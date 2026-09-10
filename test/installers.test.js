@@ -69,6 +69,34 @@ const psCodeOnly = (body) => body
   .filter((line) => !line.trimStart().startsWith('#'))
   .join('\n');
 
+// The body of the `catch { ... }` block that contains `needle`, or null if no
+// such block exists. Brace-matched rather than regexed, so what comes back is
+// the branch itself and an assertion on it cannot be answered by a line
+// somewhere else in the file. Feed it psCodeOnly() output: a comment mentioning
+// the branch must not count as the branch.
+//
+// Deliberately not a PowerShell parser. It assumes the block contains no brace
+// inside a string or subexpression, which holds for both installers' refusal
+// branches (two Write-Host lines and an exit); a future branch that broke the
+// assumption would truncate the body and fail LOUDLY here rather than pass.
+function catchBlockContaining(code, needle) {
+  const at = code.indexOf(needle);
+  if (at === -1) return null;
+  const keyword = code.lastIndexOf('catch', at);
+  if (keyword === -1) return null;
+  const open = code.indexOf('{', keyword);
+  if (open === -1 || open > at) return null;
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '{') depth += 1;
+    else if (code[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return i > at ? code.slice(open + 1, i) : null;
+    }
+  }
+  return null;
+}
+
 // Returns { code, stdout, stderr, after } — `after` being the bytes on disk.
 function runInstaller(settingsPath, source) {
   let code = 0;
@@ -286,15 +314,30 @@ test('both PowerShell installers fail closed on an unreadable settings.json', ()
   // (That cross-reference was a promise before it was a fact — it named
   // verify-release.ps1 while verify-release.ps1 contained no installer check at
   // all. Both halves exist now.)
+  //
+  // Anchored to the BRANCH, never searched for as a substring over the whole
+  // file. Three unanchored regexes used to stand here and none of them could
+  // fail: delete `exit 1` from both parse-failure branches and every one stayed
+  // satisfied by some other line — install.ps1 has two more `exit 1`s and
+  // uninstall.ps1 one — leaving warn-then-write, which is the exact shape that
+  // ate a settings.json. Worse, uninstall.ps1's `could not be parsed` probe was
+  // answered by a COMMENT (uninstall.ps1:45, the -AsHashtable post-mortem), so
+  // it survived deleting the live branch outright. Comments are stripped first,
+  // like the -AsHashtable guard above.
   for (const name of ['install.ps1', 'uninstall.ps1']) {
-    const body = fs.readFileSync(path.join(repoRoot, name), 'utf8');
-    assert.match(body, /could not be parsed/,
-      `${name} must recognise an unparseable file`);
-    assert.match(body, /left untouched/,
-      `${name} must say it changed nothing`);
-    // A warning followed by a write is precisely the shape that caused the loss.
-    assert.match(body, /exit 1/,
-      `${name} must exit non-zero rather than continue with an empty config`);
+    const code = psCodeOnly(fs.readFileSync(path.join(repoRoot, name), 'utf8'));
+    const branch = catchBlockContaining(code, 'could not be parsed');
+    assert.ok(branch,
+      `${name} has no live catch block that reports an unparseable file; `
+      + 'a comment saying so is not a refusal');
+    assert.match(branch, /left untouched/,
+      `${name}'s parse-failure branch must say it changed nothing`);
+    // A warning followed by a write is precisely the shape that caused the loss,
+    // so the exit has to be INSIDE this branch — a matching one elsewhere in the
+    // file lets execution fall through to the write.
+    assert.match(branch, /^\s*exit\s+1\s*$/m,
+      `${name}'s parse-failure branch must exit non-zero rather than continue `
+      + 'with an empty config');
   }
 });
 

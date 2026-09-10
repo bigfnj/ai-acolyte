@@ -369,6 +369,58 @@ test('a gate refresh cannot rewrite the instruction files after deactivate', asy
   }
 });
 
+// THE POSITIVE CONTROL for the two `!statuses.some(... 'already running')`
+// assertions below and further down this file. Without it they were negative-
+// only, and nothing in the suite ever saw that message at all: deleting the
+// busy-latch short-circuit from runAutoLearnScan, or simply rewording the
+// string, left both of them green while the thing they claim to be watching had
+// ceased to exist. A pair of assertions that can only agree with each other is
+// not coverage.
+//
+// Kept immediately above them so a future reword has to touch this test too.
+test('a manual scan started while another is in flight reports "already running"', async (t) => {
+  const home = tempHome(t);
+  // wedgeWorker, because the latch is only observably set while a scan is
+  // genuinely unfinished. A FakeWorker answers on the next tick and the window
+  // closes before a second scan can be dispatched, which would make this test
+  // agree with the negative ones for the wrong reason.
+  const app = harness(home, { settings: { 'autoLearn.enabled': true }, wedgeWorker: true });
+  try {
+    // Fired, NOT awaited: a wedged scan never settles.
+    const wedged = app.commands.get('permission-wildcarding.autoLearnScan')();
+    await tick(200);
+    assert.equal(app.workers.length, 1,
+      'precondition: a scan is really in flight, not merely believed to be');
+
+    app.statuses.length = 0;
+    // Fired, NOT awaited, and the resolution recorded on the side. A scan that
+    // is ALLOWED to start never settles under this harness, so awaiting the
+    // second call directly would hang the runner instead of failing when the
+    // latch is gone — which is how the first draft of this test behaved under
+    // its own mutation. The refusal is observable immediately; the latch check
+    // runs before runAutoLearnScan's first await.
+    const settled = [];
+    const second = app.commands.get('permission-wildcarding.autoLearnScan')();
+    second.then((value) => settled.push(value), (error) => settled.push(error));
+    await tick(200);
+
+    assert.ok(app.statuses.some((m) => m.includes('already running')),
+      'a manual scan refused because one is in flight must SAY so; a silent '
+      + 'no-op reads as "the scan found nothing"');
+    assert.equal(app.workers.length, 1,
+      'and it was refused, not started: no second worker was built');
+    assert.deepEqual(settled, [null],
+      'the refusal resolved null; a scan that had been allowed to start would '
+      + 'still be pending here');
+
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await Promise.allSettled([wedged, second]);
+  } finally {
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
 test('the Auto Learn busy latch does not survive a teardown', async (t) => {
   const home = tempHome(t);
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });
@@ -384,6 +436,9 @@ test('the Auto Learn busy latch does not survive a teardown', async (t) => {
     // Deliberately not awaited before the assertion: "already running" is
     // emitted synchronously, and letting the abandoned scan settle first would
     // clear the latch for us and hide the defect.
+    //
+    // Meaningful only because the test directly above proves this message is
+    // still emitted when a scan really is in flight.
     const second = app.commands.get('permission-wildcarding.autoLearnScan')();
     assert.ok(!app.statuses.some((message) => message.includes('already running')),
       'the busy latch did not survive the teardown');

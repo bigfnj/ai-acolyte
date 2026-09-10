@@ -91,6 +91,24 @@ test('extension activates with mocked VS Code and deactivates without live polic
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  // Timer bookkeeping, because the autoLearn configuration listener has no
+  // return value and no vscode-facing effect this mock can see — its whole job
+  // is timers. Intervals as well as timeouts: resetAutoLearnTimer's periodic
+  // scan is the one that shows the setting was RE-READ. `unref` so an interval
+  // armed by an activation that never reaches deactivate (an assertion failing
+  // first) cannot hold the test runner open.
+  const timers = { timeouts: 0, intervals: 0, intervalsCleared: 0 };
+  const realSetTimeout = global.setTimeout;
+  const realSetInterval = global.setInterval;
+  const realClearInterval = global.clearInterval;
+  global.setTimeout = (...args) => { timers.timeouts += 1; return realSetTimeout(...args); };
+  global.setInterval = (...args) => {
+    timers.intervals += 1;
+    const handle = realSetInterval(...args);
+    if (typeof handle?.unref === 'function') handle.unref();
+    return handle;
+  };
+  global.clearInterval = (...args) => { timers.intervalsCleared += 1; return realClearInterval(...args); };
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
@@ -107,9 +125,10 @@ test('extension activates with mocked VS Code and deactivates without live polic
     return originalLoad.call(this, request, parent, isMain);
   };
 
+  let extension;
   try {
     purgeProjectModules(extensionPath, rootSrc);
-    const extension = require(extensionPath);
+    extension = require(extensionPath);
     const context = { subscriptions: [] };
     extension.activate(context);
     assert.equal(commands.has('permission-wildcarding.scanHistory'), true);
@@ -118,10 +137,46 @@ test('extension activates with mocked VS Code and deactivates without live polic
     assert.equal(commands.has('permission-wildcarding.autoLearnReview'), true);
     assert.equal(commands.has('permission-wildcarding.autoLearnApplySafe'), true);
     assert.ok(watchers.length >= 3);
-    assert.doesNotThrow(() => configurationHandler({
+    // The autoLearn configuration listener, asserted on what it DOES.
+    //
+    // This was `assert.doesNotThrow(...)`, which is not a test of this handler.
+    // Two mutations lived under it. Emptying the handler body throws nothing —
+    // and that is verbatim the defect the comment beside the gates/memory
+    // listeners in registerLocalWatchers records having already shipped once:
+    // the setting changes, nothing happens until a window reload. Swapping the
+    // registration order of registerLocalWatchers and registerAutoLearnWatchers
+    // throws nothing either, because `configurationHandler` is ONE variable and
+    // keeps only the last registration — the assertion would then have been
+    // calling the localDrain handler, which is a total no-op for an autoLearn
+    // event.
+    const armed = { ...timers };
+    configurationHandler({
       affectsConfiguration: (name) => name === 'permissionWildcarding.autoLearn',
-    }));
+    });
+    // scheduleAutoLearn(100). `dashboard?.refresh()` contributes nothing here:
+    // no webview view is ever resolved in this mock, so refresh() returns on
+    // `!this.view` before it debounces.
+    assert.ok(timers.timeouts - armed.timeouts >= 1,
+      'an autoLearn configuration change arms a debounced rescan');
+    assert.equal(timers.intervalsCleared - armed.intervalsCleared, 1,
+      'and clears the periodic scan interval before re-arming it');
+    assert.equal(timers.intervals - armed.intervals, 1,
+      'and re-arms it, because autoLearn.enabled is still true');
+
+    // Then that it RE-READS the setting rather than reusing what activate() saw.
+    // Switching Auto Learn off has to stop the periodic scan; a handler that
+    // ignored the event would leave a 5-minute timer scanning history for a
+    // feature the user just turned off.
     autoLearnEnabled = false;
+    const disabled = { ...timers };
+    configurationHandler({
+      affectsConfiguration: (name) => name === 'permissionWildcarding.autoLearn',
+    });
+    assert.equal(timers.intervalsCleared - disabled.intervalsCleared, 1,
+      'disabling autoLearn clears the periodic scan interval');
+    assert.equal(timers.intervals - disabled.intervals, 0,
+      'and does not re-arm one');
+
     await commands.get('permission-wildcarding.autoLearnReview')();
     await commands.get('permission-wildcarding.autoLearnApplySafe')();
     assert.deepEqual(warnings.slice(-2), [
@@ -130,6 +185,16 @@ test('extension activates with mocked VS Code and deactivates without live polic
     ]);
     await extension.deactivate();
   } finally {
+    // Unconditional, and a second call is a no-op — the same guard the leak test
+    // below carries, for the same reason. An assertion above now CAN fail, and
+    // when it does `activate`'s deferred recall check is still armed: ten
+    // seconds later it spawns python against a torn-down extension and
+    // re-creates the home directory this block just deleted. That is one leaked
+    // %TEMP% directory and a ten-second test per failure.
+    try { await extension?.deactivate?.(); } catch { /* already down */ }
+    global.setTimeout = realSetTimeout;
+    global.setInterval = realSetInterval;
+    global.clearInterval = realClearInterval;
     Module._load = originalLoad;
     purgeProjectModules(extensionPath, rootSrc);
     fs.rmSync(tempHome, { recursive: true, force: true });

@@ -26,7 +26,7 @@ const path = require('path');
 // The wildcarder's own coverage test, so "missing" means the same thing here as
 // it does to the pass that writes the list. Sharing it is what keeps a broader
 // live wildcard (Bash(*), or a generalized Bash(git *)) from reading as a loss.
-const { isCoveredBy, createCoverIndex } = require('./permissions');
+const { createCoverIndex } = require('./permissions');
 const { ruleMatches } = require('./permission-match');
 
 // Server-delivered org policy. This is the one that actually exists on a

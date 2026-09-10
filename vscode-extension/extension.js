@@ -152,7 +152,7 @@ function readSettings() {
 // Re-exported as locals here so every existing call site is untouched.
 const {
   createSettingsWriter,
-  SETTINGS_ABSENT, SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
+  SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
   SETTINGS_CONTENDED_CODE,
 } = require('./src/settings-write');
 

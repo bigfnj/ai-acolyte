@@ -926,7 +926,6 @@ function max(args) {
     // pin, and because the file can become unreadable between the two reads.
     if (readSettingsForWrite('--max') === null) { process.exitCode = 1; return; }
     let res;
-    let wrote = false;
     try {
       // applyMax IS the transform, not a value computed before the write. Its
       // side effects — the allow-list snapshot and the approve script — are
@@ -934,7 +933,7 @@ function max(args) {
       // makes the snapshot reflect the freshest list rather than one from before
       // the ~9.6 ms pass. An approval that lands in that window is now restored
       // by `--max off` instead of being lost.
-      ({ result: res, wrote } = settingsWriter().writeTransform((latest) => applyMax(latest, cmd === 'on')));
+      ({ result: res } = settingsWriter().writeTransform((latest) => applyMax(latest, cmd === 'on')));
     } catch (err) {
       // Contention is transient and nothing was written, so say so rather
       // than reporting a refusal the user might act on. This code had no

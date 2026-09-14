@@ -103,28 +103,31 @@ function fastLint(dir, conf) {
 // files, ties broken by MEMORY.md mtime. Shared by the status-bar gauge and the
 // dashboard Memory card so both reflect the same file.
 //
-// COUNT, not mtime, because memory/recall.py:73 _discover_memory_dir() picks by count and
-// it is the authority: it owns the index, the lint and the compiled gates. The extension
-// OVERRIDES that discovery at extension.js:764, :807 and :2880 by pinning RECALL_MEMORY_DIR
-// from this function, so whenever the two rules disagreed the NON-authoritative one won in
-// the product. They agree today only because one store happens to be both largest and
-// newest; they diverge the moment a memory is saved from a session launched at a different
-// working directory, which mints a new project slug. Five such slugs already exist here.
+// COUNT, not mtime, because recall.py's _discover_memory_dir() picks by count and it is the
+// authority: it owns the index, the lint and the compiled gates. The extension OVERRIDES that
+// discovery on every spawn (search extension.js for RECALL_MEMORY_DIR) by pinning the value
+// this function returns, so whenever the two rules disagreed the NON-authoritative one won in
+// the product. They agree today only because one store happens to be both largest and newest;
+// they diverge the moment a memory is saved from a session launched at a different working
+// directory, which mints a new project slug. Five such slugs already exist here.
 //
-// The old rule made that flip actively dangerous: extension.js:2025 watches *.md in EVERY
-// discovered store and calls compileGates(), which compiles from the PRIMARY and installs
+// The old rule made that flip actively dangerous: the *.md watcher in extension.js fires for
+// EVERY discovered store and calls compileGates(), which compiles from the PRIMARY and installs
 // standing orders into CLAUDE.md. One memory saved elsewhere could repoint the compiler.
 //
-// The `dirs.length === 1` short-circuit that used to sit here is gone on purpose. Every
-// test that reached this function had at most one store, so the branch below was never
-// executed and the rule could have been anything. A rule no reachable input can falsify
-// must not ship.
+// The single-dir short-circuit stays. An earlier version of this comment claimed removing it
+// was what made the rule falsifiable; that was wrong and an audit falsified it by restoring the
+// line and watching all 14 tests still pass. The two-store tests pass TWO dirs, so the
+// short-circuit never fires for them. What made the rule falsifiable was writing those tests.
+// The line is worth keeping: it returns the one-store case, which is most installs, to zero
+// syscalls, and `[x].map(...).sort(...)[0].d` is `x` for every input, so it changes no answer.
 //
 // Residual, deliberate difference from Python: on an exact count tie recall.py takes the
 // first os.listdir entry and this takes the newest MEMORY.md. Unobservable for anything the
 // extension spawns, because the pin decides; visible only to a bare CLI run.
 function pickPrimaryDir(dirs) {
   if (!dirs.length) return null;
+  if (dirs.length === 1) return dirs[0];
   return dirs
     .map((d) => ({ d, n: mdCount(d), t: memoryMtime(d) }))
     .sort((a, b) => b.n - a.n || b.t - a.t)[0].d;
@@ -134,8 +137,24 @@ function pickPrimaryDir(dirs) {
 // reuse src/recall-index.js indexableMemories() here, which excludes MEMORY.md and so is a
 // different number. It would order identically today, because discoverDirs only returns
 // dirs that have a MEMORY.md, but "agrees by coincidence" is the bug being fixed.
+// A zero here is never a real count. discoverDirs only returns a dir after confirming it holds
+// a MEMORY.md, and this counts MEMORY.md too, so the true minimum is 1. Zero therefore always
+// means readdirSync threw, and swallowing that silently scored a healthy 123-file store below a
+// 7-file one -- reaching, through an fs error, exactly the mis-selection this rule exists to
+// prevent. Demonstrated with an injected EMFILE. So it says so: a control that can run degraded
+// must never do it in silence.
+//
+// It still returns 0 and still loses the comparison. Choosing well when a directory is
+// unreadable is a real design question (mtime alone? keep the previous answer?) and is in
+// BACKLOG.md; being loud about it is the part that was free.
 function mdCount(dir) {
-  try { return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length; } catch { return 0; }
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length;
+  } catch (err) {
+    console.error(`permission-wildcarding: cannot read memory store ${dir}, so it cannot win `
+      + `primary selection —`, err);
+    return 0;
+  }
 }
 
 function memoryMtime(dir) {

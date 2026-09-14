@@ -373,8 +373,14 @@ test('extension.js keeps no second copy of the memory configuration', () => {
   // matches an object literal assigning it.
   assert.equal(/lineBudget/.test(source), false, 'a hand-built memory conf is back');
   assert.equal(/totalBudget:\s*\d/.test(source), false, 'a hand-built memory conf is back');
-  assert.equal((source.match(/discoverDirs\(memoryConf\(\)\)/g) || []).length, 2,
+  assert.equal((source.match(/discoverDirs\(watchConf\)/g) || []).length, 2,
     'both memory watchers must discover from the live configuration');
+  // And they must override the lint pin. memory.dir says which store to LINT; these watchers
+  // ask which stores EXIST. Passing the pin through made discoverDirs return [] for a
+  // configured dir with no MEMORY.md, which built zero watchers and silently stopped automatic
+  // gate recompilation, because the *.md watcher is one of only two compileGates callers.
+  assert.match(source, /const watchConf = \{ \.\.\.memoryConf\(\), dir: '' \};/,
+    'the watchers must discover every store, not only a pinned one');
 });
 
 test('a gate refresh cannot rewrite the instruction files after deactivate', async (t) => {

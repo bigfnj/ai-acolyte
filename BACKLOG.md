@@ -1992,3 +1992,164 @@ in the VSIX and runs under the managed policy, with no Python and no model. The 
 ceiling and the scope check need neither. They are counting rules over the same text the Node
 lint already parses, so they can move without breaking that constraint. The demotion list is
 judgement and should stay in the CLI.
+
+## From the 2026-09-14 store-consolidation work
+
+### ~~Three implementations picked the current memory store, by two different rules~~ — FIXED 2026-09-14
+
+Kept as a record because the shape is worth naming: the copy that was NOT the authority won,
+because it was the one doing the pinning.
+
+`recall.py`'s `_discover_memory_dir` counts `.md` files. `memoryLint.js`'s `pickPrimaryDir`
+sorted by `MEMORY.md` mtime. `scripts/verify-release.ps1`'s `Find-MemoryDir` also sorted by
+mtime, under a comment reading "Discovered the way the product does". The extension pins
+`RECALL_MEMORY_DIR` from `memoryLint`'s answer at all three of its recall.py spawn sites, so
+recall.py's own discovery never ran in the product. The two agreed only because one store was
+both largest and newest. (Deliberately named by symbol rather than by line: this file already
+carries ~60 stale line refs, and two written during this very change were wrong within hours.)
+
+The consequence was not cosmetic. The `*.md` watcher in `extension.js` fires for **every**
+discovered store and calls `compileGates()`, which compiles from the **primary** and installs
+standing orders into `~/.claude/CLAUDE.md`. One memory saved from a session launched at a
+different working directory mints a new slug, and under the mtime rule that new store became
+primary immediately. Five such slugs already exist on this box.
+
+All three now count files with mtime as the tie-break. `test/recall-index.test.js` pins the
+Python expression from the Node side, which is the only cheap way to keep two languages honest.
+
+**The coverage fact is the real finding.** Every test that reached `pickPrimaryDir` had at most
+one store, so the sort was never executed. The rule could have been anything and the suite
+stayed green. Three tests now drive two stores; reverting to the mtime rule fails exactly one
+of them, where before this change it failed zero.
+
+**And a correction to this entry's own first draft.** The commit and the code comment both said
+the `dirs.length === 1` short-circuit had to be REMOVED to make the rule falsifiable. An audit
+falsified that by restoring the line and watching all 14 tests still pass: the two-store tests
+pass two dirs, so the short-circuit never fires for them. Writing the tests is what made the
+rule falsifiable; removing the line contributed nothing and cost the one-store case, which is
+most installs, two syscalls per call. The line is restored and the comment now says so. Worth
+keeping as a reminder that a plausible-sounding justification in a commit message is not
+evidence, and that this repo's own standard would have caught it sooner if applied to the
+*reason* as well as to the behaviour.
+
+Measured cost of the new rule, n=41 fresh interleaved processes against the two real stores
+(123 and 7 `.md`): **+0.417 ms p50**. Absolute arm figures are 4.871 vs 4.454 ms p50 and both
+carry per-process `fs` cold-start, so only the delta means anything. `memoryReport()` is
+recorded at 6.99 ms elsewhere in this file, so this is roughly 6% of one call, once per push.
+
+### ~~An empty compile could erase the installed standing gates in silence~~ — FIXED 2026-09-14
+
+`compile_gates()` wrote `""` when a corpus held no gate blocks. `src/agent-gates.js:80` refuses
+to install an empty block so `CLAUDE.md` survived, but `gates.generated.md` was emptied, the
+dashboard gate count read 0, and `_gates_are_stale()` then compared `""` to `""` and reported
+**not stale**. The one mechanism built to notice went quiet.
+
+`compile_gates(allow_empty=False)` now refuses and exits non-zero, naming the corpus. Both
+consumers already handle that: `extension.js:2884` surfaces stderr and `bin/wildcard-perms:632`
+installs the previously compiled bytes. Because the file is not overwritten, `--lint` now
+reports STALE, converting the silence into the signal already wired to notice it.
+`--gates-allow-empty` keeps a deliberate "delete every gate" possible.
+
+Verified live against the real hazard: compiling with `RECALL_MEMORY_DIR` pointed at the 7-file
+store exits 1 and leaves `gates.generated.md` byte-identical (sha256 `1154c433…`), with `--lint`
+then reporting STALE.
+
+### The refusal message mixes path separators
+
+`[recall] refusing to empty C:\Users\Admin/.claude/gates.generated.md`. `GATES_OUT` is built
+with `os.path.expanduser(r"~/.claude/...")`, which expands the tilde to a backslash path and
+leaves the forward slashes after it. Cosmetic, in an error path only. One `os.path.normpath`
+closes it if anyone is touching that line anyway.
+
+### `C:\Anthropic` is still a live dev root, so the orphan can recur
+
+The store this work consolidated exists because a working root was renamed. `C:\Anthropic`
+still exists and is an active dev root, so a session launched there will create
+`~/.claude/projects/C--Anthropic/memory/` again and write into it. The selection fix means a new
+store can no longer take over the card, the rebuild target or the gate compiler, so the failure
+is now "memories land somewhere nothing searches" rather than "standing orders get recompiled
+from the wrong corpus". Still worth closing.
+
+`autoMemoryDirectory` is not set in `~/.claude/settings.json`. Pinning it at user scope is the
+durable fix and would make the store independent of the launch directory entirely. Left undone
+because it is a global behaviour change affecting every session on the box, which is the owner's
+call and not a code change in this repo.
+
+### The two memory-store watchers are still never reconciled
+
+`extension.js:2005` and `:2033` enumerate stores once at activation and build a watcher per
+store. There is no equivalent of `memoryLint`'s `syncWatchers` and no periodic re-discovery, so
+a store that appears later is unwatched until a window reload, and one that disappears leaves a
+dead watcher on `context.subscriptions` until `deactivate()`. `memoryLint`'s own 5-minute
+reconcile does not help; it only drives `memoryLint.refresh()`.
+
+Lower priority than it was: with the selection rule fixed, an unwatched new store no longer
+risks a mis-targeted gate compile. Narrowing the `*.md` watcher to the primary dir would change
+*which events recompile* and deserves its own commit and test.
+
+The cheap version is to reuse what already exists rather than add a third timer: `memoryLint`
+documents this exact hazard in its own header and solves it with a 5-minute reconcile plus
+`syncWatchers()` rebuilt from discovery inside `refresh()`. The `MemoryLint` instance self-heals;
+the two copies in `extension.js` never got that fix, and they are the ones wired to the gate
+compiler. Same applies to a runtime change of `memory.dir`: the config listener calls
+`memoryLint.reconfigure()` and `dashboard.refresh()`, neither of which rebuilds those two sets.
+
+### Audit of 2026-09-14, two agents over the store-consolidation commits
+
+Fixed in the follow-up commit: the silent `mdCount` zero, the pinned-`memory.dir` watcher
+deletion, and the false short-circuit justification. These are what was measured and left.
+
+**`refresh()` lints the primary `MEMORY.md` twice.** `memoryLint.refresh()` calls `fastLint` for
+every discovered dir, primary included, then calls it again for the primary. Counted on the real
+store, one `refresh()`: 3 `readdirSync`, 29 `existsSync`, 3 `readFileSync`, 2 `statSync`, of
+which `MEMORY.md` is read twice and each of its 9 index links is probed twice. Keeping the
+loop's result in a local is one line. `refresh()` runs every 5 minutes, on every `MEMORY.md`
+save, on every editor activation of one, and 300 ms after every external write. Syscall counts
+are deterministic and were counted, not timed; a timing claim needs the cold interleaved
+protocol this file already mandates.
+
+**`memoryReport()` now scans the primary directory twice, and the corpus three times.**
+`pickPrimaryDir`'s `mdCount` scans it, then `fullReport` scans it again, then
+`recallIndexStatus`'s `indexableMemories` scans it a third time. `readdirSync` per
+`memoryReport()` went from 2 to 4 with the selection change. Threading the filename list from
+`pickPrimaryDir` into `fullReport` removes one. Measure on `_push()` end to end, not on
+`memoryReport()` alone, because `_push` is what a user waits on.
+
+**`updateStatusBar`'s guard cannot be false.** It reads `if (!statusBar) return;`, and
+`statusBar` is assigned once at activation and set to `null` nowhere, including in
+`deactivate()` where four other retainers are nulled. So after the first activation the
+condition is false forever, including after VS Code has disposed the item. Every other
+teardown-reachable path in that file checks `deactivated`; this one does not. Reachable only by
+a watcher callback already dispatched when teardown lands. One word fixes it:
+`if (deactivated || !statusBar) return;`.
+
+**`showReport()` dereferences a value its sibling null-checks.** It calls `fullReport(dir, conf)`
+and immediately reads `r.memPath`. `fullReport` returns `null` whenever `fastLint` does, which is
+any `readFileSync` failure. `refresh()` guards this correctly; `showReport()` does not. Nameable
+input: `MEMORY.md` exists as a *directory*, so `discoverDirs`'s `existsSync` passes and the read
+throws `EISDIR`. Also reachable via a permissions error or a Windows sharing violation. Surfaces
+as an error notification from a palette command, not a crash.
+
+**`MTIME_TOLERANCE_MS` is a cross-language constant that nothing pins.** `src/recall-index.js`
+says "a drift test pins the two shared constants", and that is true of `MEMORY_INDEX_NAME` and
+`RECALL_EMBED_ID`. `MTIME_TOLERANCE_MS` is a third, reconciling Python's `st_mtime` float
+seconds against Node's `mtimeMs`, and its comment cites a measurement to justify its value.
+Nothing imports it and nothing pins it, so if recall.py's mtime precision changes,
+`entryMatchesFile` starts reporting false staleness and no test notices. The drift test that
+would catch it already exists and already reads recall.py's source.
+
+**Dead exports, re-measured.** `fullReport` is genuinely dead: its only two references outside
+its own file are comments. `pickPrimaryDir` and `fastLint` are **test-only, not dead** (the
+earlier "no external consumer" note is partly refuted: `pickPrimaryDir` gained six real test
+references and they are the mutation-killing assertions). In `src/recall-index.js`,
+`readRecallIndex` and `MTIME_TOLERANCE_MS` have no importer at all. `src/tool-learn.js` exports
+`MCP_TOOL`, which nothing imports, though the constant is live inside the file. Removing export
+entries is free; removing the functions is not.
+
+**`discoverDirs` reads only `conf.dir`.** `enabled`, `lineBudget`, `totalBudget` and `maxLines`
+are inert in every call. That means `memory.enabled: false` does not stop the two watcher sets
+being built, which is a live inconsistency with `memoryCardData`, which does honour it.
+Pre-existing, and teaching `discoverDirs` about `enabled` would be a behaviour change.
+
+**`autoSyncRecallIfStale`'s outer catch discards everything.** If `recallIndexStatus` throws, the
+silent recall sync stops working and nothing anywhere records it.

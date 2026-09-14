@@ -87,15 +87,16 @@ Fixed 2026-09-14 in `memoryLint.js` and `scripts/verify-release.ps1`, which was 
 the same rule; `test/recall-index.test.js` now pins the Python one from the Node side.
 
 Discovery takes the single largest store, which means a rename **strands** the old one: this
-machine has 6 memories sitting in `C--Anthropic/memory` that the default search cannot see. The
-two that the live corpus had never re-recorded were verified and copied across on 2026-09-14, so
-the remaining four are older versions of memories it already holds. `RECALL_MEMORY_DIRS` is the
-answer when that is not the case. It
+machine HAD 6 memories sitting in a `C--Anthropic/memory` store the default search could not see.
+Resolved 2026-09-14: the two the live corpus had never re-recorded were verified against the
+machine and copied across, the other four were older versions of memories it already held, and
+the store was deleted along with the dev root that minted its slug. One store remains here.
+`RECALL_MEMORY_DIRS` stays because the NEXT rename will do the same thing. It
 affects search only — `--lint` and `--gates-compile` stay on `RECALL_MEMORY_DIR`, deliberately,
 because a gate is a standing order and a second corpus must not be able to install one. Each
 corpus keeps its own `recall_index.json` in its own directory, so the per-file staleness
 contract the extension reads is unchanged. A filename present in two corpora prints qualified
-by its store (`C--Anthropic/dup.md`); an un-collided name prints bare, so single-corpus output
+by its store (`other-root/dup.md`); an un-collided name prints bare, so single-corpus output
 is byte-identical to before.
 
 ## Model asset

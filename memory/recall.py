@@ -132,10 +132,12 @@ INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
 #
 # SEARCH may span several corpora; everything else stays on the one primary dir above. A working
 # root that gets renamed leaves its old store behind and _discover_memory_dir, which takes the
-# single largest, then cannot see it: this box has 6 memories stranded in C--Anthropic. The two
-# the main corpus had never re-recorded were verified against the machine and copied across on
-# 2026-09-14, so the remaining four are older versions of memories it already holds and the
-# stranded store was left in place rather than deleted. --lint and --gates-compile deliberately
+# single largest, then cannot see it. That happened here: 6 memories were stranded in a
+# C--Anthropic store. Resolved 2026-09-14 -- the two the main corpus had never re-recorded were
+# verified against the machine and copied across, the other four were older versions of memories
+# it already held, and the store was then deleted along with the dev root that minted its slug.
+# There is now exactly one store on this box. The capability below stays because the NEXT rename
+# will do the same thing. --lint and --gates-compile deliberately
 # do NOT span, because a gate is a standing order and a second corpus must not be able to
 # install one silently.
 def _search_dirs():

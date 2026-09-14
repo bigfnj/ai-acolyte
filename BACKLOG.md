@@ -1712,18 +1712,23 @@ was the whole point.
 Revisit only if launching per-project becomes the habit. Until then this is speculative
 restructuring of a live memory store.
 
-### One memory corpus on this box was stranded and nothing reported it
+### ~~One memory corpus on this box was stranded and nothing reported it~~ - RESOLVED 2026-09-14
 
 `_discover_memory_dir` takes the single largest `~/.claude/projects/*/memory` and silently
 discards the rest, so renaming a working root orphans the old store. Found
 `C--Anthropic/memory` holding 6 memories, two of them (Windows remote-access setup, the
 Rainmeter GPU skin) on topics the current corpus never re-recorded.
 
-`RECALL_MEMORY_DIRS` makes them searchable. The open question is whether they should instead
-be merged into the primary corpus and the old store deleted, four of the six duplicate
-topics that now have better files (`project_wallpaperengine`, `project_portal`,
-`project_finance_statements_dashboard`, `reference_silent_elevation`). Merging is a judgement
-call about which version is current, so it is not automatable.
+`RECALL_MEMORY_DIRS` made them searchable. The open question was whether to merge and delete
+instead, four of the six duplicating topics that now have better files
+(`project_wallpaperengine`, `project_portal`, `project_finance_statements_dashboard`,
+`reference_silent_elevation`).
+
+Answered by doing it. The two unique memories were verified against the live machine before
+promotion rather than copied on trust, which was worth it: one claimed a three-layer landing
+directory whose root no longer existed, and named a scheduled task that had been removed. The
+other four were left as superseded. The store was then deleted, byte-verified against a
+sha256 manifest first. One store remains on this box.
 
 ### The retrieval gate cannot run in CI, and its question set cannot be published
 
@@ -2061,19 +2066,30 @@ with `os.path.expanduser(r"~/.claude/...")`, which expands the tilde to a backsl
 leaves the forward slashes after it. Cosmetic, in an error path only. One `os.path.normpath`
 closes it if anyone is touching that line anyway.
 
-### `C:\Anthropic` is still a live dev root, so the orphan can recur
+### ~~`C:\Anthropic` is still a live dev root, so the orphan can recur~~ - RESOLVED 2026-09-14
 
-The store this work consolidated exists because a working root was renamed. `C:\Anthropic`
-still exists and is an active dev root, so a session launched there will create
-`~/.claude/projects/C--Anthropic/memory/` again and write into it. The selection fix means a new
-store can no longer take over the card, the rebuild target or the gate compiler, so the failure
-is now "memories land somewhere nothing searches" rather than "standing orders get recompiled
-from the wrong corpus". Still worth closing.
+The store this work consolidated existed because a working root was renamed, and the old root
+was still on disk, so a session launched there would have recreated the orphan.
 
-`autoMemoryDirectory` is not set in `~/.claude/settings.json`. Pinning it at user scope is the
-durable fix and would make the store independent of the launch directory entirely. Left undone
-because it is a global behaviour change affecting every session on the box, which is the owner's
-call and not a code change in this repo.
+Closed at the source. The owner asked for the whole root to go; validating first showed that
+premise was wrong in the two ways that mattered, and the validation is the part worth keeping:
+
+  * `C:\Anthropic\.Git` was not a repo folder. It was a full Git for Windows install, on the
+    MACHINE PATH, and the ONLY git on the box. Eight `bash` processes were executing from it at
+    the moment of the check, including the ones running the check.
+  * `C:\Anthropic\.Python3` was on the MACHINE PATH and was the resolved `python`. The only other
+    `python.exe` was the Microsoft Store redirector stub.
+
+So 1.45 GB of genuinely dead toolchains went (`.ghidra12`, `.jdk26`, `.cmake`, `.node`,
+`.tools`, a stray SDK zip), each confirmed superseded by a copy actually on PATH, with no
+process and no env var referencing it. Git and Python stayed. The agentic bait went too: an
+`Instructions.txt` telling every agent to install tools into that root and to edit the global
+PATH, a `.claude/settings.local.json`, and the stranded memory store itself. Working files
+someone had dropped inside the Git install directory were rescued first.
+
+`autoMemoryDirectory` remains unset in `~/.claude/settings.json`. It is no longer needed for
+this cause, since the root that minted the slug is gone, but it is still the durable fix for
+the general case and is a global behaviour change, so it stays the owner's call.
 
 ### The two memory-store watchers are still never reconciled
 

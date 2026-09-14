@@ -8,9 +8,11 @@
 // Output: permission-wildcarding-<version>.vsix in the repo root.
 
 import { execSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { syncVersion } from './sync-version.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ext = join(root, 'vscode-extension');
@@ -36,15 +38,14 @@ cpSync(join(root, 'memory', 'recall.py'), join(extMemory, 'recall.py'));
 cpSync(join(root, 'memory', 'models', 'bge-small.vocab.txt'),
   join(extMemory, 'models', 'bge-small.vocab.txt'));
 
-// 2. Optional version override (release tag).
-const override = process.argv[2]?.replace(/^v/, '').trim();
-const pkgPath = join(ext, 'package.json');
-const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-if (override && override !== pkg.version) {
-  pkg.version = override;
-  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-  console.log(`version set to ${override}`);
+// 2. Optional version override (release tag). Both manifests move together, or the
+// sidebar badge and `wildcard-perms --version` report different numbers for one build.
+// Read the manifest AFTER the sync, so the output filename below uses the new version.
+const applied = syncVersion(root, process.argv[2]);
+if (applied?.changed.length) {
+  console.log(`version set to ${applied.version} in ${applied.changed.join(', ')}`);
 }
+const pkg = JSON.parse(readFileSync(join(ext, 'package.json'), 'utf8'));
 
 // 3. Package.
 const out = join(root, `permission-wildcarding-${pkg.version}.vsix`);

@@ -1874,16 +1874,36 @@ Bump `vscode-extension/package.json` and the root `package.json` together.
 `test/installers.test.js:455` asserts they agree, and the extension manifest is authoritative
 because `release.yml` defaults its version input to it.
 
-### `release.yml` runs the version-agreement test before the step that can break it
+### ~~`release.yml` runs the version-agreement test before the step that can break it~~ — FIXED 2026-09-14
 
-`.github/workflows/release.yml` runs `npm test` at the "Test" step, then
-`node scripts/package.mjs "<tag>"` at "Package VSIX". The override path in `package.mjs` writes the
+Kept as a record, because the shape of this one is worth naming: a correct guard, on the
+correct condition, made useless by the order of two CI steps.
+
+`.github/workflows/release.yml` ran `npm test` at the "Test" step, then
+`node scripts/package.mjs "<tag>"` at "Package VSIX". The override path in `package.mjs` wrote the
 new version into `vscode-extension/package.json` only, never the root, which is the exact drift
-`test/installers.test.js:455` exists to catch. Because the test ran first, CI cannot observe it: a
-tag-built VSIX carries the tag version while the root manifest, which is what
-`wildcard-perms --version` prints, keeps whatever was committed. That is the same divergence
+`test/installers.test.js:455` exists to catch. Because the test ran first, CI could not observe
+it: a tag-built VSIX carried the tag version while the root manifest, which is what
+`wildcard-perms --version` prints, kept whatever was committed. That is the same divergence
 recorded at line 1079 of this file, reachable a second way.
 
-The fix is small, in `package.mjs`: apply the override to both manifests, or move the test step
-after packaging. Left undone because it changes release behaviour, and this session's remit was
-the memory work.
+Fixed on both sides, because either alone leaves a hole:
+
+- `scripts/sync-version.mjs` is new and owns the write. It moves **both** manifests, and
+  `scripts/package.mjs` now routes its `argv[2]` through it. Extracting it is what made the
+  behaviour testable at all: `package.mjs` runs `vsce` at import, so nothing could drive its
+  version logic without also building a VSIX.
+- `scripts/check-version-sync.mjs` is new and runs as a release step **after** packaging. It
+  asserts the manifests agree and that `permission-wildcarding-<version>.vsix` was actually
+  produced, so a future change to the packaging step cannot reopen this silently. It takes an
+  optional root argument purely so the tests can drive it against throwaway trees.
+
+`test/release-version.test.js` covers both, seven cases. Mutation-proved: dropping
+`package.json` from `MANIFESTS`, and stubbing out each of the checker's two comparisons, each
+produce exactly one failure naming the right assertion. 3/3 killed.
+
+One seam is left uncovered and is deliberate. The wiring from `package.mjs`'s `argv[2]` into
+`syncVersion` is exercised locally only through the no-change branch (`node scripts/package.mjs
+v1.4.5` against manifests already at 1.4.5, which proves argv reaches the sync and the output
+filename derives from the result). Driving the write branch end to end would mean running `vsce`
+against a mutated copy of the tree. The post-packaging check is the guard for that seam instead.

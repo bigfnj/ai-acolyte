@@ -28,6 +28,11 @@ jobs:
       - name: Package VSIX
         run: node scripts/package.mjs "${{ github.event.release.tag_name || github.event.inputs.version }}"
 
+      # The Test step above cannot see anything this step does to the manifests, so the
+      # version agreement is re-checked here, against the artefact about to be uploaded.
+      - name: Verify the built version reached both manifests
+        run: node scripts/check-version-sync.mjs
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

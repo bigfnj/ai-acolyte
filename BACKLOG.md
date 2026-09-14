@@ -2153,3 +2153,108 @@ Pre-existing, and teaching `discoverDirs` about `enabled` would be a behaviour c
 
 **`autoSyncRecallIfStale`'s outer catch discards everything.** If `recallIndexStatus` throws, the
 silent recall sync stops working and nothing anywhere records it.
+
+### Four assertions that could not fail, three of them fixed
+
+Proven by mutation, not by reading. Each had a comment naming the mutation it guarded, and each
+survived that exact mutation.
+
+**Fixed: `test/gates-stale.sh`, three of four assertions.** The shape
+`lint | grep -q STALE && fail "..." || echo "ok: ..."` reports success for any `lint` that dies
+or prints nothing: a pipeline masks Python's exit status and an `&&`/`||` list suppresses
+`set -e`. Deleting `or not os.path.exists(GATES_OUT)` from `_gates_are_stale` left a
+`FileNotFoundError` traceback in the output and the suite still printed ALL PASS. Only the
+positive "drift detected" case could ever fire. This is the suite guarding the only drift check
+the feature has.
+
+Worth recording how the **first** repair also failed: capturing into a helper and piping the
+helper into grep put `fail`'s `exit 1` inside a subshell, so the parent read grep's status and
+the mutation survived again. The capture has to happen in the calling shell. Same trap, one level
+down.
+
+**Fixed: `test/recall-py.sh`, the bad-path case.** It ran `--lexical-only`, and `_retriever`
+skips the dir-walking loop entirely for lexical mode, so the query exercised the one mode the
+defect never touched. recall.py's own comment even says "`--lexical-only` kept working". Now
+asserts on `MEMORY_DIRS` directly.
+
+**Fixed: `test/recall-py.sh`, the extends-not-replaces case.** It asserted on `dup.md`, which
+exists in **both** fixture corpora, so dropping the primary still left a file of that name in the
+output. `only-here.md` is unique to the primary and is the only witness that can distinguish the
+two behaviours.
+
+**Fixed: `test/recall-py.sh`, the unknown-mode case.** `_retriever` calls `_check_mode` as its own
+first statement, and `rank()` falls into `_retriever` whenever `idx is None`, so deleting the call
+from `rank()` still raised. The probe now passes the parts so `_retriever` is never reached.
+
+**Left: `test/recall-index.test.js`'s atomic-write pin** asserts `os.replace(tmp, INDEX_PATH)`
+merely appears in the source. It still matches if the statement is wrapped in `if False:` or
+hoisted above the `json.dump`. The assertion directly above it pins condition and order together
+and is the shape to copy. This is the exact pattern the standing gates forbid.
+
+**Left, honestly labelled rather than fixed:** the compile-stability case has one gate file in its
+fixture, so removing `sorted()` cannot make it fail, and on NTFS directory entries come back
+name-ordered anyway, which makes that `sorted()` effectively unmutatable on this platform. The
+`.tmp` residue case also passes if `save_index` reverts to a plain in-place `json.dump`, which
+creates no temp file at all; it fires only for "write tmp, forget `os.replace`". And the
+400-char frontmatter precondition pins the file's SIZE (654 bytes) rather than the offset of
+`scope:` (540), so shortening the padding would silence it while the precondition still passed.
+
+### The empty-gates guard misses one of the three causes its own comment names
+
+`compile_gates` returns early when `MEMORY_DIR` is not a directory, before the guard. Measured: a
+typo'd `RECALL_MEMORY_DIR` exits **0** with "no memory dir ... nothing to compile", the
+extension's callback resolves true, and `ensureGates()` then installs the stale compiled bytes and
+reports success. Not destructive, but "compile succeeded" is false, and a nonexistent dir is the
+most likely shape of "pointing somewhere unintended". The same `existing.strip()` test separates
+it from the legitimate fresh-machine case, so the fix is three lines.
+
+Related, and softer: the guard's `except OSError` treats absent and unreadable alike. Only absent
+is safe to read as `""`. `src/agent-gates.js` returns `null` for a real read error, so it refuses
+to install, while this proceeds. The comment claiming the two match "exactly" overstates. No cheap
+reproduction found (an `icacls` deny-read did not take), so it is recorded rather than fixed.
+
+### `bin/wildcard-perms` cannot forward `--gates-allow-empty`
+
+It hardcodes `[recall, '--gates-compile']`. `recall.py --gates-compile --gates-allow-empty` works
+directly, so there is a path, but not through the CLI wrapper or the extension. `--lint` now names
+the direct command when the corpus compiles zero gates, which closes the loop a user could
+otherwise get stuck in. Forwarding the flag properly is still the tidier fix.
+
+### Measured and left, Python side
+
+**`--lint` reads the whole corpus twice.** `lint()` opens every `.md` into `texts`, then
+`_gates_are_stale()` calls `_compile_gates_text()`, which walks `os.listdir` and opens every `.md`
+again. 123 files, 876,284 bytes, read twice per lint, and `--lint` runs from `verify-release.ps1`
+and from the dashboard. Fix without losing the docstring's purity argument: give
+`_compile_gates_text` an optional `texts` map and read only when it is `None`. Measure cold, fresh
+interleaved processes, against the real `~/.claude` and not a temp HOME, n >= 40.
+
+**`rank()` degrades silently on a partial parts tuple.** It refills only when
+`idx is None or names is None`; `lex` is never checked. So `rank(q, mode="hybrid", idx=..., names=...)`
+returns pure-vector ordering at half the score, and `mode="lexical"` with `lex=None` returns every
+score as 0.0 in alphabetical order, which is the exact failure `_check_mode` was added to prevent,
+reached through a different door. `gate_recall.py` passes all four today. One assert closes it.
+
+**`INDEX_PATH` is confirmed vestigial.** Every read is of a function-local rebound inside
+`load_index`/`save_index`. Nothing imports `recall.INDEX_PATH`. The shadowing is what makes a
+reader believe the module constant is live.
+
+**`rank_vec` and `rank_lex` do not mean the same thing.** One is guarded by a per-query dict
+truthiness test, the other by per-document membership, so in hybrid mode a document with no cached
+vector still gets a `rank_vec` while a document no query term touched correctly gets
+`rank_lex = None`. If the fusion bench that justifies keeping these ever gets written, it will read
+them as comparable.
+
+**`_lex_index`'s list branch is live, not dead.** `gate_recall.py` is the sole caller that passes a
+list, and it resolves names against the module-global `MEMORY_DIR` rather than the directory the
+names came from. Harmless only because that bench is single-corpus by construction.
+
+**`verify-release.ps1` cannot see `--gates refresh` failing.** It captures stdout only, and the
+compile-failure warning goes to stderr, so the check "refresh is silent when nothing changed"
+passes in exactly the steady state where refresh is printing an error every time. Add `2>&1` or
+check `$LASTEXITCODE`. Its negative `--lint` checks also all pass on empty output; they are covered
+only because a positive check runs first, and that ordering is load-bearing and undocumented.
+
+**Two in-tree figures for the same ONNX session construction disagree by 3x.** `recall.py` says
+"~620 ms (measured on this box)" and `test/recall-index.test.js` says "~210 ms each". Neither names
+its method. One is stale.

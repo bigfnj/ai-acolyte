@@ -40,16 +40,43 @@ compile() { HOME="$HOME_TMP" USERPROFILE="$HOME_TMP" RECALL_MEMORY_DIR="$MEM" RE
 
 fail() { echo "FAIL: $1"; exit 1; }
 
+# Every negative below used to read `lint | grep -q STALE && fail ... || echo ok`, and three of
+# the four could not fail. A pipeline masks python's exit status, and an `&&`/`||` list suppresses
+# `set -e`, so a lint that CRASHED printed nothing, grep matched nothing, and the `||` branch
+# reported "ok". Proven: deleting `or not os.path.exists(GATES_OUT)` from _gates_are_stale left a
+# FileNotFoundError traceback in the output and the suite still said ALL PASS. Only the positive
+# assertion (drift detected) could ever fire.
+#
+# So capture first, and prove the run happened before reading its text.
+#
+# NOT `lint_check ... | grep`. The first repair of this file did exactly that and the mutation
+# still survived: every stage of a pipeline runs in a SUBSHELL, so `fail`'s `exit 1` killed the
+# subshell and the parent went on reading grep's status. The capture has to happen in THIS shell.
+LINT_OUT=""
+run_lint() {
+  LINT_OUT="$(lint)" || fail "$1: --lint exited non-zero"
+  [ -n "$LINT_OUT" ] || fail "$1: --lint produced no output at all"
+}
+says_stale() { printf '%s' "$LINT_OUT" | grep -q STALE; }
+
 compile
-lint | grep -q STALE && fail "stale right after compile" || echo "ok: fresh compile is not stale"
+run_lint "fresh compile"
+says_stale && fail "stale right after compile"
+echo "ok: fresh compile is not stale"
 
 sed -i 's/Original wording/CHANGED wording/' "$MEM/a-rule.md"
-lint | grep -q STALE && echo "ok: drift detected" || fail "drift NOT detected after a gate edit"
+run_lint "after a gate edit"
+says_stale || fail "drift NOT detected after a gate edit"
+echo "ok: drift detected"
 
 compile
-lint | grep -q STALE && fail "still stale after recompile" || echo "ok: recompile clears it"
+run_lint "after recompile"
+says_stale && fail "still stale after recompile"
+echo "ok: recompile clears it"
 
 rm -f "$HOME_TMP/.claude/gates.generated.md"
-lint | grep -q STALE && fail "a never-compiled corpus must not report stale" || echo "ok: uncompiled is not stale"
+run_lint "never compiled"
+says_stale && fail "a never-compiled corpus must not report stale"
+echo "ok: uncompiled is not stale"
 
 echo "ALL PASS"

@@ -80,15 +80,30 @@ def _discover_memory_dir():
     root = os.path.expanduser(r"~/.claude/projects")
     best, best_count = None, 0
     try:
-        for slug in os.listdir(root):
-            candidate = os.path.join(root, slug, "memory")
-            if not os.path.isdir(candidate):
-                continue
+        slugs = os.listdir(root)
+    except OSError as e:
+        print(f"[recall] cannot list {root} ({e}); falling back to the default store",
+              file=sys.stderr)
+        slugs = []
+    for slug in slugs:
+        candidate = os.path.join(root, slug, "memory")
+        if not os.path.isdir(candidate):
+            continue
+        try:
             count = len([f for f in os.listdir(candidate) if f.endswith(".md")])
-            if count > best_count:
-                best, best_count = candidate, count
-    except OSError:
-        pass
+        except OSError as e:
+            # Per-candidate, and LOUD. A single `except OSError: pass` around the whole loop
+            # meant one unreadable store aborted the scan and silently returned the best of
+            # whatever had been reached first, or the hardcoded fallback if the first candidate
+            # raised. This is the authority for which corpus gets indexed, linted and compiled
+            # into standing orders, and it was the quiet one: the Node copy in memoryLint.js
+            # already refuses to degrade in silence, for the same reason and after an injected
+            # EMFILE scored a 123-file store below a 7-file one.
+            print(f"[recall] cannot read {candidate} ({e}); it cannot win corpus selection",
+                  file=sys.stderr)
+            continue
+        if count > best_count:
+            best, best_count = candidate, count
     return best or os.path.join(root, "d---ai-work", "memory")
 
 
@@ -98,8 +113,22 @@ INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
 # pickPrimaryDir and scripts/verify-release.ps1 Find-MemoryDir -- and both used to sort by
 # MEMORY.md mtime instead. The extension pins RECALL_MEMORY_DIR from its copy on every spawn, so
 # its weaker rule silently overrode this one; they agreed only because one store was both largest
-# and newest. All three count files as of 2026-09-14, and test/recall-index.test.js pins this
-# expression from the Node side so the authority cannot move without the copies noticing.
+# and newest. All three count files as of 2026-09-14.
+#
+# They are NOT identical, and an earlier version of this comment overstated that. Two real
+# differences, both left deliberately:
+#   * Candidate sets. This accepts any `*/memory` directory; the other two require a MEMORY.md
+#     inside it. A store with memories and no index file is this function's primary and is
+#     invisible to them.
+#   * Tie-breaks. This takes the first os.listdir entry on an exact count tie; both copies take
+#     the newest MEMORY.md, and their tests assert it. On a tie the extension would therefore
+#     compile gates from one store while a bare CLI run used the other. Not reachable at 122
+#     files against 6, reachable the moment a store is copied rather than moved.
+#
+# test/recall-index.test.js pins this expression from the Node side. Note what that does and does
+# not buy: it fires when the AUTHORITY moves, which is the safe direction. It cannot fire when a
+# COPY drifts, which is the direction that shipped the original bug. memoryLint's copy is covered
+# by its own behavioural tests; verify-release.ps1's copy has no test at all.
 #
 # SEARCH may span several corpora; everything else stays on the one primary dir above. A working
 # root that gets renamed leaves its old store behind and _discover_memory_dir, which takes the
@@ -749,8 +778,20 @@ def lint():
     stale_gates = _gates_are_stale()
     if stale_gates:
         print("  gates.generated.md is STALE: a gate block changed since the last compile.")
-        print("    run `recall.py --gates-compile` (or `wildcard-perms --gates refresh`) "
-              "to update it.\n")
+        # Both commands below REFUSE when the corpus compiles nothing, and neither
+        # `wildcard-perms --gates refresh` nor the extension can forward --gates-allow-empty. So
+        # advising them unconditionally sent a user who had legitimately deleted their last gate
+        # into a loop: lint says run X, X refuses, refresh warns on every session forever. Name
+        # the escape hatch in the one case where the ordinary advice cannot work.
+        if not _compile_gates_text()[1]:
+            print("    this corpus compiles ZERO gate blocks, so --gates-compile will REFUSE")
+            print("    rather than erase what is installed. If that is a surprise, check")
+            print("    RECALL_MEMORY_DIR: it is probably pointing at the wrong corpus. If you")
+            print("    really did delete every gate, run:")
+            print("      recall.py --gates-compile --gates-allow-empty\n")
+        else:
+            print("    run `recall.py --gates-compile` (or `wildcard-perms --gates refresh`) "
+                  "to update it.\n")
 
     unresolved = sorted({l for l in re.findall(r'\[\[([^\]]+)\]\]',
                                                _strip_code(mem + "".join(texts.values())))

@@ -272,31 +272,57 @@ echo "ok: --gates-compile stays on the primary corpus even when search spans sev
 # 2026-09-14 and the store was deliberately NOT deleted, so this guard is now protecting against
 # a stale hand-set var rather than an imminent deletion. Still reachable, still worth keeping.)
 # Mutation: drop the `os.path.isdir` filter in _search_dirs.
-OUT="$(RECALL_MEMORY_DIRS="$DIRS2$(printf ';')$TMP/does-not-exist" "$PY" "$RECALL" --lexical-only -k 3 "stranded body" 2>&1)"
+#
+# Asserted against _search_dirs directly, NOT through a --lexical-only query. That is how this
+# was written first and it could not fail: _retriever skips the dir-walking loop entirely for
+# lexical mode, so the query exercised the one mode the defect never touched. Proven by applying
+# the named mutation and watching the suite stay green. Reading the list is also a stronger
+# assertion than "the query survived", because it names what the filter is supposed to produce.
+BAD="$TMP/does-not-exist"
+OUT="$("$PY" -c "
+import importlib.util, os, sys
+os.environ['RECALL_MEMORY_DIRS'] = sys.argv[2] + os.pathsep + sys.argv[3]
+os.environ['RECALL_MEMORY_DIR'] = sys.argv[4]
+s = importlib.util.spec_from_file_location('recall', sys.argv[1])
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print('DIRS', len(m.MEMORY_DIRS))
+for d in m.MEMORY_DIRS: print('  ', d)
+" "$RECALL" "$(cygpath -m "$MEM2" 2>/dev/null || echo "$MEM2")" "$BAD" "$MEM" 2>&1)"
 RC=$?
-[ "$RC" = "0" ] || fail "a non-existent dir in RECALL_MEMORY_DIRS made the query exit $RC"
+[ "$RC" = "0" ] || fail "a non-existent dir in RECALL_MEMORY_DIRS made import exit $RC: $OUT"
 echo "$OUT" | grep -qi 'traceback\|FileNotFoundError' && fail "a non-existent dir raised instead of being skipped"
-echo "$OUT" | grep -q 'strand.md' || fail "skipping the bad dir also lost the good one"
+echo "$OUT" | grep -q '^DIRS 2$' || fail "expected exactly the primary + the good secondary: $OUT"
+echo "$OUT" | grep -q 'does-not-exist' && fail "the non-existent dir survived into MEMORY_DIRS"
 echo "ok: a non-existent corpus in RECALL_MEMORY_DIRS is skipped, not fatal"
 
 # ---------------------------------------------------------------- DIRS extends, never replaces
 # Naming only the secondary store is the obvious thing to type. If that REPLACED the primary,
 # every memory in it would silently vanish from search while --lint and --list kept reporting
 # them. Mutation: drop MEMORY_DIR from the list _search_dirs builds.
-OUT="$(RECALL_MEMORY_DIRS="$(cygpath -m "$MEM2" 2>/dev/null || echo "$MEM2")" "$PY" "$RECALL" --lexical-only -k 8 "primary duplicate body" 2>/dev/null)"
-echo "$OUT" | grep -q 'dup.md' || fail "naming only the secondary corpus dropped the primary from search"
+# The witness is only-here.md, NOT dup.md. dup.md exists in BOTH fixture corpora, so dropping
+# the primary still leaves a file of that name in the output and the assertion passed against the
+# mutation it names. Proven by applying it. only-here.md is unique to the primary, so it is the
+# only filename that can distinguish "extends" from "replaces".
+OUT="$(RECALL_MEMORY_DIRS="$(cygpath -m "$MEM2" 2>/dev/null || echo "$MEM2")" "$PY" "$RECALL" --lexical-only -k 8 "unique to the primary store" 2>/dev/null)"
+echo "$OUT" | grep -q 'only-here.md' || fail "naming only the secondary corpus dropped the primary from search"
 echo "ok: RECALL_MEMORY_DIRS extends the primary corpus rather than replacing it"
 
 # ---------------------------------------------------------------- an unknown mode is not silent
 # rank() used to fall through every branch on an unrecognised mode, producing all-zero scores and
 # an alphabetical result set -- so a typo like --modes hybird printed a plausible table and a
 # benchmark exited 0. Mutation: delete the _check_mode call in rank().
+#
+# The parts are passed in so rank() cannot fall through to _retriever, which calls _check_mode
+# as its own first statement. Without them the deleted call was replaced by _retriever's and the
+# ValueError still arrived, so the assertion passed against the mutation it names. Proven by
+# applying it. Empty parts are enough: the check must happen before anything is scored.
 ERR="$("$PY" -c "
 import importlib.util, sys
 s = importlib.util.spec_from_file_location('recall', sys.argv[1])
 m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+parts = dict(idx={'files': {}}, names=[], lex={'df': {}, 'len': {}, 'avg': 1.0, 'text': {}}, emb=None)
 try:
-    m.rank('anything', mode='hybird')
+    m.rank('anything', mode='hybird', **parts)
     print('NO-RAISE')
 except ValueError as e:
     print('RAISED', e)

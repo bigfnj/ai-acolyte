@@ -860,6 +860,10 @@ function memoryCardData(precomputed = null) {
         tokens: report.tokens,
         budgetTokens: Math.round(conf.totalBudget / 4),
         overBudget: report.bytes > conf.totalBudget,
+        // The cap that actually binds, and the only one the loader enforces by itself.
+        lines: report.lineCount,
+        maxLines: conf.maxLines,
+        linesOver: report.linesOver,
         files: report.fileCount,
         indexable: recall.indexable,
         embedded: recall.embedded,
@@ -3562,6 +3566,7 @@ class WildcardingViewProvider {
           <div class="stat"><div class="n" id="memTok">–</div><div class="l">tok/session</div></div>
           <div class="stat"><div class="n" id="memFiles">–</div><div class="l">files</div></div>
           <div class="stat"><div class="n" id="memEmb">–</div><div class="l">embedded</div></div>
+          <div class="stat"><div class="n" id="memLines">–</div><div class="l" id="memLinesLabel">lines</div></div>
         </div>
         <div class="memissues" id="memIssues"></div>
         <button class="restore" id="rebuild" title="Force a full CPU re-embed of the memory dir (recall.py --rebuild)">⟳  Rebuild recall index</button>
@@ -3662,10 +3667,16 @@ class WildcardingViewProvider {
     // over a Rebuild button that cannot clear it because there is nothing to clear. Every
     // other consumer -- status bar, output channel, card body -- counts over + broken.
     const issues = (m.over || 0) + (m.broken || 0);
+    // linesOver and overBudget are whole-file conditions with no line to point at, so they
+    // do not inflate the "to fix" count. They must still colour the row: a truncated index
+    // is worse than anything the count can hold, and reading green through it is the
+    // failure this card already had once.
+    const capped = !!(m.linesOver || m.overBudget);
     setState('stMemory',
       (m.tokens != null ? fmtK(m.tokens) + ' tok' : 'no index')
+        + (m.linesOver ? ' · ' + m.lines + '/' + (m.maxLines || 200) + ' lines' : '')
         + (issues ? ' · ' + issues + ' to fix' : ''),
-      issues ? 'warn' : null);
+      (issues || capped) ? 'warn' : null);
 
     // promote/prune are counts, not arrays, and 'pending' is defined the same way
     // renderLocal defines it, so the row and the card can never disagree.
@@ -3787,7 +3798,23 @@ class WildcardingViewProvider {
         + (m.stale ? ' — cache is behind the files' : '');
     $('memEmb').style.color = m.stale ? 'var(--vscode-charts-yellow, #d29922)' : '';
 
+    // Shown even when it is fine, because this is the axis that grows: roughly a line per
+    // project, against a cap the loader enforces silently. Bytes barely move by comparison,
+    // so a card that only watched bytes could read green until the tail stopped loading.
+    const maxLines = m.maxLines || 200;
+    $('memLines').textContent = m.lines == null ? '–' : m.lines;
+    $('memLinesLabel').textContent = 'of ' + maxLines + ' lines';
+    $('memLines').title = m.lines == null
+      ? 'line count unavailable'
+      : m.lines + ' of ' + maxLines + ' lines used. Claude Code loads the first ' + maxLines
+        + ' and drops the rest without saying so.';
+    $('memLines').style.color = m.linesOver
+      ? 'var(--vscode-charts-red, #f85149)'
+      : (m.lines != null && m.lines >= maxLines * 0.9
+        ? 'var(--vscode-charts-yellow, #d29922)' : '');
+
     const issues = [];
+    if (m.linesOver) issues.push(m.lines + '/' + maxLines + ' lines, past the cap');
     if (m.over)   issues.push(m.over + ' over budget');
     if (m.broken) issues.push(m.broken + ' broken link' + (m.broken !== 1 ? 's' : ''));
     const el = $('memIssues');

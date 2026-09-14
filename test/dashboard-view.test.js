@@ -33,7 +33,11 @@ function settle(ms = 140) {
 // than breaking the activation test that already works"), and this file needs two
 // things that one does not: the provider instance, and a count of how many times
 // the quadratic allow-list pass runs.
-function harness(tempHome) {
+// `opts.memoryReport` replaces the no-corpus stub below. Without it every test in this
+// file runs memoryCardData against `report: null`, so the function returns early and
+// nothing it builds is ever asserted — a mutation that emptied a payload field survived
+// the whole suite.
+function harness(tempHome, opts = {}) {
   const commands = new Map();
   const executed = [];
   const passes = { count: 0 };
@@ -163,6 +167,7 @@ function harness(tempHome) {
         // called is the whole property, and nothing else in the suite can see it.
         memoryReport: () => {
           memoryReports.count += 1;
+          if (opts.memoryReport) return opts.memoryReport();
           return { conf: {}, dir: null, report: null, gateSources: undefined };
         },
         discoverDirs: () => [],
@@ -552,6 +557,104 @@ test('a genuinely broken index link is still counted as something to fix', async
     assert.match(panel.dom.byId.get('stMemory').textContent, /3 to fix/,
       'real faults must still reach the badge, and must not be inflated by forward-links');
   } finally { app.dispose(); }
+});
+
+// Claude Code loads the first 200 lines of MEMORY.md and drops the rest in silence. The
+// card watched bytes only, against a self-imposed 12000-byte budget, so it could read
+// green while the tail of the index was already absent from every session. Lines are also
+// the axis that grows -- about one per project -- while the byte count barely moves.
+async function memoryCard(t, memory) {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  const ui = fakeView();
+  app.provider.resolveWebviewView(ui.view);
+  await settle();
+  const panel = runPanelScript(ui.view.webview.html);
+  panel.deliver({ ...ui.posted[0], memory });
+  const body = panel.dom.byId.get('memIssues');
+  return {
+    app,
+    state: panel.dom.byId.get('stMemory'),
+    lines: panel.dom.byId.get('memLines'),
+    label: panel.dom.byId.get('memLinesLabel'),
+    issues: body.textContent || (body.children[0] || {}).textContent || '',
+  };
+}
+
+// The three tests below deliver a hand-built payload, which exercises the webview render
+// but never memoryCardData. This one drives the payload builder for real, because the two
+// halves fail independently: a render that reads a field nobody sets shows a dash forever
+// and every render assertion still passes.
+test('the card payload carries the line count, not just the byte count', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome, {
+    memoryReport: () => ({
+      conf: { enabled: true, totalBudget: 12000, maxLines: 200 },
+      dir: path.join(env.tempHome, '.claude', 'projects', 'p', 'memory'),
+      report: {
+        tokens: 1662, bytes: 6648, fileCount: 120, lineCount: 84, linesOver: false,
+        over: [], broken: [], unresolved: [],
+      },
+    }),
+  });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const m = ui.posted[0].memory;
+    assert.ok(m, 'the memory card was built, so the assertions below mean something');
+    assert.equal(m.lines, 84, 'the line count must reach the webview or the stat is a dash');
+    assert.equal(m.maxLines, 200, 'the cap travels with the count, or the card invents one');
+    assert.equal(m.linesOver, false);
+  } finally { await app.dispose(); }
+});
+
+test('the line count is on the card before it becomes a problem', async (t) => {
+  const card = await memoryCard(t, {
+    tokens: 1700, lines: 84, maxLines: 200, linesOver: false,
+    over: 0, broken: 0, unresolved: 0,
+  });
+  try {
+    assert.equal(card.lines.textContent, 84, 'the growth axis is shown even when healthy');
+    assert.match(card.label.textContent, /of 200 lines/);
+    assert.ok(!/warn/.test(card.state.className),
+      'an index well inside the cap must not warn: ' + card.state.className);
+    assert.equal(card.lines.style.color, '', 'no colour at 42% of the cap');
+  } finally { card.app.dispose(); }
+});
+
+test('approaching the cap colours the count before it is breached', async (t) => {
+  const card = await memoryCard(t, {
+    tokens: 1700, lines: 185, maxLines: 200, linesOver: false,
+    over: 0, broken: 0, unresolved: 0,
+  });
+  try {
+    assert.equal(card.lines.style.color, 'var(--vscode-charts-yellow, #d29922)',
+      'the point of the gauge is the warning arriving before the truncation does');
+    assert.ok(!/warn/.test(card.state.className),
+      'nothing is being dropped yet, so the row itself stays calm');
+  } finally { card.app.dispose(); }
+});
+
+test('an index past the line cap warns, with nothing else wrong', async (t) => {
+  const card = await memoryCard(t, {
+    tokens: 1700, lines: 205, maxLines: 200, linesOver: true,
+    over: 0, broken: 0, unresolved: 0,
+  });
+  try {
+    assert.match(card.state.className, /warn/,
+      'five lines are missing from every session; the row cannot read clean');
+    assert.match(card.state.textContent, /205\/200 lines/);
+    assert.ok(!/to fix/.test(card.state.textContent),
+      'a whole-file condition has no line to point at, so it must not inflate the count');
+    assert.match(card.issues, /past the cap/);
+    assert.ok(!/index clean/.test(card.issues),
+      'the card must not call a truncated index clean: "' + card.issues + '"');
+    assert.equal(card.lines.style.color, 'var(--vscode-charts-red, #f85149)');
+  } finally { card.app.dispose(); }
 });
 
 // The cap and the "and N more" affordance are the only dashboard logic that

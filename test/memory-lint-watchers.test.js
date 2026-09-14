@@ -133,6 +133,53 @@ test('the watcher set follows the store when it moves to a new project slug', ()
   }
 });
 
+// The status bar is the surface that is always on screen; the card needs the sidebar
+// open. Claude Code drops everything past line 200 of MEMORY.md without reporting it, so
+// this gauge is the only thing on the machine that can say it happened.
+test('the status bar names the line cap only once the index is past it', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-lines-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---work', 'memory');
+  // maxLines is overridden to 10 so the fixture stays readable. 12 short lines: past the
+  // cap, and nowhere near the byte budget, which is the case bytes alone cannot see.
+  writeStore(dir, 'x\n'.repeat(12));
+
+  const h = harness(tempHome, { 'memory.maxLines': 10 });
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    lint.refresh();
+
+    const text = h.statusText[h.statusText.length - 1];
+    assert.match(text, /12\/10 lines/, 'the gauge must say how far past the cap it is');
+    assert.equal(lint.status.backgroundColor?.id, 'statusBarItem.warningBackground',
+      'two lines are being dropped from every session, so the gauge cannot stay neutral');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('an index inside the line cap says nothing about lines at all', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-lines-ok-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---work', 'memory');
+  writeStore(dir, 'x\n'.repeat(8));
+
+  const h = harness(tempHome, { 'memory.maxLines': 10 });
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    lint.refresh();
+
+    const text = h.statusText[h.statusText.length - 1];
+    assert.ok(!/lines/.test(text),
+      'a healthy index must not spend status-bar width on a number that is fine: ' + text);
+    assert.equal(lint.status.backgroundColor, undefined);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
 test('a periodic reconcile is registered, so a move with no live watcher still repaints', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-reconcile-'));
   const oldDir = path.join(tempHome, '.claude', 'projects', 'd---old', 'memory');

@@ -30,6 +30,10 @@ function cfg() {
     dir: (c.get('memory.dir') || '').trim(),
     lineBudget: Number(c.get('memory.lineBudget')) || 300,
     totalBudget: Number(c.get('memory.totalBudget')) || 12000,
+    // Not a budget we chose: Claude Code loads the first 200 lines of MEMORY.md and
+    // drops the rest without saying so. Settable only because the loader's cap could
+    // move. See fastLint for why this is the axis that binds.
+    maxLines: Number(c.get('memory.maxLines')) || 200,
   };
 }
 
@@ -61,6 +65,17 @@ function fastLint(dir, conf) {
   const tokens = Math.round(bytes / 4);
   const lines = text.split(/\r?\n/);
 
+  // Claude Code truncates MEMORY.md at 200 LINES or 25 KB, whichever comes first, and
+  // says nothing when it does. Bytes were the only axis measured here, and they are not
+  // the one that binds: this store sits at ~42% of the line cap against ~26% of the byte
+  // cap, and it grows by roughly one line per project while bytes barely move. So a card
+  // that watches only bytes reads green right up to the point where the tail of the index
+  // stops being loaded.
+  //
+  // A trailing newline splits into a final empty element that is not a line. Dropping it
+  // is what makes this agree with `wc -l`, and with what the loader counts.
+  const lineCount = lines.length - (lines[lines.length - 1] === '' ? 1 : 0);
+
   const over = [];
   const broken = [];
   const linkRe = /\]\(([^)]+\.md)(#[^)]*)?\)/g;
@@ -76,7 +91,12 @@ function fastLint(dir, conf) {
       }
     }
   });
-  return { dir, memPath, bytes, tokens, over, broken, totalOver: bytes > conf.totalBudget };
+  return {
+    dir, memPath, bytes, tokens, over, broken,
+    totalOver: bytes > conf.totalBudget,
+    lineCount,
+    linesOver: lineCount > conf.maxLines,
+  };
 }
 
 // The dir whose MEMORY.md is "current": the configured one, else the most recently
@@ -317,12 +337,17 @@ class MemoryLint {
     if (!r) { this.status.hide(); return; }
     const issues = r.over.length + r.broken.length;
     const tok = r.tokens >= 1000 ? (r.tokens / 1000).toFixed(1) + 'k' : String(r.tokens);
-    this.status.text = `$(book) mem: ${tok} tok` + (issues ? ` · ${issues} to fix` : '');
+    this.status.text = `$(book) mem: ${tok} tok`
+      + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines` : '')
+      + (issues ? ` · ${issues} to fix` : '');
     this.status.tooltip =
       `MEMORY.md: ${r.bytes} bytes (~${r.tokens} tokens/session, budget ${conf.totalBudget / 4 | 0})\n` +
+      `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest\n` +
       `${r.over.length} over-budget hook line(s), ${r.broken.length} broken index link(s)\n` +
       `${path.dirname(r.memPath).replace(os.homedir(), '~')}\nClick for the full report.`;
-    this.status.backgroundColor = (issues || r.totalOver)
+    // linesOver joins totalOver here rather than the count: neither has a line to point
+    // at, and both are worse than anything that does.
+    this.status.backgroundColor = (issues || r.totalOver || r.linesOver)
       ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.status.show();
   }
@@ -374,6 +399,12 @@ class MemoryLint {
     ch.appendLine(`Memory lint — ${r.memPath.replace(os.homedir(), '~')}`);
     ch.appendLine(`  ${r.bytes} bytes (~${r.tokens} tokens loaded every session), target < ${conf.totalBudget}`);
     if (r.totalOver) ch.appendLine(`  ! index is ${r.bytes - conf.totalBudget} bytes over budget`);
+    ch.appendLine(`  ${r.lineCount} lines of ${conf.maxLines}`
+      + ` (Claude Code loads the first ${conf.maxLines} and drops the rest in silence)`);
+    if (r.linesOver) {
+      ch.appendLine(`  ! ${r.lineCount - conf.maxLines} line(s) past the cap`
+        + ` — everything after line ${conf.maxLines} is NOT being loaded into sessions`);
+    }
     ch.appendLine(`  ${r.fileCount} memory files in the dir`);
     ch.appendLine('');
     if (r.over.length) {

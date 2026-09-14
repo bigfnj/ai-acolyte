@@ -2,7 +2,7 @@
   "name": "permission-wildcarding",
   "displayName": "Permission Wildcarding",
   "description": "Reduces Claude Code and Codex approval friction. Generalizes approved permissions into command-family wildcards on change, learns from Claude Code and Codex history (Auto Learn), recommends deterministic safe policy, writes separate Claude and validated Codex outputs, drains project-local approvals into user scope, installs a wildcardable shell style for the agent, and includes memory-index diagnostics and MAX/bypass controls.",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -253,7 +253,12 @@
         "permissionWildcarding.memory.lineBudget": {
           "type": "number",
           "default": 300,
-          "markdownDescription": "Max characters for a single `MEMORY.md` index line before it's flagged. Hooks over this are drifting into changelog territory — move the detail into the memory file or the project repo."
+          "markdownDescription": "Max **characters in one** `MEMORY.md` index line before it's flagged. (This is a width limit for a single hook, not a limit on how many lines the file may have — that's `#permissionWildcarding.memory.maxLines#`.) Hooks over this are drifting into changelog territory — move the detail into the memory file or the project repo."
+        },
+        "permissionWildcarding.memory.maxLines": {
+          "type": "number",
+          "default": 200,
+          "markdownDescription": "How many **lines** of `MEMORY.md` Claude Code actually loads. It reads the first 200 lines (or 25 KB, whichever comes first) and drops the rest **without reporting it**, so anything past the cap is silently absent from every session. This is the limit that usually arrives first, because the index grows by roughly a line per project while its byte count barely moves. Change it only if the loader's cap changes."
         },
         "permissionWildcarding.memory.totalBudget": {
           "type": "number",

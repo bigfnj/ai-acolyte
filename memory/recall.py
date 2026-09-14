@@ -94,12 +94,21 @@ def _discover_memory_dir():
 
 MEMORY_DIR = os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir()
 INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
+# This count rule is the AUTHORITY. Two other places pick a corpus -- memoryLint.js
+# pickPrimaryDir and scripts/verify-release.ps1 Find-MemoryDir -- and both used to sort by
+# MEMORY.md mtime instead. The extension pins RECALL_MEMORY_DIR from its copy on every spawn, so
+# its weaker rule silently overrode this one; they agreed only because one store was both largest
+# and newest. All three count files as of 2026-09-14, and test/recall-index.test.js pins this
+# expression from the Node side so the authority cannot move without the copies noticing.
+#
 # SEARCH may span several corpora; everything else stays on the one primary dir above. A working
 # root that gets renamed leaves its old store behind and _discover_memory_dir, which takes the
-# single largest, then cannot see it: this box has 6 memories stranded in C--Anthropic, two of
-# them on topics the main corpus never re-recorded. --lint and --gates-compile deliberately do
-# NOT span, because a gate is a standing order and a second corpus must not be able to install
-# one silently.
+# single largest, then cannot see it: this box has 6 memories stranded in C--Anthropic. The two
+# the main corpus had never re-recorded were verified against the machine and copied across on
+# 2026-09-14, so the remaining four are older versions of memories it already holds and the
+# stranded store was left in place rather than deleted. --lint and --gates-compile deliberately
+# do NOT span, because a gate is a standing order and a second corpus must not be able to
+# install one silently.
 def _search_dirs():
     """Corpora to SEARCH: the primary, then anything in RECALL_MEMORY_DIRS, order preserved.
 
@@ -111,9 +120,10 @@ def _search_dirs():
     Non-existent entries are dropped here, not at the point of use: _display_keys already
     tolerated a bad path but _retriever's own loop did not, so one stale entry raised
     FileNotFoundError out of every query while --lexical-only kept working. Merging the
-    stranded corpus and deleting it -- the next step the BACKLOG proposes -- would have done
-    exactly that. The primary is kept whether or not it exists, so its own error messages
-    still name it.
+    stranded corpus and deleting it would have done exactly that. (The merge happened on
+    2026-09-14; the store was deliberately left in place, so this now guards a stale hand-set
+    var rather than an imminent deletion.) The primary is kept whether or not it exists, so its
+    own error messages still name it.
     """
     extra = (os.environ.get("RECALL_MEMORY_DIRS") or "").split(os.pathsep)
     out, seen = [], set()

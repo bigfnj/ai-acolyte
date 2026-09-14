@@ -268,8 +268,10 @@ echo "ok: --gates-compile stays on the primary corpus even when search spans sev
 # ---------------------------------------------------------------- a bad path cannot kill a query
 # _display_keys tolerated an unreadable dir; _retriever's own loop did not, so one stale entry in
 # RECALL_MEMORY_DIRS raised FileNotFoundError out of every non-lexical query. Deleting the
-# stranded corpus after merging it -- the next step the BACKLOG proposes -- would have triggered
-# exactly that. Mutation: drop the `os.path.isdir` filter in _search_dirs.
+# stranded corpus after merging it would have triggered exactly that. (That merge happened on
+# 2026-09-14 and the store was deliberately NOT deleted, so this guard is now protecting against
+# a stale hand-set var rather than an imminent deletion. Still reachable, still worth keeping.)
+# Mutation: drop the `os.path.isdir` filter in _search_dirs.
 OUT="$(RECALL_MEMORY_DIRS="$DIRS2$(printf ';')$TMP/does-not-exist" "$PY" "$RECALL" --lexical-only -k 3 "stranded body" 2>&1)"
 RC=$?
 [ "$RC" = "0" ] || fail "a non-existent dir in RECALL_MEMORY_DIRS made the query exit $RC"

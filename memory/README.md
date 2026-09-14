@@ -74,12 +74,23 @@ score column and reproduces the pre-hybrid output exactly.
 
 The corpus is discovered rather than hardcoded because Claude Code derives the project slug
 from the working directory, so renaming a working root relocates the whole store. The VS Code
-extension pins both vars explicitly when it spawns this script, so its card and this tool
-always agree on which dir they are talking about.
+extension pins `RECALL_MEMORY_DIR` on every spawn (the singular var only: it never passes
+`RECALL_MEMORY_DIRS`), choosing the dir by the same rule `_discover_memory_dir` uses, most `.md`
+files with `MEMORY.md` mtime as the tie-break. So the card and this tool name the same dir
+whether or not the pin applies.
+
+That sentence used to claim the extension pinned *both* vars and that the two therefore "always
+agree". Both halves were false. It pinned one var, and it chose the dir by newest `MEMORY.md`
+while this script counts files, so the pin silently **overrode** this script's choice with a
+different one. They matched only because one store happened to be both largest and newest.
+Fixed 2026-09-14 in `memoryLint.js` and `scripts/verify-release.ps1`, which was a third copy of
+the same rule; `test/recall-index.test.js` now pins the Python one from the Node side.
 
 Discovery takes the single largest store, which means a rename **strands** the old one: this
-machine has 6 memories sitting in `C--Anthropic/memory` that nothing could search, two of them
-on topics the current corpus never re-recorded. `RECALL_MEMORY_DIRS` is the answer to that. It
+machine has 6 memories sitting in `C--Anthropic/memory` that the default search cannot see. The
+two that the live corpus had never re-recorded were verified and copied across on 2026-09-14, so
+the remaining four are older versions of memories it already holds. `RECALL_MEMORY_DIRS` is the
+answer when that is not the case. It
 affects search only — `--lint` and `--gates-compile` stay on `RECALL_MEMORY_DIR`, deliberately,
 because a gate is a standing order and a second corpus must not be able to install one. Each
 corpus keeps its own `recall_index.json` in its own directory, so the per-file staleness

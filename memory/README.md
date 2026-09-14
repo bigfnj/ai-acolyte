@@ -20,10 +20,19 @@ python recall.py -k 10 "run admin tasks without a UAC prompt"
 python recall.py --vector-only "..."   # cosine alone; the pre-hybrid ranking
 python recall.py --lexical-only "..."  # BM25 alone; builds no ONNX session
 python recall.py --lint          # audit index bloat + broken links (no model needed)
+python recall.py --gates-compile # lift scope:global gate blocks into ~/.claude/gates.generated.md
+python recall.py --gates-compile --gates-allow-empty   # ... and let the result be empty
 python recall.py --rebuild       # force re-embed everything
 python recall.py --list          # show what's indexed
 python recall.py --selftest      # verify the embedder's reference cosines
 ```
+
+`--gates-compile` **refuses to replace a non-empty `gates.generated.md` with nothing** and exits
+non-zero, naming the corpus it read. A compile that finds zero gates is nearly always
+`RECALL_MEMORY_DIR` pointing at the wrong dir, and every downstream signal for it is silent: the
+installer declines an empty block so `CLAUDE.md` still looks correct, the dashboard count reads 0,
+and the `--lint` staleness check compares empty to empty and reports current. Pass
+`--gates-allow-empty` when deleting every gate is what you actually meant.
 
 Ranked output is `score  file  cos N  lex N  description  > best-matching line`.
 

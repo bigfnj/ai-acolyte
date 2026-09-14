@@ -123,14 +123,24 @@ echo "ok: frontmatter is read from the --- block, not a byte window"
 # This is the assertion that separates the correct fix from the naive one. Simply dropping the
 # 400-char cap passes the test above AND passes on the live corpus, and is still wrong: this
 # corpus contains memories that document gate syntax.
-rm -f "$MEM"/deep.md
+#
+# The generated file is deleted first, and that deletion is load-bearing. The expected compile
+# here is EMPTY, so leaving the previous test's output in place walks straight into
+# compile_gates()'s empty-compile guard: the write is refused, the file keeps deep.md's gate, and
+# an assertion phrased as "the new text is absent" then inspects the PREVIOUS gate and passes
+# without ever reaching _fm. Starting from no file means the guard is not reached and the
+# assertion reads what this compile actually produced.
+#
+# `[ -s ]` rather than a grep for the fixture's wording: for a negative, "nothing compiled at all"
+# is strictly stronger than "this one string is absent", and it cannot be satisfied by stale bytes.
+rm -f "$MEM"/deep.md "$TMP/.claude/gates.generated.md"
 {
   printf -- '---\nname: doc\nmetadata:\n  type: reference\n---\n\n'
   printf 'How to declare a gate:\n\n```yaml\nmetadata:\n  scope: global\n```\n\n'
   printf -- '<!-- gate -->\n- **This must NOT compile.** It is documentation, not a declaration.\n<!-- /gate -->\n'
 } > "$MEM/doc.md"
 "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
-grep -q 'must NOT compile' "$TMP/.claude/gates.generated.md" \
+[ -s "$TMP/.claude/gates.generated.md" ] \
   && fail "a scope: global inside a fenced code example was compiled as a real gate"
 echo "ok: scope: global inside a fenced example is not treated as a declaration"
 
@@ -160,6 +170,57 @@ ONE="$(head -1 "$TMP/.claude/gates.generated.md")"
 TWO="$(head -1 "$TMP/.claude/gates.generated.md")"
 [ "$ONE" = "$TWO" ] || fail "compiling twice over an unchanged corpus produced a different sha"
 echo "ok: compiling an unchanged corpus twice yields the same sha"
+
+# ---------------------------------------------------------------- a gateless corpus cannot empty it
+# Runs here because the block above leaves a real, non-empty compile on disk, which is the only
+# state in which this failure exists.
+#
+# Point RECALL_MEMORY_DIR at a corpus with no gate blocks -- a wrong dir, a renamed working root,
+# a half-migrated store -- and the compiler used to write "" over a good gates.generated.md. Every
+# downstream signal for that is silent: agent-gates.js refuses to install an empty block so
+# CLAUDE.md keeps its old text and looks correct, the dashboard's gate count reads 0, and
+# _gates_are_stale() then compares "" against "" and answers "not stale". The one mechanism built
+# to notice the problem is the one the problem switches off.
+#
+# The refusal has to be LOUD. Both callers -- the extension's execFile and
+# `wildcard-perms --gates refresh` -- branch on the exit status, and neither of them can see a
+# bare `return`.
+#
+# Mutations, one assertion each: delete the `if not names and not allow_empty` block (the file is
+# overwritten); swap the sys.exit for a `return` (exit 0); drop the `and not allow_empty` half (the
+# escape hatch stops working); add `if not fresh: return False` to _gates_are_stale (no STALE).
+GATES="$TMP/.claude/gates.generated.md"
+[ -s "$GATES" ] || fail "precondition: the idempotence block should have left a non-empty compile"
+BEFORE="$(cat "$GATES")"
+
+GATELESS="$TMP/gateless"
+mkdir -p "$GATELESS"
+printf -- '---\nname: plain\nmetadata:\n  scope: project\n---\nnothing global, no gate block\n' > "$GATELESS/plain.md"
+printf -- '# Memory Index\n' > "$GATELESS/MEMORY.md"
+
+ERR="$(RECALL_MEMORY_DIR="$GATELESS" "$PY" "$RECALL" --gates-compile 2>&1 >/dev/null)"
+RC=$?
+[ "$(cat "$GATES")" = "$BEFORE" ] || fail "a gateless corpus overwrote the compiled gates with nothing"
+[ "$RC" = "0" ] && fail "the refusal exited 0: neither the extension nor --gates refresh can see that"
+# The corpus is named by its full path, which MSYS rewrites to native form on the way into
+# python.exe, so match the leaf rather than "$GATELESS".
+echo "$ERR" | grep -q 'gateless' || fail "the refusal does not name the corpus it read: '$ERR'"
+echo "$ERR" | grep -q -- '--gates-allow-empty' || fail "the refusal does not name its own escape hatch: '$ERR'"
+echo "ok: a gateless corpus is refused, non-zero, with the compiled gates left intact"
+
+# Silence would be the worst outcome: the file is preserved, so nothing looks wrong. The refusal
+# has to leave the drift check able to see the mismatch it just declined to erase.
+LINTED="$(RECALL_MEMORY_DIR="$GATELESS" "$PY" "$RECALL" --lint 2>&1)"
+echo "$LINTED" | grep -q STALE || fail "after a refused compile --lint reported no drift at all"
+echo "ok: a refused compile leaves --lint reporting STALE rather than empty-equals-empty"
+
+# Deleting every gate on purpose must still be possible, or the guard is a wall instead of a
+# question. The flag is the whole difference between an accident and an intention.
+RECALL_MEMORY_DIR="$GATELESS" "$PY" "$RECALL" --gates-compile --gates-allow-empty >/dev/null 2>&1
+RC=$?
+[ "$RC" = "0" ] || fail "--gates-allow-empty must compile cleanly, exited $RC"
+[ -s "$GATES" ] && fail "--gates-allow-empty did not empty the compiled gates"
+echo "ok: --gates-allow-empty still lets a deliberate 'delete every gate' through"
 
 # ---------------------------------------------------------------- MEMORY_DIRS spans corpora
 # A renamed working root strands its old store: _discover_memory_dir takes the single largest and

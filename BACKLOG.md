@@ -1860,3 +1860,30 @@ fixed, for as long as the VSIX was stale.
 
 Not a contract break, and the interface is identical across versions. Worth stating as a release
 rule: a merge that changes `memory/recall.py` is not in the product until the VSIX is rebuilt.
+
+### The version bump is half of that release rule
+
+Rebuilding is not enough on its own. `4471fe5` set the manifest pair to 1.4.4 and a VSIX was built
+from it. Commits `8ce8c3a` and `312f86c` then changed `extension.js` and `memory/recall.py` on top
+of that without touching the version, so a freshly built `permission-wildcarding-1.4.4.vsix` and
+the earlier 1.4.4 named two different builds. VS Code keys upgrades on the version string, so
+installing an equal version over an existing one is a silent no-op, which presents to a user as
+"in-place upgrades do not work". Bumped to 1.4.5 on 2026-09-14.
+
+Bump `vscode-extension/package.json` and the root `package.json` together.
+`test/installers.test.js:455` asserts they agree, and the extension manifest is authoritative
+because `release.yml` defaults its version input to it.
+
+### `release.yml` runs the version-agreement test before the step that can break it
+
+`.github/workflows/release.yml` runs `npm test` at the "Test" step, then
+`node scripts/package.mjs "<tag>"` at "Package VSIX". The override path in `package.mjs` writes the
+new version into `vscode-extension/package.json` only, never the root, which is the exact drift
+`test/installers.test.js:455` exists to catch. Because the test ran first, CI cannot observe it: a
+tag-built VSIX carries the tag version while the root manifest, which is what
+`wildcard-perms --version` prints, keeps whatever was committed. That is the same divergence
+recorded at line 1079 of this file, reachable a second way.
+
+The fix is small, in `package.mjs`: apply the override to both manifests, or move the test step
+after packaging. Left undone because it changes release behaviour, and this session's remit was
+the memory work.

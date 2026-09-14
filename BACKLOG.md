@@ -2091,6 +2091,15 @@ someone had dropped inside the Git install directory were rescued first.
 this cause, since the root that minted the slug is gone, but it is still the durable fix for
 the general case and is a global behaviour change, so it stays the owner's call.
 
+**REJECTED, do not re-propose: relocating git or python out of `C:\Anthropic`.** It is an odd home
+for two machine-wide toolchains and the convention that put them there is deleted, so the
+tidy-up suggests itself. The owner's answer was "leave them alone, python is too fragile to
+mess with". Two facts make it worse than untidy: `C:\Anthropic\.Python3` is the resolved bare
+`python` and its only alternative is the Microsoft Store redirector stub, and a session's Bash
+tool executes out of `C:\Anthropic\.Git`, so the plan would kill the shell carrying it out.
+Recorded in the `reference_git_push_gh_helper` memory too, which is where a session will
+actually look.
+
 ### The two memory-store watchers are still never reconciled
 
 `extension.js:2005` and `:2033` enumerate stores once at activation and build a watcher per

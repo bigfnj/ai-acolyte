@@ -368,7 +368,9 @@ VSIX and works under a managed policy.
   timer so a store that **moves** — Claude Code derives the project slug from the working
   directory, so renaming a working root relocates the whole store to a new slug — is picked
   up rather than freezing the gauge on a now-deleted path. Tunable via the
-  `permissionWildcarding.memory.*` settings (`enabled`, `dir`, `lineBudget`, `totalBudget`).
+  `permissionWildcarding.memory.*` settings (`enabled`, `dir`, `lineBudget` for one hook's
+  width, `maxLines` for how many lines Claude Code actually loads, `totalBudget`,
+  `recallScript`).
   Command: `Permission Wildcarding: Lint memory index`.
 
 The semantic-recall side of memory hygiene is [`memory/recall.py`](memory/README.md) — a CPU

@@ -161,7 +161,8 @@ works under a managed policy.
   index link pointing at a missing file.
 - It auto-discovers every `~/.claude/projects/*/memory/MEMORY.md`, updates on save and
   on external edits, and can be pinned or tuned via the `permissionWildcarding.memory.*`
-  settings (`enabled`, `dir`, `lineBudget`, `totalBudget`). Command:
+  settings (`enabled`, `dir`, `lineBudget` for one hook's width, `maxLines` for how many lines
+  Claude Code actually loads, `totalBudget`, `recallScript`). Command:
   `Permission Wildcarding: Lint memory index`.
 
 The semantic-recall side of memory hygiene (`memory/recall.py`) is a separate CPU

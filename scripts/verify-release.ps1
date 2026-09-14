@@ -69,7 +69,12 @@ if (Test-Path $genFile) { $script:compiledAt = (Get-Item $genFile).LastWriteTime
 #   PW_RECALL_PROBES  'query=>expected;query=>expected' - semantic-recall probes
 
 # Discovered the way the product does: every ~/.claude/projects/*/memory holding a
-# MEMORY.md, most recently touched first.
+# MEMORY.md, MOST .md FILES first, ties to the most recently touched. Same rule as
+# recall.py _discover_memory_dir and memoryLint.js pickPrimaryDir -- three copies, one
+# definition. This one said "the way the product does" while sorting by mtime alone, which
+# is not what recall.py does; on a box with a second store it picked the corpus the product
+# does not compile from, so the corpus-watcher probe at the bottom of this script edited a
+# gated memory nothing would ever recompile and then waited for a change that could not come.
 function Find-MemoryDir {
     # A configured value that does not exist SKIPS rather than fails, which is this
     # script's contract for every machine-specific setting. Returning it unchecked
@@ -91,7 +96,9 @@ function Find-MemoryDir {
     # the corpus-watcher check reported "skipped -- gated memory not found" forever
     # even with PW_GATE_MEMORY correctly set. It skipped rather than failed, which is
     # why it went unnoticed.
-    return @($candidates | Sort-Object { (Get-Item (Join-Path $_ 'MEMORY.md')).LastWriteTime } -Descending)[0]
+    return @($candidates | Sort-Object `
+        @{ Expression = { (Get-ChildItem $_ -Filter *.md -File -ErrorAction SilentlyContinue).Count }; Descending = $true }, `
+        @{ Expression = { (Get-Item (Join-Path $_ 'MEMORY.md')).LastWriteTime }; Descending = $true })[0]
 }
 
 function Get-ConfiguredPairs([string]$Value, [string]$Separator) {

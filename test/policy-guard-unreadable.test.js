@@ -90,6 +90,7 @@ function harness(tempHome) {
       return {
         MemoryLint: class MemoryLint { activate() {} },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };
     }

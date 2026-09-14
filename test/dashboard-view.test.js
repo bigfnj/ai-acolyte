@@ -170,6 +170,7 @@ function harness(tempHome, opts = {}) {
           if (opts.memoryReport) return opts.memoryReport();
           return { conf: {}, dir: null, report: null, gateSources: undefined };
         },
+        cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };
     }

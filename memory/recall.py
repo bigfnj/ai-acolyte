@@ -11,9 +11,16 @@ desktopPet ships) -- always available, no GPU, no Ollama, no MCP, no hooks, so i
 untouched under the corporate managed policy. Vectors are cached and only changed files
 re-embed on the next run.
 
+Ranking is hybrid: the embedding cosine, fused with BM25 over the WHOLE file. The two
+answer different questions because the embedder truncates at 256 tokens, so on this
+corpus the median file contributes only ~832 chars to its vector and deeper text -- the
+commands, the error strings, the paths -- is invisible to the vector leg entirely.
+
 Usage (from anywhere):
     python recall.py "how do I push git from the agent shell"
     python recall.py -k 10 "run admin tasks without a UAC prompt"
+    python recall.py --vector-only "..."   # cosine alone; the pre-hybrid ranking
+    python recall.py --lexical-only "..."  # BM25 alone; builds no ONNX session
     python recall.py --lint            # audit index bloat + links (no model needed)
     python recall.py --rebuild         # force re-embed every file
     python recall.py --list            # show what's indexed
@@ -22,9 +29,13 @@ Usage (from anywhere):
 Config via env:
     RECALL_MEMORY_DIR   corpus to index      (default: the ~/.claude/projects/*/memory
                                              holding the most memory files)
-    RECALL_MODEL_DIR    bge-small.onnx dir   (default ./models, then desktopPet's copy)
+    RECALL_MEMORY_DIRS  corpora to SEARCH    (os.pathsep-separated; default: the one above.
+                                             --lint and --gates-compile never span these)
+    RECALL_MODEL_DIR    bge-small.onnx dir   (default ./models)
+
+Retrieval quality is measured by bench/gate_recall.py, not asserted here.
 """
-import os, sys, re, json, argparse, hashlib, unicodedata
+import os, sys, re, json, math, argparse, hashlib, unicodedata
 
 # --- runtime shim: onnxruntime + numpy live in the DevToolbox venv, not system python.
 # Re-run under the venv python via subprocess (NOT os.execv -- Windows detaches the
@@ -77,9 +88,42 @@ def _discover_memory_dir():
 
 MEMORY_DIR = os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir()
 INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
+# SEARCH may span several corpora; everything else stays on the one primary dir above. A working
+# root that gets renamed leaves its old store behind and _discover_memory_dir, which takes the
+# single largest, then cannot see it: this box has 6 memories stranded in C--Anthropic, two of
+# them on topics the main corpus never re-recorded. --lint and --gates-compile deliberately do
+# NOT span, because a gate is a standing order and a second corpus must not be able to install
+# one silently.
+MEMORY_DIRS = [d for d in (os.environ.get("RECALL_MEMORY_DIRS") or "").split(os.pathsep)
+               if d.strip()] or [MEMORY_DIR]
 EMBED_CHAR_CAP = 8000          # per-file text handed to the tokenizer
 EXCLUDE = {"MEMORY.md"}        # the index is just hooks; skip it as a search target
 EMBED_ID = "bge-small-onnx"    # cache identity; bump to force a full re-embed
+# --- lexical leg. The embedder truncates every doc to 256 tokens (_encode), so on this corpus
+# the median file contributes only ~832 chars to its vector and the worst case 9%. Commands,
+# error strings and paths deeper in a file are invisible to the vector leg. BM25 reads the whole
+# file, which is where the recall it adds comes from -- do not narrow it to the embedded slice.
+BM25_K1 = 1.2                  # term-frequency saturation; the textbook default. These files carry
+                               # no keyword spam for a different value to defend against.
+BM25_B = 0.75                  # length normalization, and the whole answer to the 211k-char file in
+                               # this corpus: its dl/avgdl is 28.9, so the normalizer demands tf~26
+                               # before it scores what a median file scores at tf=1. Measured at
+                               # b=0 that one file took a top-10 slot on 8 of 8 probe queries; at
+                               # 0.75 it took none. Do NOT cap the per-file read instead -- a cap
+                               # reintroduces, one layer down, the exact truncation this leg exists
+                               # to defeat.
+LEX_MIN_TERM = 2               # chars. best_line uses 3; measured here 2 is better, because gh, ps,
+                               # js, ui and db are discriminating keys in this corpus and
+                               # reference_git_push_gh_helper's only natural handle is "gh".
+LEX_SLUG_WEIGHT = 2            # extra counts for the filename's own words. A presence boost, not a
+                               # fitted knob: measured flat (MRR .612/.612/.613/.613) from 1 to 5.
+FUSE_W = 0.5                   # cosine's share of the fused score, the rest BM25, each min-max
+                               # normalized per query. Measured flat across 0.3/0.5/0.7.
+RRF_K = 60                     # damping for the reciprocal-rank fusion kept as mode="rrf". Not the
+                               # default: RRF ranks, so a document NO query term touches scores as
+                               # merely "last" rather than abstaining, and its floor is only 3x
+                               # below its ceiling. Min-max lets the lexical leg contribute exactly
+                               # 0.0 when it cannot separate, degrading to pure cosine.
 LINT_LINE_WARN = 300           # chars; a dense one-line hook ceiling -- over this is drifting to changelog
 LINT_TOTAL_WARN = 12000        # bytes; whole always-loaded index getting heavy
 LINT_ENTRY_WARN = 16           # resident entries. Attention dilutes per-entry, not per-byte: 3k
@@ -172,6 +216,21 @@ class Bge:
         return (v / (np.linalg.norm(v) or 1.0)).tolist()
 
 
+_BGE = None
+
+
+def _bge():
+    """One ONNX session per process. Constructing it costs ~210 ms, most of a warm query's wall
+    time. search() used to build its own AFTER build_or_update had already built one, so a query
+    that followed an edit paid for the 34 MB session twice. Every caller inside this module goes
+    through here; selftest() still constructs Bge directly because construction is what it tests.
+    """
+    global _BGE
+    if _BGE is None:
+        _BGE = Bge()
+    return _BGE
+
+
 def parse_meta(text):
     """Return (description, body). description from YAML frontmatter if present."""
     desc, body = "", text
@@ -185,24 +244,46 @@ def parse_meta(text):
     return desc, body.strip()
 
 
-def load_index():
+def _index_path(mem_dir):
+    return os.path.join(mem_dir, "recall_index.json")
+
+
+def load_index(mem_dir=None):
+    INDEX_PATH = _index_path(mem_dir or MEMORY_DIR)
     if os.path.exists(INDEX_PATH):
         try:
             return json.load(open(INDEX_PATH, encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            # Say so. A truncated cache silently discards every vector and re-embeds the whole
+            # corpus, which looks exactly like a first run -- slow, correct, and unexplained.
+            # stderr with exit 0 on purpose: extension.js treats a non-zero exit as sync failure.
+            print(f"[recall] {INDEX_PATH} unreadable ({e.__class__.__name__}); re-embedding all.",
+                  file=sys.stderr)
     return {"embed": EMBED_ID, "files": {}}
 
 
-def build_or_update(force=False, quiet=False):
-    idx = load_index()
+def save_index(idx, mem_dir=None):
+    """Write via a temp file in the same directory, then os.replace. The previous
+    json.dump(idx, open(...)) left a truncated cache behind if anything interrupted it, and
+    load_index's bare except turned that into a silent full re-embed."""
+    INDEX_PATH = _index_path(mem_dir or MEMORY_DIR)
+    tmp = INDEX_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(idx, f)
+    os.replace(tmp, INDEX_PATH)
+
+
+def build_or_update(force=False, quiet=False, mem_dir=None):
+    MEMORY_DIR = mem_dir or globals()["MEMORY_DIR"]      # shadow for the whole body; see MEMORY_DIRS
+    idx = load_index(MEMORY_DIR)
     if force or idx.get("embed") != EMBED_ID:
         idx = {"embed": EMBED_ID, "files": {}}
 
     on_disk = {n: os.stat(os.path.join(MEMORY_DIR, n))
                for n in os.listdir(MEMORY_DIR) if n.endswith(".md") and n not in EXCLUDE}
-    for gone in [n for n in idx["files"] if n not in on_disk]:
-        del idx["files"][gone]
+    gone = [n for n in idx["files"] if n not in on_disk]
+    for n in gone:
+        del idx["files"][n]
 
     todo = [n for n, st in on_disk.items()
             if n not in idx["files"]
@@ -212,25 +293,44 @@ def build_or_update(force=False, quiet=False):
     if todo:
         if not quiet:
             print(f"[recall] embedding {len(todo)} file(s) on CPU (bge-small) ...", file=sys.stderr)
-        emb = Bge()
+        emb = _bge()
         for n in todo:
             raw = open(os.path.join(MEMORY_DIR, n), encoding="utf-8", errors="replace").read()
             desc, body = parse_meta(raw)
             st = on_disk[n]
             idx["files"][n] = {"mtime": st.st_mtime, "size": st.st_size, "desc": desc,
                                "vec": emb.embed((desc + "\n" + body)[:EMBED_CHAR_CAP])}
-        json.dump(idx, open(INDEX_PATH, "w", encoding="utf-8"))
+    # `or gone`: a deletion-only change used to prune the in-memory dict and then never write it,
+    # because the write sat inside `if todo:`. The next run re-read the same stale cache, so
+    # recallIndexStatus reported count-mismatch forever and the extension's 15-minute auto-sync
+    # re-ran without ever converging. --list printed the right thing throughout, from the pruned
+    # in-memory copy, which is why this hid for so long.
+    if todo or gone:
+        save_index(idx, MEMORY_DIR)
     return idx
 
 
-def best_line(query, name):
+def best_line(query, name, text=None):
     terms = {w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2}
     if not terms:
         return ""
     best, score = "", 0
-    for ln in open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace"):
+    if text is None:
+        # A caller that did not build the lexical index (vector mode) passes no text. The name
+        # may be qualified with a store slug when MEMORY_DIRS spans corpora, so resolve it rather
+        # than assuming the primary dir, and treat a miss as "no snippet" -- a display extra must
+        # never be the thing that ends a query.
+        path = _display_keys(MEMORY_DIRS).get(name) or os.path.join(MEMORY_DIR, name)
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return ""
+    for ln in text.splitlines():
         ln = ln.strip()
-        if len(ln) < 25 or ln.startswith(("---", "name:", "metadata:", "#")):
+        # "description:" joined this list once the lexical leg landed: the frontmatter description
+        # is already printed on the line above, so without it the snippet just says it twice and
+        # never shows the line that actually matched.
+        if len(ln) < 25 or ln.startswith(("---", "name:", "metadata:", "description:", "#")):
             continue
         hits = sum(1 for t in terms if t in ln.lower())
         if hits > score:
@@ -238,19 +338,199 @@ def best_line(query, name):
     return (best[:200] + "...") if len(best) > 200 else best
 
 
-def search(query, k):
-    idx = build_or_update()
-    if not idx["files"]:
+# --- lexical leg: BM25 over the WHOLE file, which is the half the embedder never sees ---------
+
+def _lex_terms(text):
+    """Lowercased [a-z0-9]+ runs of LEX_MIN_TERM chars or more. Returns a LIST, not a set:
+    document term frequency is the signal best_line never had."""
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= LEX_MIN_TERM]
+
+
+def _slug_terms(name):
+    """A memory's filename is a hand-written summary -- reference_ps51_scriptroot_param_default
+    carries the nouns a person would actually type. Leaving those out of the index is what forced
+    the slug vocabulary to be resident in MEMORY.md in the first place."""
+    stem = name[:-3] if name.endswith(".md") else name
+    return _lex_terms(stem.replace("_", " ").replace("-", " ").replace("/", " "))
+
+
+def _lex_index(names):
+    """Corpus-wide BM25 statistics, computed fresh per run rather than cached. Deliberate: df and
+    avgdl are corpus-GLOBAL, so editing one file invalidates them all, which is a different
+    invalidation model from the per-file (mtime, size) one recall_index.json uses. Persisting
+    would add a staleness axis src/recall-index.js structurally cannot see, to save ~67 ms on a
+    command whose ONNX session construction alone costs ~210 ms.
+
+    No stopword list: frontmatter boilerplate appears in nearly every file, so Robertson IDF
+    flattens it without one (`the` -> 0.021, `backslash` -> 3.535).
+    """
+    tf, dl, text, df = {}, {}, {}, {}
+    for n, path in names.items() if isinstance(names, dict) else ((n, os.path.join(MEMORY_DIR, n))
+                                                                 for n in names):
+        try:
+            raw = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        text[n] = raw
+        # The description is already inside raw; counting it again would double-weight it.
+        terms = _slug_terms(n) * LEX_SLUG_WEIGHT + _lex_terms(raw)
+        counts = {}
+        for t in terms:
+            counts[t] = counts.get(t, 0) + 1
+        tf[n], dl[n] = counts, len(terms)
+        for t in counts:
+            df[t] = df.get(t, 0) + 1
+    total = len(tf)
+    idf = {t: math.log(1.0 + (total - d + 0.5) / (d + 0.5)) for t, d in df.items()}
+    return {"tf": tf, "dl": dl, "idf": idf, "text": text,
+            "avgdl": (sum(dl.values()) / total if total else 0.0) or 1.0}
+
+
+def _bm25(query, lex):
+    """{name: score}, omitting documents no query term touches. Query terms are set-deduped --
+    asking twice is not asking harder -- while document term frequency carries the weight."""
+    terms = set(_lex_terms(query))
+    if not terms or not lex["tf"]:
+        return {}
+    scores = {}
+    for name, counts in lex["tf"].items():
+        norm = BM25_K1 * (1.0 - BM25_B + BM25_B * lex["dl"][name] / lex["avgdl"])
+        s = 0.0
+        for t in terms:
+            f = counts.get(t, 0)
+            if f:
+                s += lex["idf"][t] * (f * (BM25_K1 + 1.0)) / (f + norm)
+        if s:
+            scores[name] = s
+    return scores
+
+
+def _unit(scores, names):
+    """Min-max a score map onto 0..1. A map that separates nothing -- empty, or every value equal
+    -- returns 0.0 for every document, so a fusion built on this degrades to the other leg
+    instead of fusing an arbitrary order."""
+    vals = [scores.get(n, 0.0) for n in names]
+    lo, hi = (min(vals), max(vals)) if vals else (0.0, 0.0)
+    if hi <= lo:
+        return {n: 0.0 for n in names}
+    return {n: (scores.get(n, 0.0) - lo) / (hi - lo) for n in names}
+
+
+def _rank_map(scores, names):
+    """name -> 0-based rank, best first. Ties break on name so the order is reproducible."""
+    return {n: i for i, n in enumerate(sorted(names, key=lambda n: (-scores.get(n, 0.0), n)))}
+
+
+def _display_keys(dirs):
+    """{display key: absolute path} across every searched corpus. A bare filename stays bare, so
+    single-corpus output is unchanged; a filename that exists in two corpora is qualified with
+    its store's slug, because "which of the two portal-project.md did you mean" has to be
+    answerable from the printed line alone."""
+    seen, keys = {}, {}
+    for d in dirs:
+        try:
+            names = [n for n in os.listdir(d) if n.endswith(".md") and n not in EXCLUDE]
+        except OSError:
+            continue
+        for n in names:
+            seen.setdefault(n, []).append(d)
+    for n, owners in seen.items():
+        for d in owners:
+            slug = os.path.basename(os.path.dirname(d.rstrip("/\\"))) or os.path.basename(d)
+            keys[n if len(owners) == 1 else f"{slug}/{n}"] = os.path.join(d, n)
+    return keys
+
+
+def _retriever(mode):
+    """rank()'s query-independent half, built only as far as the mode needs. "lexical" builds
+    neither the vector cache nor the ONNX session, which is what makes --lexical-only a usable
+    fallback on a box with no model rather than merely an A/B switch.
+
+    Spans MEMORY_DIRS. Each corpus keeps its own recall_index.json in its own directory, so the
+    per-file (mtime, size) contract src/recall-index.js reads is untouched; only the merged view
+    is new."""
+    keys = _display_keys(MEMORY_DIRS)
+    files = {}
+    if mode != "lexical":
+        for d in MEMORY_DIRS:
+            sub = build_or_update(mem_dir=d)["files"]
+            for key, path in keys.items():
+                if os.path.dirname(path) == d.rstrip("/\\") and os.path.basename(path) in sub:
+                    files[key] = sub[os.path.basename(path)]
+    idx = {"embed": EMBED_ID, "files": files}
+    names = sorted(files) if files else sorted(keys)
+    lex = _lex_index({k: keys[k] for k in names if k in keys}) if mode != "vector" else None
+    emb = _bge() if mode in ("hybrid", "vector", "rrf") else None
+    return idx, lex, emb, names
+
+
+def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
+    """The whole retriever with no printing -- what the eval harness imports and calls.
+
+        "hybrid"   cosine and BM25, each min-max normalized per query, averaged at FUSE_W
+        "vector"   cosine alone; the pre-hybrid ordering, kept as the A/B control
+        "lexical"  BM25 alone; no ONNX session, no vector cache
+        "rrf"      reciprocal rank fusion instead of min-max; the A/B for "hybrid"
+
+    idx/lex/emb/names are the query-independent pieces. Pass them in to score many queries
+    against one corpus: Bge() alone is ~210 ms, which is most of what a benchmark would
+    otherwise be measuring. Returns the top k as dicts, best first; k=0 means all.
+    """
+    if idx is None or names is None:
+        idx, lex, emb, names = _retriever(mode)
+    files = idx["files"]
+    if not names:
+        return []
+
+    cos = {}
+    if mode in ("hybrid", "vector", "rrf"):
+        q = (emb or _bge()).embed(query)
+        cos = {n: sum(a * b for a, b in zip(q, files[n]["vec"])) for n in names if n in files}
+    bm = _bm25(query, lex) if mode in ("hybrid", "lexical", "rrf") and lex else {}
+
+    if mode == "vector":
+        fused = cos
+    elif mode == "lexical":
+        top = max(bm.values()) if bm else 0.0
+        fused = {n: bm.get(n, 0.0) / top for n in names} if top else {n: 0.0 for n in names}
+    elif mode == "rrf":
+        cr, lr = _rank_map(cos, names), _rank_map(bm, names)
+        fused = {n: 1.0 / (RRF_K + 1 + cr[n]) + 1.0 / (RRF_K + 1 + lr[n]) for n in names}
+    else:
+        uc, ul = _unit(cos, names), _unit(bm, names)
+        fused = {n: FUSE_W * uc[n] + (1.0 - FUSE_W) * ul[n] for n in names}
+
+    order = sorted(names, key=lambda n: (-fused.get(n, 0.0), n))
+    rv, rl = _rank_map(cos, names), _rank_map(bm, names)
+    out = [{"name": n, "score": fused.get(n, 0.0),
+            "desc": files.get(n, {}).get("desc", ""),
+            "cos": cos.get(n), "bm25": bm.get(n),
+            "rank_vec": rv[n] + 1 if cos else None,
+            "rank_lex": rl[n] + 1 if n in bm else None,
+            "text": (lex or {}).get("text", {}).get(n)} for n in order]
+    return out[:k] if k else out
+
+
+def search(query, k, mode="hybrid"):
+    idx, lex, emb, names = _retriever(mode)
+    if not names:
         sys.exit("[recall] nothing indexed.")
-    q = Bge().embed(query)
-    scored = sorted(((sum(a * b for a, b in zip(q, m["vec"])), name, m["desc"])
-                     for name, m in idx["files"].items()), reverse=True)
-    print(f'\n  recall: "{query}"   (bge-small CPU, {len(idx["files"])} memories)\n')
-    for score, name, desc in scored[:k]:
-        print(f"  {score:5.3f}  {name}")
-        if desc:
-            print(f"         {desc[:150]}")
-        hit = best_line(query, name)
+    label = {"hybrid": "bge-small + BM25", "vector": "bge-small CPU",
+             "lexical": "BM25 only, no model", "rrf": "bge-small + BM25, RRF"}[mode]
+    print(f'\n  recall: "{query}"   ({label}, {len(names)} memories)\n')
+    for r in rank(query, k, mode=mode, idx=idx, lex=lex, emb=emb, names=names):
+        # A fused score is normalized per query, so it is comparable WITHIN a result set and not
+        # across them. The cosine tail keeps the README's "~0.5+ is a real hit" calibration, and
+        # every figure recorded before this change, readable.
+        tail = ""
+        if mode != "vector":
+            bits = ([f"cos {r['cos']:.3f}"] if r["cos"] is not None else []) + \
+                   ([f"lex {r['bm25']:.1f}"] if r["bm25"] is not None else [])
+            tail = ("   " + "  ".join(bits)) if bits else ""
+        print(f"  {r['score']:5.3f}  {r['name']}{tail}")
+        if r["desc"]:
+            print(f"         {r['desc'][:150]}")
+        hit = best_line(query, r["name"], r["text"])
         if hit:
             print(f"         > {hit}")
         print()
@@ -263,8 +543,24 @@ def _norm(s):
 def _fm(text, key):
     """One frontmatter scalar. Shapes vary across the corpus -- some files nest under
     `metadata:`, older ones are flat -- so match the key at any indent instead of parsing
-    YAML. `^\\s*type:` cannot collide with `node_type:`: only whitespace may precede it."""
-    m = re.search(rf'^\s*{key}:\s*(.+)$', text[:400], re.MULTILINE)
+    YAML. `^\\s*type:` cannot collide with `node_type:`: only whitespace may precede it.
+
+    Scoped to the real `---` block rather than a byte window. It used to read text[:400], which
+    cut mid-value: 6 files in the live corpus misread `type:` (5 as "", and one as "r"), so they
+    escaped the lint's demotion check. 38 of 119 frontmatter blocks are already longer than 400
+    chars and the longest is 9,664, so the cliff was going to reach `scope:` eventually, and a
+    `scope:` that falls off it drops that memory out of the compiled gates in silence.
+
+    Raising the cap instead would be wrong, not merely crude: this corpus contains memories that
+    DOCUMENT gate syntax, so a whole-text search would match `scope: global` inside a fenced
+    example and compile a gate nobody declared.
+    """
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    if end == -1:
+        return ""
+    m = re.search(rf'^\s*{key}:\s*(.+)$', text[3:end], re.MULTILINE)
     return m.group(1).strip().strip('"').strip("'") if m else ""
 
 
@@ -502,6 +798,8 @@ def main():
     ap.add_argument("--gates-compile", action="store_true",
                     help="lift scope:global gate blocks into ~/.claude/gates.generated.md")
     ap.add_argument("--selftest", action="store_true", help="verify the embedder's reference cosines")
+    ap.add_argument("--vector-only", action="store_true", help="rank by embedding cosine alone")
+    ap.add_argument("--lexical-only", action="store_true", help="rank by BM25 alone (no model load)")
     args = ap.parse_args()
 
     if args.lint:
@@ -522,7 +820,10 @@ def main():
         return
     if not args.query:
         ap.print_help(); return
-    search(" ".join(args.query), args.k)
+    if args.vector_only and args.lexical_only:
+        sys.exit("[recall] --vector-only and --lexical-only are mutually exclusive.")
+    mode = "vector" if args.vector_only else "lexical" if args.lexical_only else "hybrid"
+    search(" ".join(args.query), args.k, mode)
 
 
 if __name__ == "__main__":

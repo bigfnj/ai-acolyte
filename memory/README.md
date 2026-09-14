@@ -17,14 +17,21 @@ Two layers:
 ```
 python recall.py "how do I push git from the agent shell"
 python recall.py -k 10 "run admin tasks without a UAC prompt"
+python recall.py --vector-only "..."   # cosine alone; the pre-hybrid ranking
+python recall.py --lexical-only "..."  # BM25 alone; builds no ONNX session
 python recall.py --lint          # audit index bloat + broken links (no model needed)
 python recall.py --rebuild       # force re-embed everything
 python recall.py --list          # show what's indexed
 python recall.py --selftest      # verify the embedder's reference cosines
 ```
 
-Ranked output is `cosine  file  description  > best-matching line`. ~0.5+ is a real hit,
-0.7+ is strong.
+Ranked output is `score  file  cos N  lex N  description  > best-matching line`.
+
+The **cosine** is the number to calibrate on, and it is the one every figure recorded before
+the hybrid ranker landed refers to: ~0.5+ is a real hit, 0.7+ is strong. The leading **score**
+is min-max normalized *within one result set*, so it says how the results compare to each
+other and nothing about how good the best one is. `--vector-only` prints the raw cosine in the
+score column and reproduces the pre-hybrid output exactly.
 
 ## How it works
 
@@ -32,6 +39,15 @@ Ranked output is `cosine  file  description  > best-matching line`. ~0.5+ is a r
   WordPiece, CLS-pool, L2-norm, 384-dim. Runs on the CPU via `onnxruntime` — always available,
   no GPU, no Ollama, no MCP, no Claude Code hook, so it runs untouched under the corporate
   managed policy. Verified to reproduce desktopPet's self-test cosines (0.72 / 0.44).
+- **Hybrid ranking.** The cosine above, fused with Okapi BM25 over the whole file, each min-max
+  normalized per query and averaged. The two legs see different text: `Bge._encode` truncates
+  at 256 tokens, so on the live corpus 117 of 119 files are cut and the median file contributes
+  only ~832 chars to its vector. BM25 reads all of it, which is why a question about a command
+  or an error string buried mid-file can be answered at all. Measured over 24 questions,
+  R@1 0.58 → 0.79 and worst rank 94 → 48; `bench/gate_recall.py` reproduces it.
+  Lexical statistics are recomputed per query, never cached: `df` and `avgdl` are corpus-global
+  and so invalidate on any edit, a different model from the per-file `(mtime, size)` one
+  `recall_index.json` uses, and the whole pass costs ~67 ms against a ~210 ms session load.
 - **Incremental cache.** One vector per file, cached in `recall_index.json` **in the memory
   dir** (not this repo); only changed files re-embed. Bump `EMBED_ID` in `recall.py` to force
   a full rebuild.
@@ -43,13 +59,24 @@ Ranked output is `cosine  file  description  > best-matching line`. ~0.5+ is a r
 
 | var | default | meaning |
 |---|---|---|
-| `RECALL_MEMORY_DIR` | auto-discovered: the `~/.claude/projects/*/memory` holding the most memory files | corpus to index |
-| `RECALL_MODEL_DIR`  | `./models` beside this script | where `bge-small.onnx` lives |
+| `RECALL_MEMORY_DIR`  | auto-discovered: the `~/.claude/projects/*/memory` holding the most memory files | the one corpus to index, lint and compile gates from |
+| `RECALL_MEMORY_DIRS` | the dir above | corpora to **search**, `os.pathsep`-separated |
+| `RECALL_MODEL_DIR`   | `./models` beside this script | where `bge-small.onnx` lives |
 
 The corpus is discovered rather than hardcoded because Claude Code derives the project slug
 from the working directory, so renaming a working root relocates the whole store. The VS Code
 extension pins both vars explicitly when it spawns this script, so its card and this tool
 always agree on which dir they are talking about.
+
+Discovery takes the single largest store, which means a rename **strands** the old one: this
+machine has 6 memories sitting in `C--Anthropic/memory` that nothing could search, two of them
+on topics the current corpus never re-recorded. `RECALL_MEMORY_DIRS` is the answer to that. It
+affects search only — `--lint` and `--gates-compile` stay on `RECALL_MEMORY_DIR`, deliberately,
+because a gate is a standing order and a second corpus must not be able to install one. Each
+corpus keeps its own `recall_index.json` in its own directory, so the per-file staleness
+contract the extension reads is unchanged. A filename present in two corpora prints qualified
+by its store (`C--Anthropic/dup.md`); an un-collided name prints bare, so single-corpus output
+is byte-identical to before.
 
 ## Model asset
 

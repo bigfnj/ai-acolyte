@@ -1689,3 +1689,103 @@ Get-ChildItem $env:TEMP -Directory |
   Remove-Item -Recurse -Force
 ```
 
+
+---
+
+## From the 2026-09-14 hybrid-recall work
+
+The retrieval change itself landed. These are what it surfaced and deliberately did not do.
+
+### The per-project memory split is deferred, and the reason is not technical
+
+`RECALL_MEMORY_DIRS` now makes a split *possible*: search spans corpora while `--lint` and
+`--gates-compile` stay on the primary. What is not done is physically relocating memories
+into per-project directories.
+
+It only pays off if sessions are launched inside each project, which is not current
+practice. Doing it would mean writing `.claude/settings.json` into 13 other repos, several
+public, while a concurrent session was demonstrably active in at least one of them (two
+`ILT-wt-*` worktrees appeared during this work). And it buys little that the index diet did
+not already buy: deleting the slug vocabulary took `MEMORY.md` from 163 lines to 84, which
+was the whole point.
+
+Revisit only if launching per-project becomes the habit. Until then this is speculative
+restructuring of a live memory store.
+
+### One memory corpus on this box was stranded and nothing reported it
+
+`_discover_memory_dir` takes the single largest `~/.claude/projects/*/memory` and silently
+discards the rest, so renaming a working root orphans the old store. Found
+`C--Anthropic/memory` holding 6 memories, two of them (Windows remote-access setup, the
+Rainmeter GPU skin) on topics the current corpus never re-recorded.
+
+`RECALL_MEMORY_DIRS` makes them searchable. The open question is whether they should instead
+be merged into the primary corpus and the old store deleted, four of the six duplicate
+topics that now have better files (`project_wallpaperengine`, `project_portal`,
+`project_finance_statements_dashboard`, `reference_silent_elevation`). Merging is a judgement
+call about which version is current, so it is not automatable.
+
+### The retrieval gate cannot run in CI, and its question set cannot be published
+
+`memory/bench/gate_recall.py` is committed; `memory/bench/queries.json` is gitignored,
+because it maps a private corpus (the same reason `bench_embed.py`'s query set is). So the
+gate is reproducible only on a machine with both the corpus and the model.
+
+`test/recall-py.sh` covers the *mechanics* against synthetic fixtures and is the thing that
+would catch a regression. The quality numbers are a local measurement, not a CI gate, and the
+commit message is where they live. Naming this so a later reader does not mistake the absence
+of a CI job for an oversight.
+
+### min-max versus RRF is unresolved, and 24 queries cannot resolve it
+
+Measured on the 24-question set: min-max MRR 0.830, RRF 0.832, identical R@1 (0.79), R@3
+(0.83) and median (1.0). RRF was marginally better on worst rank (39 vs 48).
+
+Min-max ships as the default on a structural argument rather than a measured one: RRF fuses
+ranks, so a document *no* query term touches scores as merely "last" rather than abstaining,
+and its floor sits only 3x below its ceiling. Min-max lets the lexical leg contribute exactly
+0.0 when it separates nothing, degrading to pure cosine. `mode="rrf"` is reachable from
+`rank()` with no CLI flag so the question stays open.
+
+`FUSE_W` swept 0.3-0.8: R@1 flat at 0.79 across 0.4-0.7, MRR flat, only worst-case monotonic
+(22 at w=0.3, 48 at 0.5, 76 at 0.7). Left at 0.5 deliberately. **Do not tune it on this query
+set**, `memory/bench/README.md` already says R@1 swings of one or two queries are noise at
+twice this sample size.
+
+### A gate that the unchanged code also passes is not a gate
+
+Worth recording as a method note, because it nearly shipped. The plan specified the retrieval
+gate as "median rank <= 2". Every mode scores a median of 1.0 on this corpus, vector-only
+included, so that criterion would have passed against completely unchanged code. R@1 is what
+moves (0.58 → 0.79) and is what the resident slug vocabulary was actually buying.
+
+`gate_recall.py` now gates on R@1 with an MRR-lift proof, and `--fuse-w 1.0` is the built-in
+mutation: it disables the lexical leg, collapses hybrid onto vector exactly, and must exit 1.
+
+### `EMBED_CHAR_CAP` is decorative and the real cap is four times smaller
+
+`EMBED_CHAR_CAP = 8000` looks like the limit on what gets embedded. It is not: `_encode`
+truncates to 256 tokens, which on this corpus means a median of ~832 characters, 26% of the
+already-capped text, worst case 9%.
+
+bge-small's real context window is 512, so doubling the token cap is one line and doubles the
+visible prefix of every file. It is not free: it needs an `EMBED_ID` bump and a full re-embed,
+and `EMBED_ID` is pinned in `recall.py`, `src/recall-index.js` and asserted equal in
+`test/recall-index.test.js`, so three files move together. Unmeasured in isolation:
+`bench_report.md`'s "bge-small +qprefix" row conflates the window with the query prefix, so
+that row is not evidence either way. Complement to BM25, not a substitute: an 8,000-char file
+would still be ~75% invisible.
+
+### This repo now ships two products under one name
+
+`memory/` plus `src/agent-gates.js`, `src/recall-index.js`, `vscode-extension/memoryLint.js`
+and the Memory card are a memory-management tool. The permission-wildcarding half is a
+different tool. They share the VS Code extension for a real reason, under a managed policy
+that defines only `PostToolUse`, the extension is the only durable automation surface, which
+is what `## Design principle: watch the cause, don't hook the event` is about.
+
+The cost is discoverability: nobody searching for an agent-memory tool finds
+"permission-wildcarding", and the README (58 KB) and this file (107 KB) both carry two
+products' worth of material. Not proposing a split, the coupling is genuine and two release
+trains sharing a 34 MB model asset would be worse. Recording it so the naming question is
+asked deliberately rather than discovered.

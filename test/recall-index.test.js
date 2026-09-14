@@ -180,3 +180,28 @@ test('the constants shared with recall.py have not drifted', () => {
   // there is nothing to do. If --list stops building, the sync stops syncing.
   assert.match(source, /if args\.list:\s*\r?\n\s*idx = build_or_update\(\)/);
 });
+
+test('recall.py constructs the ONNX session once per process', () => {
+  // search() used to build its own Bge() after build_or_update had already built one, so a
+  // query that followed an edit loaded the 34 MB session twice, ~210 ms each. Counting
+  // assignments rather than calls: a bare `Bge()` also appears in a docstring, and pinning a
+  // prose mention would make this fail on a comment edit.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');
+  const built = source.match(/= Bge\(\)/g) || [];
+  assert.equal(built.length, 2,
+    `recall.py constructs Bge ${built.length} times; expected 2 (the _bge() memo and selftest)`);
+  assert.match(source, /^_BGE = None$/m, 'the session memo is gone');
+  assert.match(source, /def _bge\(\):/, 'the session accessor is gone');
+});
+
+test('the index write is atomic and survives a deletion-only change', () => {
+  // Both were real: the write sat inside `if todo:`, so a deletion was pruned in memory and
+  // never persisted, and recallIndexStatus then reported count-mismatch forever while the
+  // 15-minute auto-sync re-ran without converging. Behaviour is covered by test/recall-py.sh,
+  // which needs the toolbox Python; this pins the shape so CI notices a revert.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');
+  assert.match(source, /if todo or gone:\s*\r?\n\s*save_index\(idx, MEMORY_DIR\)/,
+    'a deletion-only change is no longer persisted');
+  assert.match(source, /os\.replace\(tmp, INDEX_PATH\)/,
+    'the index write is no longer atomic');
+});

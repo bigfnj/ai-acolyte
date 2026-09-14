@@ -46,9 +46,12 @@ subcommand. The safety boundary for the legacy hook is still your
 - **`src/agent-gates.js`** — the second managed block: your own standing orders, compiled
   out of your Claude Code file memory by `recall.py --gates-compile`. Separate markers and
   a separate switch, so neither block can turn the other off (see below).
-- **`memory/recall.py`** / **`src/recall-index.js`** — the CPU semantic-recall script
-  (bge-small ONNX), which the VSIX bundles, and the shared staleness predicate the
-  extension uses to decide whether re-embedding is needed at all.
+- **`memory/recall.py`** / **`src/recall-index.js`** — the CPU hybrid-recall script
+  (bge-small ONNX cosine fused with BM25 over the whole file), which the VSIX bundles, and
+  the shared staleness predicate the extension uses to decide whether re-embedding is
+  needed at all. The two legs exist because the embedder truncates at 256 tokens, so most
+  of a long memory is invisible to the vector side; `memory/bench/gate_recall.py` measures
+  what that costs and what the lexical leg buys back.
 - **`patterns/starter-pack.json`** / **`patterns/starter-pack.md`** — a curated
   seed of common, safe wildcard patterns (documented in the `.md`).
 - **`scripts/mirror-pack.js`** — keeps the starter pack's PowerShell half in step with
@@ -369,7 +372,13 @@ VSIX and works under a managed policy.
   Command: `Permission Wildcarding: Lint memory index`.
 
 The semantic-recall side of memory hygiene is [`memory/recall.py`](memory/README.md) — a CPU
-(bge-small ONNX) tool. The **script** ships inside the VSIX, so a fresh install can rebuild
+(bge-small ONNX) tool, since 2026-09-14 fused with BM25 over the whole file rather than ranking
+on the embedding alone. That is not a refinement: `Bge._encode` caps every document at 256
+tokens, so on a real 119-file corpus 117 files are truncated and the median one contributes
+~832 characters to its vector. Commands, error strings and paths further down were never
+searchable. Measured over 24 natural-language questions, R@1 went 0.58 → 0.79 and the worst
+rank 94 → 48; `memory/bench/gate_recall.py` reproduces it and fails if the lexical leg is
+switched off. The **script** ships inside the VSIX, so a fresh install can rebuild
 the index with no checkout on disk. The **32MB model** does not: a versioned extension dir
 would re-download it on every upgrade, so the Memory card fetches it on first use into
 `~/.claude/wildcarding/models/` — outside both the extension dir and any checkout, so it

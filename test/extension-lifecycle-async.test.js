@@ -184,9 +184,23 @@ function harness(tempHome, options = {}) {
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
         MemoryLint: class MemoryLint { activate() {} },
+        // Load-bearing, unlike the cfg stub in the six harnesses that return
+        // `discoverDirs: () => []`: this one really does build watchers, so a missing cfg
+        // makes discoverDirs(memoryConf()) throw inside the watcher try/catch and both
+        // watchers vanish. The MEMORY.md watcher test below is what catches that.
+        cfg: () => ({
+          enabled: true,
+          dir: options.memoryDir || '',
+          lineBudget: 300,
+          totalBudget: 12000,
+          maxLines: 200,
+        }),
         memoryReport: () => (options.memoryDir
           ? {
-            conf: { enabled: true, dir: options.memoryDir, lineBudget: 300, totalBudget: 12000 },
+            conf: {
+              enabled: true, dir: options.memoryDir, lineBudget: 300, totalBudget: 12000,
+              maxLines: 200,
+            },
             dir: options.memoryDir,
             report: {
               tokens: 10, bytes: 40, fileCount: 1, over: [], broken: [], unresolved: [],
@@ -346,6 +360,21 @@ test('every execFile in the extension hands its child over to be killable', () =
   const tracked = source.match(/trackChild\(execFile\(/g) || [];
   assert.equal(spawns.length, 4, 'the four known spawn sites');
   assert.equal(tracked.length, 4, 'each one retained via trackChild, or deactivate cannot kill it');
+});
+
+// memoryLint.cfg() is the single enumeration of the permissionWildcarding.memory.* keys.
+// Two hand-built copies used to live at the memory-card and gates watcher sites, and both
+// were wrong in the same two ways: they passed `dir: ''` so a pinned memory.dir was ignored,
+// and they had already fallen a key behind when `maxLines` was added to cfg().
+test('extension.js keeps no second copy of the memory configuration', () => {
+  const source = fs.readFileSync(extensionPath, 'utf8');
+  // `lineBudget` appears nowhere else in extension.js, so its mere presence means a literal
+  // is back. `totalBudget` does appear as a property read, hence the `: <digit>` which only
+  // matches an object literal assigning it.
+  assert.equal(/lineBudget/.test(source), false, 'a hand-built memory conf is back');
+  assert.equal(/totalBudget:\s*\d/.test(source), false, 'a hand-built memory conf is back');
+  assert.equal((source.match(/discoverDirs\(memoryConf\(\)\)/g) || []).length, 2,
+    'both memory watchers must discover from the live configuration');
 });
 
 test('a gate refresh cannot rewrite the instruction files after deactivate', async (t) => {

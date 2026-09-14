@@ -99,15 +99,47 @@ function fastLint(dir, conf) {
   };
 }
 
-// The dir whose MEMORY.md is "current": the configured one, else the most recently
-// touched (i.e. the memory you're actually working in). Shared by the status-bar
-// gauge and the dashboard Memory card so both reflect the same file.
+// The dir that is "current": the configured one, else the store holding the MOST .md
+// files, ties broken by MEMORY.md mtime. Shared by the status-bar gauge and the
+// dashboard Memory card so both reflect the same file.
+//
+// COUNT, not mtime, because memory/recall.py:73 _discover_memory_dir() picks by count and
+// it is the authority: it owns the index, the lint and the compiled gates. The extension
+// OVERRIDES that discovery at extension.js:764, :807 and :2880 by pinning RECALL_MEMORY_DIR
+// from this function, so whenever the two rules disagreed the NON-authoritative one won in
+// the product. They agree today only because one store happens to be both largest and
+// newest; they diverge the moment a memory is saved from a session launched at a different
+// working directory, which mints a new project slug. Five such slugs already exist here.
+//
+// The old rule made that flip actively dangerous: extension.js:2025 watches *.md in EVERY
+// discovered store and calls compileGates(), which compiles from the PRIMARY and installs
+// standing orders into CLAUDE.md. One memory saved elsewhere could repoint the compiler.
+//
+// The `dirs.length === 1` short-circuit that used to sit here is gone on purpose. Every
+// test that reached this function had at most one store, so the branch below was never
+// executed and the rule could have been anything. A rule no reachable input can falsify
+// must not ship.
+//
+// Residual, deliberate difference from Python: on an exact count tie recall.py takes the
+// first os.listdir entry and this takes the newest MEMORY.md. Unobservable for anything the
+// extension spawns, because the pin decides; visible only to a bare CLI run.
 function pickPrimaryDir(dirs) {
   if (!dirs.length) return null;
-  if (dirs.length === 1) return dirs[0];
   return dirs
-    .map((d) => ({ d, t: (() => { try { return fs.statSync(path.join(d, 'MEMORY.md')).mtimeMs; } catch { return 0; } })() }))
-    .sort((a, b) => b.t - a.t)[0].d;
+    .map((d) => ({ d, n: mdCount(d), t: memoryMtime(d) }))
+    .sort((a, b) => b.n - a.n || b.t - a.t)[0].d;
+}
+
+// Literally recall.py's expression: os.listdir filtered on .md, MEMORY.md INCLUDED. Do not
+// reuse src/recall-index.js indexableMemories() here, which excludes MEMORY.md and so is a
+// different number. It would order identically today, because discoverDirs only returns
+// dirs that have a MEMORY.md, but "agrees by coincidence" is the bug being fixed.
+function mdCount(dir) {
+  try { return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length; } catch { return 0; }
+}
+
+function memoryMtime(dir) {
+  try { return fs.statSync(path.join(dir, 'MEMORY.md')).mtimeMs; } catch { return 0; }
 }
 
 // Blank out fenced + inline code spans so example [[links]] written inside backticks
@@ -448,4 +480,4 @@ function memoryReport() {
   return { conf, dir, report: dir ? fullReport(dir, conf) : null };
 }
 
-module.exports = { MemoryLint, fastLint, fullReport, discoverDirs, pickPrimaryDir, memoryReport };
+module.exports = { MemoryLint, cfg, fastLint, fullReport, discoverDirs, pickPrimaryDir, memoryReport };

@@ -180,6 +180,75 @@ test('an index inside the line cap says nothing about lines at all', () => {
   }
 });
 
+// memoryLint.js pickPrimaryDir and recall.py:73 _discover_memory_dir answer the same
+// question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
+// sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.
+// Until these two tests existed, every test that reached pickPrimaryDir had at most one
+// discoverable store, so the `dirs.length === 1` short-circuit fired first and the rule
+// below it was never executed. It could have been anything.
+function twoStores(tempHome, bigExtra, smallExtra) {
+  const big = path.join(tempHome, '.claude', 'projects', 'd---ai-work', 'memory');
+  const small = path.join(tempHome, '.claude', 'projects', 'c--other', 'memory');
+  writeStore(big, '# Memory Index\n\n- [a](a.md) — hook\n');
+  for (const n of bigExtra) fs.writeFileSync(path.join(big, n), 'body\n', 'utf8');
+  writeStore(small, '# Memory Index\n\n- [z](z.md) — hook\n');
+  for (const n of smallExtra) fs.writeFileSync(path.join(small, n), 'body\n', 'utf8');
+  // The divergence in one line: the SMALL store is the most recently touched, which is
+  // exactly what saving one memory from a session launched elsewhere produces.
+  const now = Date.now();
+  fs.utimesSync(path.join(big, 'MEMORY.md'), new Date(now - 60000), new Date(now - 60000));
+  fs.utimesSync(path.join(small, 'MEMORY.md'), new Date(now), new Date(now));
+  return { big, small };
+}
+
+test('the primary store is the one with the most memories, not the most recently touched', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-primary-'));
+  const { big, small } = twoStores(tempHome, ['a.md', 'b.md', 'c.md'], ['z.md']);
+  const h = harness(tempHome);
+  try {
+    assert.equal(h.loaded.discoverDirs(h.loaded.cfg()).length, 2, 'precondition: two stores');
+    assert.equal(h.loaded.pickPrimaryDir([small, big]), big);
+    assert.equal(h.loaded.pickPrimaryDir([big, small]), big, 'and not merely input order');
+    // The product claim: this is the value extension.js pins as RECALL_MEMORY_DIR, and the
+    // dir compileGates() installs standing orders from.
+    assert.equal(h.loaded.memoryReport().dir, big);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('two stores of equal size fall back to the most recently touched', () => {
+  // mtime is the tie-break, not dead weight. A rule nothing can falsify must not ship, so
+  // the tie-break gets a case that reaches it.
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-tie-'));
+  const { big, small } = twoStores(tempHome, ['a.md'], ['z.md']);
+  const h = harness(tempHome);
+  try {
+    assert.equal(h.loaded.pickPrimaryDir([big, small]), small,
+      'equal .md counts, so the newer MEMORY.md wins');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('an explicit memory.dir is the only store discovered', () => {
+  // Nothing covered memory.dir at all. It matters now because the two watcher sites in
+  // extension.js used to pass a hand-built conf with `dir: ''`, so a pinned dir was ignored
+  // and both stores got watched anyway.
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-pinned-'));
+  const { small } = twoStores(tempHome, ['a.md', 'b.md', 'c.md'], ['z.md']);
+  const h = harness(tempHome, { 'memory.dir': small });
+  try {
+    assert.deepEqual(h.loaded.discoverDirs(h.loaded.cfg()), [small],
+      'auto-discovery must not run alongside an explicit dir');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
 test('a periodic reconcile is registered, so a move with no live watcher still repaints', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-reconcile-'));
   const oldDir = path.join(tempHome, '.claude', 'projects', 'd---old', 'memory');

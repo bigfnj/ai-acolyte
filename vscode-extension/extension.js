@@ -43,7 +43,9 @@ const {
 
 // Ambient memory-index hygiene lint (self-contained; pure Node, no Python/model/hook).
 // memoryReport() also backs the dashboard Memory card (stats only, still pure Node).
-const { MemoryLint, memoryReport, discoverDirs } = require('./memoryLint');
+// cfg is aliased: `cfg` is already a local name in six places in this file, and a
+// module-scope binding shadowed by six locals meaning something else is a footgun.
+const { MemoryLint, memoryReport, discoverDirs, cfg: memoryConf } = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP_DIR    = path.join(os.homedir(), '.claude', 'backups');
@@ -1993,8 +1995,14 @@ function activate(context) {
   // Keep the dashboard's Memory card live as MEMORY.md changes (an agent editing it
   // outside the editor still fires this). Best-effort — the card also refreshes on
   // panel visibility and after a rebuild, so a watcher failure is non-fatal.
+  //
+  // memoryConf(), not a hand-built literal. The copy that used to sit here (and at the gates
+  // watcher below) passed `dir: ''` unconditionally, so it ignored the user's
+  // permissionWildcarding.memory.dir entirely and watched every discovered store even when
+  // one was explicitly pinned. It had also already gone stale: `maxLines` was added to cfg()
+  // and neither copy grew it. One enumeration of the memory.* keys, in cfg().
   try {
-    for (const dir of discoverDirs({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000 })) {
+    for (const dir of discoverDirs(memoryConf())) {
       const w = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(vscode.Uri.file(dir), 'MEMORY.md')
       );
@@ -2022,7 +2030,7 @@ function activate(context) {
   // policy can switch it off. Gated on the block already being installed, so this never
   // spawns python for anyone who has not opted in.
   try {
-    for (const dir of discoverDirs({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000 })) {
+    for (const dir of discoverDirs(memoryConf())) {
       const w = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(vscode.Uri.file(dir), '*.md')
       );

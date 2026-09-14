@@ -181,6 +181,20 @@ test('the constants shared with recall.py have not drifted', () => {
   assert.match(source, /if args\.list:\s*\r?\n\s*idx = build_or_update\(\)/);
 });
 
+test('recall.py still picks the memory dir by file count, not mtime', () => {
+  // The second copy of this rule is vscode-extension/memoryLint.js pickPrimaryDir, and the
+  // extension OVERRIDES recall.py's discovery with it by pinning RECALL_MEMORY_DIR on every
+  // spawn. So when the two disagree, the non-authoritative copy wins in the product -- which
+  // is what happened: memoryLint sorted by MEMORY.md mtime while recall.py counts files.
+  // recall.py stays the authority. This fails when the authority moves and the Node copy is
+  // left behind, which is the only direction the drift can hide in.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');
+  assert.match(source, /count = len\(\[f for f in os\.listdir\(candidate\) if f\.endswith\("\.md"\)\]\)/,
+    'recall.py no longer chooses a corpus by counting .md files');
+  assert.match(source, /if count > best_count:\s*\r?\n\s*best, best_count = candidate, count/,
+    'recall.py no longer takes the LARGEST corpus');
+});
+
 test('recall.py constructs the ONNX session once per process', () => {
   // search() used to build its own Bge() after build_or_update had already built one, so a
   // query that followed an edit loaded the 34 MB session twice, ~210 ms each. Counting

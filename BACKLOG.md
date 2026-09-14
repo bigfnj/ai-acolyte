@@ -1927,7 +1927,7 @@ Claude Code actually loads. Recorded because two tools reporting different value
 is believed later by whoever reads only one of them. Fix is one line on the Python side: read
 bytes, or `open(..., newline='')`.
 
-### The extension never checks the cap that actually binds
+### ~~The extension never checks the cap that actually binds~~ — FIXED 2026-09-14 in 1.4.6
 
 Claude Code truncates `MEMORY.md` at **200 lines or 25 KB, whichever comes first**. That is the
 entire premise of the memory work: the store is at 84 lines against 200 (42%) and 6648 bytes
@@ -1940,9 +1940,24 @@ self-imposed 12000-byte proxy. There is no `lineBudget` for the FILE (the existi
 `memory.lineBudget` setting is a per-bullet character limit, a different thing with a confusingly
 similar name), and no setting for 200.
 
-So the card can read green while the index is three lines from silently dropping its tail. Add a
-line count to `fastLint`, surface it beside the byte gauge, and default it to 200. Worth doing
-before the next several projects land.
+So the card can read green while the index is three lines from silently dropping its tail.
+
+`fastLint` now returns `lineCount` and `linesOver`, surfaced on the status bar (which is always
+on screen, unlike the card), in the output channel, and as a fourth card stat shown even when
+healthy, since the count is the thing that grows. `permissionWildcarding.memory.maxLines`
+defaults to 200. `memory.lineBudget` keeps its meaning as a per-hook character width and its
+description now says so, because the two names were easy to confuse.
+
+`linesOver` colours the row but does not enter the "N to fix" count, which keeps meaning "faults
+with a line to point at". Mutation-proved 8/8 across all three surfaces.
+
+Worth recording that two of those eight started as survivors, and both were real gaps rather than
+runner bugs. Emptying the `lines` payload field survived the whole suite, because every test in
+`dashboard-view.test.js` stubs `memoryReport` to return no corpus, so `memoryCardData` returned
+early and nothing it built was ever asserted by anything. `harness()` now takes a `memoryReport`
+override and one test drives the real builder. The lesson generalises past this change: the card
+renderer and the card payload builder fail independently, and a suite that only feeds hand-built
+payloads to the renderer cannot see the builder at all.
 
 ### `RECALL_MEMORY_DIRS` shipped in `recall.py` and the extension cannot reach it
 

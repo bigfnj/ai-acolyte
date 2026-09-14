@@ -197,6 +197,21 @@ class Bge:
         return (v / (np.linalg.norm(v) or 1.0)).tolist()
 
 
+_BGE = None
+
+
+def _bge():
+    """One ONNX session per process. Constructing it costs ~210 ms, most of a warm query's wall
+    time. search() used to build its own AFTER build_or_update had already built one, so a query
+    that followed an edit paid for the 34 MB session twice. Every caller inside this module goes
+    through here; selftest() still constructs Bge directly because construction is what it tests.
+    """
+    global _BGE
+    if _BGE is None:
+        _BGE = Bge()
+    return _BGE
+
+
 def parse_meta(text):
     """Return (description, body). description from YAML frontmatter if present."""
     desc, body = "", text
@@ -214,9 +229,23 @@ def load_index():
     if os.path.exists(INDEX_PATH):
         try:
             return json.load(open(INDEX_PATH, encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            # Say so. A truncated cache silently discards every vector and re-embeds the whole
+            # corpus, which looks exactly like a first run -- slow, correct, and unexplained.
+            # stderr with exit 0 on purpose: extension.js treats a non-zero exit as sync failure.
+            print(f"[recall] {INDEX_PATH} unreadable ({e.__class__.__name__}); re-embedding all.",
+                  file=sys.stderr)
     return {"embed": EMBED_ID, "files": {}}
+
+
+def save_index(idx):
+    """Write via a temp file in the same directory, then os.replace. The previous
+    json.dump(idx, open(...)) left a truncated cache behind if anything interrupted it, and
+    load_index's bare except turned that into a silent full re-embed."""
+    tmp = INDEX_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(idx, f)
+    os.replace(tmp, INDEX_PATH)
 
 
 def build_or_update(force=False, quiet=False):
@@ -226,8 +255,9 @@ def build_or_update(force=False, quiet=False):
 
     on_disk = {n: os.stat(os.path.join(MEMORY_DIR, n))
                for n in os.listdir(MEMORY_DIR) if n.endswith(".md") and n not in EXCLUDE}
-    for gone in [n for n in idx["files"] if n not in on_disk]:
-        del idx["files"][gone]
+    gone = [n for n in idx["files"] if n not in on_disk]
+    for n in gone:
+        del idx["files"][n]
 
     todo = [n for n, st in on_disk.items()
             if n not in idx["files"]
@@ -237,14 +267,20 @@ def build_or_update(force=False, quiet=False):
     if todo:
         if not quiet:
             print(f"[recall] embedding {len(todo)} file(s) on CPU (bge-small) ...", file=sys.stderr)
-        emb = Bge()
+        emb = _bge()
         for n in todo:
             raw = open(os.path.join(MEMORY_DIR, n), encoding="utf-8", errors="replace").read()
             desc, body = parse_meta(raw)
             st = on_disk[n]
             idx["files"][n] = {"mtime": st.st_mtime, "size": st.st_size, "desc": desc,
                                "vec": emb.embed((desc + "\n" + body)[:EMBED_CHAR_CAP])}
-        json.dump(idx, open(INDEX_PATH, "w", encoding="utf-8"))
+    # `or gone`: a deletion-only change used to prune the in-memory dict and then never write it,
+    # because the write sat inside `if todo:`. The next run re-read the same stale cache, so
+    # recallIndexStatus reported count-mismatch forever and the extension's 15-minute auto-sync
+    # re-ran without ever converging. --list printed the right thing throughout, from the pruned
+    # in-memory copy, which is why this hid for so long.
+    if todo or gone:
+        save_index(idx)
     return idx
 
 
@@ -357,7 +393,7 @@ def _retriever(mode):
     idx = {"files": {}} if mode == "lexical" else build_or_update()
     names = sorted(idx["files"]) if idx["files"] else _lex_names()
     lex = _lex_index(names) if mode != "vector" else None
-    emb = Bge() if mode in ("hybrid", "vector", "rrf") else None
+    emb = _bge() if mode in ("hybrid", "vector", "rrf") else None
     return idx, lex, emb, names
 
 
@@ -385,7 +421,7 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
 
     cos = {}
     if mode in ("hybrid", "vector", "rrf"):
-        q = (emb or Bge()).embed(query)
+        q = (emb or _bge()).embed(query)
         cos = {n: sum(a * b for a, b in zip(q, files[n]["vec"])) for n in names if n in files}
     bm = _bm25(query, lex) if mode in ("hybrid", "lexical", "rrf") and lex else {}
 
@@ -444,8 +480,24 @@ def _norm(s):
 def _fm(text, key):
     """One frontmatter scalar. Shapes vary across the corpus -- some files nest under
     `metadata:`, older ones are flat -- so match the key at any indent instead of parsing
-    YAML. `^\\s*type:` cannot collide with `node_type:`: only whitespace may precede it."""
-    m = re.search(rf'^\s*{key}:\s*(.+)$', text[:400], re.MULTILINE)
+    YAML. `^\\s*type:` cannot collide with `node_type:`: only whitespace may precede it.
+
+    Scoped to the real `---` block rather than a byte window. It used to read text[:400], which
+    cut mid-value: 6 files in the live corpus misread `type:` (5 as "", and one as "r"), so they
+    escaped the lint's demotion check. 38 of 119 frontmatter blocks are already longer than 400
+    chars and the longest is 9,664, so the cliff was going to reach `scope:` eventually, and a
+    `scope:` that falls off it drops that memory out of the compiled gates in silence.
+
+    Raising the cap instead would be wrong, not merely crude: this corpus contains memories that
+    DOCUMENT gate syntax, so a whole-text search would match `scope: global` inside a fenced
+    example and compile a gate nobody declared.
+    """
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    if end == -1:
+        return ""
+    m = re.search(rf'^\s*{key}:\s*(.+)$', text[3:end], re.MULTILINE)
     return m.group(1).strip().strip('"').strip("'") if m else ""
 
 

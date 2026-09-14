@@ -134,6 +134,20 @@ grep -q 'must NOT compile' "$TMP/.claude/gates.generated.md" \
   && fail "a scope: global inside a fenced code example was compiled as a real gate"
 echo "ok: scope: global inside a fenced example is not treated as a declaration"
 
+# ---------------------------------------------------------------- B3b: a BOM must not hide a gate
+# Scoping _fm to the --- block fixed the byte-window bug and introduced the mirror image of it:
+# requiring the fence at byte 0 means a UTF-8 BOM, or a leading blank line, drops the memory out
+# of the compiled gates in silence. PowerShell 5.1's `Out-File -Encoding utf8` writes a BOM, so
+# one PowerShell one-liner over a gated memory was enough. Mutation: remove the lstrip in _fm.
+rm -f "$MEM"/*.md
+printf '\xEF\xBB\xBF' > "$MEM/bom.md"
+printf -- '---\nname: bom\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Declared behind a BOM.** Pass: it still compiles.\n<!-- /gate -->\n' >> "$MEM/bom.md"
+printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
+"$PY" "$RECALL" --gates-compile >/dev/null 2>&1
+grep -q 'Declared behind a BOM' "$TMP/.claude/gates.generated.md" \
+  || fail "a gated memory written with a UTF-8 BOM dropped out of the compiled standing orders"
+echo "ok: a UTF-8 BOM before the frontmatter fence does not hide a gate"
+
 # ---------------------------------------------------------------- gates compile is idempotent
 # gates-stale.sh covers drift-detected and drift-cleared. Nothing covered stability, and an
 # unstable compile would make --lint report STALE forever.
@@ -189,5 +203,43 @@ RECALL_MEMORY_DIRS="$DIRS2" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
 grep -q 'From the second corpus' "$TMP/.claude/gates.generated.md" \
   && fail "a gate declared in a secondary corpus reached the compiled standing orders"
 echo "ok: --gates-compile stays on the primary corpus even when search spans several"
+
+# ---------------------------------------------------------------- a bad path cannot kill a query
+# _display_keys tolerated an unreadable dir; _retriever's own loop did not, so one stale entry in
+# RECALL_MEMORY_DIRS raised FileNotFoundError out of every non-lexical query. Deleting the
+# stranded corpus after merging it -- the next step the BACKLOG proposes -- would have triggered
+# exactly that. Mutation: drop the `os.path.isdir` filter in _search_dirs.
+OUT="$(RECALL_MEMORY_DIRS="$DIRS2$(printf ';')$TMP/does-not-exist" "$PY" "$RECALL" --lexical-only -k 3 "stranded body" 2>&1)"
+RC=$?
+[ "$RC" = "0" ] || fail "a non-existent dir in RECALL_MEMORY_DIRS made the query exit $RC"
+echo "$OUT" | grep -qi 'traceback\|FileNotFoundError' && fail "a non-existent dir raised instead of being skipped"
+echo "$OUT" | grep -q 'strand.md' || fail "skipping the bad dir also lost the good one"
+echo "ok: a non-existent corpus in RECALL_MEMORY_DIRS is skipped, not fatal"
+
+# ---------------------------------------------------------------- DIRS extends, never replaces
+# Naming only the secondary store is the obvious thing to type. If that REPLACED the primary,
+# every memory in it would silently vanish from search while --lint and --list kept reporting
+# them. Mutation: drop MEMORY_DIR from the list _search_dirs builds.
+OUT="$(RECALL_MEMORY_DIRS="$(cygpath -m "$MEM2" 2>/dev/null || echo "$MEM2")" "$PY" "$RECALL" --lexical-only -k 8 "primary duplicate body" 2>/dev/null)"
+echo "$OUT" | grep -q 'dup.md' || fail "naming only the secondary corpus dropped the primary from search"
+echo "ok: RECALL_MEMORY_DIRS extends the primary corpus rather than replacing it"
+
+# ---------------------------------------------------------------- an unknown mode is not silent
+# rank() used to fall through every branch on an unrecognised mode, producing all-zero scores and
+# an alphabetical result set -- so a typo like --modes hybird printed a plausible table and a
+# benchmark exited 0. Mutation: delete the _check_mode call in rank().
+ERR="$("$PY" -c "
+import importlib.util, sys
+s = importlib.util.spec_from_file_location('recall', sys.argv[1])
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+try:
+    m.rank('anything', mode='hybird')
+    print('NO-RAISE')
+except ValueError as e:
+    print('RAISED', e)
+" "$RECALL" 2>&1)"
+echo "$ERR" | grep -q 'RAISED' || fail "an unknown ranking mode did not raise: $ERR"
+echo "$ERR" | grep -q 'hybird' || fail "the error does not name the bad mode"
+echo "ok: an unrecognised ranking mode raises instead of scoring everything zero"
 
 echo "ALL PASS"

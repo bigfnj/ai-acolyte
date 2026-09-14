@@ -29,7 +29,8 @@ Config via env:
     RECALL_MEMORY_DIR   corpus to rank over   (default: recall.py's own discovery)
     RECALL_MODEL_DIR    bge-small.onnx dir    (default: recall.py's own discovery)
     GATE_QUERIES        question set path     (default: ./queries.json)
-    GATE_MEDIAN_MAX     pass threshold        (default: 2)
+    GATE_R1_MIN         pass threshold on R@1 (default: 0.70)
+    GATE_MRR_LIFT       hybrid must beat vector by this (default: 0.05)
 
 queries.json is gitignored on purpose -- it maps the private memory corpus. Its shape is the one
 bench_embed.py already reads, with one optional field added:
@@ -48,7 +49,9 @@ for stream in (sys.stdout, sys.stderr):          # Windows consoles default to c
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUERIES = os.environ.get("GATE_QUERIES") or os.path.join(HERE, "queries.json")
-MEDIAN_MAX = int(os.environ.get("GATE_MEDIAN_MAX", "2"))   # reported only; see the gate below
+# There is deliberately no GATE_MEDIAN_MAX. It existed, was documented as a pass threshold, and
+# nothing read it -- a documented knob that silently does nothing is the same class of defect as
+# a gate that cannot fail. Median is a reported column; see the gate below for why.
 R1_MIN = float(os.environ.get("GATE_R1_MIN", "0.70"))      # the gate that actually discriminates
 MRR_LIFT_MIN = float(os.environ.get("GATE_MRR_LIFT", "0.05"))  # hybrid must beat vector by this
 MISS_RANK_PENALTY = 999          # a target that never appears must hurt the median, not be dropped
@@ -114,13 +117,17 @@ def main():
 
     # Build the corpus, the lexical statistics and the ONNX session ONCE, then hand the same
     # objects to every mode. Otherwise the comparison is between one cold start and three warm
-    # ones, and Bge() alone is ~210 ms.
+    # ones, and the session costs ~620 ms measured on this box.
     idx = recall.build_or_update()
     if not idx["files"]:
         sys.exit("[gate] nothing indexed.")
     names = sorted(idx["files"])
     lex = recall._lex_index(names)
-    emb = recall.Bge()
+    # _bge(), NOT Bge(). build_or_update above already populates the module singleton whenever
+    # anything was stale, so constructing directly here built a SECOND session: measured +624 ms
+    # and +45 MB RSS. That is the exact defect this file exists to validate the fix for,
+    # reintroduced inside the validator, beneath a comment claiming the session is built once.
+    emb = recall._bge()
     parts = (idx, lex, emb, names)
 
     print(f"\n  gate: {len(queries)} questions over {len(idx['files'])} memories"
@@ -143,7 +150,10 @@ def main():
             print(f"  {item.get('axis', '-'):<14s} {item['q'][:56]:<56s} {cells}")
 
     print()
-    ok = True
+    # `gated` starts False so an invocation that runs NO gate cannot report PASS. Both gates are
+    # conditional on hybrid being in --modes, so `--modes lexical` previously printed a table and
+    # exited 0 with RESULT: PASS, having checked nothing at all.
+    ok, gated = True, False
     if "hybrid" in got:
         # NOT median rank. Measured 2026-09-14 on the 24-question set: EVERY mode scores a median
         # of 1.0, including vector-only, because most questions already land their target first.
@@ -155,6 +165,7 @@ def main():
               f"{'>=' if passed else '<'} {R1_MIN:.2f}   (median {got['hybrid']['median']:.1f}, "
               f"reported but NOT gated: every mode scores 1.0)")
         ok &= passed
+        gated = True
     if "hybrid" in got and "vector" in got:
         # The mutation test. If the old ranker clears the same bar, the new leg earned nothing and
         # shipping it would be cargo cult. A green gate that cannot fail is not evidence.
@@ -172,8 +183,10 @@ def main():
             for q, first, r in got[mode]["misses"]:
                 print(f"    rank {r if r else 'miss':>4}  {q}\n            got: {first}")
 
-    print(f"\n  RESULT: {'PASS' if ok else 'FAIL'}\n")
-    sys.exit(0 if ok else 1)
+    if not gated:
+        print("  NO GATE RAN. Both gates need 'hybrid' in --modes; this run only measured.")
+    print(f"\n  RESULT: {'PASS' if ok and gated else 'FAIL'}\n")
+    sys.exit(0 if ok and gated else 1)
 
 
 if __name__ == "__main__":

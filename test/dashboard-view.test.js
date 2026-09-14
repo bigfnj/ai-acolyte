@@ -500,6 +500,60 @@ test('the panel template contains no backtick that would end it early', () => {
   assert.deepEqual(offenders, [], 'no backticks between the template delimiters');
 });
 
+// The Memory card used two different definitions of "issue": the badge counted
+// over + broken + unresolved, the body counted over + broken. With only unresolved
+// [[links]] present it read "3 to fix" directly above "index clean, all links
+// resolve", over a Rebuild button that cannot clear them -- they are forward-links
+// to memories not written yet, which memoryLint's fullReport calls report-only.
+// Nothing covered the memory card at all before this.
+test('an unresolved [[link]] is reported, not counted as something to fix', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const panel = runPanelScript(ui.view.webview.html);
+
+    const payload = { ...ui.posted[0] };
+    payload.memory = { tokens: 1700, fileCount: 120, embedded: 119, indexable: 119,
+      over: 0, broken: 0, unresolved: 3 };
+    panel.deliver(payload);
+
+    const badge = panel.dom.byId.get('stMemory').textContent;
+    assert.ok(!/to fix/.test(badge),
+      'a forward-link must not be counted as work: badge said "' + badge + '"');
+
+    const body = panel.dom.byId.get('memIssues');
+    const text = body.textContent || (body.children[0] || {}).textContent || '';
+    assert.ok(!/all links resolve/.test(text),
+      'the card must not claim all links resolve while three do not: "' + text + '"');
+    assert.match(text, /3 forward-links not written yet/,
+      'the card should say what the three actually are');
+  } finally { app.dispose(); }
+});
+
+test('a genuinely broken index link is still counted as something to fix', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const panel = runPanelScript(ui.view.webview.html);
+
+    const payload = { ...ui.posted[0] };
+    payload.memory = { tokens: 1700, over: 1, broken: 2, unresolved: 3 };
+    panel.deliver(payload);
+
+    // 3, not 6: over + broken, with the three forward-links excluded.
+    assert.match(panel.dom.byId.get('stMemory').textContent, /3 to fix/,
+      'real faults must still reach the badge, and must not be inflated by forward-links');
+  } finally { app.dispose(); }
+});
+
 // The cap and the "and N more" affordance are the only dashboard logic that
 // lives in the webview script rather than in a method, so run the script the way
 // the webview would: a DOM thin enough to read in one screen, fed the exact

@@ -200,8 +200,8 @@ test('the index write is atomic and survives a deletion-only change', () => {
   // 15-minute auto-sync re-ran without converging. Behaviour is covered by test/recall-py.sh,
   // which needs the toolbox Python; this pins the shape so CI notices a revert.
   const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');
-  assert.match(source, /if todo or gone:\s*\r?\n\s*save_index\(idx, MEMORY_DIR\)/,
-    'a deletion-only change is no longer persisted');
+  assert.match(source, /if todo or gone or force:\s*\r?\n\s*save_index\(idx, MEMORY_DIR\)/,
+    'a deletion-only change, or a forced rebuild of an empty corpus, is no longer persisted');
   assert.match(source, /os\.replace\(tmp, INDEX_PATH\)/,
     'the index write is no longer atomic');
 });

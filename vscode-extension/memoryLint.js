@@ -393,7 +393,16 @@ class MemoryLint {
       for (const l of r.unresolved) ch.appendLine(`  [[${l}]]`);
       ch.appendLine('');
     }
-    if (!r.over.length && !r.broken.length) ch.appendLine('clean: every index line within budget, all index links resolve.');
+    // "all index links resolve" was printed directly beneath a list of links that do not
+    // resolve, because the verdict only tests over + broken. The unresolved ones are
+    // report-only and correctly excluded from the verdict; the sentence just has to stop
+    // claiming otherwise when there are any.
+    if (!r.over.length && !r.broken.length) {
+      ch.appendLine(r.unresolved.length
+        ? `clean: every index line within budget, every index link resolves. `
+          + `The ${r.unresolved.length} [[link]](s) above are forward-links, not faults.`
+        : 'clean: every index line within budget, all index links resolve.');
+    }
     ch.show(true);
     this.refresh();
   }

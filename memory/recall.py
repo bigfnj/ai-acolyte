@@ -94,8 +94,34 @@ INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
 # them on topics the main corpus never re-recorded. --lint and --gates-compile deliberately do
 # NOT span, because a gate is a standing order and a second corpus must not be able to install
 # one silently.
-MEMORY_DIRS = [d for d in (os.environ.get("RECALL_MEMORY_DIRS") or "").split(os.pathsep)
-               if d.strip()] or [MEMORY_DIR]
+def _search_dirs():
+    """Corpora to SEARCH: the primary, then anything in RECALL_MEMORY_DIRS, order preserved.
+
+    EXTENDS rather than replaces. Setting the plural var to just the stranded store is the
+    obvious thing to type after reading about it, and under a replacing rule that silently
+    removed all 119 primary memories from search while --lint, --list and --gates-compile
+    carried on reporting them. A quiet hole is worse than an error.
+
+    Non-existent entries are dropped here, not at the point of use: _display_keys already
+    tolerated a bad path but _retriever's own loop did not, so one stale entry raised
+    FileNotFoundError out of every query while --lexical-only kept working. Merging the
+    stranded corpus and deleting it -- the next step the BACKLOG proposes -- would have done
+    exactly that. The primary is kept whether or not it exists, so its own error messages
+    still name it.
+    """
+    extra = (os.environ.get("RECALL_MEMORY_DIRS") or "").split(os.pathsep)
+    out, seen = [], set()
+    for i, d in enumerate([MEMORY_DIR] + [e.strip() for e in extra]):
+        if not d or (i and not os.path.isdir(d)):
+            continue
+        key = os.path.normcase(os.path.abspath(d))
+        if key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+MEMORY_DIRS = _search_dirs()
 EMBED_CHAR_CAP = 8000          # per-file text handed to the tokenizer
 EXCLUDE = {"MEMORY.md"}        # the index is just hooks; skip it as a search target
 EMBED_ID = "bge-small-onnx"    # cache identity; bump to force a full re-embed
@@ -220,7 +246,7 @@ _BGE = None
 
 
 def _bge():
-    """One ONNX session per process. Constructing it costs ~210 ms, most of a warm query's wall
+    """One ONNX session per process. Constructing it costs ~620 ms (measured on this box), most of a warm query's wall
     time. search() used to build its own AFTER build_or_update had already built one, so a query
     that followed an edit paid for the 34 MB session twice. Every caller inside this module goes
     through here; selftest() still constructs Bge directly because construction is what it tests.
@@ -305,7 +331,10 @@ def build_or_update(force=False, quiet=False, mem_dir=None):
     # recallIndexStatus reported count-mismatch forever and the extension's 15-minute auto-sync
     # re-ran without ever converging. --list printed the right thing throughout, from the pruned
     # in-memory copy, which is why this hid for so long.
-    if todo or gone:
+    # `or force`: --rebuild over an empty corpus produces todo == [] and gone == [], so without
+    # it the reset index is never written and a stale recall_index.json survives the rebuild
+    # the user explicitly asked for.
+    if todo or gone or force:
         save_index(idx, MEMORY_DIR)
     return idx
 
@@ -358,8 +387,8 @@ def _lex_index(names):
     """Corpus-wide BM25 statistics, computed fresh per run rather than cached. Deliberate: df and
     avgdl are corpus-GLOBAL, so editing one file invalidates them all, which is a different
     invalidation model from the per-file (mtime, size) one recall_index.json uses. Persisting
-    would add a staleness axis src/recall-index.js structurally cannot see, to save ~67 ms on a
-    command whose ONNX session construction alone costs ~210 ms.
+    would add a staleness axis src/recall-index.js structurally cannot see, to save ~80 ms on a
+    command whose ONNX session construction alone costs ~620 ms.
 
     No stopword list: frontmatter boilerplate appears in nearly every file, so Robertson IDF
     flattens it without one (`the` -> 0.021, `backslash` -> 3.535).
@@ -421,11 +450,35 @@ def _rank_map(scores, names):
     return {n: i for i, n in enumerate(sorted(names, key=lambda n: (-scores.get(n, 0.0), n)))}
 
 
+MODES = ("hybrid", "vector", "lexical", "rrf")
+
+
+def _check_mode(mode):
+    """An unrecognised mode used to fall through every branch: cos={} and bm={} produced an
+    all-zero fused score and an alphabetically ordered result set, so `--modes hybird` printed a
+    plausible-looking row and a benchmark exited 0 on a typo. Fail loudly instead."""
+    if mode not in MODES:
+        raise ValueError(f"unknown ranking mode {mode!r}; expected one of {', '.join(MODES)}")
+
+
 def _display_keys(dirs):
     """{display key: absolute path} across every searched corpus. A bare filename stays bare, so
     single-corpus output is unchanged; a filename that exists in two corpora is qualified with
     its store's slug, because "which of the two portal-project.md did you mean" has to be
     answerable from the printed line alone."""
+    # Labels must be unique before they are used to disambiguate, or they disambiguate nothing.
+    # Two corpora whose parent directories share a name -- a backup at
+    # D:\backup\d---ai-work\memory beside the live d---ai-work, the likeliest thing anyone would
+    # actually add -- both resolve to the slug "d---ai-work", so the qualified key collided and
+    # the last writer silently won. That removed the primary's copy of EVERY shared filename
+    # from search, which is the exact failure this qualification exists to prevent.
+    labels, used = {}, {}
+    for d in dirs:
+        base = os.path.basename(os.path.dirname(d.rstrip("/\\"))) or os.path.basename(d) or d
+        n = used.get(base, 0)
+        used[base] = n + 1
+        labels[d] = base if not n else f"{base}~{n + 1}"
+
     seen, keys = {}, {}
     for d in dirs:
         try:
@@ -436,8 +489,7 @@ def _display_keys(dirs):
             seen.setdefault(n, []).append(d)
     for n, owners in seen.items():
         for d in owners:
-            slug = os.path.basename(os.path.dirname(d.rstrip("/\\"))) or os.path.basename(d)
-            keys[n if len(owners) == 1 else f"{slug}/{n}"] = os.path.join(d, n)
+            keys[n if len(owners) == 1 else f"{labels[d]}/{n}"] = os.path.join(d, n)
     return keys
 
 
@@ -449,6 +501,7 @@ def _retriever(mode):
     Spans MEMORY_DIRS. Each corpus keeps its own recall_index.json in its own directory, so the
     per-file (mtime, size) contract src/recall-index.js reads is untouched; only the merged view
     is new."""
+    _check_mode(mode)
     keys = _display_keys(MEMORY_DIRS)
     files = {}
     if mode != "lexical":
@@ -473,9 +526,10 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
         "rrf"      reciprocal rank fusion instead of min-max; the A/B for "hybrid"
 
     idx/lex/emb/names are the query-independent pieces. Pass them in to score many queries
-    against one corpus: Bge() alone is ~210 ms, which is most of what a benchmark would
+    against one corpus: the ONNX session alone is ~620 ms, which is most of what a benchmark would
     otherwise be measuring. Returns the top k as dicts, best first; k=0 means all.
     """
+    _check_mode(mode)
     if idx is None or names is None:
         idx, lex, emb, names = _retriever(mode)
     files = idx["files"]
@@ -555,12 +609,20 @@ def _fm(text, key):
     DOCUMENT gate syntax, so a whole-text search would match `scope: global` inside a fenced
     example and compile a gate nobody declared.
     """
-    if not text.startswith("---"):
+    # Tolerate a UTF-8 BOM and leading blank lines before the fence. The byte-window version
+    # this replaced scanned with re.MULTILINE and did not care where the fence sat; requiring it
+    # at byte 0 reintroduced the same class of silent failure from the other side. Files are
+    # opened as "utf-8", not "utf-8-sig", and PowerShell 5.1's `Out-File -Encoding utf8` writes
+    # a BOM, so a memory edited by a PowerShell one-liner would drop out of the compiled gates
+    # with nothing reporting it. No file in either live corpus has one today: this is a guard
+    # against a regression, not a fix for a present breakage.
+    head = text.lstrip("﻿ \t\r\n")
+    if not head.startswith("---"):
         return ""
-    end = text.find("\n---", 3)
+    end = head.find("\n---", 3)
     if end == -1:
         return ""
-    m = re.search(rf'^\s*{key}:\s*(.+)$', text[3:end], re.MULTILINE)
+    m = re.search(rf'^\s*{key}:\s*(.+)$', head[3:end], re.MULTILINE)
     return m.group(1).strip().strip('"').strip("'") if m else ""
 
 
@@ -597,7 +659,7 @@ def lint():
         text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace").read()
         texts[stem] = text
         valid.add(_norm(stem)); valid.add(_norm(_fm(text, "name") or stem))
-        # Frontmatter reads stay capped at the head, but a gate block can sit anywhere in
+        # Frontmatter reads are scoped to the --- block, but a gate block can sit anywhere in
         # the body, so that one looks at the whole file.
         meta[stem] = (_fm(text, "type"), _fm(text, "scope"), GATE_BEGIN in text)
 
@@ -809,8 +871,13 @@ def main():
     if args.selftest:
         selftest(); return
     if args.rebuild:
-        build_or_update(force=True)
-        print("[recall] rebuilt.", file=sys.stderr)
+        # Spans MEMORY_DIRS. Rebuilding only the primary while search covers several corpora
+        # meant there was no way to force a re-embed of a secondary one: after an EMBED_ID bump
+        # --rebuild reported success and left it on stale vectors.
+        for d in MEMORY_DIRS:
+            build_or_update(force=True, mem_dir=d)
+        print("[recall] rebuilt." if len(MEMORY_DIRS) == 1
+              else f"[recall] rebuilt {len(MEMORY_DIRS)} corpora.", file=sys.stderr)
         if not args.query:
             return
     if args.list:

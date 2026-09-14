@@ -3655,7 +3655,13 @@ class WildcardingViewProvider {
       !gt.compiled ? null : (!gt.on || !gt.current ? 'warn' : null));
 
     const m = d.memory || {};
-    const issues = (m.over || 0) + (m.broken || 0) + (m.unresolved || 0);
+    // NOT + m.unresolved. An unresolved [[link]] is report-only by design: memoryLint.js's
+    // fullReport says so, and the memory convention treats a [[name]] with no file yet as a
+    // forward-link worth writing rather than an error. Counting it here made the badge read
+    // "3 to fix" while the card body said "index clean, all links resolve" in the same view,
+    // over a Rebuild button that cannot clear it because there is nothing to clear. Every
+    // other consumer -- status bar, output channel, card body -- counts over + broken.
+    const issues = (m.over || 0) + (m.broken || 0);
     setState('stMemory',
       (m.tokens != null ? fmtK(m.tokens) + ' tok' : 'no index')
         + (issues ? ' · ' + issues + ' to fix' : ''),
@@ -3791,6 +3797,17 @@ class WildcardingViewProvider {
       const a = document.createElement('a');
       a.className = 'memlink';
       a.textContent = '⚠ ' + issues.join(' · ') + ' — open report';
+      a.addEventListener('click', (e) => { e.preventDefault(); vscode.postMessage({ type: 'lintMemory' }); });
+      el.appendChild(a);
+    } else if (m.unresolved) {
+      // Not a warning and not "to fix": a [[link]] with no file yet is a forward-link. Say so
+      // plainly rather than claiming "all links resolve", which was false whenever this was
+      // non-zero, and make it openable so the names are one click away.
+      el.className = 'memissues muted';
+      const a = document.createElement('a');
+      a.className = 'memlink';
+      a.textContent = '✓ index clean · ' + m.unresolved + ' forward-link'
+        + (m.unresolved !== 1 ? 's' : '') + ' not written yet — open report';
       a.addEventListener('click', (e) => { e.preventDefault(); vscode.postMessage({ type: 'lintMemory' }); });
       el.appendChild(a);
     } else {

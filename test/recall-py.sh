@@ -147,4 +147,47 @@ TWO="$(head -1 "$TMP/.claude/gates.generated.md")"
 [ "$ONE" = "$TWO" ] || fail "compiling twice over an unchanged corpus produced a different sha"
 echo "ok: compiling an unchanged corpus twice yields the same sha"
 
+# ---------------------------------------------------------------- MEMORY_DIRS spans corpora
+# A renamed working root strands its old store: _discover_memory_dir takes the single largest and
+# cannot see the rest. RECALL_MEMORY_DIRS searches both. --lint and --gates-compile deliberately
+# stay on the primary dir, so a second corpus cannot install a standing order.
+#
+# Mutation: make _display_keys qualify unconditionally, or never. Unconditional breaks the first
+# assertion (single-corpus output must stay bare); never breaks the second (a collision becomes
+# unanswerable from the printed line).
+MEM2="$TMP/memory2"
+mkdir -p "$MEM2"
+rm -f "$MEM"/*.md "$MEM"/recall_index.json
+printf -- '---\nname: only\ndescription: unique to the primary store\n---\nprimary body\n' > "$MEM/only-here.md"
+printf -- '---\nname: dup\ndescription: primary copy\n---\nprimary duplicate body\n' > "$MEM/dup.md"
+printf -- '---\nname: dup\ndescription: secondary copy\n---\nsecondary duplicate body\n' > "$MEM2/dup.md"
+printf -- '---\nname: strand\ndescription: stranded in the second store\n---\nstranded body\n' > "$MEM2/strand.md"
+printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
+
+# MSYS translates a lone POSIX path in an env var but leaves a ;-separated list alone, so the
+# native Python would receive /tmp/... and find nothing. Convert explicitly.
+if command -v cygpath >/dev/null 2>&1; then
+  DIRS2="$(cygpath -m "$MEM");$(cygpath -m "$MEM2")"
+else
+  DIRS2="$MEM:$MEM2"
+fi
+
+OUT="$(RECALL_MEMORY_DIRS="$DIRS2" "$PY" "$RECALL" --lexical-only -k 8 "stranded body" 2>/dev/null)"
+echo "$OUT" | grep -q 'strand.md' || fail "a memory in the second corpus was not searchable"
+echo "$OUT" | grep -q 'only-here.md' || fail "qualification dropped an un-collided primary name"
+echo "$OUT" | grep -qE '^\s+[0-9.]+\s+only-here\.md' || fail "an un-collided name must print bare, not qualified"
+echo "ok: a second corpus is searchable and un-collided names still print bare"
+
+OUT="$(RECALL_MEMORY_DIRS="$DIRS2" "$PY" "$RECALL" --lexical-only -k 8 "duplicate body" 2>/dev/null)"
+echo "$OUT" | grep -q '/dup.md' || fail "a filename present in both corpora was not qualified by store"
+echo "ok: a filename that exists in two corpora is qualified with its store"
+
+# --gates-compile must NOT span: a second corpus installing a standing order is the failure this
+# separation exists to prevent.
+printf -- '---\nname: sneak\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **From the second corpus.** Must not compile.\n<!-- /gate -->\n' > "$MEM2/sneak.md"
+RECALL_MEMORY_DIRS="$DIRS2" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
+grep -q 'From the second corpus' "$TMP/.claude/gates.generated.md" \
+  && fail "a gate declared in a secondary corpus reached the compiled standing orders"
+echo "ok: --gates-compile stays on the primary corpus even when search spans several"
+
 echo "ALL PASS"

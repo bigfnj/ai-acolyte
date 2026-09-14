@@ -11,9 +11,16 @@ desktopPet ships) -- always available, no GPU, no Ollama, no MCP, no hooks, so i
 untouched under the corporate managed policy. Vectors are cached and only changed files
 re-embed on the next run.
 
+Ranking is hybrid: the embedding cosine, fused with BM25 over the WHOLE file. The two
+answer different questions because the embedder truncates at 256 tokens, so on this
+corpus the median file contributes only ~832 chars to its vector and deeper text -- the
+commands, the error strings, the paths -- is invisible to the vector leg entirely.
+
 Usage (from anywhere):
     python recall.py "how do I push git from the agent shell"
     python recall.py -k 10 "run admin tasks without a UAC prompt"
+    python recall.py --vector-only "..."   # cosine alone; the pre-hybrid ranking
+    python recall.py --lexical-only "..."  # BM25 alone; builds no ONNX session
     python recall.py --lint            # audit index bloat + links (no model needed)
     python recall.py --rebuild         # force re-embed every file
     python recall.py --list            # show what's indexed
@@ -22,7 +29,11 @@ Usage (from anywhere):
 Config via env:
     RECALL_MEMORY_DIR   corpus to index      (default: the ~/.claude/projects/*/memory
                                              holding the most memory files)
-    RECALL_MODEL_DIR    bge-small.onnx dir   (default ./models, then desktopPet's copy)
+    RECALL_MEMORY_DIRS  corpora to SEARCH    (os.pathsep-separated; default: the one above.
+                                             --lint and --gates-compile never span these)
+    RECALL_MODEL_DIR    bge-small.onnx dir   (default ./models)
+
+Retrieval quality is measured by bench/gate_recall.py, not asserted here.
 """
 import os, sys, re, json, math, argparse, hashlib, unicodedata
 
@@ -77,6 +88,14 @@ def _discover_memory_dir():
 
 MEMORY_DIR = os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir()
 INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
+# SEARCH may span several corpora; everything else stays on the one primary dir above. A working
+# root that gets renamed leaves its old store behind and _discover_memory_dir, which takes the
+# single largest, then cannot see it: this box has 6 memories stranded in C--Anthropic, two of
+# them on topics the main corpus never re-recorded. --lint and --gates-compile deliberately do
+# NOT span, because a gate is a standing order and a second corpus must not be able to install
+# one silently.
+MEMORY_DIRS = [d for d in (os.environ.get("RECALL_MEMORY_DIRS") or "").split(os.pathsep)
+               if d.strip()] or [MEMORY_DIR]
 EMBED_CHAR_CAP = 8000          # per-file text handed to the tokenizer
 EXCLUDE = {"MEMORY.md"}        # the index is just hooks; skip it as a search target
 EMBED_ID = "bge-small-onnx"    # cache identity; bump to force a full re-embed
@@ -225,7 +244,12 @@ def parse_meta(text):
     return desc, body.strip()
 
 
-def load_index():
+def _index_path(mem_dir):
+    return os.path.join(mem_dir, "recall_index.json")
+
+
+def load_index(mem_dir=None):
+    INDEX_PATH = _index_path(mem_dir or MEMORY_DIR)
     if os.path.exists(INDEX_PATH):
         try:
             return json.load(open(INDEX_PATH, encoding="utf-8"))
@@ -238,18 +262,20 @@ def load_index():
     return {"embed": EMBED_ID, "files": {}}
 
 
-def save_index(idx):
+def save_index(idx, mem_dir=None):
     """Write via a temp file in the same directory, then os.replace. The previous
     json.dump(idx, open(...)) left a truncated cache behind if anything interrupted it, and
     load_index's bare except turned that into a silent full re-embed."""
+    INDEX_PATH = _index_path(mem_dir or MEMORY_DIR)
     tmp = INDEX_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(idx, f)
     os.replace(tmp, INDEX_PATH)
 
 
-def build_or_update(force=False, quiet=False):
-    idx = load_index()
+def build_or_update(force=False, quiet=False, mem_dir=None):
+    MEMORY_DIR = mem_dir or globals()["MEMORY_DIR"]      # shadow for the whole body; see MEMORY_DIRS
+    idx = load_index(MEMORY_DIR)
     if force or idx.get("embed") != EMBED_ID:
         idx = {"embed": EMBED_ID, "files": {}}
 
@@ -280,7 +306,7 @@ def build_or_update(force=False, quiet=False):
     # re-ran without ever converging. --list printed the right thing throughout, from the pruned
     # in-memory copy, which is why this hid for so long.
     if todo or gone:
-        save_index(idx)
+        save_index(idx, MEMORY_DIR)
     return idx
 
 
@@ -290,7 +316,15 @@ def best_line(query, name, text=None):
         return ""
     best, score = "", 0
     if text is None:
-        text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace").read()
+        # A caller that did not build the lexical index (vector mode) passes no text. The name
+        # may be qualified with a store slug when MEMORY_DIRS spans corpora, so resolve it rather
+        # than assuming the primary dir, and treat a miss as "no snippet" -- a display extra must
+        # never be the thing that ends a query.
+        path = _display_keys(MEMORY_DIRS).get(name) or os.path.join(MEMORY_DIR, name)
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return ""
     for ln in text.splitlines():
         ln = ln.strip()
         # "description:" joined this list once the lexical leg landed: the frontmatter description
@@ -317,7 +351,7 @@ def _slug_terms(name):
     carries the nouns a person would actually type. Leaving those out of the index is what forced
     the slug vocabulary to be resident in MEMORY.md in the first place."""
     stem = name[:-3] if name.endswith(".md") else name
-    return _lex_terms(stem.replace("_", " ").replace("-", " "))
+    return _lex_terms(stem.replace("_", " ").replace("-", " ").replace("/", " "))
 
 
 def _lex_index(names):
@@ -331,9 +365,10 @@ def _lex_index(names):
     flattens it without one (`the` -> 0.021, `backslash` -> 3.535).
     """
     tf, dl, text, df = {}, {}, {}, {}
-    for n in names:
+    for n, path in names.items() if isinstance(names, dict) else ((n, os.path.join(MEMORY_DIR, n))
+                                                                 for n in names):
         try:
-            raw = open(os.path.join(MEMORY_DIR, n), encoding="utf-8", errors="replace").read()
+            raw = open(path, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
         text[n] = raw
@@ -386,19 +421,47 @@ def _rank_map(scores, names):
     return {n: i for i, n in enumerate(sorted(names, key=lambda n: (-scores.get(n, 0.0), n)))}
 
 
+def _display_keys(dirs):
+    """{display key: absolute path} across every searched corpus. A bare filename stays bare, so
+    single-corpus output is unchanged; a filename that exists in two corpora is qualified with
+    its store's slug, because "which of the two portal-project.md did you mean" has to be
+    answerable from the printed line alone."""
+    seen, keys = {}, {}
+    for d in dirs:
+        try:
+            names = [n for n in os.listdir(d) if n.endswith(".md") and n not in EXCLUDE]
+        except OSError:
+            continue
+        for n in names:
+            seen.setdefault(n, []).append(d)
+    for n, owners in seen.items():
+        for d in owners:
+            slug = os.path.basename(os.path.dirname(d.rstrip("/\\"))) or os.path.basename(d)
+            keys[n if len(owners) == 1 else f"{slug}/{n}"] = os.path.join(d, n)
+    return keys
+
+
 def _retriever(mode):
     """rank()'s query-independent half, built only as far as the mode needs. "lexical" builds
     neither the vector cache nor the ONNX session, which is what makes --lexical-only a usable
-    fallback on a box with no model rather than merely an A/B switch."""
-    idx = {"files": {}} if mode == "lexical" else build_or_update()
-    names = sorted(idx["files"]) if idx["files"] else _lex_names()
-    lex = _lex_index(names) if mode != "vector" else None
+    fallback on a box with no model rather than merely an A/B switch.
+
+    Spans MEMORY_DIRS. Each corpus keeps its own recall_index.json in its own directory, so the
+    per-file (mtime, size) contract src/recall-index.js reads is untouched; only the merged view
+    is new."""
+    keys = _display_keys(MEMORY_DIRS)
+    files = {}
+    if mode != "lexical":
+        for d in MEMORY_DIRS:
+            sub = build_or_update(mem_dir=d)["files"]
+            for key, path in keys.items():
+                if os.path.dirname(path) == d.rstrip("/\\") and os.path.basename(path) in sub:
+                    files[key] = sub[os.path.basename(path)]
+    idx = {"embed": EMBED_ID, "files": files}
+    names = sorted(files) if files else sorted(keys)
+    lex = _lex_index({k: keys[k] for k in names if k in keys}) if mode != "vector" else None
     emb = _bge() if mode in ("hybrid", "vector", "rrf") else None
     return idx, lex, emb, names
-
-
-def _lex_names():
-    return sorted(n for n in os.listdir(MEMORY_DIR) if n.endswith(".md") and n not in EXCLUDE)
 
 
 def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):

@@ -1907,3 +1907,73 @@ One seam is left uncovered and is deliberate. The wiring from `package.mjs`'s `a
 v1.4.5` against manifests already at 1.4.5, which proves argv reaches the sync and the output
 filename derives from the result). Driving the write branch end to end would mean running `vsce`
 against a mutated copy of the tree. The post-packaging check is the guard for that seam instead.
+
+## From the 2026-09-14 post-install verification of 1.4.5
+
+Found by testing the installed VSIX against the real memory store rather than the checkout.
+Everything here is about the gap between what `memory/recall.py` can now do and what the
+extension actually reaches for. None of it is a regression; all of it is capability that
+shipped in the Python and was never wired into the product.
+
+### The two linters disagree about the size of `MEMORY.md`
+
+`memoryLint.js:60` reports 6648 bytes, `recall.py --lint` reports 6564, for the same file at the
+same moment. The difference is exactly 84, which is the CR byte on each of its 84 lines: Python
+opens in text mode and normalises CRLF to LF before measuring, Node measures the file as it sits
+on disk.
+
+Immaterial today at 55% of a 12000-byte budget, and the Node figure is the one that matches what
+Claude Code actually loads. Recorded because two tools reporting different values for one number
+is believed later by whoever reads only one of them. Fix is one line on the Python side: read
+bytes, or `open(..., newline='')`.
+
+### The extension never checks the cap that actually binds
+
+Claude Code truncates `MEMORY.md` at **200 lines or 25 KB, whichever comes first**. That is the
+entire premise of the memory work: the store is at 84 lines against 200 (42%) and 6648 bytes
+against 25600 (26%), so **lines** are the binding constraint and they are the axis that grows by
+roughly one entry per project.
+
+`memoryLint.js` never counts lines. `fastLint` splits the text into lines at line 62 and uses
+them only to iterate; the sole whole-file verdict is `totalOver: bytes > conf.totalBudget`, a
+self-imposed 12000-byte proxy. There is no `lineBudget` for the FILE (the existing
+`memory.lineBudget` setting is a per-bullet character limit, a different thing with a confusingly
+similar name), and no setting for 200.
+
+So the card can read green while the index is three lines from silently dropping its tail. Add a
+line count to `fastLint`, surface it beside the byte gauge, and default it to 200. Worth doing
+before the next several projects land.
+
+### `RECALL_MEMORY_DIRS` shipped in `recall.py` and the extension cannot reach it
+
+Phase 5 of the hybrid-recall work added multi-corpus search: `RECALL_MEMORY_DIRS` extends the
+primary store, deduped, with non-existent entries skipped, and `test/recall-py.sh` covers it in
+five cases. The extension passes `RECALL_MEMORY_DIR` (singular) at all three of its invocation
+sites, `extension.js:763` (`--rebuild`), `:806` (`--list` auto-sync) and `:2875`
+(`--gates-compile`), and never passes the plural form anywhere.
+
+`--gates-compile` is correct to stay single-dir and should not change. The other two are the
+gap.
+
+`memoryLint.discoverDirs` already finds every store: on this box it returns two,
+`C--Anthropic/memory` and `d---ai-work/memory`. `pickPrimaryDir` then reduces them to one and
+every consumer downstream sees only that. This is the same stranded corpus recorded earlier in
+this file, seen from the product side: the extension can enumerate it, and has no way to search
+or index it.
+
+Needs a setting (`permissionWildcarding.memory.extraDirs`, or make the existing `memory.dir`
+accept a list) plus passing it through at `:763` and `:806`. Note that `memory.dir` today is an
+override that REPLACES discovery, so it cannot be widened without deciding which meaning wins.
+
+### Three lint checks exist only in Python and never reach the card
+
+`recall.py --lint` enforces the resident-entry ceiling (15 of 16 right now), flags
+`type: feedback` entries with no `scope:` (3 of them, which the gate compiler cannot place), and
+lists demotion candidates (2, about 455 bytes). None of these exist in `memoryLint.js`, and the
+extension never shells out to `--lint` at all.
+
+That is deliberate as far as it goes: `memoryLint.js`'s header states it is pure Node so it ships
+in the VSIX and runs under the managed policy, with no Python and no model. The resident-entry
+ceiling and the scope check need neither. They are counting rules over the same text the Node
+lint already parses, so they can move without breaking that constraint. The demotion list is
+judgement and should stay in the CLI.

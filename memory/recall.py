@@ -22,6 +22,12 @@ Usage (from anywhere):
     python recall.py --vector-only "..."   # cosine alone; the pre-hybrid ranking
     python recall.py --lexical-only "..."  # BM25 alone; builds no ONNX session
     python recall.py --lint            # audit index bloat + links (no model needed)
+    python recall.py --gates-compile   # lift scope:global gate blocks into ~/.claude/gates.generated.md
+    python recall.py --gates-compile --gates-allow-empty
+                                       # ... and allow the result to be EMPTY. Without this flag a
+                                       # compile that finds no gates refuses to overwrite a non-empty
+                                       # gates.generated.md, because the usual cause is a corpus
+                                       # pointed at the wrong dir, not a deliberate deletion.
     python recall.py --rebuild         # force re-embed every file
     python recall.py --list            # show what's indexed
     python recall.py --selftest        # verify the embedder reproduces its reference cosines
@@ -806,7 +812,7 @@ def _gates_are_stale():
     return fresh != on_disk
 
 
-def compile_gates():
+def compile_gates(allow_empty=False):
     """Lift every scope:global gate block into one block for the installer to drop into
     CLAUDE.md, and write it. The judgement happened when the memory was written, which is
     what lets this run unattended."""
@@ -817,6 +823,33 @@ def compile_gates():
         return
 
     out, names = _compile_gates_text()
+
+    # Refuse to replace a compiled file with nothing. A corpus that yields zero gates is
+    # almost always RECALL_MEMORY_DIR pointing somewhere unintended, and the damage is
+    # silent in every direction: agent-gates.js declines to install an empty block so
+    # CLAUDE.md survives and looks fine, the dashboard's gate count reads 0, and
+    # _gates_are_stale() then compares "" to "" and answers "not stale" -- the one
+    # mechanism built to notice this goes quiet. Exiting non-zero is the point: both
+    # callers (the extension's execFile and `wildcard-perms --gates refresh`) read the
+    # status and surface stderr, and neither sees a `return`.
+    #
+    # The guard lives HERE, in the writer, and must not move into _compile_gates_text():
+    # _gates_are_stale() shares that pure function, so a guard there would make staleness
+    # lie about the very drift it exists to report, and would put a file read on the
+    # normal path. `.strip()` matches readCompiled()'s definition of "compiled" in
+    # src/agent-gates.js, so this refuses exactly when that would have installed something.
+    if not names and not allow_empty:
+        try:
+            existing = open(GATES_OUT, encoding="utf-8", errors="replace").read()
+        except OSError:
+            existing = ""
+        if existing.strip():
+            # Kept short on purpose: extension.js slices this stderr at 300 chars before
+            # showing it. 226 with this box's real paths, so both names survive the slice.
+            sys.exit(f"[recall] refusing to empty {GATES_OUT} ({len(existing)} bytes): "
+                     f"no gate blocks in {MEMORY_DIR}. Check RECALL_MEMORY_DIR, or pass "
+                     f"--gates-allow-empty to erase every gate.")
+
     # newline="\n" on purpose: a CRLF translation on Windows would change the bytes and
     # make the hash useless as a "has anything actually changed" signal.
     os.makedirs(os.path.dirname(GATES_OUT), exist_ok=True)
@@ -858,7 +891,10 @@ def main():
     ap.add_argument("--list", action="store_true", help="show what's indexed and exit")
     ap.add_argument("--lint", action="store_true", help="audit index bloat + links (no model)")
     ap.add_argument("--gates-compile", action="store_true",
-                    help="lift scope:global gate blocks into ~/.claude/gates.generated.md")
+                    help="lift scope:global gate blocks into ~/.claude/gates.generated.md "
+                         "(refuses to overwrite a compiled file with nothing)")
+    ap.add_argument("--gates-allow-empty", action="store_true",
+                    help="with --gates-compile: allow an empty result to erase every compiled gate")
     ap.add_argument("--selftest", action="store_true", help="verify the embedder's reference cosines")
     ap.add_argument("--vector-only", action="store_true", help="rank by embedding cosine alone")
     ap.add_argument("--lexical-only", action="store_true", help="rank by BM25 alone (no model load)")
@@ -867,7 +903,7 @@ def main():
     if args.lint:
         lint(); return
     if args.gates_compile:
-        compile_gates(); return
+        compile_gates(allow_empty=args.gates_allow_empty); return
     if args.selftest:
         selftest(); return
     if args.rebuild:

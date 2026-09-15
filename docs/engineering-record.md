@@ -249,7 +249,7 @@ and not ours.
 
 | Item | Measured | Frequency |
 |---|---|---|
-| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. ~~**The retracted 2.3 ms figure still ships in a code comment at `src/permissions.js:686-687`**, in the very commit whose message retracts it~~ — **FIXED 2026-09-14.** It shipped at `src/permissions.js:10`, not 686-687; the reference in this very sentence was itself stale. The header now names ~0.9 ms and says why 2.3 ms was wrong | ~0.9 ms | per hook call |
+| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. ~~**The retracted 2.3 ms figure still ships in a code comment at `src/permissions.js:686-687`**, in the very commit whose message retracts it~~ — **FIXED 2026-09-14.** It shipped at `src/permissions.js:10`, not 686-687; the reference in this very sentence was itself stale. The header now says "~0.9 ms on EVERY tool call" and why 2.3 ms was wrong | ~0.9 ms | per hook call |
 | A fixed-point cache keyed on a CONTENT HASH of settings.json lets the hook skip the read, the module load and the pass | our-code p50 11.80 -> 2.46 ms; wall 62.3 -> 53.6 ms; 30/30 hits | per hook call |
 | ~~`memoryReport()` runs TWICE per dashboard refresh~~ **DONE 2026-09-10.** "11.22 ms" was the COMBINED cost of both calls, not the saving — the second is much cheaper because the file cache and the JIT are warm. Measured directly, 11 interleaved fresh processes: one call 6.99 ms, two 9.92 ms, so hoisting saves **2.93 ms** and 25 fs syscalls | 2.93 ms | per refresh |
 | `runWildcarding` takes the policy lock even on the unchanged path; the CLI hook was deliberately changed not to | lock cycle 3.72 ms of 9.60 ms, plus contention with Auto Learn | per settings.json write |
@@ -419,19 +419,23 @@ already a fixed point, which is the only state in which it must fire zero times.
   untested.** Its message calls it a correctness fix — "both halves now come from
   ONE read" — but the old code was `applyMax(settings, turningOn)`, whose
   `res.settings` was computed **in memory from `settings`**. There was one read
-  then and one now. Two mutants at `extension.js:2254` (`preMax` = the post-MAX
-  list; `preMax = []`) both **SURVIVED** the full 400-test suite. The four purge
-  assertions in `test/policy-backup.test.js` guard the filter and the
-  `MAX_ALLOW_CORE` constant; the only thing that varies with the argument is
-  `detectMcpServers`, and no test asserts an `mcp__*` blanket entry leaves the
-  backup. Control: restoring the top-level `require('../src/permissions')` **is**
-  caught, so that guard is real and this one is not.
+  then and one now. Two mutants on `wroteOntoAllow` at `extension.js:2402` — it
+  was named `preMax` when this was written — the post-MAX list, and `[]`, both
+  **SURVIVED** the full 400-test suite. The four purge assertions in
+  `test/policy-backup.test.js` guard the filter and the `MAX_ALLOW_CORE`
+  constant; the only thing that varies with the argument is `detectMcpServers`,
+  and at the time no test asserted an `mcp__*` blanket entry leaves the backup.
+  One does now: "MAX off purges a blanket that arrived WHILE MAX was on" at
+  `test/policy-backup.test.js:416`, added in answer to this entry. Control:
+  restoring the top-level `require('../src/permissions')` **is** caught, so that
+  guard is real and this one is not.
 - **`if (!res.changed)` in `toggleMax` is unreachable,** and the commit has it
   backwards: deriving `turningOn = !isMaxOn(latest)` from the same `latest` is
   exactly what makes it un-reachable. 65 shapes of `latest` enumerated (5 allow
   sets x 3 hook states x 4 modes, plus `{}`, `null`, non-array allow, bare
-  `hooks`): **0 yielded `changed: false`**. `extension.js:2235`'s wording also
-  reads backwards — "MAX is already OFF" in response to a click asking for ON.
+  `hooks`): **0 yielded `changed: false`**. `extension.js:2367`'s wording also
+  reads backwards: "MAX is already ${turningOn ? 'OFF' : 'ON'}" answers a click
+  asking for ON with "already OFF".
 - **The version badge's degradation claim is false for the case it names.** For a
   **malformed** manifest the catch never runs: Node refuses to load
   `extension.js` at all (`ERR_INVALID_PACKAGE_CONFIG` at
@@ -450,8 +454,9 @@ already a fixed point, which is the only state in which it must fire zero times.
   inert. **A future transform whose side effects are not idempotent must not use
   this writer** — now stated in the code as well.
 - **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
-  but not `bin/wildcard-perms:278`,** where the allow-array extraction lives.
-  Changing *which* field feeds the pass would not invalidate existing keys.
+  but not `settings?.permissions?.allow` at `bin/wildcard-perms:284`,** where the
+  allow array the pass runs on is extracted. Changing *which* field feeds the
+  pass would not invalidate existing keys.
 - **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
   `extension.js` (`SETTINGS`, `BACKUP_DIR`, `MIRROR_BACKUP_DEFAULT`,
   `PROJECTS_DIR`, `CODEX_SESSIONS_DIR`, `RECALL_MODEL_HOME`) and 6 in `src/`
@@ -542,22 +547,24 @@ in this project should be sited.
 
 ## Whole-object settings.json writers: FIVE sites, not one
 
-The earlier entry naming `src/auto-learn-manager.js:1178-1218` as "a third
-unrebased whole-object writer" was right but incomplete, and the migration is
-harder than it looked.
+The earlier entry called the apply path — built at `const updated = {`, written by
+`atomicWrite(change.path, change.content)`, `src/auto-learn-manager.js:1571-1611` —
+"a third unrebased whole-object writer". Right, but incomplete, and the migration
+is harder than it looked.
 
-Sanctioned writers: `src/settings-write.js:166` (`writeAllow`, rebasing merge)
-and `:322` (`writeTransform`, CAS + verbatim).
+Sanctioned writers: `function writeAllow` at `src/settings-write.js:145` (rebasing
+merge, written at `:210`) and `function writeTransform` at `:254` (CAS + verbatim,
+written at `:369`).
 
 Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `src/auto-learn-manager.js:1178-1181` → written `:1218` | The apply path. Has an `unchanged()` recheck at `:1213-1217`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `src/auto-learn-manager.js:1500-1502` → written `:1546` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `src/auto-learn-manager.js:1025` | `rollback()` writes back `change.before.content` — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1021`. |
-| `src/auto-learn-manager.js:1565` | `undo()`'s inner rollback, same shape, `:1561` hash guard. |
-| `src/local-settings.js:245` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:201` read → `:245` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
+| `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1922-1924`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:1365` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1361`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:1987` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
+| `{ ...local, permissions }` at `src/local-settings.js:245` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:201` read → `:245` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
 needs a **two-file atomic window**: `updateClaudeClaims` mutates `claims` in
@@ -571,17 +578,18 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `:1025` blindly restores `change.before.content`. If the writer
+- `rollback()` at `:1365` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a
   settings.json an external actor deliberately deleted.** That is a new defect
   the migration would introduce, and no existing test would catch it.
 
-**Prerequisite, now being addressed:** `grep "Policy changed" test/` returns
-nothing. The entire "detect and throw" behaviour that justifies this writer's
-safety is unpinned, so swapping it for a retrying writer would pass the full
-suite silently.
+**Prerequisite, since met:** `grep "Policy changed" test/` returned nothing, so
+the entire "detect and throw" behaviour that justifies this writer's safety was
+unpinned, and swapping it for a retrying writer would have passed the full suite
+silently. The "Policy changed" guard is pinned now: `test/auto-learn-manager.test.js:492-511`
+records why, and the two tests are at `:513` and `:593`.
 
 ## `runWildcarding`'s lock: the constraint that decides any refactor
 
@@ -598,9 +606,9 @@ re-read and recompute reintroduces the MAX / `Bash(npm test)` deletion bug**
 documented at `bin/wildcard-perms:354-368`.
 
 Two further traps for that refactor, both real:
-- **Key on file BYTES, not the parsed allow list.** The unchanged path is where a
-  hand-added deny rule first reaches the backup (`extension.js:2360-2363`); a
-  key on the allow list makes a deny-only edit a hit, and that rule never gets
+- **Key on file BYTES, not the parsed allow list.** The unchanged path is where
+  "a deny rule added by hand first reaches the backup" (`extension.js:2495-2497`);
+  a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
   rebuilds a *deleted* backup — not hypothetical: on 2026-09-09 every directory
@@ -622,11 +630,14 @@ rebuilt, deny-only edits lost, poisoning the memo on a busy-lock-deferred pass
 
 Also worth folding in eventually: activation takes **two** lock acquisitions
 back to back — `runWildcarding()` then `drainLocal()` — which is the shape
-`bin/wildcard-perms:311-329` was deliberately fixed away from for the hook.
+`bin/wildcard-perms:311-329` ("ONE lock acquisition covering both jobs") was
+deliberately fixed away from for the hook.
 
 ## `preMax` is misnamed, and the audit's read of it was wrong too
 
-`vscode-extension/extension.js:2254`. Two corrections:
+The purge argument: `const wroteOntoAllow = wroteOnto?.permissions?.allow ?? []`
+at `vscode-extension/extension.js:2402`, named `preMax` when this was written.
+Two corrections:
 
 - **It cannot be reverted.** `f041031` deleted the `readSettings()` call
   entirely, so there is no in-scope expression to revert to. The mutation that
@@ -637,7 +648,9 @@ back to back — `runWildcarding()` then `drainLocal()` — which is the shape
 - **The name and its comment are both wrong.** When turning MAX *off*,
   `wroteOnto?.permissions?.allow` is the **MAX-ON on-disk list**, not the pre-MAX
   list — the pre-MAX list lives only in the sidecar snapshot and is re-unioned by
-  `disableMaxAllow`. The comment at `:2249-2252` repeats the error.
+  `disableMaxAllow`. The comment repeated the error too. Both have since been
+  fixed in place: the variable is `wroteOntoAllow`, and `:2381-2385` now states
+  the correction rather than the error.
 
 Why both mutants survive, verified by running the real functions on both existing
 fixtures (byte-identical purge sets for all three variants):
@@ -752,5 +765,6 @@ installing an equal version over an existing one is a silent no-op, which presen
 "in-place upgrades do not work". Bumped to 1.4.5 on 2026-09-14.
 
 Bump `vscode-extension/package.json` and the root `package.json` together.
-`test/installers.test.js:455` asserts they agree, and the extension manifest is authoritative
-because `release.yml` defaults its version input to it.
+`test/installers.test.js:455` — "the two package manifests report the same version" —
+asserts they agree, and the extension manifest is authoritative because `release.yml`
+defaults its version input to it.

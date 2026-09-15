@@ -42,6 +42,7 @@ Config via env:
 Retrieval quality is measured by bench/gate_recall.py, not asserted here.
 """
 import os, sys, re, json, math, argparse, hashlib, unicodedata
+from collections import Counter
 
 # --- runtime shim: onnxruntime + numpy live in the DevToolbox venv, not system python.
 # Re-run under the venv python via subprocess (NOT os.execv -- Windows detaches the
@@ -464,9 +465,9 @@ def _lex_index(names):
         text[n] = raw
         # The description is already inside raw; counting it again would double-weight it.
         terms = _slug_terms(n) * LEX_SLUG_WEIGHT + _lex_terms(raw)
-        counts = {}
-        for t in terms:
-            counts[t] = counts.get(t, 0) + 1
+        # Counter, not a hand-rolled loop: it is a dict subclass, so tf[n] and every
+        # downstream use are unchanged, and the counting runs in C.
+        counts = Counter(terms)
         tf[n], dl[n] = counts, len(terms)
         for t in counts:
             df[t] = df.get(t, 0) + 1
@@ -606,7 +607,13 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
     cos = {}
     if mode in ("hybrid", "vector", "rrf"):
         q = (emb or _bge()).embed(query)
-        cos = {n: sum(a * b for a, b in zip(q, files[n]["vec"])) for n in names if n in files}
+        # One matrix multiply instead of a Python-level dot product per document. The
+        # vectors are already lists and numpy is already imported, so this is the same
+        # arithmetic in C. Immaterial for one CLI query, real across a bench run.
+        hit = [n for n in names if n in files]
+        if hit:
+            mat = np.asarray([files[n]["vec"] for n in hit], dtype=np.float64)
+            cos = dict(zip(hit, (mat @ np.asarray(q, dtype=np.float64)).tolist()))
     bm = _bm25(query, lex) if mode in ("hybrid", "lexical", "rrf") and lex else {}
 
     if mode == "vector":

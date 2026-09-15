@@ -36,42 +36,38 @@ and rare rather than fired by a file watcher. Now cheap anyway at 6 ms, so this 
 tidiness rather than performance.
 
 
-### Managed-block removal can fuse the user's own lines
+### Five unsynchronized writers share one instruction file
 
-Both newline sweeps eat every adjacent newline and only the end-of-file case puts
-one back: `let above = range.start` at `src/agent-guidance.js:170-173`, against a
-file whose contract (`:22-25`) is that the block is "removable without touching a
-byte of the user's own text". Measured:
+Re-verified 2026-09-14. The two other halves this entry used to carry, newline fusion on
+removal and `blockRange` truncating on an inner END marker, are both FIXED and removed:
+the mid-file `separator` at `src/agent-guidance.js:180-183` now reconstructs the user's
+own line terminators, and `escapeMarker` at `src/agent-guidance.js:108` neutralises an
+END marker inside a body rather than refusing it. Only the concurrency half survives, and
+it no longer depends on them.
 
-    CASE 1  off        -> "my own notesmore of my notes\n"     <- two user lines fused
-    CASE 2  first off  -> "user preamble<!--GB-->\nGATES\n<!--GE-->\n"
+`~/.claude/CLAUDE.md` has five writers and no shared lock:
 
-Case 2 is `--guidance off` while gates or a derived block is installed, a
-documented supported combination. Harmless on this box *today* only because the
-live `~/.claude/CLAUDE.md` has the block at lines 1-31 with user content from 33,
-so `start === 0`; any content added above the block, or any second block below
-it, arms this.
+| Writer | Site |
+|---|---|
+| CLI guidance | `setGuidanceAll(cmd === 'on')` at `bin/wildcard-perms:579` |
+| CLI gates | `setGatesAll(cmd !== 'off')` at `bin/wildcard-perms:646` |
+| Extension guidance | `setGuidanceAll(want)` at `vscode-extension/extension.js:2799`, and `:2848` |
+| Extension gates | `setGatesAll(want)` at `vscode-extension/extension.js:3009`, and `:3073` |
+| Derived guidance | `decideDerived` at `src/auto-learn-manager.js:1221` |
 
-Related, same file: `blockRange` (`:130-136`) takes `indexOf(begin)` then the
-**first** `indexOf(end, start)`, with no guard against a body containing its own
-END marker. The gates body is arbitrary user-corpus text and the derived body
-embeds managed rule text, so a memory whose `<!-- gate -->` section documents
-this feature — entirely plausible for someone whose memories are about their own
-tooling — truncates the range; `apply(text, true)` then leaves the old body tail
-plus an orphaned END marker in the file, accumulating on every toggle.
+Only the last takes a lock, and it is the POLICY lock, which none of the other four take,
+so it buys nothing here. Confirmed still true today: `withPolicyLock` in
+`bin/wildcard-perms` wraps `--drain`, `--seed`, `--bypass` and `--max`, and neither
+guidance nor gates is inside one.
 
-And there are **five unsynchronized writers** of that one file: CLI guidance
-(`setGuidanceAll` at `bin/wildcard-perms:579`), CLI gates (`:646`), extension
-guidance (`setGuidanceAll` at `extension.js:2799,2848`), extension gates
-(`:3009,3073`) and `decideDerived` at `auto-learn-manager.js:1221`. Only the
-last holds a lock, and it is the *policy*
-lock, which none of the others take — so it buys nothing here. The extension also
-recompiles gates automatically on a memory-dir change, so an automatic write can
-race a manual `--guidance off`. Individually recoverable; combined with the two
-findings above, a race can leave the file structurally broken. Note also that the
-instruction-file backups are single-slot fixed names
-(`agent-guidance.js:233`, `derived-guidance.js:342`), so two toggles in a row
-overwrite the good copy with the bad one.
+The window is not hypothetical. The extension recompiles gates automatically on a
+memory-dir change, so an automatic write can race a manual `--guidance off` with no
+coordination at all.
+
+Made worse by single-slot backups: `backupName = 'CLAUDE.md.pre-guidance'` at
+`src/agent-guidance.js:233` and the `.pre-derived` write at `src/derived-guidance.js:342`
+are fixed names, so two toggles in a row overwrite the good copy with the bad one. That
+is what turns a recoverable interleaving into a lost file.
 
 ### Smaller measured perf items, none urgent
 
@@ -79,9 +75,6 @@ overwrite the good copy with the bad one.
   when backup entries are not present verbatim in live, which its own comment
   calls "the normal state". 0.13 ms today because the Set fast path hits;
   **15.5 ms** measured with no verbatim hits. Same prefix-index fix.
-- `src/local-settings.js:73` — `grantedBy` does `allow.includes(entry)` (linear;
-  should be a Set) plus a linear cover scan, per local entry, twice via
-  `redundantUnder`. Drain path only.
 - The drain path in `bin/wildcard-perms` reads settings.json 4 times and runs
   processAllowList twice per drain.
 - `src/policy-exporters.js:537` (also 476, 677) — `new RegExp` inside a nested
@@ -298,9 +291,17 @@ what was deliberately left.
   the exported alias `DEFAULT_POLICY_LOCK_STALE_MS`, and the option keys
   `claudeHistoryPath` / `codexHistoryPath` / `validateCodexRules` (one occurrence
   repo-wide each).
-- `manager.getStatus()` / `getCandidates()` / `list()` fallbacks in
-  `extension.js:1019,1026` can never run: they are aliases of the functions
-  checked first, and no test injects a partial mock.
+- Two fallback branches can never run, because each is an alias of the function
+  checked immediately before it and no test injects a partial mock.
+  `return manager.getStatus();` at `vscode-extension/extension.js:1019` follows a
+  `manager.status` check, and `src/auto-learn-manager.js:2007` exports
+  `getStatus: status`. `manager.getCandidates(options)` at
+  `vscode-extension/extension.js:1026` follows a `manager.listCandidates` check, and
+  `src/auto-learn-manager.js:2009` exports `getCandidates: listCandidates`.
+  Re-verified 2026-09-14. A correction pass read this entry as closed because it also
+  named `list()`: that alias IS still exported on the same line as `getCandidates`, but
+  it is not part of either fallback chain, so naming it here was the imprecision that
+  made the entry look refuted.
 - `verdicts.unknown` can no longer be non-zero, and the whole `verdicts` object
   is read by no production code (only `--learn status` JSON and tests).
 - `--guidance off` sweeps only the shell-style block, and the install/uninstall
@@ -1250,13 +1251,15 @@ What is genuinely open:
   made checkable by quoting the identifier that actually sits at the cited line, which is what
   converted 13 rows to OK during the pass. Worth doing opportunistically when a sentence is being
   edited anyway, not as a sweep.
-- **Five entries elsewhere in this file look closed by current code** and, under this file's own
-  "closed items are removed" rule, want deleting rather than renumbering. `src/agent-guidance.js`
-  now computes a mid-file `separator` and `escapeMarker` guards `blockRange` against a body
-  carrying its own END marker, which refutes both halves of the managed-block fusion entry;
-  `src/local-settings.js` documents the Set plus shared index as landed while the perf bullet
-  still calls `grantedBy` linear; and the `list()` fallback named in the `manager.getStatus()`
-  bullet is gone.
+- **RESOLVED 2026-09-14.** The correction pass flagged entries here that looked closed by current
+  code. Checked one at a time against the source, and the flag was right twice and wrong once:
+  the newline-fusion and inner-END-marker halves of the managed-block entry are genuinely fixed
+  (by the mid-file `separator` at `src/agent-guidance.js:180-183` and `escapeMarker` at
+  `src/agent-guidance.js:108`) and were removed, leaving only the concurrency half; the
+  `grantedBy` perf bullet is closed by `grantedByIndex` at `src/local-settings.js:84` and was
+  removed; but the `manager.getStatus()` fallback entry is STILL OPEN, and was flagged closed
+  only because it also named an alias that is not part of the fallback chain. Trusting the flag
+  would have deleted a live finding.
 - **One bullet is refuted, not stale.** It claimed `bin/wildcard-perms` had no `return` on a
   `finish()` call. Line 282 now reads
   `if (!settings || typeof settings !== 'object') return finish(input, false);`.

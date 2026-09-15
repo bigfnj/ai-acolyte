@@ -1271,18 +1271,23 @@ What is genuinely open:
   `finish()` call. Line 282 now reads
   `if (!settings || typeof settings !== 'object') return finish(input, false);`.
 
-### CI is running on borrowed time: the pinned actions target a deprecated Node
+### The release workflow's node24 bump is unverified until a release runs
 
-Every job on the 1.4.10 run (34928599078, all five green) carried the same annotation:
+The test matrix half of this is CLOSED: run 34935429588 is green on all five jobs with zero
+deprecation annotations, against the run before it where all five carried one.
 
-> Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run
-> on Node.js 24: `actions/checkout@v4`, `actions/setup-node@v4`.
+What is left is a verification gap, not a defect. `release.yml` runs only on a release, so its
+two bumps, `actions/upload-artifact@v6` and `softprops/action-gh-release@v3`, have never
+executed. That is also why the deprecation was invisible there: the annotation the test matrix
+raised never mentioned those two, because that workflow had not run. Nothing to do until the next
+release; check that run rather than assuming it.
 
-"Forced to run on" is GitHub bridging it for now, not a stable arrangement. When the bridge is
-withdrawn both actions stop, and they are the first two steps of all five jobs, so the failure
-mode is the whole matrix at once rather than one test. Bump both to `@v5`. Unrelated to the
-`engines` floor moving 18 to 20 in `package.json`, which is about the runtime the package
-supports and is already satisfied by every matrix leg.
+Worth keeping because the original entry got the fix wrong in a way that would have looked done.
+It said "bump both to `@v5`". Checking each action's `action.yml` at each major shows the first
+node24 major is not the same for all of them: `actions/upload-artifact@v5` is STILL node20, so a
+uniform `@v5` would have left one action on the deprecated runtime while the annotation went
+quiet. The pins that actually clear it are checkout v5, setup-node v5, upload-artifact v6 and
+gh-release v3.
 
 ### Optimization proposals, each with the measurement that would settle it
 

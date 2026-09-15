@@ -214,9 +214,9 @@ function settingsWriter() {
 // would restore nothing. The CLI writes no high-water backup, so on a CLI-only
 // install there was no way back at all.
 //
-// This is the refusal src/settings-write.js:67-79 documents, reached from the
-// two verbs that do not go through writeAllow. The extension's toggleMax
-// already got this right; the CLI half was left behind.
+// This is the "exists but could not be parsed" refusal src/settings-write.js:150-162
+// documents, reached from the two verbs that do not go through writeAllow. The
+// extension's toggleMax already got this right; the CLI half was left behind.
 function readSettingsForWrite(label) {
   const { readSettingsState, SETTINGS_UNREADABLE } = require('../src/settings-write');
   const state = readSettingsState(SETTINGS);
@@ -318,8 +318,8 @@ function run(input) {
 // The two jobs used to lock separately — the wildcarding write took no lock at
 // all and the drain took its own — leaving a window between them for Auto Learn
 // to land its settings write and its claims write. That is verbatim the
-// interleaving src/policy-lock.js:3-7 exists to prevent, so they now share one
-// acquisition. A busy lock stays silent: the next tool call fires the hook
+// "interleaved write" src/policy-lock.js:3-7 exists to prevent, so they now share
+// one acquisition. A busy lock stays silent: the next tool call fires the hook
 // again and the pass is idempotent, so losing a turn costs at most one extra
 // prompt and never a permission.
 // Every caller now `return`s into this rather than relying on it never returning.

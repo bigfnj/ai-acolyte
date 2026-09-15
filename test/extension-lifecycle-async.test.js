@@ -14,7 +14,7 @@
 //   - `autoLearnBusy` left true, which short-circuits every later scan.
 //
 // Its own mocks, again: this needs to count spawns, kills and watcher callbacks,
-// and the standing decision in this suite (test/extension-activation.test.js:113)
+// and the standing decision in this suite (test/extension-activation.test.js:141)
 // is that duplicating a mock is cheaper than breaking one that works.
 
 const test = require('node:test');

@@ -120,7 +120,7 @@ test('the key follows the code, so a checkout invalidates it without a version b
   // mtime alone, with the size untouched. `git checkout` of a single file in place
   // is the motivating case — it is what someone bisecting the generalizer does, it
   // can leave the size identical, and a hand-maintained VERSION constant (the
-  // src/auto-learn-manager.js:29-31 shape) cannot see it at all. Without this the
+  // src/auto-learn-manager.js:34 shape) cannot see it at all. Without this the
   // cache would report a stale fixed point for the whole bisect.
   stamp(first, T2);
   const touched = keyAt();

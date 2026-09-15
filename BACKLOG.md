@@ -720,8 +720,10 @@ Method note that changed three verdicts: **comment mentions are not references.*
   `mergeClaudeAllow` object-third-arg shim, `createSettingsWriter`'s `= {}`
   default and `|| defaultSettingsPath()`, `assessPolicy`'s `claimed`, and
   `fixed-point-cache`'s `cacheFile ||`.
-- **Write-only locals:** `wrote` in the CLI's `--max`, `lastErr` in
-  `writeFileAtomicSync`, and `err.result`/`err.latest` on both CONTENDED throws.
+- **Write-only locals:** `wrote` in the CLI's `--max`, and `err.result`/`err.latest`
+  on both CONTENDED throws. (`lastErr` in `writeFileAtomicSync` was on this list and
+  is not write-only: the in-place fallback reports its code, and that report is now
+  asserted. Removed 2026-09-14.)
   Four unused imports: `isCoveredBy` in two modules, `SETTINGS_ABSENT`/
   `SETTINGS_PRESENT` in the extension.
 - ~~**~60 stale `file:line` refs in this file, and 7 stale cross-file refs in code
@@ -1160,14 +1162,6 @@ record but leaves the record, so an abandoned target becomes a permanently retai
 `{applied: [], reviewed: []}` of roughly 50 bytes. Every other axis is capped (candidates 1000,
 pruned 2000, cursors 5000, observation hashes 20000, managed hits 200). Two lines if anyone is
 already in `pruneGrantKeys`: delete a record whose two lists both emptied.
-
-**`src/permissions.js:68`'s `if (lastErr)` cannot be false.** The only ways out of the retry loop
-without returning are exhausting `MAX_ATTEMPTS` or breaking on a non-retryable code, and both assign
-`lastErr` at `:50`. So the guard is dead and the `process.emitWarning` always fires when the fallback
-is reached. Behaviour is right and preserving the cause is a genuine improvement over discarding it,
-but mutating the guard to `if (false)` leaves the suite at 517/515/0: nothing anywhere asserts the
-warning exists. Either assert it or drop the guard, so the code stops implying a
-false branch exists.
 
 **`MIN_SUPPORTED_VERSION` cannot change an outcome.** Mutating the check at
 `src/auto-learn-manager.js:62` to `if (false) return null` left the suite green, because any

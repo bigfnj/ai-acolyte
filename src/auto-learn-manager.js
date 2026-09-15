@@ -10,7 +10,12 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const { aggregateObservations, isAutoSafeCandidate, COMPLEX_REASONS } = require('./auto-learn');
+const {
+  aggregateObservations, isAutoSafeCandidate, COMPLEX_REASONS,
+  normalizeCandidateKey, normalizePermissionSpelling, preferredPermissionSpelling,
+  preferredPrefixSpelling,
+} = require('./auto-learn');
+const { isCoveredBy } = require('./permissions');
 const { scanHistoryFiles } = require('./history-adapters');
 const { createPolicyLock } = require('./policy-lock');
 const { commandLaunch } = require('./exec-resolve');
@@ -27,6 +32,44 @@ const {
 } = require('./policy-exporters');
 
 const VERSION = 1;
+// The oldest on-disk version this code can still make sense of. A state written
+// below it is reset rather than read, which is the reset mechanism that did not
+// exist: `VERSION` was write-only, so bumping it did nothing at all and the one
+// time a reset was wanted (the Codex `session` fix) the change had to be
+// designed around its absence.
+const MIN_SUPPORTED_VERSION = 1;
+// fromVersion -> (raw) => raw, applied in order until the file reads as
+// `VERSION`. EMPTY TODAY, and that is the honest state of it: there has only
+// ever been one version, so there is no migration to register and no test can
+// reach the loop body. What the mechanism buys is that the NEXT bump has a
+// place to put its migration and a defined behaviour when none exists, instead
+// of the field being inert.
+const STATE_MIGRATIONS = new Map();
+// A state file's declared version, or `VERSION` when it says nothing. Every
+// file this tool has ever written carries `version: 1`, so an absent version
+// means a hand-written or foreign file rather than an older one, and treating
+// it as current keeps that readable instead of wiping it.
+function declaredVersion(raw) {
+  const value = object(raw) ? raw.version : undefined;
+  return Number.isInteger(value) ? value : VERSION;
+}
+// Returns the raw state brought up to `VERSION`, or null when it cannot be.
+// Null means reset: a state older than the oldest supported version, or one
+// whose chain has a step nobody wrote, is not partially readable.
+function migrateState(raw) {
+  let from = declaredVersion(raw);
+  if (from > VERSION) return raw;
+  if (from < MIN_SUPPORTED_VERSION) return null;
+  let current = raw;
+  while (from < VERSION) {
+    const step = STATE_MIGRATIONS.get(from);
+    if (!step) return null;
+    current = step(current);
+    if (!object(current)) return null;
+    from += 1;
+  }
+  return current;
+}
 const MODES = new Set(['observe', 'recommend', 'auto-safe']);
 const CLAUDE_CLAIMS_VERSION = 1;
 const OUTCOMES = new Set(['success', 'failed', 'unknown']);
@@ -34,6 +77,9 @@ const RISK_RANK = new Map([
   ['read-only', 0], ['unknown', 1], ['complex', 2], ['write', 3],
   ['shell', 4], ['network', 5], ['credential', 6], ['admin', 7], ['destructive', 8],
 ]);
+// One spelling of the control-character class, so the three sites that reject
+// them cannot drift apart.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const RETRY_RENAME = new Set(['EPERM', 'EACCES', 'EBUSY', 'ETXTBSY']);
 
 function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -77,6 +123,9 @@ function within(root, value) {
 function candidateFingerprint(item) {
   return hash(Buffer.from(JSON.stringify({
     key: item.key, prefix: item.prefix, claudePermission: item.claudePermission,
+    // A family that gained a second spelling gained a second allow entry, so a
+    // review approved before that happened is a review of a different grant.
+    permissions: item.permissions,
     risk: item.risk, baseAutoSafe: item.baseAutoSafe, complex: item.complex,
     reasons: item.reasons, sources: item.sources, counts: item.counts,
   }), 'utf8'));
@@ -129,7 +178,7 @@ function unchanged(target, before) {
 function validPrefix(value) {
   if (!Array.isArray(value) || value.length === 0 || value.length > 8) return null;
   if (value.some((token) => typeof token !== 'string' || !token || token.length > 256 ||
-    /[\u0000-\u001f\u007f]/.test(token))) return null;
+    CONTROL_CHARACTERS.test(token))) return null;
   return value.slice();
 }
 function counts(value) {
@@ -150,18 +199,38 @@ function refresh(candidate, threshold) {
   candidate.disposition = candidate.autoSafe ? 'auto-safe' : candidate.meetsThreshold ? 'review' : 'observe';
   return candidate;
 }
+// Every spelling of this family's permission that was actually observed. A
+// family whose permission is null has none: a real conflict must not smuggle a
+// rule back in through this list, and the filter is what stops it.
+function permissionSpellings(value, base) {
+  if (!base) return [];
+  const identity = normalizePermissionSpelling(base);
+  const all = [base, ...(Array.isArray(value) ? value : [])]
+    .map((item) => clean(item, 768))
+    .filter((item) => item && normalizePermissionSpelling(item) === identity);
+  return [...new Set(all)].sort();
+}
 function candidate(value, threshold) {
   if (!object(value)) return null;
-  const key = clean(value.key, 512);
+  const kind = value.kind === 'tool' ? 'tool' : 'shell';
+  // A state written before the `.exe` spellings were unified holds the two
+  // halves of a family under two keys. Normalizing on the way in migrates them
+  // onto one key; `sanitizeState` merges the pair rather than letting the later
+  // one win, so no counted run is dropped by the rename. Tool families keep
+  // their keys verbatim: `mcp:` and `webfetch:` specifiers are not executables.
+  const key = kind === 'shell'
+    ? normalizeCandidateKey(clean(value.key, 512)) : clean(value.key, 512);
   const prefix = validPrefix(value.prefix);
   if (!key || !prefix) return null;
+  const claudePermission = clean(value.claudePermission, 768) || null;
   const reasons = [...new Set((Array.isArray(value.reasons) ? value.reasons : [])
     .map((item) => clean(item, 80)).filter(Boolean))].sort();
   return refresh({
     key, tool: clean(value.tool, 64), shell: clean(value.shell, 32),
-    kind: value.kind === 'tool' ? 'tool' : 'shell',
+    kind,
     root: clean(value.root, 256) || prefix[0], prefix,
-    claudePermission: clean(value.claudePermission, 768) || null,
+    claudePermission,
+    permissions: permissionSpellings(value.permissions, claudePermission),
     risk: RISK_RANK.has(value.risk) ? value.risk : 'unknown',
     baseAutoSafe: value.baseAutoSafe === true,
     // Re-derived, not read back. The flag is OR-merged across observations and
@@ -219,7 +288,7 @@ function parseClaudeClaims(before, target) {
   }
   const result = emptyClaudeClaims();
   for (const [permission, record] of Object.entries(raw.permissions)) {
-    if (!permission || permission.length > 768 || /[\u0000-\u001f\u007f]/.test(permission) ||
+    if (!permission || permission.length > 768 || CONTROL_CHARACTERS.test(permission) ||
         !object(record) || typeof record.managed !== 'boolean' || !Array.isArray(record.claimants)) {
       throw new Error(`Cannot use malformed Claude policy claims registry: ${target}`);
     }
@@ -228,7 +297,18 @@ function parseClaudeClaims(before, target) {
       typeof id !== 'string' || !/^state-sha256:[a-f0-9]{24}$/.test(id))) {
       throw new Error(`Cannot use malformed Claude policy claims registry: ${target}`);
     }
-    result.permissions[permission] = { managed: record.managed, claimants };
+    // `coveredBy` is optional and absent from every registry written before it
+    // existed, so a missing one is valid; a present one is held to the same
+    // shape as a permission string.
+    const covered = record.coveredBy;
+    if (covered !== undefined && (typeof covered !== 'string' || !covered ||
+      covered.length > 768 || CONTROL_CHARACTERS.test(covered))) {
+      throw new Error(`Cannot use malformed Claude policy claims registry: ${target}`);
+    }
+    result.permissions[permission] = {
+      managed: record.managed, claimants,
+      ...(covered === undefined ? {} : { coveredBy: covered }),
+    };
   }
   return result;
 }
@@ -238,17 +318,36 @@ function renderClaudeClaims(value) {
     const record = value.permissions[permission];
     permissions[permission] = {
       managed: record.managed === true,
+      ...(typeof record.coveredBy === 'string' && record.coveredBy
+        ? { coveredBy: record.coveredBy } : {}),
       claimants: [...new Set(record.claimants)].sort(),
     };
   }
   return JSON.stringify({ version: CLAUDE_CLAIMS_VERSION, permissions }, null, 2) + '\n';
 }
-function updateClaudeClaims(claims, claimantId, permissions, current, legacyManaged) {
+// `coveredBy` is how the registry stops claiming a permission the allow list no
+// longer holds. After an apply, the wildcarding pass prunes any new entry a
+// broader existing rule already covers -- measured 2026-09-03, 12 entries
+// written and 8 pruned -- and the registry went on claiming all 12.
+//
+// Of the two candidate fixes, RECORDING THE COVERING PARENT is the one taken.
+// Reconciling claims against the file instead cannot tell "pruned because a
+// parent covers it" from "the user deleted it", and dropping the claim in the
+// second case silently releases a grant another workspace still holds. Naming
+// the parent keeps the claim, puts the reason in the registry file where a
+// human can check it, and is the half of the answer that survives the parent
+// later being removed.
+//
+// A covered permission is also not `managed` by this claimant: the entry is not
+// in the file, so releasing the claim must not pretend to remove it.
+function updateClaudeClaims(claims, claimantId, permissions, current, legacyManaged, coveredBy) {
+  const covered = coveredBy instanceof Map ? coveredBy : new Map();
   for (const record of Object.values(claims.permissions)) {
     record.claimants = record.claimants.filter((id) => id !== claimantId);
   }
   for (const permission of permissions) {
     let record = claims.permissions[permission];
+    const parent = covered.get(permission) || null;
     if (!record) {
       record = {
         managed: legacyManaged.has(permission) || !current.includes(permission),
@@ -256,6 +355,10 @@ function updateClaudeClaims(claims, claimantId, permissions, current, legacyMana
       };
       claims.permissions[permission] = record;
     }
+    if (parent) {
+      record.coveredBy = parent;
+      record.managed = false;
+    } else delete record.coveredBy;
     if (!record.claimants.includes(claimantId)) record.claimants.push(claimantId);
     record.claimants.sort();
   }
@@ -350,12 +453,38 @@ function cursor(value) {
   return Number.isFinite(result.size) ? result : null;
 }
 
+// A family that was evicted by the candidate cap, and how many runs it had when
+// it went. This is the whole reason the cap is safe to have: a candidate is the
+// only record that a family was ever observed, so eviction keeps the key and
+// the run total and drops only the derived fields, which re-derive from one
+// fresh observation. Roughly 30 bytes against a candidate's ~390.
+//
+// The key is a family name (`powershell:git status`), which is the same class
+// of data the candidate map already holds; no path, argument or prompt text is
+// involved. Capped in turn, cheapest-first, so this cannot become the unbounded
+// structure it exists to bound.
+const PRUNED_CANDIDATES_LIMIT = 2000;
+function prunedCandidates(value) {
+  if (!object(value)) return {};
+  const entries = [];
+  for (const [key, runs] of Object.entries(value)) {
+    const name = clean(key, 512);
+    const total = Math.max(0, Math.floor(Number(runs) || 0));
+    if (name) entries.push([name, total]);
+  }
+  entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const result = {};
+  for (const [key, runs] of entries.slice(0, PRUNED_CANDIDATES_LIMIT)) result[key] = runs;
+  return result;
+}
 function emptyState(mode, threshold) {
   return {
-    version: VERSION, mode, threshold, candidates: {}, observationHashes: {}, cursors: {},
+    version: VERSION, sourceVersion: VERSION,
+    mode, threshold, candidates: {}, observationHashes: {}, cursors: {},
     applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
     codexTargets: {}, managedClaude: {}, managedHits: {}, managedHitsAt: null,
     derivedGuidance: { accepted: [], declined: [] },
+    prunedCandidates: {},
     lastScanAt: null, lastScanStats: null,
     lastApplication: null,
   };
@@ -388,19 +517,39 @@ function lastApplication(value) {
     },
   } : null;
 }
-function sanitizeState(raw, mode, threshold) {
+function sanitizeState(input, mode, threshold) {
   const state = emptyState(mode, threshold);
+  if (!object(input)) return state;
+  // `version` was written and never read, so the field could not do the one
+  // thing a version field is for. Now it decides: a state below the supported
+  // floor, or one whose migration chain has a missing step, is reset rather
+  // than half-read, and a state from a NEWER copy of the tool is still readable
+  // but is remembered as newer so `save()` can refuse to write over it.
+  const raw = migrateState(input);
   if (!object(raw)) return state;
+  state.sourceVersion = declaredVersion(raw);
   state.mode = MODES.has(raw.mode) ? raw.mode : mode;
   state.threshold = positive(raw.threshold, threshold);
   if (object(raw.candidates)) for (const value of Object.values(raw.candidates)) {
     const item = candidate(value, state.threshold);
-    if (item) state.candidates[item.key] = item;
+    if (!item) continue;
+    // Two keys can normalize onto one family (the `.exe` migration). Merging
+    // rather than overwriting is what stops the rename discarding the counts of
+    // whichever half happened to be read second.
+    const prior = state.candidates[item.key];
+    state.candidates[item.key] = prior ? mergeStoredCandidates(prior, item, state.threshold) : item;
   }
   if (object(raw.observationHashes)) for (const [id, value] of Object.entries(raw.observationHashes)) {
     if (!/^[a-f0-9]{64}$/.test(id) || !object(value)) continue;
-    const key = clean(value.key, 512);
-    if (key) state.observationHashes[id] = {
+    const stored = clean(value.key, 512);
+    if (!stored) continue;
+    // Follow the family if its key was migrated, so the dedupe entry keeps
+    // working. Only when the migrated family actually exists: a blind rewrite
+    // could point a hash at a family that was never there, and losing a hash
+    // costs a re-count of bytes a cursor has already consumed.
+    const migrated = normalizeCandidateKey(stored);
+    const key = (state.candidates[stored] || !state.candidates[migrated]) ? stored : migrated;
+    state.observationHashes[id] = {
       key, outcome: OUTCOMES.has(value.outcome) ? value.outcome : 'unknown',
       source: clean(value.source, 32) || 'unknown',
     };
@@ -418,14 +567,29 @@ function sanitizeState(raw, mode, threshold) {
   state.managedHits = managedHits(raw.managedHits);
   state.managedHitsAt = clean(raw.managedHitsAt, 64) || null;
   state.derivedGuidance = derivedGuidance(raw.derivedGuidance);
+  state.prunedCandidates = prunedCandidates(raw.prunedCandidates);
   state.lastScanAt = clean(raw.lastScanAt, 64) || null;
-  if (object(raw.lastScanStats)) state.lastScanStats = {
-    files: Math.max(0, Number(raw.lastScanStats.files) || 0),
-    observations: Math.max(0, Number(raw.lastScanStats.observations) || 0),
-    errors: Math.max(0, Number(raw.lastScanStats.errors) || 0),
-  };
+  state.lastScanStats = scanStats(raw.lastScanStats);
   state.lastApplication = lastApplication(raw.lastApplication);
   return state;
+}
+// The writer used to write five fields and this reader rebuilt three, so
+// `prunedObservations` vanished on reload: a value the scan reported and the
+// state file held, dropped by the whitelist that was supposed to reject junk.
+// Every field the scan reports is listed here, and `blindScan` among them,
+// because "the cursor map was preserved because nothing was enumerated" is the
+// one thing a consumer tuning retry backoff cannot infer from the error count.
+function scanStats(value) {
+  if (!object(value)) return null;
+  const count = (name) => Math.max(0, Number(value[name]) || 0);
+  return {
+    files: count('files'), observations: count('observations'), errors: count('errors'),
+    prunedObservations: count('prunedObservations'),
+    prunedCursors: count('prunedCursors'),
+    prunedCandidates: count('prunedCandidates'),
+    prunedGrants: count('prunedGrants'),
+    blindScan: value.blindScan === true,
+  };
 }
 function persistentState(state) {
   const candidates = {};
@@ -434,7 +598,9 @@ function persistentState(state) {
     candidates[key] = {
       key, tool: item.tool, kind: item.kind, shell: item.shell, root: item.root,
       prefix: item.prefix.slice(),
-      claudePermission: item.claudePermission, risk: item.risk, baseAutoSafe: item.baseAutoSafe,
+      claudePermission: item.claudePermission,
+      permissions: item.permissions.slice(),
+      risk: item.risk, baseAutoSafe: item.baseAutoSafe,
       complex: item.complex, reasons: item.reasons.slice(), sources: item.sources.slice(),
       counts: { ...item.counts },
     };
@@ -446,7 +612,8 @@ function persistentState(state) {
     codexTargets: codexTargets(state.codexTargets), managedClaude: managedClaude(state.managedClaude),
     managedHits: managedHits(state.managedHits), managedHitsAt: state.managedHitsAt,
     derivedGuidance: derivedGuidance(state.derivedGuidance),
-    lastScanAt: state.lastScanAt, lastScanStats: state.lastScanStats,
+    prunedCandidates: prunedCandidates(state.prunedCandidates),
+    lastScanAt: state.lastScanAt, lastScanStats: scanStats(state.lastScanStats),
     lastApplication: state.lastApplication,
   };
 }
@@ -465,8 +632,18 @@ function mergeCandidate(existing, fresh, threshold) {
   existing.risk = maxRisk(existing.risk, fresh.risk);
   existing.baseAutoSafe = existing.baseAutoSafe && fresh.baseAutoSafe;
   existing.complex = existing.complex || fresh.complex;
-  if (existing.claudePermission !== fresh.claudePermission) existing.claudePermission = null;
-  if (JSON.stringify(existing.prefix) !== JSON.stringify(fresh.prefix)) {
+  if (existing.claudePermission !== fresh.claudePermission) {
+    // `git` and `git.exe` are two spellings of one grant, not a conflict. Any
+    // other disagreement still nulls the permission, as it always has.
+    existing.claudePermission =
+      preferredPermissionSpelling(existing.claudePermission, fresh.claudePermission);
+  }
+  existing.permissions = permissionSpellings(
+    [...(existing.permissions || []), ...(fresh.permissions || [])], existing.claudePermission,
+  );
+  const mergedPrefix = preferredPrefixSpelling(existing.prefix, fresh.prefix);
+  if (mergedPrefix) existing.prefix = mergedPrefix;
+  else {
     existing.complex = true;
     existing.baseAutoSafe = false;
     existing.reasons.push('prefix-conflict');
@@ -474,6 +651,28 @@ function mergeCandidate(existing, fresh, threshold) {
   existing.reasons = [...new Set([...existing.reasons, ...fresh.reasons])].sort();
   existing.sources = [...new Set([...existing.sources, ...fresh.sources])].sort();
   return refresh(existing, threshold);
+}
+// Two STORED candidates that now share one key, which only happens when a key
+// migration folds them together. Unlike `mergeCandidate` the counts add up:
+// both sides are already-counted evidence with their own observation hashes, so
+// discarding either would lose runs that nothing can re-derive.
+function mergeStoredCandidates(left, right, threshold) {
+  const winner = left.counts.total >= right.counts.total ? left : right;
+  const other = winner === left ? right : left;
+  winner.risk = maxRisk(winner.risk, other.risk);
+  winner.baseAutoSafe = winner.baseAutoSafe && other.baseAutoSafe;
+  winner.claudePermission =
+    preferredPermissionSpelling(winner.claudePermission, other.claudePermission);
+  winner.permissions = permissionSpellings(
+    [...winner.permissions, ...other.permissions], winner.claudePermission,
+  );
+  const mergedPrefix = preferredPrefixSpelling(winner.prefix, other.prefix);
+  if (mergedPrefix) winner.prefix = mergedPrefix;
+  winner.reasons = [...new Set([...winner.reasons, ...other.reasons])].sort();
+  winner.sources = [...new Set([...winner.sources, ...other.sources])].sort();
+  winner.complex = winner.reasons.some((reason) => COMPLEX_REASONS.has(reason));
+  for (const name of OUTCOMES) winner.counts[name] += other.counts[name];
+  return refresh(winner, threshold);
 }
 function observedOutcome(item) {
   if (item.counts?.success === 1) return 'success';
@@ -498,6 +697,101 @@ function pruneObservationHashes(state, limit) {
   state.observationHashes = Object.fromEntries(kept);
   return entries.length - kept.length;
 }
+// Cursors used to be pruned only as a side effect of `scan()` replacing the map
+// wholesale. The blind-scan guard suspends that replacement, and it fires for a
+// legitimately emptied root as well as for an unreadable one, so in that case
+// nothing pruned them at all and the file could only grow.
+//
+// Existence-based pruning is not available there: a cursor is keyed by a
+// SHA-256 of its path, so there is no path left to stat, and a blind scan by
+// definition enumerated nothing to compare against. What IS available is a cap.
+// A cursor is a pure cache -- losing one costs a single re-read of that file,
+// and the re-read is deduped by `observationHashes`, so it cannot inflate a
+// count -- which is what makes evicting without evidence safe here and not safe
+// for candidates.
+//
+// Eviction is by `mtimeMs`, oldest transcript first, because the oldest
+// transcript is the one least likely to be appended to again and therefore the
+// cheapest cursor to have to rebuild. Ties break on the key so the result is
+// deterministic.
+const CURSOR_LIMIT = 5000;
+function pruneCursors(state, limit) {
+  const entries = Object.entries(state.cursors);
+  if (!(limit > 0) || entries.length <= limit) return 0;
+  const ranked = entries.slice().sort((a, b) =>
+    (b[1].mtimeMs || 0) - (a[1].mtimeMs || 0) || a[0].localeCompare(b[0]));
+  state.cursors = Object.fromEntries(ranked.slice(0, limit));
+  return entries.length - limit;
+}
+
+// `state.candidates` was the one persisted structure with no cap and no
+// eviction, on axes that grow without bound: one entry per domain ever fetched,
+// one per MCP server-and-action.
+//
+// Evidence is not thrown away, in two senses. Nothing that carries a DECISION
+// or has reached the bar is evictable at all -- applied, reviewed, auto-safe or
+// at-threshold -- so the cap can only ever reach families still below the
+// success threshold. And what is evicted leaves a tombstone in
+// `prunedCandidates` recording the family name and its run total, so "this
+// family was observed, N times" survives even though the derived fields do not.
+// The tombstone count is reported by `status()`, so it is not a field written
+// and read by nobody.
+//
+// The tombstone is a record, not a seed: a family observed again starts a fresh
+// candidate from zero. Re-counting from an old total would double-count,
+// because `pruneObservationHashes` drops the hashes of a family that is gone.
+const CANDIDATE_LIMIT = 1000;
+function pruneCandidates(state, limit, protectedKeys) {
+  const keys = Object.keys(state.candidates);
+  if (!(limit > 0) || keys.length <= limit) return 0;
+  const evictable = keys.filter((key) => {
+    const item = state.candidates[key];
+    if (protectedKeys.has(key)) return false;
+    return !item.autoSafe && !item.meetsThreshold;
+  });
+  // Cheapest evidence first: fewest runs, then the key, so two scans of the
+  // same state evict the same families.
+  evictable.sort((a, b) =>
+    state.candidates[a].counts.total - state.candidates[b].counts.total || a.localeCompare(b));
+  const excess = Math.min(evictable.length, keys.length - limit);
+  for (const key of evictable.slice(0, excess)) {
+    const runs = state.candidates[key].counts.total;
+    state.prunedCandidates[key] = Math.max(state.prunedCandidates[key] || 0, runs);
+    delete state.candidates[key];
+  }
+  state.prunedCandidates = prunedCandidates(state.prunedCandidates);
+  return excess;
+}
+
+// The same reconciliation `pruneObservationHashes` does, for the grant lists. A
+// key whose candidate `sanitizeState` dropped sat in `applied.claude` and
+// `reviewed.claude` forever, and the v1.4.0 crash fix guarded the read rather
+// than removing the orphan.
+//
+// No provenance is discarded by this that an apply does not discard already:
+// `applyUnlocked`'s retention filter drops exactly these keys from `nextClaude`
+// on every non-observe apply, and an orphan contributes no permission to the
+// claims registry either way, because the permission is rendered FROM the
+// candidate. This only makes the state agree with that sooner, and makes
+// `--learn status` stop listing a grant whose family no longer exists.
+function pruneGrantKeys(state) {
+  let removed = 0;
+  const keep = (list) => {
+    const next = list.filter((key) => state.candidates[key]);
+    removed += list.length - next.length;
+    return next;
+  };
+  for (const kind of ['claude', 'codex']) {
+    state.applied[kind] = keep(state.applied[kind]);
+    state.reviewed[kind] = keep(state.reviewed[kind]);
+  }
+  for (const record of Object.values(state.codexTargets)) {
+    record.applied = keep(record.applied);
+    record.reviewed = keep(record.reviewed);
+  }
+  return removed;
+}
+
 function observationHash(observation, key) {
   const identity = observation?.id || JSON.stringify([
     observation?.source, observation?.tool, observation?.callId, observation?.command,
@@ -602,6 +896,10 @@ function createAutoLearnManager(options = {}) {
   const lockStaleMs = Number.isFinite(options.lockStaleMs) ? Math.max(0, options.lockStaleMs) : 10 * 60 * 1000;
   const observationHashLimit = Number.isFinite(options.observationHashLimit)
     ? Math.max(0, Math.floor(options.observationHashLimit)) : 20000;
+  const cursorLimit = Number.isFinite(options.cursorLimit)
+    ? Math.max(0, Math.floor(options.cursorLimit)) : CURSOR_LIMIT;
+  const candidateLimit = Number.isFinite(options.candidateLimit)
+    ? Math.max(0, Math.floor(options.candidateLimit)) : CANDIDATE_LIMIT;
   // Cached, because the policy is a client-refreshed cache and re-reading it per
   // candidate would only add I/O to a listing — but keyed on a cheap stat rather
   // than held for the manager's lifetime. Nothing watches the policy file, and
@@ -680,7 +978,36 @@ function createAutoLearnManager(options = {}) {
     for (const item of Object.values(state.candidates)) refresh(item, state.threshold);
     return state;
   }
+  // Refuses to write over a state file a NEWER copy of the tool wrote.
+  //
+  // `persistentState` serializes a whitelist of known keys, which is right for
+  // rejecting junk and wrong for coexisting with a newer build: an older copy
+  // round-trips the file and writes it back WITHOUT the fields it has never
+  // heard of. That is not hypothetical -- three extension versions were
+  // installed at once on a real machine, each with its own watcher and timer
+  // against one state file, and `managedHits` was emptied twice within minutes
+  // of being populated. The advisory lock does not help, because every writer
+  // is individually correct and takes the lock properly.
+  //
+  // Carrying unknown keys through instead was the other candidate fix and is
+  // the weaker one: it preserves a field's BYTES without preserving its
+  // meaning, so a field whose shape changed is carried forward wrong, and it
+  // reinstates exactly the junk the whitelist exists to reject. Refusing is
+  // strict, loud, and would have named the multi-install problem the first time
+  // it happened instead of leaving a table that emptied itself.
+  //
+  // The version read is the one this process loaded. A newer copy that writes
+  // between our load and our save is what the lock serializes, and the next
+  // load refuses.
   function save(state) {
+    if (Number.isInteger(state.sourceVersion) && state.sourceVersion > VERSION) {
+      throw new Error(
+        `Refusing to write Auto Learn state version ${VERSION} over version ` +
+        `${state.sourceVersion}: ${statePath} was written by a newer copy of this tool, ` +
+        'and saving would drop the fields this copy does not know about. ' +
+        'Upgrade or uninstall the older install.',
+      );
+    }
     atomicWrite(statePath, JSON.stringify(persistentState(state), null, 2) + '\n');
   }
   // Shared with the extension wildcarding pass so the two writers of
@@ -708,7 +1035,8 @@ function createAutoLearnManager(options = {}) {
     ];
     return {
       ...item, prefix: item.prefix.slice(), reasons: item.reasons.slice(),
-      sources: item.sources.slice(), counts: { ...item.counts },
+      sources: item.sources.slice(), permissions: item.permissions.slice(),
+      counts: { ...item.counts },
       fingerprint: candidateFingerprint(item), eligibleTargets,
       policy: policyVerdict,
       pendingTargets: eligibleTargets.filter((target) => !to.includes(target)),
@@ -788,8 +1116,17 @@ function createAutoLearnManager(options = {}) {
     // Without this the report could name a blocked family but never say which
     // rule was expensive, which is the only question a policy owner can act on.
     const costs = new Map();
+    // `clean` on the way in, for the same reason the hit table applies it on the
+    // way in. The two suppliers disagreed: a managed-hits key has been through
+    // `clean(rule, 200)` since it was recorded, while the inert-family side
+    // arrives as the raw string from `~/.claude/remote-settings.json`, and that
+    // string is interpolated into the user's CLAUDE.md by `derived-guidance`.
+    // Sanitising at the interpolation (`cleanRule` there) makes the block safe;
+    // sanitising here as well is what makes the two suppliers agree, so a rule
+    // that reaches this table by both routes cannot land as two entries whose
+    // prompt counts each understate the real cost.
     const addCost = (rule, runs, tools) => {
-      const text = typeof rule === 'string' ? rule : '';
+      const text = clean(rule, 200);
       if (!text || !(runs > 0)) return;
       const entry = costs.get(text) || { rule: text, prompts: 0, tools: [] };
       entry.prompts += runs;
@@ -941,6 +1278,9 @@ function createAutoLearnManager(options = {}) {
       lastApplicationAt: state.lastApplication?.at || null,
       lastApplication: state.lastApplication ? { at: state.lastApplication.at } : null,
       canUndo: Boolean(state.lastApplication), candidateCount: all.length,
+      // Families the candidate cap has evicted. Reported rather than merely
+      // stored, so "this family was observed and then dropped" is answerable.
+      prunedCandidateCount: Object.keys(state.prunedCandidates).length,
       counts: {
         total: all.length, safe: all.filter((item) => item.autoSafe).length,
         review: all.filter((item) => item.disposition === 'review').length,
@@ -1026,6 +1366,23 @@ function createAutoLearnManager(options = {}) {
       else fs.unlinkSync(change.path);
     } catch { conflicts.push(change.path); }
     return conflicts;
+  }
+
+  // The user's own deny entries, read from the same file the grant is written
+  // to. An unreadable or malformed settings.json yields none rather than
+  // throwing: the apply below parses it again and reports the parse failure
+  // properly, and withholding every grant because a reader could not run would
+  // be a worse answer than the one this is protecting against.
+  function readUserDeny() {
+    if (!claudeSettingsPath) return [];
+    const now = snapshot(claudeSettingsPath);
+    if (!now.exists) return [];
+    let settings;
+    try { settings = JSON.parse(now.content.toString('utf8').replace(/^\uFEFF/, '')); }
+    catch { return []; }
+    if (!object(settings)) return [];
+    const deny = settings.permissions?.deny;
+    return Array.isArray(deny) ? deny.filter((rule) => typeof rule === 'string' && rule.trim()) : [];
   }
 
   function applyUnlocked(state, request = {}) {
@@ -1121,12 +1478,28 @@ function createAutoLearnManager(options = {}) {
     // stats the policy file on every call to validate its cache stamp, and the
     // verdict must not change halfway through one application regardless.
     const policy = useClaude ? managedPolicy() : null;
+    // The user's OWN deny list, which this path never consulted. Deny beats
+    // allow, so writing an entry a user deny already blocks produces a dead
+    // entry and a report that says it was applied. `planPromotions` in
+    // `local-settings.js` has checked `userDeny` and withheld all along; this is
+    // the same check on the other writer, and the same class of bug the `inert`
+    // gate above was added to fix. Read once per application, for the reason
+    // given above.
+    const userDeny = useClaude ? readUserDeny() : [];
     if (useClaude) for (const item of selected) {
       if (!claudeEligible(item, includeReviewed)) continue;
       if (assessPermission(policy, item.claudePermission) === 'inert') {
         withheld.push({
           key: item.key, permission: item.claudePermission,
           ...(overridingRule(policy, item.claudePermission) || {}),
+        });
+        continue;
+      }
+      const denied = userDeny.find((rule) => coversPermission(rule, item.claudePermission));
+      if (denied) {
+        withheld.push({
+          key: item.key, permission: item.claudePermission,
+          decision: 'deny', rule: denied, source: 'user-deny',
         });
         continue;
       }
@@ -1156,23 +1529,43 @@ function createAutoLearnManager(options = {}) {
       if (!object(settings)) throw new Error('Claude settings must be a JSON object');
       let current = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow.slice() : [];
       const items = nextClaude.map((key) => state.candidates[key]).filter(Boolean);
+      // A list per key, not one permission. A family that observed both `git`
+      // and `git.exe` renders two entries, and taking only the first would
+      // write one of them and claim neither the other nor the runs behind it.
       const permissionsByKey = new Map();
       for (const item of items) {
-        const permission = renderClaudePermissions([item], { includeReviewed: true })[0] || null;
-        if (permission) permissionsByKey.set(item.key, permission);
+        const rendered = renderClaudePermissions([item], { includeReviewed: true });
+        if (rendered.length) permissionsByKey.set(item.key, rendered);
       }
 
       const claimsBefore = snapshot(claudeClaimsPath);
       const claims = parseClaudeClaims(claimsBefore, claudeClaimsPath);
-      const desiredPermissions = [...new Set(permissionsByKey.values())];
+      const desiredPermissions = [...new Set([].concat(...permissionsByKey.values()))];
       const legacyManaged = new Set(Object.values(nextManagedClaude));
+      // Which desired entries a broader rule ALREADY IN THE FILE covers. These
+      // are the ones the wildcarding pass prunes right after an apply, so
+      // writing them again is churn and claiming them is a claim on something
+      // the file does not hold. Recorded on the claim instead; see
+      // `updateClaudeClaims`.
+      const coveredBy = new Map();
+      for (const permission of desiredPermissions) {
+        if (current.includes(permission)) continue;
+        const parent = current.find((entry) =>
+          typeof entry === 'string' && isCoveredBy(permission, entry));
+        if (parent) coveredBy.set(permission, parent);
+      }
       current = updateClaudeClaims(
-        claims, claudeClaimantId, desiredPermissions, current, legacyManaged,
+        claims, claudeClaimantId, desiredPermissions, current, legacyManaged, coveredBy,
       );
-      const allow = mergeClaudeAllow(current, items, null, { includeReviewed: true });
+      const allow = mergeClaudeAllow(current, items, null, { includeReviewed: true })
+        .filter((entry) => !coveredBy.has(entry));
+      // Keyed by PERMISSION rather than by candidate key, because a key can now
+      // carry more than one. Nothing reads these keys -- both consumers take
+      // `Object.values` -- so the map stays a set of permissions by another
+      // name, and an older state keyed by candidate key still reads correctly.
       nextManagedClaude = {};
-      for (const [key, permission] of permissionsByKey) {
-        if (claims.permissions[permission]?.managed) nextManagedClaude[key] = permission;
+      for (const permission of desiredPermissions) {
+        if (claims.permissions[permission]?.managed) nextManagedClaude[permission] = permission;
       }
 
       const updated = {
@@ -1419,6 +1812,18 @@ function createAutoLearnManager(options = {}) {
         if (accepted) acceptedObservations += 1;
       }
       for (const item of Object.values(state.candidates)) refresh(item, state.threshold);
+      // Candidates first, because evicting one orphans its grant keys and its
+      // observation hashes, and both of the passes that reconcile those run
+      // after it. A grant key is evidence of a human decision, so a family that
+      // holds one is never evictable in the first place.
+      const grantedKeys = new Set([
+        ...state.applied.claude, ...state.applied.codex,
+        ...state.reviewed.claude, ...state.reviewed.codex,
+        ...Object.values(state.codexTargets).flatMap((record) =>
+          [...record.applied, ...record.reviewed]),
+      ]);
+      const prunedCandidateCount = pruneCandidates(state, candidateLimit, grantedKeys);
+      const prunedGrants = pruneGrantKeys(state);
       const prunedObservations = pruneObservationHashes(state, observationHashLimit);
       // A scan that enumerated NO FILES AT ALL does not get to speak for the
       // cursor map. `findJsonlFiles` cannot read a root it has no access to --
@@ -1459,12 +1864,27 @@ function createAutoLearnManager(options = {}) {
       // Enforce the cap on the way out, so one scan cannot leave the file
       // holding more rules than the normalizer would accept reading it back.
       state.managedHits = managedHits(state.managedHits);
+      // Last, because it has to run against the map this scan just decided on,
+      // whether that is the replaced one or the preserved one. The preserved
+      // case is the one that matters: it is the only path on which nothing else
+      // prunes a cursor at all.
+      const prunedCursorCount = pruneCursors(state, cursorLimit);
       state.lastScanAt = now();
       state.lastScanStats = {
         files: Array.isArray(result.files) ? result.files.length : Object.keys(state.cursors).length,
         observations: acceptedObservations,
         errors: Array.isArray(result.files) ? result.files.filter((item) => item.mode === 'error').length : 0,
         prunedObservations,
+        prunedCursors: prunedCursorCount,
+        prunedCandidates: prunedCandidateCount,
+        prunedGrants,
+        // "The cursor map was preserved because nothing was enumerated." The
+        // error count already says a root failed; it does not say the scan was
+        // therefore unable to look at anything, and a consumer tuning retry
+        // backoff had to infer that from two numbers that also describe an
+        // ordinary quiet scan. The signal is in the data -- walk failures carry
+        // `scope: 'root'` -- so this only surfaces it.
+        blindScan,
       };
       save(state);
       const application = state.mode === 'auto-safe'
@@ -1473,6 +1893,8 @@ function createAutoLearnManager(options = {}) {
         scannedAt: state.lastScanAt, files: state.lastScanStats.files,
         observations: acceptedObservations, newObservations, updatedObservations,
         prunedObservations,
+        prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidateCount, prunedGrants,
+        blindScan,
         candidates: Object.keys(state.candidates).length, application, apply: application,
       };
     });

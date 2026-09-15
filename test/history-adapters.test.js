@@ -903,3 +903,100 @@ test('an unreadable root is reported as an error rather than as an empty corpus'
   });
   assert.deepEqual(absent.files, []);
 });
+
+// The nested extractor learned both names for the shell entry point after a
+// 0.153.x rollout produced zero observations from the whole Codex corpus. The
+// non-nested reader was left knowing only `shell_command`, which is the same
+// defect on the other path: a plain `function_call` carrying the command in its
+// arguments yields nothing at all, and an empty observation list is
+// indistinguishable here from a session that ran no shell.
+//
+// NOT VERIFIED AGAINST A REAL SAMPLE. No transcript on this machine carries
+// this shape, so the fixture asserts only what the reader is being asked to
+// accept: either name, either argument spelling, and nothing else assumed.
+test('a non-nested exec_command function call is observed, under either argument spelling', () => {
+  const transcript = jsonl(
+    { type: 'session_meta', payload: { id: 'codex-session', cwd: 'D:\repo' } },
+    responseItem({
+      type: 'function_call', name: 'exec_command', call_id: 'cmd-call',
+      arguments: JSON.stringify({ cmd: 'git status --short' }),
+    }),
+    responseItem({
+      type: 'function_call', name: 'functions.exec_command', call_id: 'command-call',
+      arguments: JSON.stringify({ command: 'rg TODO src' }),
+    }),
+    responseItem({ type: 'function_call_output', call_id: 'cmd-call', output: { exit_code: 0 } }),
+    responseItem({ type: 'function_call_output', call_id: 'command-call', output: { exit_code: 1 } }),
+  );
+
+  const observations = parseCodexJsonl(transcript, { file: 'D:\history\codex.jsonl', platform: 'win32' });
+  assert.equal(observations.length, 2);
+  assert.equal(byCallId(observations, 'cmd-call').command, 'git status --short');
+  assert.equal(byCallId(observations, 'cmd-call').status, 'success');
+  assert.equal(byCallId(observations, 'command-call').command, 'rg TODO src');
+  assert.equal(byCallId(observations, 'command-call').status, 'failed');
+});
+
+test('widening the name set does not widen what counts as a shell call', () => {
+  // The control. `exec_command` is accepted by name, so the guard that matters
+  // now is the one on the arguments: a call with neither spelling, and a call
+  // by some other name, must still produce nothing.
+  const transcript = jsonl(
+    { type: 'session_meta', payload: { id: 'codex-session', cwd: 'D:\repo' } },
+    responseItem({
+      type: 'function_call', name: 'exec_command', call_id: 'no-command',
+      arguments: JSON.stringify({ workdir: 'D:\repo' }),
+    }),
+    responseItem({
+      type: 'function_call', name: 'exec_command', call_id: 'blank-command',
+      arguments: JSON.stringify({ cmd: '   ' }),
+    }),
+    responseItem({
+      type: 'function_call', name: 'apply_patch', call_id: 'other-tool',
+      arguments: JSON.stringify({ cmd: 'git status' }),
+    }),
+  );
+  assert.deepEqual(parseCodexJsonl(transcript, { platform: 'win32' }), []);
+});
+
+// Invariant 1 is asserted as "no observed FILE path leaves the parser", and a
+// URL slipped past the shape of that assertion: `tool-learn.js` returned
+// `input.url` verbatim as `observation.command`, so a path, a query string or a
+// token in the URL sat on the observation right beside the rule it was supposed
+// to be excluded by. Nothing downstream ever wanted more than the host.
+test('a fetched URL reaches the parser as an origin, never as a path or a query', () => {
+  const transcript = jsonl({
+    type: 'assistant',
+    sessionId: 'claude-session',
+    cwd: 'D:\repo',
+    message: {
+      role: 'assistant',
+      content: [{
+        type: 'tool_use', id: 'fetch-1', name: 'WebFetch',
+        input: { url: 'https://user:pw@Docs.Example.com:8443/uniquesecretpath?token=uniquetokenvalue#frag' },
+      }],
+    },
+  });
+
+  const [observation] = parseClaudeJsonl(transcript, { file: 'D:\history\claude.jsonl' });
+  assert.equal(observation.command, 'https://docs.example.com',
+    'scheme and host, and nothing else');
+  const serialized = JSON.stringify(observation);
+  for (const leak of ['uniquesecretpath', 'uniquetokenvalue', 'user:pw', '8443', 'frag']) {
+    assert.ok(!serialized.includes(leak), `an observation must not carry "${leak}"`);
+  }
+});
+
+test('a fetch target that is not an http origin produces no observation at all', () => {
+  // Previously these still became observations carrying the raw string, and
+  // were only discarded later by `toolInvocation`. Dropping them at the parser
+  // is what makes "no URL leaves the parser" true rather than nearly true.
+  const transcript = jsonl(...['file:///etc/uniquepasswdfile', 'not a url', 'https://localhost/x'].map((url, index) => ({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: `fetch-${index}`, name: 'WebFetch', input: { url } }],
+    },
+  })));
+  assert.deepEqual(parseClaudeJsonl(transcript, { file: 'D:\history\claude.jsonl' }), []);
+});

@@ -49,7 +49,7 @@ function parseArgs(argv) {
 }
 
 function readAllow(settingsPath) {
-  const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^﻿/, ''));
+  const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, ''));
   const allow = raw && raw.permissions && Array.isArray(raw.permissions.allow) ? raw.permissions.allow : [];
   return allow.filter((entry) => typeof entry === 'string' && entry);
 }

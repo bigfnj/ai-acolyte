@@ -38,10 +38,10 @@ tidiness rather than performance.
 
 ### Managed-block removal can fuse the user's own lines
 
-`src/agent-guidance.js:147-150`. Both newline sweeps eat every adjacent newline
-and only the end-of-file case puts one back, against a file whose contract
-(`:22-25`) is that the block is "removable without touching a byte of the user's
-own text". Measured:
+Both newline sweeps eat every adjacent newline and only the end-of-file case puts
+one back: `let above = range.start` at `src/agent-guidance.js:170-173`, against a
+file whose contract (`:22-25`) is that the block is "removable without touching a
+byte of the user's own text". Measured:
 
     CASE 1  off        -> "my own notesmore of my notes\n"     <- two user lines fused
     CASE 2  first off  -> "user preamble<!--GB-->\nGATES\n<!--GE-->\n"
@@ -52,7 +52,7 @@ live `~/.claude/CLAUDE.md` has the block at lines 1-31 with user content from 33
 so `start === 0`; any content added above the block, or any second block below
 it, arms this.
 
-Related, same file: `blockRange` (`:113-119`) takes `indexOf(begin)` then the
+Related, same file: `blockRange` (`:130-136`) takes `indexOf(begin)` then the
 **first** `indexOf(end, start)`, with no guard against a body containing its own
 END marker. The gates body is arbitrary user-corpus text and the derived body
 embeds managed rule text, so a memory whose `<!-- gate -->` section documents
@@ -61,9 +61,10 @@ tooling — truncates the range; `apply(text, true)` then leaves the old body ta
 plus an orphaned END marker in the file, accumulating on every toggle.
 
 And there are **five unsynchronized writers** of that one file: CLI guidance
-(`bin/wildcard-perms:579`), CLI gates (`:646`), extension guidance
-(`extension.js:2725,2774`), extension gates (`:2935,2999`) and `decideDerived`
-(`auto-learn-manager.js:921`). Only the last holds a lock, and it is the *policy*
+(`setGuidanceAll` at `bin/wildcard-perms:579`), CLI gates (`:646`), extension
+guidance (`setGuidanceAll` at `extension.js:2799,2848`), extension gates
+(`:3009,3073`) and `decideDerived` at `auto-learn-manager.js:1221`. Only the
+last holds a lock, and it is the *policy*
 lock, which none of the others take — so it buys nothing here. The extension also
 recompiles gates automatically on a memory-dir change, so an automatic write can
 race a manual `--guidance off`. Individually recoverable; combined with the two
@@ -91,9 +92,9 @@ overwrite the good copy with the bad one.
   4.48 to 2.36 ms per 285 candidates against 300 rules. Managed boxes only.
 
 **Checked and NOT worth doing**, recorded so it is not re-derived: the
-per-observation `aggregateObservations([obs])` at `auto-learn-manager.js:1369`
+per-observation `aggregateObservations([observation], { threshold: 1 })` at `auto-learn-manager.js:1771`
 looks like a batch-function-in-a-loop but measured 53.29 ms vs 50.21 ms batched
-over 1,422 observations (6%); `new RegExp` at `history-adapters.js:429` never
+over 1,422 observations (6%); `new RegExp` at `history-adapters.js:445` never
 appears in the CPU profile; multiple `readSettings()` per extension event is
 0.127 ms each and the freshness is deliberate and documented; the double
 JSON.stringify compare is 0.038 ms; `memory/recall.py` has no hot-path issue,
@@ -119,10 +120,10 @@ under the 2026-09-10 audit below.
   temp+rename, so a terminated write leaves a temp file rather than a corrupt
   settings.json, which makes a generous deadline defensible — but it is a
   semantics change to teardown and wants its own decision.
-- **Cancel targets the wrong request** (`extension.js:681-683`).
+- **Cancel targets the wrong request** (`extension.js:696-698`).
   `token.onCancellationRequested(() => activeReq?.destroy())` only ever holds the
-  outermost httpsGetFollow return, while httpsGetFollow (`:626-639`) builds a
-  fresh req per redirect and surfaces none of them. The comment at 620-623 says
+  outermost httpsGetFollow return, while httpsGetFollow (`:640-654`) builds a
+  fresh req per redirect and surfaces none of them. The comment at 635-636 says
   the model's /resolve/ URLs always 302, so **Cancel is a no-op on every real
   download** and the 32 MB transfer runs to completion. No deactivate path either.
 
@@ -145,19 +146,20 @@ rather than removed.
 
 Six option keys are read with zero suppliers anywhere including tests, each
 leaving an unreachable branch: `managedPolicyPath` (3 reads, 0 writes),
-`defaultTool` (makes `history-adapters.js:662` an unreachable early return),
+`defaultTool` (makes `history-adapters.js:718` an unreachable early return),
 `priorCursors`, `busyMessage` (`policy-lock.js:43-45`), and `homeDir` /
-`successThreshold` — the last two unreachable because `extension.js:887-888` sets
+`successThreshold` — the last two unreachable because `extension.js:941-942` sets
 both spellings on the same object, so the `||` and `??` legs never fire.
 
-Also unreachable: `extension.js:1050-1051` (`typeof manager?.overview ===
+Also unreachable: `extension.js:1058` (`typeof manager?.overview ===
 'function'` is always true, the same shape as the three fallbacks already
-recorded here), `policy-exporters.js:650-652` (a mergeClaudeAllow overload shim
-nobody calls with an object third argument) and `:658-661` (that third parameter
+recorded here), `policy-exporters.js:682-686` (a mergeClaudeAllow overload shim
+nobody calls with an object third argument) and `:691-694` (that third parameter
 is vestigial in production; only a test passes a function).
 
-Two corrections to this file's own claims: `list:` at
-`auto-learn-manager.js:1549` has **zero** consumers anywhere, so it is dead on
+Two corrections to this file's own claims:
+`list: listCandidates` at `auto-learn-manager.js:2009` has **zero** consumers
+anywhere, so it is dead on
 both sides rather than merely an unreachable fallback; and "verdicts.unknown can
 no longer be non-zero" is **half wrong** — the `!policy.present` path is provably
 dead, but `managed-policy.js:162` (`!toolOf(permission)`) is reachable, because
@@ -176,8 +178,9 @@ export removes a wrapper and the pretense of a second implementation.
 
 `policy-lock.js` carries two busy strings for one condition —
 `POLICY_LOCK_BUSY_MESSAGE:20` and the default `busy()` at `:45` — and the thrown
-`conflict.message` is discarded by every consumer (`extension.js:2079`, `:2250`,
-`bin/wildcard-perms`), all of which substitute the constant. With the dead
+`conflict.message` is discarded by every consumer, each substituting
+`POLICY_LOCK_BUSY_MESSAGE` instead (`extension.js:2422`, `:2686`,
+`bin/wildcard-perms`). With the dead
 `options.busyMessage` above, the whole indirection collapses to the constant.
 
 (Not a defect, noted so nobody "fixes" it: the duplicated
@@ -290,21 +293,22 @@ what was deliberately left.
 
 ### Small, confirmed, no urgency
 
-- Dead: `mineWildcard` (`src/permissions.js:171`), `readConfig`
-  (`src/codex-max.js:107`), `readAllow` (`vscode-extension/extension.js:120`),
+- Dead: `mineWildcard` (`src/permissions.js:190`),
+  `readConfig` (`src/codex-max.js:112`), `readAllow` (`vscode-extension/extension.js:120`),
   the exported alias `DEFAULT_POLICY_LOCK_STALE_MS`, and the option keys
   `claudeHistoryPath` / `codexHistoryPath` / `validateCodexRules` (one occurrence
   repo-wide each).
 - `manager.getStatus()` / `getCandidates()` / `list()` fallbacks in
-  `extension.js:891,898,938` can never run: they are aliases of the functions
+  `extension.js:1019,1026` can never run: they are aliases of the functions
   checked first, and no test injects a partial mock.
 - `verdicts.unknown` can no longer be non-zero, and the whole `verdicts` object
   is read by no production code (only `--learn status` JSON and tests).
 - `--guidance off` sweeps only the shell-style block, and the install/uninstall
   scripts never touch instruction files, so an accepted derived block is orphaned
   after an uninstall with no command that removes it.
-- The Codex validator's temp file is created before the `try` whose `finally`
-  unlinks it (`src/auto-learn-manager.js:496`), so a failed write orphans it.
+- The Codex validator's temp file is created before the `try` whose `finally` unlinks it:
+  `.permission-wildcarding-validate` at `src/auto-learn-manager.js:807-809`, so a failed
+  write orphans it.
 - `policyCache` has no invalidation path from the managed-policy watcher, so
   `status()` reports a stale verdict between a policy change and the next scan.
 - `rebuildManagedHits` is not in `auto-learn-worker.js`'s allowed operations, so
@@ -351,9 +355,9 @@ The general form is already recorded above. The specific audit, 2026-09-10:
 Exactly five module-level paths leak from the first harness to every later one:
 
 ```
-MAX_STATE_FILE       src/permissions.js:430
-APPROVE_SCRIPT       src/permissions.js:435
-BYPASS_STATE_FILE    src/permissions.js:351
+MAX_STATE_FILE       src/permissions.js:601
+APPROVE_SCRIPT       src/permissions.js:607
+BYPASS_STATE_FILE    src/permissions.js:522
 POLICY_LOCK_PATH     src/policy-lock.js:19
 CODEX_CONFIG         src/codex-max.js:35
 ```
@@ -370,12 +374,12 @@ away from becoming vacuous, and the suite leaves stray directories in
 None is vacuous — each has a nameable killing mutation — but the stated guarantee
 is wider than the check:
 
-- `test/dashboard-view.test.js:277` counts webview routes with
+- `test/dashboard-view.test.js:330` counts webview routes with
   `/case '[A-Za-z]+':\s*vscode\.commands\.executeCommand\(/g`. A route written
   as `case 'x': { ... }`, dispatched via a variable, or named with a digit is not
   counted, so "fails if a route is added untested" holds only for the current
   spelling.
-- `test/extension-lifecycle-async.test.js:277` uses `/(?<![\w.])execFile\(/g`,
+- `test/extension-lifecycle-async.test.js:442` uses `/(?<![\w.])execFile\(/g`,
   which excludes `.execFile(` — a fifth spawn written `cp.execFile(` passes
   silently.
 - `src/derived-guidance.js:57-63` says truncation is 200 chars, but the escaping
@@ -394,7 +398,7 @@ is wider than the check:
 `src/agent-guidance.js:181-183` hardcodes `separator = '\n'` on the
 end-of-file branch, while the install branch adds none when the file already ends
 `\n\n`. Measured round trip: `"my own notes\n\n"` -> `"my own notes\n"`.
-`test/agent-guidance.test.js:189-190` asserts this exact output, so it is a
+`test/agent-guidance.test.js:214-215` asserts this exact output, so it is a
 deliberate-but-undocumented choice — the commit message claims byte-exactness.
 Mid-file, start-of-file, adjacent-blocks and the CRLF install path all round-trip
 exactly, and accumulation is stopped.
@@ -413,9 +417,9 @@ The recorded "42 dead export names" still holds as a count; the composition move
 referenced only from `test/`. Newly confirmed 2026-09-10, all with zero code
 references:
 
-- `defaultSettingsPath` (`src/settings-write.js:125`) — used only internally at
-  `:60`. Landed the same day it became dead.
-- `createSettingsWriter`'s own fallbacks (`src/settings-write.js:59-60`): all
+- `defaultSettingsPath` (`src/settings-write.js:24`) — used only internally at
+  `:143`. Landed the same day it became dead.
+- `createSettingsWriter`'s own fallbacks (`src/settings-write.js:142-143`): all
   three callers pass `settingsPath`, so both the `= {}` default and the
   `|| defaultSettingsPath()` leg are unreachable. `onWrite` IS supplied, by the
   extension only.
@@ -426,9 +430,9 @@ references:
 - `renderCodexRules`'s `options.version` and `options.header`
   (`src/policy-exporters.js:392-397`) — two dead keys and three dead arms across
   7 call sites.
-- `options.claudeSettingsPath` (`src/auto-learn-manager.js:581`) — a fourth member
+- `options.claudeSettingsPath` (`src/auto-learn-manager.js:875`) — a fourth member
   of the already-recorded alias family; only the alias spelling is supplied.
-- `applyClaude` / `applyCodex` (`src/auto-learn-manager.js:1578`) are test-only;
+- `applyClaude` / `applyCodex` (`src/auto-learn-manager.js:1654,1659`) are test-only;
   production uses `apply`, and the worker's allow-list does not include them.
 - `createCoverIndex(...).stats()` is test-only — a measurement hook, not API.
 
@@ -448,18 +452,18 @@ VSIX gap.
   reclaim it for `DEFAULT_STALE_MS`. Low probability, and it fails closed
   (refusal, not corruption), but the fix is small: treat a zero-byte lock as
   reclaimable after a short grace rather than the full stale window.
-- **The hook accumulates stdin without a bound.** `bin/wildcard-perms:92` is
-  `input += chunk` with no cap, and a PostToolUse payload carries tool output.
+- **The hook accumulates stdin without a bound.** `input += chunk` at `bin/wildcard-perms:96`
+  has no cap, and a PostToolUse payload carries tool output.
   A cap with a graceful "no cwd, no drain" fallback costs nothing.
-- **`run()` relies on `finish()` never returning.** `bin/wildcard-perms:211` is
+- **`run()` relies on `finish()` never returning.** `bin/wildcard-perms:282` is
   `if (!settings) finish(input, false);` with no `return`. Correct today because
   `finish` ends in `process.exit(0)` on all three paths; one added early return
   and execution falls through and calls `finish` twice. One word.
 - **`wildcardUnderLock` ignores `writeAllow`'s `addedAllow`**
   (`bin/wildcard-perms:296-300`), computing `added`/`removed` from its own
-  pre-write snapshot — the exact anti-pattern `src/settings-write.js:106-108`
-  documents ten lines above it ("a caller that reports its own intent ends up
-  announcing '+299 restored' over a file that already had them"). Only a stderr
+  pre-write snapshot — the exact anti-pattern `src/settings-write.js:212-214`
+  documents four lines above it ("A caller that reports its own intent instead ends
+  up announcing … '+299 restored' over a file that already had them"). Only a stderr
   diagnostic.
 - **The teardown flag can be cleared under a pending teardown.** `deactivate()`
   sets `deactivated = true`, then awaits a drain with no deadline; `activate()`
@@ -468,7 +472,7 @@ VSIX gap.
   runner without draining it. A second consequence of the recorded "no deadline"
   item. SUSPECTED — depends on VS Code await semantics not verifiable from here.
 - **A junction to a large tree is now walked in full.**
-  `src/history-adapters.js:915` queues `entry.isSymbolicLink()` children, which
+  `entry.isSymbolicLink()` children are queued at `src/history-adapters.js:939`, which
   was the point (junctions), but the realpath set stops cycles, not breadth. And a
   transcript reachable by two link paths gets two cursors and two parses;
   `observationHashes` dedupes the observations, so only I/O and state size are
@@ -567,8 +571,9 @@ Both found while scoping items that were then dropped:
 - **`bin/wildcard-perms:57-73`** — `--help`, `-h`, `--version`, `-V` and the
   unrecognized-option guard have **no test anywhere**. That guard exists because
   its absence once "silently rewrote the user's permission policy and exited 0".
-- **`src/auto-learn-manager.js:1207` and `:1216`** — see the whole-object writer
-  section above.
+- **`src/auto-learn-manager.js:1600` (`Policy changed while Auto Learn was preparing it`)
+  and `:1609` (`Policy changed before Auto Learn could write it`)** — see the
+  whole-object writer section above.
 
 Also unpinned and worth knowing: `fullReport` in `vscode-extension/memoryLint.js`
 has **no direct test at all**. Seven test files stub `memoryReport` to a zero-arg
@@ -856,7 +861,7 @@ shipped in the Python and was never wired into the product.
 Phase 5 of the hybrid-recall work added multi-corpus search: `RECALL_MEMORY_DIRS` extends the
 primary store, deduped, with non-existent entries skipped, and `test/recall-py.sh` covers it in
 five cases. The extension passes `RECALL_MEMORY_DIR` (singular) at all three of its invocation
-sites, `extension.js:763` (`--rebuild`), `:806` (`--list` auto-sync) and `:2875`
+sites, `extension.js:763` (`--rebuild`), `:806` (`--list` auto-sync) and `:2977`
 (`--gates-compile`), and never passes the plural form anywhere.
 
 `--gates-compile` is correct to stay single-dir and should not change. The other two are the
@@ -1107,7 +1112,7 @@ stderr line at `:399-402`, on a path that is quiet by design. The gate is `PROMO
 `.claude/settings.local.json` containing `Bash(curl *)`, `Bash(python *)` or `Bash(node *)` clears
 it and lands in the user's global allow list. The extension refuses exactly this for an untrusted
 workspace (`vscode-extension/extension.js:2631-2634`, "an untrusted window reads but never
-writes", plus `:909` and `:2664`); the CLI has no equivalent, and VS Code trust has no CLI
+writes", plus `:909` and `:2669`); the CLI has no equivalent, and VS Code trust has no CLI
 analogue. May be inherent to a CLI, but it deserves a decision rather than an accident. This is the
 highest-consequence item in this section.
 
@@ -1212,7 +1217,8 @@ property of the current data, not a property of the code, and the file is user-e
 
 **`_fm` matches an indented `scope:` under any other frontmatter key.** The regex is `^\s*scope:`, so
 `scope: global` nested under `metadata:` compiles a gate nobody declared at the top level. The new
-Python fixture at `test/recall-py.sh:243-251` writes exactly that shape and passes for the right
+Python fixture that writes `$GATED/g.md`, at `test/recall-py.sh:325-333`, uses exactly that
+shape and passes for the right
 reason, but it documents an accident rather than a decision. Pre-existing, not from this work, and
 that fixture is currently the only place it is recorded.
 
@@ -1272,13 +1278,13 @@ supports and is already satisfied by every matrix leg.
 No numbers asserted. This repo's rule is that a figure is real only when measured cold, in fresh
 interleaved processes, against a purpose-built variant with the change removed.
 
-**The `numpy` matmul at `memory/recall.py:610-616`** replaced a Python dot product per document. Its
-own comment says "immaterial for one CLI query, real across a bench run", which is the honest
+**The `numpy` matmul at `memory/recall.py:624-630`** replaced a Python dot product per document. Its
+own comment says "Immaterial for one CLI query, real across a bench run", which is the honest
 framing. To settle: run `memory/bench/gate_recall.py` cold in fresh interleaved processes against a
 variant with the matmul reverted, over the 24-question set, and report the per-query MEDIAN. The
 ~620 ms ONNX session dominates the total and would swamp the signal.
 
-**`Counter` at `memory/recall.py:468-470`** is almost certainly unmeasurable end to end on a 123-file
+**`counts = Counter(terms)` at `memory/recall.py:482-484`** is almost certainly unmeasurable end to end on a 123-file
 corpus. What would prove otherwise: `_lex_index` alone, timed in fresh processes over a synthetic
 corpus ten times the size, with the hand-rolled loop restored in the comparison variant. Low value.
 

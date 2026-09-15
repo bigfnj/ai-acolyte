@@ -1,10 +1,18 @@
 # Permission Wildcarding (VS Code extension)
 
 Watches `~/.claude/settings.json` and live-generalizes approved Claude Code
-permissions to depth-aware wildcards. Adds an Activity Bar dashboard: an
-"Active" status card, live tallies (approved / wildcards / specific), a
-**Wildcard Now** button, and a collapsible list of tracked wildcards, each with
-a one-click prune.
+permissions to depth-aware wildcards. Adds an Activity Bar dashboard: a hero card
+with the "Active" / "Idle" state, the version, the approved total and the
+wildcards / specific split, plus **Wildcard Now** and **Restore prunes from
+backup**; then seven collapsible rows, closed by default and summarised on the
+right — **Auto Learn**, **MAX modes**, **Project-local**, **Shell-style
+guidance**, **Memory gates**, **Memory**, and **Wildcards tracked**. That last
+row lists each tracked wildcard with a one-click prune, capped at a 12-entry
+preview so it cannot become the panel.
+
+Because it is a VS Code extension rather than a Claude Code hook, none of this
+depends on a hook being allowed to fire, so it keeps working where a managed
+policy disables user hooks.
 
 On every write it also saves a high-water-mark backup of the allow list **and the
 deny list** to `~/.claude/backups/allow-list.latest.json`, so a managed-settings
@@ -18,6 +26,15 @@ safety argument at "deny still wins", so bringing permissions back without the
 rules that bound them would be worse than not restoring at all. Both halves land
 in a single atomic write, and an older allow-only backup file is still read and
 upgraded in place.
+
+That primary copy lives *inside* `~/.claude`, which covers a `settings.json` rewritten in
+place but not that whole directory being recreated. So the same payload is mirrored
+off-tree to `~/.permission-wildcarding/allow-list.latest.json`, or wherever
+`permissionWildcarding.backupMirrorPath` points — put it on another volume to survive more
+than a reset. The mirror is written second and best-effort, so a bad path can never cost
+you the primary; restore reads the primary first and falls back to the mirror. Fallback
+rather than union, on purpose: unioning a stale mirror would hand back the entry you
+deliberately pruned.
 
 ## Review noise
 
@@ -103,10 +120,12 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 ### Review and policy output
 
-The dashboard and Command Palette provide **Scan now**, **Review candidates**,
-**Apply safe candidates**, **Undo last application**, **Cycle mode**, and
-**Why did this prompt?** Apply keeps a recoverable snapshot; Undo restores the most recent
-Auto Learn application. The repository CLI uses the same service:
+The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
+those are also the only four message arms the webview host handles (`autoLearnScan`,
+`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:3237-3240`).
+**Apply safe candidates** and **Cycle mode** are Command Palette only — see the command
+list at the end of this file. Apply keeps a recoverable snapshot; Undo restores the most
+recent Auto Learn application. The repository CLI uses the same service:
 
 ```bash
 bin/wildcard-perms --learn scan
@@ -134,9 +153,12 @@ managed/system policy, session approval state, and sandbox restrictions are outs
 See the official Codex [rules](https://learn.chatgpt.com/docs/agent-configuration/rules) and
 [permissions](https://learn.chatgpt.com/docs/permissions) documentation.
 
-Other settings are `permissionWildcarding.autoLearn.enabled`,
-`permissionWildcarding.autoLearn.intervalMinutes` (default **5**), and
-`permissionWildcarding.autoLearn.codexExecutable` (default `codex`).
+The other Auto Learn settings are `permissionWildcarding.autoLearn.enabled` (default
+**true**), `permissionWildcarding.autoLearn.intervalMinutes` (default **5**),
+`permissionWildcarding.autoLearn.debounceSeconds` (default **20** — the quiet window a
+watcher-driven scan waits out, so a burst of transcript writes coalesces into one scan), and
+`permissionWildcarding.autoLearn.codexExecutable` (default `codex`). The full list of all 17
+settings is at the end of this file.
 
 ### Future local CPU assistance
 
@@ -165,14 +187,24 @@ works under a managed policy.
   Claude Code actually loads, `totalBudget`, `recallScript`). Command:
   `Permission Wildcarding: Lint memory index`.
 
-The semantic-recall side of memory hygiene (`memory/recall.py`) is a separate CPU
-tool in this repo, deliberately not bundled into the extension.
+The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
+(bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
+packaging copies it into `extMemory` (`scripts/package.mjs:38`), and `recallScriptPath`
+(`extension.js:553-560`) probes that bundled copy before any checkout, so a fresh install
+can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
+Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing `<name>.tmp`
+and renaming on success. **Cancel** or any failure unlinks that partial inside `close()`'s
+callback — `fs.unlinkSync(tmp)` (`extension.js:693`) — and resolves only after it, so a
+cancelled download leaves nothing behind. Unlinking *beside* the close raced the still-open
+write handle and lost on Windows, which orphaned every cancelled transfer. See the Memory
+card section below.
 
 ## Memory card (dashboard)
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
-doesn't — the state of the CPU recall model and the vector cache — all by passive
-filesystem probe, so no Python runs until you ask for it:
+doesn't — the state of the CPU recall model and the vector cache. The card's own
+status is a passive filesystem probe: `recallStatus` (`extension.js:622`) tests for
+the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
   (which carries `onnxruntime`) are present, otherwise it names what's missing.
@@ -181,20 +213,29 @@ filesystem probe, so no Python runs until you ask for it:
   `recall_index.json`).
 - An **issues line** (`N over budget · N broken links`) that links to the full lint
   report; or `✓ index clean` when there's nothing to fix.
-- **⟳ Rebuild recall index** — the one button, and the only place Python is spawned.
-  It runs `recall.py --rebuild` in the DevToolbox venv to force a full CPU re-embed
-  (model + corpus pinned via env so the cache matches the card). The card also
-  triggers a silent background rebuild automatically — on startup and whenever
-  `MEMORY.md` changes — when the embedded count lags behind the memory file count.
-  A 15-minute cooldown prevents back-to-back rebuilds. A status-bar message
-  confirms each auto-rebuild; any failure is logged to the extension host console
-  without a notification.
+- **⟳ Rebuild recall index** — the one button. It runs `recall.py --rebuild` in the
+  DevToolbox venv to force a full CPU re-embed (model + corpus pinned via env so the
+  cache matches the card). A full rebuild happens *only* here, because you asked for one.
 
-Set `permissionWildcarding.memory.recallScript` to your repo's `memory/recall.py` if you
-run the installed VSIX (the dev/source layout auto-detects it). The status probe works
-regardless; only the rebuild button needs the path.
+Python does run unattended in two other places, both gated on your having opted in.
+`autoSyncRecallIfStale` (`extension.js:794`) runs `recall.py` **incrementally** — not
+`--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
+genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
+`entryMatchesFile` (`src/recall-index.js:88`) — plus the embed identity, and never a bare
+count. The index file itself is excluded, because it is the index and is never embedded.
+A 15-minute cooldown prevents back-to-back runs; a status-bar message confirms each sync,
+and a failure is logged to the extension host console without a notification.
+Separately, the gate compiler spawns
+`recall.py --gates-compile`, but only once the memory-gates block is installed.
+
+`permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
+but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
+dev/source layout is auto-detected. The status probe works regardless of the path.
 
 ## Install
+
+Needs **VS Code 1.80** or newer (`engines.vscode` is `^1.80.0`) and **Node >= 20** for the
+CLI half in the repository.
 
 Download the `.vsix` from the repository's
 [Releases](https://github.com/bigfnj/permission-wildcarding/releases), then in
@@ -226,8 +267,11 @@ active "skip everything" is never ambiguous about what it covers.
 removing it too would leave nothing able to refuse a command. You still get
 stopped for out-of-workspace writes and network access, which are the cases worth
 being asked about. On a console-managed org an `allowed_approval_policies` cap
-may prevent `never`; the switch settles for the least-friction value the policy
-allows and reports what it set. Restart Codex to apply; it reads config at startup.
+may forbid `never`. The switch then reports itself **unavailable** and writes nothing
+(`blockedBy: 'enterprise-policy'` at `src/codex-max.js:267-272`): every other value it could
+write still prompts *and* equals the org's own default, so setting it and calling that "MAX
+on" would claim prompts are skipped when they are not. Restart Codex to apply; it reads
+config at startup.
 
 `config.toml` is edited surgically, line by line, so literal-string paths, inline
 arrays and nested `[plugins."x@y"]` tables survive. Turning it off restores the
@@ -287,3 +331,56 @@ is already fully generalized.
 Command Palette. Apply safe is a no-op wherever nothing is auto-safe — which, once
 auto-safe narrowed to suffix-closed roots, is most real machines — and Cycle mode
 cycles between one useful mode and two that do nothing there.
+
+## Every command
+
+All 19, as registered in `contributes.commands`. Each is prefixed
+`Permission Wildcarding:` in the Command Palette. Four are also title-bar buttons on the
+dashboard view: Toggle Claude MAX, Wildcard Now, Auto Learn - Scan now, and Restore prunes
+from backup.
+
+| Command | What it does |
+| --- | --- |
+| Wildcard Now | Run the generalization pass over `~/.claude/settings.json` once |
+| Restore prunes from backup | Merge the saved allow **and** deny backup back in |
+| Show all tracked wildcards | The full list with a filter box, past the card's 12-entry preview; picking one removes it after a confirm |
+| Auto Learn - Scan now | Read new Claude Code and Codex transcript history |
+| Auto Learn - Scan now (compatibility command) | The same action under the pre-rename command id, so an existing binding still resolves |
+| Auto Learn - Review candidates | Tick the families to grant, with policy overrides labelled |
+| Auto Learn - Apply safe candidates | Apply only the deterministic read-only, suffix-closed ones |
+| Auto Learn - Undo last application | Release this claimant's grants through the claims registry |
+| Auto Learn - Cycle mode | `observe` → `recommend` → `auto-safe` |
+| Auto Learn - Why did this prompt? | Diagnose one command against user settings and org policy |
+| Auto Learn - Show families blocked by managed policy | Families whose prompt no user rule can stop, with the rule |
+| Derived guidance - review mitigations for prompts no rule can stop | Accept / decline each measured mitigation by id |
+| Toggle Claude MAX | Allow-list wildcards + the `PreToolUse` approve hook |
+| Toggle Codex MAX | `approval_policy = "never"`; `sandbox_mode` untouched |
+| Drain project-local approvals into user scope | Promote, verify, then prune `.claude/settings.local.json` |
+| Toggle shell-style guidance in `~/.claude/CLAUDE.md` | The marker-fenced block that stops un-generalizable approvals |
+| Toggle memory gates in `~/.claude/CLAUDE.md` | Install or remove your compiled standing orders |
+| Lint memory index | The `MEMORY.md` bloat + broken-link report |
+| Rebuild recall index | Force a full CPU bge-small re-embed |
+
+## Every setting
+
+All 17 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `backupMirrorPath` | `""` | Off-tree copy of the allow/deny backup. Empty means `~/.permission-wildcarding/allow-list.latest.json`; point it at another volume to survive more than a `~/.claude` reset |
+| `autoLearn.enabled` | `true` | Scan history at all |
+| `autoLearn.mode` | `"recommend"` | `observe` / `recommend` / `auto-safe` |
+| `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies |
+| `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |
+| `autoLearn.debounceSeconds` | `20` | Quiet window a watcher-driven scan waits out |
+| `autoLearn.codexScope` | `"user"` | `user` / `workspace` / `off` — where generated Codex rules land |
+| `autoLearn.codexExecutable` | `"codex"` | Binary used for `codex execpolicy check` |
+| `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
+| `guidance.enabled` | `true` | Keep the shell-style block installed on activation |
+| `gates.enabled` | `true` | Keep the memory-gates block installed on activation |
+| `memory.enabled` | `true` | The `MEMORY.md` lint, gauge and diagnostics |
+| `memory.dir` | `""` | Pin one memory store instead of auto-discovering |
+| `memory.lineBudget` | `300` | Characters one index hook line may use |
+| `memory.maxLines` | `200` | Lines Claude Code actually loads from `MEMORY.md` |
+| `memory.totalBudget` | `12000` | Byte budget for the whole always-loaded index |
+| `memory.recallScript` | `""` | Override the `recall.py` path; checked before the bundled copy |

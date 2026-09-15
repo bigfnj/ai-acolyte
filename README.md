@@ -42,7 +42,12 @@ subcommand. The safety boundary for the legacy hook is still your
   limits on what each may ever propose.
 - **`src/policy-lock.js`** — the advisory lock every *in-process* policy writer
   takes, so Auto Learn and the wildcarding pass cannot interleave on
-  `settings.json`. The four shell installers are the exception: `install.sh`,
+  `settings.json`. The same primitive, pointed at a different path, is also what
+  keeps the five writers of `~/.claude/CLAUDE.md` off each other:
+  `instructionLockPath` (`src/agent-guidance.js:265`) keys one lock per target
+  file, so `CLAUDE.md` and `AGENTS.md` never contend with one another, and a busy
+  target is reported through the per-target `error` row every caller already
+  renders rather than waited on. The four shell installers are the exception: `install.sh`,
   `install.ps1`, `uninstall.sh` and `uninstall.ps1` each rewrite `settings.json`
   without the lock and without `writeFileAtomicSync`, because a standalone script
   cannot reach either. `install.sh` writes a `.pre-install-backup` copy first as
@@ -54,7 +59,11 @@ subcommand. The safety boundary for the legacy hook is still your
   installed agent's user-scope instruction file (`~/.claude/CLAUDE.md`, and
   `~/.codex/AGENTS.md` when Codex is present), the only way to fix the approvals no
   generalizer can ever match twice (see below). `createManagedBlock` is the marker-fenced
-  primitive both blocks are built from.
+  primitive both blocks are built from, and `withInstructionLock`
+  (`src/agent-guidance.js:274`) is the lock every write to those files goes through. The
+  read happens *inside* it: a lock around the write alone would still let a second writer
+  land between this one's read and its own write, which is the interleaving itself rather
+  than a smaller version of it.
 - **`src/agent-gates.js`** — the second managed block: your own standing orders, compiled
   out of your Claude Code file memory by `recall.py --gates-compile`. Separate markers and
   a separate switch, so neither block can turn the other off (see below).
@@ -108,13 +117,15 @@ subcommand. The safety boundary for the legacy hook is still your
 - **`vscode-extension/`** — optional VS Code extension. Watches `settings.json` live
   and wildcards on change, and adds an **Activity Bar dashboard** (asterisk icon):
   a hero card carrying the "Active" / "Idle" state, the version, the approved
-  total and a **Wildcard Now** button; then one collapsible row per area, each
-  closed by default and summarised on the right so a row only has to be opened to
-  act on it. Rows cover live tallies (approved / wildcards / specific),
-  cross-agent **Auto Learn** controls (see below), and the tracked wildcards —
-  each with a one-click prune (✕), capped at the first 12 so the list cannot
-  become the panel. A **⚡ MAX** toggle (skip every prompt — see below) sits
-  alongside. The status-bar indicator is **always** present, not only while MAX is
+  total, the wildcards / specific split, and the **Wildcard Now** and **Restore
+  prunes from backup** buttons; then seven collapsible rows, each closed by
+  default and summarised on the right so a row only has to be opened to act on
+  it — **Auto Learn**, **MAX modes** (skip every prompt — see below),
+  **Project-local**, **Shell-style guidance**, **Memory gates**, **Memory**, and
+  **Wildcards tracked**. That last row lists each tracked wildcard with a
+  one-click prune (✕), capped at `LIST_CAP`
+  (`vscode-extension/extension.js:3720`) — 12 — so the list cannot become the
+  panel. The status-bar indicator is **always** present, not only while MAX is
   on: it reads `$(shield)` with the current friction state for Claude and Codex
   when prompts are active, and switches to `$(zap)` on a warning background when
   either agent has prompts off. Clicking it toggles Claude MAX. It also
@@ -220,7 +231,8 @@ Claude Code persists an "always approve" into the **project's**
 `.claude/settings.local.json`, not the user-scope `settings.json` that every pass above
 targets. So the file where approvals actually accumulate was the one nothing generalized.
 Measured on one real repo: 167 entries, **68% already covered** by a user-scope wildcard,
-and most of the rest multi-statement PowerShell that can never match a second command.
+and most of the rest multi-statement PowerShell that can never match a second command. That
+measurement is recorded beside the code it motivated, in the header of `src/local-settings.js`.
 
 The drain moves them in one direction only — upward:
 
@@ -308,6 +320,15 @@ its config directory already exists, so a Claude-only machine never grows a `~/.
 file is backed up under its own name (`CLAUDE.md.pre-guidance`, `AGENTS.md.pre-guidance`)
 before it is first changed.
 
+`~/.claude/CLAUDE.md` has five writers — `--guidance` and `--gates` from the CLI, the
+extension's two toggles, and the derived-guidance reconcile — and every one of them reads the
+whole file, computes a whole new file, and writes it back. Marker fencing does not make that
+safe: a write landing inside another writer's read-to-write window is erased rather than
+merged, and your own notes go with it. So each target file has its own lock (see
+`src/policy-lock.js` above), taken around the read as well as the write. Contention is
+reported and never waited on: the toggle says which file was busy, changes nothing, takes no
+backup, and the next command or activation retries.
+
 The block is fenced by `<!-- BEGIN/END permission-wildcarding: shell style -->`, so it is
 idempotent to refresh, replaced rather than duplicated when a release changes the wording,
 and removed byte-for-byte when turned off. It is written on activation while
@@ -361,8 +382,16 @@ bin/wildcard-perms --gates refresh        # compile then install; silent when un
 bin/wildcard-perms --gates off
 ```
 
-`--gates refresh` is built for a `SessionStart` hook, so an edited gate is live in the next
-session with nothing to remember:
+**What keeps the installed block fresh is the extension, not a hook.** Nothing in this repo
+registers a `SessionStart` hook — `install.sh` and `install.ps1` register `PostToolUse` and
+only that — so with the editor closed, an edited gate reaches `~/.claude/CLAUDE.md` when you
+run `wildcard-perms --gates refresh` and not before. With VS Code open it is automatic:
+`gatesCorpusWatchers` (`vscode-extension/extension.js:2129`) watches every discovered memory
+store for `*.md` changes, and `gatesCorpusBump` compiles and reinstalls 2 s later.
+
+`--gates refresh` is *shaped* so a `SessionStart` hook could drive it on a box whose policy
+defines that event. You add the entry yourself; nothing here installs it, and the caveat
+below is why it is not installed by default:
 
 ```json
 "SessionStart": [
@@ -432,20 +461,38 @@ on the embedding alone. That is not a refinement: `Bge._encode` caps every docum
 tokens, so on a real 119-file corpus 117 files are truncated and the median one contributes
 ~832 characters to its vector. Commands, error strings and paths further down were never
 searchable. Measured over 24 natural-language questions, R@1 went 0.58 → 0.79 and the worst
-rank 94 → 48; `memory/bench/gate_recall.py` reproduces it and fails if the lexical leg is
-switched off. The **script** ships inside the VSIX, so a fresh install can rebuild
-the index with no checkout on disk. The **32MB model** does not: a versioned extension dir
-would re-download it on every upgrade, so the Memory card fetches it on first use into
-`~/.claude/wildcarding/models/` — outside both the extension dir and any checkout, so it
-survives upgrades, a deleted clone, and a synced OneDrive folder. An existing copy anywhere
-on the usual search path is used as-is rather than re-fetched, and the vocab is seeded beside
-it first, because a model without its vocab fails at embed time rather than download time.
+rank 94 → 48; the corpus those came from and the rest of the numbers are in
+[`memory/README.md`](memory/README.md), and `memory/bench/gate_recall.py` reproduces them and
+fails if the lexical leg is switched off (`--fuse-w 1.0` collapses hybrid onto vector exactly
+and must exit 1). It is a local gate, not a CI one: `memory/bench/queries.json` maps a private
+corpus and is gitignored, so the gate runs only where both the corpus and the model are.
 
-No Python runs until you click **Rebuild recall index** (a full `--rebuild`, because you
-asked for one). The background sync is incremental instead: it fires only when the cache is
-genuinely behind the corpus — compared by name, size and mtime, excluding `MEMORY.md`, which
-is the index and is never embedded — and then re-embeds only the files that changed, without
-even loading the ONNX session when there is nothing to do.
+The **script** ships inside the VSIX: packaging copies it into `extMemory`
+(`scripts/package.mjs:38`), and `recallScriptPath` (`vscode-extension/extension.js:553-560`)
+probes that bundled copy before any checkout path, so a
+fresh install can rebuild the index with no checkout on disk. The **32MB model** does not: a
+versioned extension dir would re-download it on every upgrade, so the Memory card fetches it
+on first use into `~/.claude/wildcarding/models/` — outside both the extension dir and any
+checkout, so it survives upgrades, a deleted clone, and a synced OneDrive folder. An existing
+copy anywhere on the usual search path is used as-is rather than re-fetched, and the vocab is
+seeded beside it first, because a model without its vocab fails at embed time rather than
+download time. The transfer writes `<name>.tmp` and renames on success; **Cancel** or any
+failure unlinks that partial inside `close()`'s callback — `fs.unlinkSync(tmp)`
+(`vscode-extension/extension.js:693`) — and resolves only after it, so "the download settled"
+means the temp file is gone. Unlinking *beside* the close raced the still-open write handle
+and lost on Windows, which left every cancelled 32 MB download on disk forever.
+
+The Memory card's own status is a passive filesystem probe.
+`recallStatus` (`vscode-extension/extension.js:622`) tests for the model asset and the
+venv, and never runs Python. A full `--rebuild` happens only when you click
+**Rebuild recall index**, because you asked for one.
+Python does run unattended for two other things, both gated on your having
+opted in already. `autoSyncRecallIfStale` (`vscode-extension/extension.js:794`) runs
+`recall.py` *incrementally* when the cache is genuinely behind the corpus — compared by name,
+size and mtime, excluding `MEMORY.md`, which is the index and is never embedded — re-embedding
+only the files that changed and not even loading the ONNX session when there is nothing to do,
+with a 15-minute cooldown between runs. And `compileGates` spawns `recall.py --gates-compile`,
+but only once the gates block is installed.
 
 ## Auto Learn: Claude Code + Codex history
 
@@ -606,8 +653,11 @@ dashboard answers from one state read cached against the state file rather than 
 The `PostToolUse` hook fires after every tool call, and it was spending most of
 that time proving nothing had changed. `ruleMatches` rebuilt a RegExp on every
 call, and `isCoveredBy` **sat** inside both passes of `processAllowList` while
-those passes were still quadratic, so one pass over a real 317-entry allow list
-was **192,150 regex compilations**. Both passes are now narrowed by the coverage
+those passes were still quadratic, so one pass over a real 316-entry allow list
+was **192,150 regex compilations** and 507 ms. That measurement is recorded
+beside the caches it justifies — see the note on `ruleMatches` at
+`src/permission-match.js:32-38`, which keeps it in the past tense on purpose,
+because it is not a description of the current scan. Both passes are now narrowed by the coverage
 index described in `src/permissions.js`, so the quadratic scan is no longer what
 this costs; `isCoveredBy` itself is untouched and still decides every answer.
 
@@ -618,8 +668,11 @@ refusal to cache a managed-policy verdict, where the file underneath is a
 client-refreshed copy. The maps are capped, because the hook process exits after
 one pass while the extension host holds the module for a whole session.
 
-Measured end to end, real process launches with a Claude Code style payload on
-stdin, before and after interleaved on the same machine:
+Measured end to end: 25 real process launches per arm, a Claude Code style JSON
+payload on stdin, the two arms **interleaved** on one machine so load noise hit
+both. "Before" is the `v1.3.0` tag checked out into a throwaway worktree — a
+build with the change removed, not a computed estimate. Method and raw numbers
+are recorded in commit `729ac1c`:
 
 ```
 hook BEFORE (v1.3.0)   min 511.6  p50 548.1  p90 562.5   ms
@@ -698,9 +751,11 @@ Generated Codex rules default to `~/.codex/rules/permission-wildcarding.rules`. 
 policy. The generated file is dedicated to Auto Learn; `default.rules` is not overwritten.
 
 Use the dashboard or Command Palette to **Scan now**, **Review candidates**,
-**Undo last application**, or **Why did this prompt?**. **Apply safe candidates**
-is Command Palette only — the dashboard has no button for it, even though the
-webview host still carries an `autoLearnApply` arm that nothing sends. The diagnostic
+**Undo last application**, or **Why did this prompt?** — those four are the Auto Learn
+card's four buttons, and the only four message arms the webview host handles:
+`autoLearnScan`, `autoLearnReview`, `autoLearnUndo` and `autoLearnWhy`
+(`vscode-extension/extension.js:3237-3240`). **Apply safe candidates** and **Cycle mode**
+are Command Palette only. The diagnostic
 checks Claude user-settings precedence or visible Codex user/trusted-workspace rules. It cannot
 see managed/system policy, session approval state, or sandbox restrictions, and labels that
 limitation in its result. The CLI equivalents are:
@@ -915,9 +970,11 @@ The extension is not a hook, so no policy toggle can reach it. That reframes the
   edit instead of once per session, and it needs no session to have started. The `MAX` restore
   watches "approvals stopped being granted" rather than any single policy file, for the same
   reason (see below).
-- **Keep a CLI that does the work, and let both the watcher and a hook call it.** `wildcard-perms
-  --gates refresh` is one command. The extension's watcher calls it; a `SessionStart` hook calls
-  the same command where policy permits one. The behavior does not depend on which fired.
+- **Keep the work in two steps every trigger can run, not in the trigger.** `wildcard-perms
+  --gates refresh` is compile-then-install in one command. The extension does not shell out to
+  the CLI; it runs the same pair in process, from `compileGates` through `ensureGates`
+  (`vscode-extension/extension.js:2951-2996`). Both sides act on the same compiled file, so
+  the behavior does not depend on which fired.
 - **Write to instruction files, not to the agent's live state.** A managed policy can stop a hook
   from running but cannot stop the agent from reading `~/.claude/CLAUDE.md`. Anything that must be
   resident every session goes there as a marker-fenced block, which is also how the agent-guidance
@@ -989,23 +1046,33 @@ Cutting a GitHub Release builds and attaches the `.vsix` automatically via
 [`.github/workflows/release.yml`](.github/workflows/release.yml). The version is
 taken from the release tag, so you don't hand-edit either `package.json`.
 `scripts/package.mjs` passes the tag to `syncVersion`, whose `MANIFESTS` list
-covers **both** `vscode-extension/package.json` (the sidebar badge) and the root
-`package.json` (what `wildcard-perms --version` prints). They used to move
-separately, which is how a build once reported 1.4.2 from the CLI and 1.4.4 in
-the badge:
+(`scripts/sync-version.mjs:21`) covers **both** `vscode-extension/package.json`
+(the sidebar badge) and the root `package.json` (what `wildcard-perms --version`
+prints). They used to move separately, which is how a build once reported 1.4.2
+from the CLI and 1.4.4 in the badge; `test/installers.test.js:455` — "the two
+package manifests report the same version" — is the guard that now asserts they
+agree:
 
 ```bash
 gh release create v1.2.3 --generate-notes
 # -> workflow packages permission-wildcarding-1.2.3.vsix and attaches it to the release
 ```
 
-Before tagging, run the tests and the memory-index lint. The lint also fails on gate
-source drift, so a release cannot ship with the resident block behind its source memories:
+Before tagging, run the tests, the self-reference check, and the memory-index lint. The lint
+also fails on gate source drift, so a release cannot ship with the resident block behind its
+source memories:
 
 ```bash
-node --test test/*.test.js          # all pass
+node --test                         # the whole suite; `npm test` runs the same thing
+node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN
 python memory/recall.py --lint      # index clean, gates not stale vs source
 ```
+
+Bump `vscode-extension/package.json` and the root `package.json` together, and bump them at
+all: VS Code keys upgrades on the version string, so installing an equal version over an
+existing one is a silent no-op that presents to a user as "in-place upgrades do not work".
+A merge that changes `memory/recall.py` is likewise not in the product until the VSIX is
+rebuilt, because `recallScriptPath` prefers the bundled copy over any checkout.
 
 ## Note
 

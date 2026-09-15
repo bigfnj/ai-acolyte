@@ -63,6 +63,32 @@ const REF_RE = new RegExp(
 
 const REF_RE_TEST = new RegExp(REF_RE.source);
 
+// The same pattern plus the backticks a reference is normally written inside.
+//
+// judge() strips references out of the prose before hunting for an anchor, so that
+// "permissions.js" inside a reference cannot serve as its own anchor. Stripping the
+// token ALONE left the pair that wrapped it: `src/foo.js:12` collapsed to a backtick,  line-refs:ignore
+// a space and a backtick, which is under the 3-character floor for a code span. The
+// scanner therefore skipped it and paired that leftover backtick with the OPENING
+// backtick of the next real anchor, so every code span after a backticked reference
+// shifted by one and the anchor that mattered was never extracted at all.
+//
+// The cost was false STALE and UNVERIFIABLE verdicts on references that were correct.
+// Two agents hit it independently, on different files, during one correction pass:
+// `src/history-adapters.js:939` queues `entry.isSymbolicLink()` children reported STALE
+// on the anchor "point", and it only resolved when the symbol was moved AHEAD of the
+// citation. Writing the anchor first was a workaround for this bug, not a convention.
+//
+// The optional backticks sit OUTSIDE REF_RE's own lookaround, which still sees the
+// backtick as the neighbouring character and still passes, so the token match is
+// unchanged. A reference written without backticks is unaffected.
+const REF_STRIP_RE = new RegExp('`?' + REF_RE.source + '`?', 'g');
+
+// Remove every file:line token, and the code span it was written in, from `text`.
+function stripRefs(text) {
+  return String(text).replace(REF_STRIP_RE, ' ');
+}
+
 // A line carrying this marker has its references skipped.
 //
 // Needed because documentation ABOUT the reference format contains references
@@ -430,8 +456,9 @@ function judge(ref, index) {
   const span = lines.slice(ref.start - 1, ref.end).join('\n');
   const gather = (text) => {
     // Drop every file:line token first, so "permissions.js" inside the reference
-    // itself cannot serve as its own anchor.
-    const anchors = anchorsFrom(flatten(text).replace(REF_RE, ' ')).filter((a) => {
+    // itself cannot serve as its own anchor. stripRefs takes the wrapping backticks
+    // with it; see the note there for what leaving them behind cost.
+    const anchors = anchorsFrom(stripRefs(flatten(text))).filter((a) => {
       const n = norm(a.text).toLowerCase();
       return n !== path.posix.basename(rel).toLowerCase() && !n.startsWith(rel.toLowerCase());
     });
@@ -617,4 +644,8 @@ if (require.main === module) main();
 // use one would also be the first to exercise it. The FUNCTIONS stay: main() calls
 // every one of them, and removing an export entry is free while removing a function
 // is not.
-module.exports = { collectRefs, tracked, checkBounds };
+// stripRefs and anchorsFrom are exported for the regression test that pins the
+// backtick-stripping bug. They are the smallest seam that can observe it: the
+// symptom is an anchor going missing between those two calls, and nothing the
+// CLI prints distinguishes "no anchor in the prose" from "the anchor was eaten".
+module.exports = { collectRefs, tracked, checkBounds, stripRefs, anchorsFrom };

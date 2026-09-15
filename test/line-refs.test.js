@@ -42,7 +42,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { checkBounds, collectRefs, tracked } = require('../scripts/check-line-refs.js');
+const {
+  checkBounds, collectRefs, tracked, stripRefs, anchorsFrom,
+} = require('../scripts/check-line-refs.js');
 
 test('every file:line reference resolves to a real file and a line inside it', () => {
   const broken = checkBounds();
@@ -72,4 +74,42 @@ test('the reference extractor still finds the corpus it is meant to police', () 
   // whole class of reference cannot hide behind the other's count.
   assert.ok(refs.some((r) => r.kind === 'doc'), 'no references found in tracked .md files');
   assert.ok(refs.some((r) => r.kind === 'comment'), 'no references found in source comments');
+});
+
+// A reference is stripped out of the prose before the anchor hunt, so that the file
+// name inside the reference cannot serve as its own anchor. Stripping the token but
+// NOT the backticks around it left an orphan backtick, which paired with the opening
+// backtick of the next real anchor and shifted every code span after it. The anchor
+// that mattered was then never extracted, and a correct reference was reported STALE
+// or UNVERIFIABLE with no way to tell that from "the prose names nothing literal".
+//
+// This is the exact string that exposed it during the correction pass of 2026-09-14.
+// Two agents hit the same bug independently on different files, and both worked around
+// it by moving the symbol ahead of the citation, which is why it looked like a writing
+// convention rather than a defect.
+test('an anchor written AFTER a backticked reference is still extracted', () => {
+  const prose = 'The walk at `src/history-adapters.js:939` queues `entry.isSymbolicLink()` children.';
+  const anchors = anchorsFrom(stripRefs(prose)).map((a) => a.text);
+
+  assert.ok(
+    anchors.includes('entry.isSymbolicLink()'),
+    'the code span after the reference was eaten by an orphan backtick, so the anchor ' +
+      `hunt never saw it. Extracted: ${JSON.stringify(anchors)}`
+  );
+
+  // The other half of the contract, so a "fix" that simply stopped stripping would
+  // fail here rather than pass the assertion above by doing nothing.
+  assert.ok(
+    !anchors.some((a) => a.includes('history-adapters.js')),
+    `the reference survived the strip and can now anchor itself: ${JSON.stringify(anchors)}`
+  );
+
+  // A reference written WITHOUT backticks must still be removed, and must not take a
+  // neighbouring span with it. Without this, consuming an optional backtick on each
+  // side could eat the opening backtick of an adjacent anchor and reintroduce the bug
+  // from the other direction.
+  const bare = 'See src/history-adapters.js:939 and `COMMAND_TOOLS` for the rest.';
+  const bareAnchors = anchorsFrom(stripRefs(bare)).map((a) => a.text);
+  assert.ok(bareAnchors.includes('COMMAND_TOOLS'), JSON.stringify(bareAnchors));
+  assert.ok(!bareAnchors.some((a) => a.includes('history-adapters.js')), JSON.stringify(bareAnchors));
 });

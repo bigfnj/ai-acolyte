@@ -28,47 +28,6 @@ silently became unreachable and the assertion after it went vacuous. **Audit the
 remaining multi-harness test files for the same shape**; a test that cannot fail
 is worse than one that does.
 
-### restoreFromBackup still recomputes the pass twice
-
-It runs its own `processAllowList` and then calls `refresh()`, which recomputes
-it. Left alone when the watcher path was fixed, because this one is user-initiated
-and rare rather than fired by a file watcher. Now cheap anyway at 6 ms, so this is
-tidiness rather than performance.
-
-
-### Five unsynchronized writers share one instruction file
-
-Re-verified 2026-09-14. The two other halves this entry used to carry, newline fusion on
-removal and `blockRange` truncating on an inner END marker, are both FIXED and removed:
-the mid-file `separator` at `src/agent-guidance.js:180-183` now reconstructs the user's
-own line terminators, and `escapeMarker` at `src/agent-guidance.js:108` neutralises an
-END marker inside a body rather than refusing it. Only the concurrency half survives, and
-it no longer depends on them.
-
-`~/.claude/CLAUDE.md` has five writers and no shared lock:
-
-| Writer | Site |
-|---|---|
-| CLI guidance | `setGuidanceAll(cmd === 'on')` at `bin/wildcard-perms:579` |
-| CLI gates | `setGatesAll(cmd !== 'off')` at `bin/wildcard-perms:646` |
-| Extension guidance | `setGuidanceAll(want)` at `vscode-extension/extension.js:2799`, and `:2848` |
-| Extension gates | `setGatesAll(want)` at `vscode-extension/extension.js:3009`, and `:3073` |
-| Derived guidance | `decideDerived` at `src/auto-learn-manager.js:1221` |
-
-Only the last takes a lock, and it is the POLICY lock, which none of the other four take,
-so it buys nothing here. Confirmed still true today: `withPolicyLock` in
-`bin/wildcard-perms` wraps `--drain`, `--seed`, `--bypass` and `--max`, and neither
-guidance nor gates is inside one.
-
-The window is not hypothetical. The extension recompiles gates automatically on a
-memory-dir change, so an automatic write can race a manual `--guidance off` with no
-coordination at all.
-
-Made worse by single-slot backups: `backupName = 'CLAUDE.md.pre-guidance'` at
-`src/agent-guidance.js:233` and the `.pre-derived` write at `src/derived-guidance.js:342`
-are fixed names, so two toggles in a row overwrite the good copy with the bad one. That
-is what turns a recoverable interleaving into a lost file.
-
 ### Smaller measured perf items, none urgent
 
 - `src/policy-guard.js:117` — `missingFromLive`'s cover fallback is quadratic
@@ -158,27 +117,6 @@ no longer be non-zero" is **half wrong** — the `!policy.present` path is prova
 dead, but `managed-policy.js:162` (`!toolOf(permission)`) is reachable, because
 sanitizeState truncates claudePermission to 768 chars, which can cut the closing
 paren and fail RULE_SHAPE.
-
-### Duplication worth collapsing
-
-`permissionMatches` exists twice with **byte-identical** bodies —
-`src/policy-guard.js:91-93` and `vscode-extension/autoLearnUi.js:111-113`, each
-one line delegating to ruleMatches. `test/policy-guard.test.js:192` exists to
-catch drift *between the two implementations*, and since neither has independent
-logic left, that half of the test can no longer fail: it is now purely a
-correctness test of ruleMatches. Collapsing autoLearnUi onto the policy-guard
-export removes a wrapper and the pretense of a second implementation.
-
-`policy-lock.js` carries two busy strings for one condition —
-`POLICY_LOCK_BUSY_MESSAGE:20` and the default `busy()` at `:45` — and the thrown
-`conflict.message` is discarded by every consumer, each substituting
-`POLICY_LOCK_BUSY_MESSAGE` instead (`extension.js:2422`, `:2686`,
-`bin/wildcard-perms`). With the dead
-`options.busyMessage` above, the whole indirection collapses to the constant.
-
-(Not a defect, noted so nobody "fixes" it: the duplicated
-AUTO_SUFFIX_CLOSED_ROOTS and the two SAFE_GIT lists are deliberate and
-drift-tested, documented in both export comments.)
 
 ### Declared-but-unwired UI
 
@@ -394,22 +332,6 @@ is wider than the check:
   scan for `trackChild(execFile(`, so a correct `const c = execFile(...);
   trackChild(c);` would fail it and a `spawn()` would slip past.
 
-### Guidance removal still consumes one user newline at end of file
-
-`src/agent-guidance.js:181-183` hardcodes `separator = '\n'` on the
-end-of-file branch, while the install branch adds none when the file already ends
-`\n\n`. Measured round trip: `"my own notes\n\n"` -> `"my own notes\n"`.
-`test/agent-guidance.test.js:214-215` asserts this exact output, so it is a
-deliberate-but-undocumented choice — the commit message claims byte-exactness.
-Mid-file, start-of-file, adjacent-blocks and the CRLF install path all round-trip
-exactly, and accumulation is stopped.
-
-**Separate residual, no migration exists:** a file damaged by the pre-fix
-inner-marker bug is not repaired. `blockRange` on a file containing
-`...END ... BEGIN ...` returns null, so `has()` is false and `apply(text, true)`
-appends a SECOND block, leaving the orphaned END above it and accumulating per
-toggle. Only reachable for a user whose corpus quoted a marker before 2026-09-10.
-
 ### Dead exports and unreachable options, re-measured
 
 The recorded "42 dead export names" still holds as a count; the composition moved
@@ -444,43 +366,30 @@ across 578 declarations in `src/`, `bin/`, `vscode-extension/` and `scripts/`, a
 directions. `scripts/package.mjs` enumerates `src/` dynamically, so there is no
 VSIX gap.
 
-### Smaller confirmed items
+### Smaller confirmed items, all of them in `bin/` or the extension
 
-- **`policy-lock` orphans a zero-byte lock for the full 10 minutes.**
-  `locked()` creates the file with `openSync(..., 'wx')` and writes its metadata
-  after. A process that dies in that window leaves a lock with no valid pid, so
-  `recoverLock` falls to the `lockAgeMs(stat) < staleMs` branch and refuses to
-  reclaim it for `DEFAULT_STALE_MS`. Low probability, and it fails closed
-  (refusal, not corruption), but the fix is small: treat a zero-byte lock as
-  reclaimable after a short grace rather than the full stale window.
+Re-verified 2026-09-14 against the tree. Four of the original seven are gone: the
+zero-byte `policy-lock` orphan is FIXED (`honourFor` in `src/policy-lock.js`), `run()` now
+reads `if (!settings || typeof settings !== 'object') return finish(input, false);` at
+`bin/wildcard-perms:282` so the missing `return` is CLOSED, and the junction-breadth and
+`/cygdrive` items were argued out rather than fixed (text proposed for
+`docs/engineering-record.md`). What is left needs files this pass was not allowed to touch.
+
 - **The hook accumulates stdin without a bound.** `input += chunk` at `bin/wildcard-perms:96`
   has no cap, and a PostToolUse payload carries tool output.
   A cap with a graceful "no cwd, no drain" fallback costs nothing.
-- **`run()` relies on `finish()` never returning.** `bin/wildcard-perms:282` is
-  `if (!settings) finish(input, false);` with no `return`. Correct today because
-  `finish` ends in `process.exit(0)` on all three paths; one added early return
-  and execution falls through and calls `finish` twice. One word.
-- **`wildcardUnderLock` ignores `writeAllow`'s `addedAllow`**
-  (`bin/wildcard-perms:296-300`), computing `added`/`removed` from its own
-  pre-write snapshot — the exact anti-pattern `src/settings-write.js:212-214`
-  documents four lines above it ("A caller that reports its own intent instead ends
-  up announcing … '+299 restored' over a file that already had them"). Only a stderr
-  diagnostic.
+- **`wildcardUnderLock` ignores `writeAllow`'s `addedAllow`.** `const added   =
+  after.filter(...)` / `const removed = before.filter(...)` at `bin/wildcard-perms:382-383`
+  compute the diff from this function's own pre-write snapshot, while the write it just
+  made returns the real counts. That is the exact anti-pattern `src/settings-write.js:212-214`
+  documents ("A caller that reports its own intent instead ends up announcing … '+299
+  restored' over a file that already had them"). Only a stderr diagnostic.
 - **The teardown flag can be cleared under a pending teardown.** `deactivate()`
   sets `deactivated = true`, then awaits a drain with no deadline; `activate()`
   sets it false. If VS Code's deactivate timeout expires first and a same-realm
   re-activate runs, the OLD deactivate's continuation then nulls the SUCCESSOR's
   runner without draining it. A second consequence of the recorded "no deadline"
   item. SUSPECTED — depends on VS Code await semantics not verifiable from here.
-- **A junction to a large tree is now walked in full.**
-  `entry.isSymbolicLink()` children are queued at `src/history-adapters.js:939`, which
-  was the point (junctions), but the realpath set stops cycles, not breadth. And a
-  transcript reachable by two link paths gets two cursors and two parses;
-  `observationHashes` dedupes the observations, so only I/O and state size are
-  wasted. SUSPECTED cost, not correctness.
-- **`/cygdrive/d/...` is not normalized** by either uninstaller's path matcher.
-  Every other spelling converges — I traced `node "D:/..."`, `/d/...`,
-  backslashes and case. Cosmetic.
 
 ## From the 2026-09-10 optimization and correctness pass
 
@@ -688,86 +597,6 @@ UNC, mapped drive, 8.3, `\\?\`, >260 chars, trailing dot/space, relative). But:
 - `APPROVE_COMMAND` does no quote escaping, so a POSIX `$HOME` containing `"`
   emits a genuinely broken command that the test rejects with the wrong
   diagnosis.
-
-### Dead code, re-measured — and three earlier entries were WRONG
-
-Method note that changed three verdicts: **comment mentions are not references.**
-
-- **`SETTINGS_CONTENDED_CODE` was NOT resolved** by the vanish refusal, contrary
-  to what I wrote here earlier today: that refusal SETS the code, it does not
-  read it. Now genuinely wired (see the git log).
-- **`enableMaxAllow`, `disableMaxAllow` and `registerApproveHook` are all still
-  DEAD**, not "test-only" — their apparent test uses are comments.
-- **`readAllow` no longer exists**; that entry is closed.
-- Also now fixed and closable: `policyCache` invalidation, `rebuildManagedHits`
-  missing from the worker's allowed operations, and `run()` relying on `finish()`
-  never returning.
-- Headline count holds at **41 dead export names**, 68 test-only, 111
-  production. New unlabelled ones include `prunePermissions`, `MAX_ALLOW_CORE`,
-  `detectMcpServers`, `ensureApproveScript`, `unregisterApproveHook`,
-  `gatesStatus`, `readCodexMaxState`/`writeCodexMaxState`, and
-  `fastLint`/`fullReport`/`pickPrimaryDir`.
-- **Careful:** removing the *export entries* is free, but every one of those
-  `src/permissions.js` functions is live INSIDE `applyMax`/`maxLayers`. A cleanup
-  that deletes the function with the export takes MAX mode with it.
-- **Four NEW option keys with no supplier:** `options.now` in `policy-lock.js`,
-  `auto-learn-manager.js` and `codex-max.js` — three modules with no injectable
-  clock, which is why none has a time-dependent test — and
-  `options.cacheFile` in `fixed-point-cache.js`. `now` is worth SUPPLYING rather
-  than deleting; it is the seam those modules need.
-- **Newly proven unreachable** (by enumerating the input space, not asserting):
-  the four `managerStatus`/`managerCandidates`/`autoLearnEvidence` fallbacks, the
-  `mergeClaudeAllow` object-third-arg shim, `createSettingsWriter`'s `= {}`
-  default and `|| defaultSettingsPath()`, `assessPolicy`'s `claimed`, and
-  `fixed-point-cache`'s `cacheFile ||`.
-- **Write-only locals:** `wrote` in the CLI's `--max`, and `err.result`/`err.latest`
-  on both CONTENDED throws. (`lastErr` in `writeFileAtomicSync` was on this list and
-  is not write-only: the in-place fallback reports its code, and that report is now
-  asserted. Removed 2026-09-14.)
-  Four unused imports: `isCoveredBy` in two modules, `SETTINGS_ABSENT`/
-  `SETTINGS_PRESENT` in the extension.
-- ~~**~60 stale `file:line` refs in this file, and 7 stale cross-file refs in code
-  comments.**~~ **PARTLY DONE 2026-09-14, and it is no longer a hand count.**
-  `scripts/check-line-refs.js` extracts every `file:line` reference from tracked
-  `.md` files and from comments in tracked source, resolves each against the
-  current tree, and grades it against an ANCHOR recovered from the surrounding
-  prose — a backticked span, a quoted phrase, or a distinctive identifier. Run it
-  with `--detail` to see the cited line beside the candidate, or `--json` to
-  consume it. It counts **147** references (92 in BACKLOG.md, 41 in code comments,
-  the rest in other docs), which is where the "~60" estimate came from and is
-  more than twice it. 30 were corrected in this pass: 13 in code comments and 17
-  here, each verified by reading the target rather than trusting the report.
-  Everything below `runWildcarding` in `extension.js` shifted by ~41 lines in the
-  pass that produced the original note, and editing `src/permissions.js`'s header
-  by three lines during THIS pass invalidated four more references several hundred
-  lines below it. That is the shape of the problem, and it is why the checker
-  exists.
-  - **Read the checker's STALE verdict as a candidate, not a proof.** Measured
-    against hand verification on the code-comment set, a good fraction of STALE
-    rows are the checker picking a neighbouring symbol as the anchor while the
-    reference itself is fine. `bin/wildcard-perms:11-26` is the clean example:
-    correct, and reported STALE because the sentence around it also names
-    `createHash`. Verify before rewriting. It has no false NEGATIVES that were
-    found by hand, so the honest summary is high recall, moderate precision.
-  - **The residue is deliberate.** What is left is mostly UNVERIFIABLE — a
-    reference whose surrounding prose makes a descriptive claim ("the refusal
-    this documents") with no literal string to match. There is nothing to check
-    those against short of reading both ends, and a guess would be worse than the
-    stale number.
-  - **`test/line-refs.test.js` asserts only the objective half** — every
-    reference resolves to a real file and a line inside it — plus a count floor
-    so that assertion cannot pass vacuously if the extractor stops matching. The
-    STALE verdict is deliberately not asserted, for the precision reason above: a
-    gate that cries wolf gets suppressed and takes the real signal with it.
-    - It found a defect on its first tracked run: the checker's OWN format
-      illustrations (`src/foo` style dangling examples) became references the
-      moment the file was committed. Hence a line-scoped `line-refs` + `:ignore`
-      marker. Line-scoped on purpose — a file that uses it for one illustration
-      is still policed for its real references, and a mutation proves that.
-  - **Bare `:NNN` continuation references are NOT covered** (`(`:489`)`,
-    `(`:3206`)`). They carry no filename, so the checker cannot resolve them; the
-    ones fixed in this pass were fixed by hand alongside their named sibling.
-    Anyone extending the checker should start there.
 
 ### Optimization: the new DO list, measured in the right place
 
@@ -987,50 +816,30 @@ try/caught at :33, :41 and :81. The reachable ones inside the same try are `memo
 re-enters on every MEMORY.md write, so a deterministic throw recurred silently on every trigger
 and a broken run logged identically to a working one. Now `console.error`s, the house style here.
 
-### Four assertions that could not fail, three of them fixed
+### Three assertions in the memory suites still cannot fail for the mutation they name
 
-Proven by mutation, not by reading. Each had a comment naming the mutation it guarded, and each
-survived that exact mutation.
+Re-verified 2026-09-14. The four repairs this entry used to record are done and removed;
+the 400-char frontmatter precondition it listed as "honestly labelled rather than fixed"
+is now fixed too — `test/recall-py.sh:120-122` recovers `SCOPE_AT` with `grep -bo` and
+fails unless the offset is `-gt 400`, so it pins the offset rather than the file size.
+What remains is three source-text or fixture weaknesses in the two memory suites.
 
-**Fixed: `test/gates-stale.sh`, three of four assertions.** The shape
-`lint | grep -q STALE && fail "..." || echo "ok: ..."` reports success for any `lint` that dies
-or prints nothing: a pipeline masks Python's exit status and an `&&`/`||` list suppresses
-`set -e`. Deleting `or not os.path.exists(GATES_OUT)` from `_gates_are_stale` left a
-`FileNotFoundError` traceback in the output and the suite still printed ALL PASS. Only the
-positive "drift detected" case could ever fire. This is the suite guarding the only drift check
-the feature has.
-
-Worth recording how the **first** repair also failed: capturing into a helper and piping the
-helper into grep put `fail`'s `exit 1` inside a subshell, so the parent read grep's status and
-the mutation survived again. The capture has to happen in the calling shell. Same trap, one level
-down.
-
-**Fixed: `test/recall-py.sh`, the bad-path case.** It ran `--lexical-only`, and `_retriever`
-skips the dir-walking loop entirely for lexical mode, so the query exercised the one mode the
-defect never touched. recall.py's own comment even says "`--lexical-only` kept working". Now
-asserts on `MEMORY_DIRS` directly.
-
-**Fixed: `test/recall-py.sh`, the extends-not-replaces case.** It asserted on `dup.md`, which
-exists in **both** fixture corpora, so dropping the primary still left a file of that name in the
-output. `only-here.md` is unique to the primary and is the only witness that can distinguish the
-two behaviours.
-
-**Fixed: `test/recall-py.sh`, the unknown-mode case.** `_retriever` calls `_check_mode` as its own
-first statement, and `rank()` falls into `_retriever` whenever `idx is None`, so deleting the call
-from `rank()` still raised. The probe now passes the parts so `_retriever` is never reached.
-
-**Left: `test/recall-index.test.js`'s atomic-write pin** asserts `os.replace(tmp, INDEX_PATH)`
-merely appears in the source. It still matches if the statement is wrapped in `if False:` or
-hoisted above the `json.dump`. The assertion directly above it pins condition and order together
-and is the shape to copy. This is the exact pattern the standing gates forbid.
-
-**Left, honestly labelled rather than fixed:** the compile-stability case has one gate file in its
-fixture, so removing `sorted()` cannot make it fail, and on NTFS directory entries come back
-name-ordered anyway, which makes that `sorted()` effectively unmutatable on this platform. The
-`.tmp` residue case also passes if `save_index` reverts to a plain in-place `json.dump`, which
-creates no temp file at all; it fires only for "write tmp, forget `os.replace`". And the
-400-char frontmatter precondition pins the file's SIZE (654 bytes) rather than the offset of
-`scope:` (540), so shortening the padding would silence it while the precondition still passed.
+- **`test/recall-index.test.js:238-239`** — the `assert.match` whose message reads "the
+  index write is no longer atomic" matches a bare `os.replace(tmp, INDEX_PATH)` anywhere in
+  `recall.py`. It still passes with that statement wrapped in `if False:` or hoisted above
+  the `json.dump`, because nothing in the pattern says where it sits. The assertion
+  immediately above it at `test/recall-index.test.js:236` pins the `if todo or gone or
+  force:` condition and the `save_index` call that must follow it in one pattern, and is
+  the shape to copy. This is the exact pattern the standing gates forbid.
+- **`test/recall-py.sh:206-212`, compile stability.** The fixture writes one gate file
+  (`g.md`), so removing `sorted()` from the corpus walk cannot change the order the two
+  compiles see, and on NTFS directory entries come back name-ordered anyway. `[ "$ONE" =
+  "$TWO" ]` therefore holds for a build with no ordering guarantee at all.
+- **`test/recall-py.sh:98`, `.tmp` residue.** `[ -e "$MEM/recall_index.json.tmp" ] && fail`
+  also passes if `save_index` reverts to a plain in-place `json.dump`, which creates no
+  temp file to leave behind. It fires only for "write tmp, forget `os.replace`", and the
+  source-text pin above does not cover the other half either, so between them the atomic
+  write has no assertion that fails when it stops being atomic.
 
 ### `bin/wildcard-perms` cannot forward `--gates-allow-empty`
 

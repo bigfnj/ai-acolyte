@@ -11,9 +11,13 @@ const assert = require('node:assert/strict');
 
 const {
   deriveMitigations, markersFor, renderMitigation, DEFAULT_THRESHOLD, DEFAULT_LIMIT,
-  installedDerivedIds, reconcileDerived, cleanRule,
+  installedDerivedIds, reconcileDerived, cleanRule, setDerivedGuidance,
 } = require('../src/derived-guidance');
-const { GUIDANCE_BODY, BEGIN, END } = require('../src/agent-guidance');
+const { GUIDANCE_BODY, BEGIN, END, instructionLockPath } = require('../src/agent-guidance');
+const { createPolicyLock } = require('../src/policy-lock');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const rule = (text, prompts, extra = {}) => ({
   rule: text, prompts, decision: 'ask', tools: [], ...extra,
@@ -314,4 +318,33 @@ test('a hostile rule reaches the instruction file defused, and the advice surviv
     { accepted: ['batch-file-edits'] }).changed, false);
   // And the user's own file comes back byte for byte.
   assert.equal(reconcileDerived(installed.text, [], { accepted: [] }).text, notes);
+});
+
+// setDerivedGuidance is the FIFTH writer of ~/.claude/CLAUDE.md, and the only one that
+// ever held a lock: `decideDerived` wraps it in the POLICY lock, which guards
+// settings.json and which no guidance or gates writer takes, so it never excluded any of
+// the other four. It takes the instruction-file lock here instead.
+test('a derived write does not land inside another writer of the same file', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-derived-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  const claude = path.join(home, '.claude', 'CLAUDE.md');
+  fs.mkdirSync(path.dirname(claude), { recursive: true });
+  const notes = '# my notes\n\nkeep these\n';
+  fs.writeFileSync(claude, notes, 'utf8');
+  const backupDir = path.join(home, 'backups');
+  const args = [MITIGATIONS, ['batch-file-edits'], { home, backupDir }];
+
+  createPolicyLock({ lockPath: instructionLockPath(claude) }).locked(() => {
+    const [row] = setDerivedGuidance(...args);
+    assert.equal(row.changed, false);
+    assert.match(row.error, /being written by another/);
+    assert.deepEqual(row.added, []);
+    assert.equal(fs.readFileSync(claude, 'utf8'), notes, 'the contended file keeps every byte');
+    assert.equal(fs.existsSync(backupDir), false, 'and its pre-derived copy was not taken');
+  });
+
+  const [went] = setDerivedGuidance(...args);
+  assert.equal(went.changed, true);
+  assert.deepEqual(went.added, ['batch-file-edits']);
+  assert.ok(fs.readFileSync(claude, 'utf8').startsWith(notes));
 });

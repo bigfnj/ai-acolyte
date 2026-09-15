@@ -26,7 +26,7 @@ const os = require('os');
 const path = require('path');
 
 const { toolOf } = require('./managed-policy');
-const { createManagedBlock, installedGuidanceTargets } = require('./agent-guidance');
+const { createManagedBlock, installedGuidanceTargets, withInstructionLock } = require('./agent-guidance');
 const { writeFileAtomicSync } = require('./permissions');
 
 const DEFAULT_THRESHOLD = 50;
@@ -320,11 +320,17 @@ function derivedStatus({ home = os.homedir() } = {}) {
 // whole, so a failure cannot leave half a decision applied. Backed up on first
 // modification for the same reason `setGuidance` does it, under its own name so
 // it cannot overwrite that function's pre-change copy in a shared directory.
+//
+// The fifth writer of the same instruction file, and the only one that used to hold a
+// lock — the POLICY lock, taken by `decideDerived` for the claims registry, which no
+// guidance or gates writer takes. It takes the instruction-file lock here instead, so
+// this reconcile and a `--guidance off` running beside it cannot each write a whole file
+// computed from a read the other has already invalidated.
 function setDerivedGuidance(mitigations, accepted, {
   home = os.homedir(),
   backupDir = path.join(os.homedir(), '.claude', 'backups'),
 } = {}) {
-  return derivedTargets(home).map((target) => {
+  return derivedTargets(home).map((target) => withInstructionLock(target.path, () => {
     const base = { agent: target.agent, path: target.path };
     const text = readFileOrEmpty(target.path);
     if (text === null) {
@@ -350,7 +356,8 @@ function setDerivedGuidance(mitigations, accepted, {
     return { ...base, changed: true, error: null,
       added: result.added, updated: result.updated, removed: result.removed,
       installed: installedDerivedIds(result.text) };
-  });
+  }, (busy) => ({ agent: target.agent, path: target.path, changed: false, error: busy,
+    added: [], updated: [], removed: [], installed: [] })));
 }
 
 module.exports = {

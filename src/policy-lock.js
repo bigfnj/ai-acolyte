@@ -42,7 +42,7 @@ function createPolicyLock(options = {}) {
   const clock = typeof options.now === 'function' ? options.now : () => new Date().toISOString();
   const busy = typeof options.busyMessage === 'function'
     ? options.busyMessage
-    : (target) => `Auto Learn is already running (lock: ${target})`;
+    : () => POLICY_LOCK_BUSY_MESSAGE;
 
   function removeOwnedLock(owner) {
     try {
@@ -72,7 +72,7 @@ function createPolicyLock(options = {}) {
           else return false;
         }
         if (alive) return false;
-      } else if (lockAgeMs(stat) < staleMs) {
+      } else if (lockAgeMs(stat) < honourFor(stat, staleMs)) {
         return false;
       }
       const before = { text, size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino };
@@ -120,6 +120,28 @@ function createPolicyLock(options = {}) {
   }
 
   return { locked, path: lockPath };
+}
+
+// A lock file that was created but never filled in, and how long it is honoured.
+//
+// `locked` opens with `wx` and writes the metadata as a SECOND step, so a process that
+// dies between those two calls leaves a zero-byte lock. There is no pid in it to probe,
+// so `recoverLock` falls through to the age test and refuses to reclaim for the whole
+// stale window — ten minutes by default, for a hole that is open for less than a
+// millisecond. It fails closed rather than corrupting anything, but ten minutes is the
+// wrong order of magnitude for the mistake, and the instruction-file lock in
+// `agent-guidance.js` puts it on an interactive path where a user is waiting.
+//
+// A grace rather than an immediate reclaim, because a zero-byte lock is also what a
+// HEALTHY holder looks like for that sub-millisecond window. `Math.min` so an explicit
+// smaller `staleMs` keeps meaning what it says — `staleMs: 0` still reclaims at once.
+// What makes this safe is the unchanged-file re-verification below the age test: if the
+// real owner writes its metadata between the two stats, the size changes and the reclaim
+// is abandoned.
+const ZERO_BYTE_GRACE_MS = 5000;
+
+function honourFor(stat, staleMs) {
+  return stat.size === 0 ? Math.min(staleMs, ZERO_BYTE_GRACE_MS) : staleMs;
 }
 
 module.exports = {

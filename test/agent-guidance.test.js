@@ -16,8 +16,9 @@ const path = require('node:path');
 const {
   BEGIN, END, guidanceBlock, hasGuidance, isCurrent, applyGuidance, guidanceStatus, setGuidance,
   guidanceTargets, installedGuidanceTargets, guidanceStatusAll, setGuidanceAll,
-  createManagedBlock, escapeMarker,
+  createManagedBlock, escapeMarker, instructionLockPath,
 } = require('../src/agent-guidance');
+const { createPolicyLock } = require('../src/policy-lock');
 
 const USER_TEXT = '# My global instructions\n\nAlways use the toolbox python.\n';
 
@@ -166,6 +167,40 @@ test('setGuidance writes the file, backs up what was there, and reports state', 
   assert.equal(fs.readFileSync(box.file, 'utf8'), USER_TEXT);
 });
 
+// Five writers share ~/.claude/CLAUDE.md — `--guidance` and `--gates` from the CLI, the
+// extension's two toggles, and the derived-guidance reconcile — and each of them reads the
+// whole file, computes a whole new one and writes it back. A write landing inside another
+// writer's read-to-write window is not merged, it is erased, and the single-slot backup
+// then copies the damage over the good copy on the next toggle. So the contract is: a
+// contended file is REPORTED and left exactly as it was.
+test('a second writer of the same instruction file is refused, and changes nothing', () => {
+  const box = scratch();
+  fs.writeFileSync(box.file, USER_TEXT, 'utf8');
+  const other = path.join(box.root, 'AGENTS.md');
+  fs.writeFileSync(other, USER_TEXT, 'utf8');
+
+  createPolicyLock({ lockPath: instructionLockPath(box.file) }).locked(() => {
+    const blocked = setGuidance(true, { file: box.file, backupDir: box.backupDir });
+    assert.equal(blocked.changed, false);
+    assert.match(blocked.error, /being written by another/);
+    assert.equal(fs.readFileSync(box.file, 'utf8'), USER_TEXT,
+      'the contended file keeps every byte it had');
+    assert.equal(fs.existsSync(box.backupDir), false,
+      'and no backup was taken, so the good copy is still the good copy');
+
+    // Per FILE, not one global lock: CLAUDE.md and AGENTS.md share no state, and
+    // setGuidanceAll writes them in a loop. Serialising those would be a lock this
+    // feature does not need.
+    assert.equal(setGuidance(true, { file: other, backupDir: box.backupDir }).changed, true,
+      'a different instruction file is not blocked by this one');
+  });
+
+  // Released with the callback, so the next attempt goes through.
+  assert.equal(setGuidance(true, { file: box.file, backupDir: box.backupDir }).changed, true);
+  assert.equal(fs.existsSync(instructionLockPath(box.file)), false,
+    'the lock file does not outlive the write');
+});
+
 test('a missing CLAUDE.md is created rather than treated as an error', () => {
   const box = scratch();
   const result = setGuidance(true, { file: box.file, backupDir: box.backupDir });
@@ -217,6 +252,37 @@ test('removal keeps exactly one separator wherever the block sits', () => {
   // No block, no write.
   assert.deepEqual(applyGuidance('my own notes\n', false),
     { changed: false, text: 'my own notes\n' });
+});
+
+// The run of newlines immediately above the block's begin marker.
+const runAbove = (text) => {
+  const at = text.indexOf(BEGIN);
+  let run = 0;
+  while (at - run - 1 >= 0 && text[at - run - 1] === '\n') run += 1;
+  return run;
+};
+
+// The one round trip that is NOT byte-exact, pinned so it stays a decision rather than a
+// surprise. The suite header above claims "turning it off restores the file the user had
+// byte for byte", and for a file whose last line is blank that is false by construction.
+test('a trailing blank line is normalised away, and the install is why it must be', () => {
+  const blankAtEnd = 'my own notes\n\n';
+  const installed = applyGuidance(blankAtEnd, true);
+  assert.equal(installed.text, `${blankAtEnd}${guidanceBlock()}`,
+    'the install reuses the blank line the file already ended with, adding none of its own');
+  assert.equal(applyGuidance(installed.text, false).text, 'my own notes\n');
+
+  // A file ending with a single newline round-trips exactly...
+  const oneNewline = 'my own notes\n';
+  const tidy = applyGuidance(oneNewline, true);
+  assert.equal(tidy.text, `my own notes\n\n${guidanceBlock()}`);
+  assert.equal(applyGuidance(tidy.text, false).text, oneNewline);
+
+  // ...and this is the whole reason the other cannot. Both spellings reach removal with
+  // the same run above the block, so no removal rule can send them to different places:
+  // exactness for one is a lost byte for the other, and the single trailing newline wins.
+  assert.equal(runAbove(installed.text), runAbove(tidy.text),
+    'the two inputs are indistinguishable by the time removal sees them');
 });
 
 test('off with a second managed block below it leaves that block on its own line', () => {

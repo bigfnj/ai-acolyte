@@ -84,14 +84,10 @@ is what turns a recoverable interleaving into a lost file.
   token comparison when the rule side could be lowered once at rulePrefix time.
   4.48 to 2.36 ms per 285 candidates against 300 rules. Managed boxes only.
 
-**Checked and NOT worth doing**, recorded so it is not re-derived: the
-per-observation `aggregateObservations([observation], { threshold: 1 })` at `auto-learn-manager.js:1771`
-looks like a batch-function-in-a-loop but measured 53.29 ms vs 50.21 ms batched
-over 1,422 observations (6%); `new RegExp` at `history-adapters.js:445` never
-appears in the CPU profile; multiple `readSettings()` per extension event is
-0.127 ms each and the freshness is deliberate and documented; the double
-JSON.stringify compare is 0.038 ms; `memory/recall.py` has no hot-path issue,
-since build_or_update already gates re-embedding on mtime+size.
+The five things checked here and found NOT worth doing moved to
+`docs/engineering-record.md` on 2026-09-14, under "Optimizations measured and DECLINED".
+They were conclusions sitting in a queue, which is how a settled decision gets
+re-litigated by someone who sees an unticked box.
 
 ### The deactivation drain has no deadline
 
@@ -770,30 +766,9 @@ the pass, now EQUAL to the two sweeps.
 | **Hook stdin -> `fs.readFileSync(0, 'utf8')`** | 1.17-1.27 ms in-process, **not resolvable end-to-end** | cold, n=61, 3 arms | DO, low — it REMOVES 5 lines. Needs an explicit `if (!cwd)` fallback: a partial read silently truncates the JSON and the drain stops promoting approvals forever with no failing log line |
 | **Sticky dashboard hint** — retain `{allow, optimized}` and revalidate with `sameList` | saves 1.38-2.19 min / 1.65-2.20 p50 ms per push | warm, n=180, 3 runs | **DEFERRED, not refuted.** It collides with "a stale hint is recomputed, not trusted": with a cache, a stale hint falls back to a cache that IS valid against disk, so no pass runs and that assertion goes 1 -> 0. Weakening a guard test to accommodate an optimization is how tests lose teeth. Revisit by re-expressing that test around the OUTPUT rather than the pass count |
 
-**Measured and DROPPED — do not re-derive:**
-
-- **`activate()`'s two lock acquisitions** — the premise is now stale. Counted
-  empirically: a converged list with no project-local file takes **0**
-  acquisitions; 1 if either half has work; 2 only on a first run. Taking the lock
-  off both unchanged paths already did this. Merging would fuse two independent
-  retry budgets for near-zero gain.
-- **Inlining `fixed-point-cache` into the CLI** — built the arm, verified it
-  removes exactly 2 fs calls; three cold runs give sign-consistent deltas of
-  +0.8 to +3.7 ms, entirely inside the noise floor. ~200 lines duplicated for
-  nothing.
-- **The FNV-1a loop** — 0.513/0.600 cold, but the second call is 0.088/0.101, so
-  **84% is V8 warm-up, not the loop**. A 4-byte-unrolled variant is SLOWER cold.
-  Replacing the content hash with `mtime:size` would weaken the one property the
-  module exists for.
-- **The 19 `statSync` in `recallIndexStatus`** (0.765/0.848, the largest single
-  fs component) — they ARE the staleness check, and `recall_index.json` is not
-  watched. A stale "not stale" badge is worse than 0.8 ms.
-- `settings.json` read 3x (0.302/0.506), `gates.generated.md` read 3x
-  (0.118/0.450), `CLAUDE.md` read 2x (0.073/0.306), `MEMORY.md` read 2x
-  (0.142/0.149) — all at or below the bar, confirming the earlier refutations.
-- **Perfect fs dedupe as a package**: 87 -> 62 calls saves only 1.54/1.64 ms
-  against the real location, LESS than the sum of its parts because each part
-  carries shared per-call overhead. The `fastLint` item alone captures 70% of it.
+The six items measured and DROPPED here moved to `docs/engineering-record.md` on
+2026-09-14, under "Optimizations measured and DECLINED", along with the hit-path
+baseline below. Each was built or profiled and rejected on the number.
 
 **Hit path re-baselined: still 13 fs calls, nothing crept in.** `require.cache`
 on a hit holds exactly 2 modules. The dominant remaining term is **not fs** — it

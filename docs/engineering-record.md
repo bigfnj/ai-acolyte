@@ -819,3 +819,67 @@ to come first. It does not. See the note on `REF_STRIP_RE` in
 rather than moved has no line to point at. A citation whose whole purpose is to record
 where a retracted figure was wrongly said to live must stay wrong to make its point.
 Both are in the tree on purpose.
+
+## Optimizations measured and DECLINED — do not re-derive these
+
+Moved out of `BACKLOG.md` on 2026-09-14. Each was built or profiled, not guessed, and
+each was rejected on the number rather than on taste. They were sitting in the queue
+under headings like "none urgent", which is how a decision gets re-litigated: a reader
+sees an unticked box, not a conclusion.
+
+The measurement bar these were held to: cold, in fresh interleaved processes, against a
+purpose-built variant with the change REMOVED. A warm loop or a sandboxed temp HOME has
+been wrong every time, twice with the conclusion inverted.
+
+### From the hook and extension profiling pass
+
+**`activate()`'s two lock acquisitions.** Premise stale, counted empirically: a converged
+list with no project-local file takes **0** acquisitions, 1 if either half has work, and
+2 only on a first run. Taking the lock off both unchanged paths already did this. Merging
+would fuse two independent retry budgets for near-zero gain.
+
+**Inlining `fixed-point-cache` into the CLI.** Built the arm and verified it removes
+exactly 2 fs calls. Three cold runs give sign-consistent deltas of +0.8 to +3.7 ms,
+entirely inside the noise floor. About 200 lines duplicated for nothing.
+
+**The FNV-1a loop.** 0.513 min / 0.600 p50 cold, but the second call is 0.088/0.101, so
+**84% of it is V8 warm-up rather than the loop**. A 4-byte-unrolled variant is SLOWER
+cold. Replacing the content hash with `mtime:size` would weaken the one property the
+module exists for.
+
+**The 19 `statSync` in `recallIndexStatus`** (0.765/0.848, the largest single fs
+component). They ARE the staleness check, and `recall_index.json` is not watched. A stale
+"not stale" badge is worse than 0.8 ms.
+
+**Repeated small reads**, all at or below the bar and confirming earlier refutations:
+`settings.json` 3x (0.302/0.506), `gates.generated.md` 3x (0.118/0.450), `CLAUDE.md` 2x
+(0.073/0.306), `MEMORY.md` 2x (0.142/0.149).
+
+**Perfect fs dedupe as a package.** 87 calls to 62 saves only 1.54/1.64 ms against the
+real location, LESS than the sum of its parts, because each part carries shared per-call
+overhead. The `fastLint` item alone captures 70% of it, so the package is worth strictly
+less than its best member.
+
+**Hit-path baseline, for anyone who thinks something crept in:** still 13 fs calls, and
+`require.cache` on a hit holds exactly 2 modules. The dominant remaining term is NOT fs.
+It is the stdin round-trip at 3.78 min / 5.48 p50 ms, of which only about 1.2 ms is
+stream overhead the hook controls.
+
+### From the allow-list and learner profiling pass
+
+**Per-observation `aggregateObservations`.** Looks like a batch function called in a
+loop, which is usually a finding. Measured 53.29 ms against 50.21 ms batched over 1,422
+observations, a 6% difference. Not worth the restructure.
+
+**`new RegExp` in `history-adapters.js`.** Never appears in the CPU profile at all.
+
+**Multiple `readSettings()` per extension event.** 0.127 ms each, and the freshness is
+deliberate and documented. See also the note above on the same call being re-read inside
+one dashboard push, which WAS worth removing, because that one was a duplicate rather
+than a refresh.
+
+**The double `JSON.stringify` compare.** 0.038 ms.
+
+**`memory/recall.py` has no hot-path issue.** `build_or_update` already gates
+re-embedding on `mtime` plus size, so the expensive work does not run on an unchanged
+corpus.

@@ -1,13 +1,13 @@
 'use strict';
 
-// The shared modules live in two places depending on layout: `./src/` inside a
-// packaged extension, where scripts/package.mjs copies repo-root src/ next to
-// this file, and `../src/` in the repository, where that copy is generated and
-// gitignored. extension.js gets away with `./src/` only because its one test
-// installs a Module._load hook to redirect it; this file is required directly
-// by several tests, so it has to resolve without help or a fresh checkout
-// cannot run the suite at all. CI runs npm test before packaging, which is
-// exactly that condition.
+// The shared modules live in two places depending on layout: `./src/` inside a packaged
+// extension, where scripts/package.mjs copies repo-root src/ next to this file, and `../src/`
+// in the repository, where that copy is generated and gitignored. This file is required
+// DIRECTLY by several tests, so it has to resolve without help or a fresh checkout cannot run
+// the suite at all — CI runs npm test before packaging, which is exactly that condition.
+// extension.js keeps the flat `./src/` requires on purpose and is not an oversight: it reads
+// `require('vscode')` at module scope, so it can only ever be loaded through a stub, and all
+// seven test files that load it already redirect `./src/` in the same Module._load hook.
 function requireShared(name) {
   try { return require(`./src/${name}`); }
   catch (error) {

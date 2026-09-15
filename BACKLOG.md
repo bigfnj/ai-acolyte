@@ -89,33 +89,6 @@ The five things checked here and found NOT worth doing moved to
 They were conclusions sitting in a queue, which is how a settled decision gets
 re-litigated by someone who sees an unticked box.
 
-### The deactivation drain has no deadline
-
-The other three findings from the 2026-09-09 leak audit are now fixed — children
-are tracked and killed, the `deactivated` flag exists and is checked in the three
-schedulers as well as the async continuations, and the runner and busy latch are
-reset. This one is deliberately left, and one new consequence of it is recorded
-under the 2026-09-10 audit below.
-
-- **The drain has no deadline** (`autoLearnWorkerRunner.js:79-82`).
-  `await Promise.allSettled([...jobs])` runs *before* any terminate() and no
-  layer sets a per-job timeout, so a worker wedged on a large transcript makes
-  deactivate() never resolve — a stalled window reload — and the thread is never
-  terminated because terminate() is only reached after the drain. Also
-  `workers.delete()` lives only in the exit handler, so a worker that errors
-  without exiting sits in the set for the session. **Deliberately not changed:**
-  the drain is documented as existing so JS rollback stays available, and a
-  deadline that cuts a policy write is worse than a slow reload. atomicWrite is
-  temp+rename, so a terminated write leaves a temp file rather than a corrupt
-  settings.json, which makes a generous deadline defensible — but it is a
-  semantics change to teardown and wants its own decision.
-- **Cancel targets the wrong request** (`extension.js:696-698`).
-  `token.onCancellationRequested(() => activeReq?.destroy())` only ever holds the
-  outermost httpsGetFollow return, while httpsGetFollow (`:640-654`) builds a
-  fresh req per redirect and surfaces none of them. The comment at 635-636 says
-  the model's /resolve/ URLs always 302, so **Cancel is a no-op on every real
-  download** and the 32 MB transfer runs to completion. No deactivate path either.
-
 ### 42 dead export names, and 6 option keys with no supplier
 
 Verified 2026-09-09 by loading every module and diffing declared exports against
@@ -175,42 +148,6 @@ export removes a wrapper and the pretense of a second implementation.
 (Not a defect, noted so nobody "fixes" it: the duplicated
 AUTO_SUFFIX_CLOSED_ROOTS and the two SAFE_GIT lists are deliberate and
 drift-tested, documented in both export comments.)
-
-### Declared-but-unwired UI
-
-Cross-referenced 2026-09-09 and re-run 2026-09-10; the headline diffs come back
-clean in both directions (19 of 19 commands registered, 4 of 4 menu entries
-resolve, 16 of 16 config keys both read and declared, 8 of 8 CLI verbs
-dispatched), so these are the residue.
-
-Both the uninstall gap and the missing config listeners are now closed — verified
-empirically 2026-09-10 under both PowerShell editions, including per-hook removal
-that spares a co-located third-party hook, and `memory.enabled` taking effect both
-ways without a window reload. What remains:
-
-- **Two dead webview switch arms**: `extension.js:3165` (autoLearnApply) and
-  `:3167` (autoLearnMode) have no sender. All `type:` literals were enumerated
-  (16 senders, 18 arms); the element ids alApply/alMode do not exist. Two
-  dashboard buttons were removed and their handlers left behind. Both features
-  remain palette-reachable, so this is dead dispatch, not lost functionality.
-- **`extension.js:17-34` hard-requires `./src/*`**, which .gitignore excludes and
-  scripts/package.mjs creates only at package time. Self-documented as a known
-  asymmetry in `autoLearnUi.js:5-16` ("extension.js gets away with ./src/ only
-  because its one test installs a Module._load hook"), and the same file handles
-  the identical problem correctly for Python via a two-path probe. Low impact —
-  no `.vscode/launch.json` exists, so a fresh checkout has no F5 path — but it is
-  literally a require of a path absent from a clean clone.
-
-### The memory convention and this project's lint disagree about `scope:`
-
-`recall.py --lint` reports "type: feedback with no scope:" as actionable, since
-the gates compiler cannot place such a memory. But the memory-authoring
-convention Claude Code itself follows defines frontmatter as
-name/description/metadata.type with **no `scope:` key**, so every feedback memory
-written the normal way trips this check on arrival — observed immediately on
-2026-09-09 with a newly written memory. Either the lint should treat a missing
-scope on `feedback` as "not a gate, no action", or the convention needs to carry
-scope. As it stands, the lint's one actionable finding class is guaranteed noise.
 
 ### Small, off-axis, confirmed
 
@@ -607,21 +544,6 @@ call `runNow` on an already-optimal list now exercise the *unlocked probe* path
 and a `backupPolicy` mutant kills 8 of them. What moved is which path they
 cover — `backupPolicy` under the lock is no longer exercised by any of them.
 
-### A leak my own re-activate fix introduced
-
-Nulling `autoLearnWorkerRunner` in `activate()` (correct, and required) makes a
-neighbouring comment in `deactivate()` false: it argues "the successor could not
-have created its own while this slot was full, so it would inherit this dead
-one." It now can. So when a wedged predecessor's worker finally answers, its
-post-drain continuation nulls the **successor's live** runner without
-`.deactivate()`ing it — a leaked worker thread per occurrence. The fix is the
-same `generation === activationGeneration` guard already used for the busy latch.
-
-Also: **`node --test` has no default per-test timeout**, so a never-settling
-promise hangs the whole file instead of failing it. The wedged-worker test
-should carry an explicit `{ timeout }`, and arguably every async test in that
-file should.
-
 ### The memory-gate compiler: four ways to lose a standing gate silently
 
 All reproduced. These matter more than they look, because a gate that vanishes
@@ -797,47 +719,6 @@ measured on the live 119-file corpus rather than estimated.
 - `best_line` calls `_display_keys(MEMORY_DIRS)` once per printed result in `--vector-only`,
   where `lex` is None so the fallback fires for every row: 1 + k directory scans, ~5 ms. Hoist
   the map into `_retriever`'s return value if this code is touched anyway.
-
-## From the 2026-09-14 post-install verification of 1.4.5
-
-Found by testing the installed VSIX against the real memory store rather than the checkout.
-Everything here is about the gap between what `memory/recall.py` can now do and what the
-extension actually reaches for. None of it is a regression; all of it is capability that
-shipped in the Python and was never wired into the product.
-
-### `RECALL_MEMORY_DIRS` shipped in `recall.py` and the extension cannot reach it
-
-Phase 5 of the hybrid-recall work added multi-corpus search: `RECALL_MEMORY_DIRS` extends the
-primary store, deduped, with non-existent entries skipped, and `test/recall-py.sh` covers it in
-five cases. The extension passes `RECALL_MEMORY_DIR` (singular) at all three of its invocation
-sites, `extension.js:763` (`--rebuild`), `:806` (`--list` auto-sync) and `:2977`
-(`--gates-compile`), and never passes the plural form anywhere.
-
-`--gates-compile` is correct to stay single-dir and should not change. The other two are the
-gap.
-
-`memoryLint.discoverDirs` already finds every store: on this box it returns two,
-`C--Anthropic/memory` and `d---ai-work/memory`. `pickPrimaryDir` then reduces them to one and
-every consumer downstream sees only that. This is the same stranded corpus recorded earlier in
-this file, seen from the product side: the extension can enumerate it, and has no way to search
-or index it.
-
-Needs a setting (`permissionWildcarding.memory.extraDirs`, or make the existing `memory.dir`
-accept a list) plus passing it through at `:763` and `:806`. Note that `memory.dir` today is an
-override that REPLACES discovery, so it cannot be widened without deciding which meaning wins.
-
-### Three lint checks exist only in Python and never reach the card
-
-`recall.py --lint` enforces the resident-entry ceiling (15 of 16 right now), flags
-`type: feedback` entries with no `scope:` (3 of them, which the gate compiler cannot place), and
-lists demotion candidates (2, about 455 bytes). None of these exist in `memoryLint.js`, and the
-extension never shells out to `--lint` at all.
-
-That is deliberate as far as it goes: `memoryLint.js`'s header states it is pure Node so it ships
-in the VSIX and runs under the managed policy, with no Python and no model. The resident-entry
-ceiling and the scope check need neither. They are counting rules over the same text the Node
-lint already parses, so they can move without breaking that constraint. The demotion list is
-judgement and should stay in the CLI.
 
 ## From the 2026-09-14 store-consolidation work
 

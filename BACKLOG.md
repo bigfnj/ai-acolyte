@@ -255,27 +255,32 @@ scope. As it stands, the lint's one actionable finding class is guaranteed noise
 
 ### Nothing at all protects the transcript or memory corpora
 
-Same event, and this is the expensive half. `~/.claude/projects/**/*.jsonl` went
-to **7 files / 6 MB**, oldest 18:57 that day — and the sharpest measure of that
-is in this file: the `state.candidates` entry below recorded **710 cursors
-against exactly 710 files** on 2026-09-09, hours earlier. So 710 transcripts
-became 7. The corpus behind every measurement this project has published (largest
-single transcript 70.4 MB, 6,870 observations, 249 runs) is gone. The file-memory
-corpus went to one memory with zero standing orders, taking the 6 compiled gates
-with it.
+**Re-measured 2026-09-14, and the numbers in this entry were badly out of date.** The
+corpus rebuilt itself by accumulation: 660 transcripts, 732.7 MB, oldest 2026-07-10,
+against the 7 files and 6 MB recorded right after the profile wipe. The memory corpus is
+123 files in one store. So the loss described here is history, and the derived-state
+warnings that followed it (candidates at 50, observationHashes at 352) are stale.
 
-Two knock-on effects worth knowing before trusting anything derived from state:
-the learner rebuilt from what survives, so `candidates` is 50 where that entry
-says 285, and `observationHashes` is 352 where it was capped at 20,000. **Every
-numeric trigger in this file is now far from firing for the wrong reason** — not
-because the pressure eased, but because the evidence was deleted.
+**The exposure is unchanged, which is why this stays open.** `~/.claude/projects` is a
+plain directory, confirmed today: `(Get-Item $p).LinkType` is empty. The same event
+would take the same 732.7 MB. Nothing in this repo protects it and nothing in this repo
+can, because Claude Code writes both transcripts and memories under
+`~/.claude/projects/<workspace>/` and that path is not configurable. `recall.py` supports
+`RECALL_MEMORY_DIR`, which relocates the READER only.
 
-`recall.py` already supports `RECALL_MEMORY_DIR`, so pointing the *reader* off-tree
-is supported. It does not solve it alone: Claude Code writes memories to
-`~/.claude/projects/<workspace>/memory/` and that path is not configurable, so
-durability needs the directory itself to live elsewhere (a junction to a git repo
-on `D:` keeps both defaults intact and survives a reset as data plus one junction
-to recreate). The corpus is private, so it must not go in this public repo.
+**The fix this entry proposed conflicts with a recorded constraint, so do not just do
+it.** It says to junction the directory to a git repo on `D:`. C: is the only SSD on this
+box, and the workspace memories already record that the older "just move it to D:" advice
+in the space analyses is wrong for that reason. This is 732.7 MB of actively appended
+transcript on the hot path of every session, so a junction to a spinning disk trades a
+durability problem for a latency one. That trade was never stated when the fix was
+proposed.
+
+**What actually needs deciding, and it is the owner's call, not an engineering one:**
+whether durability here is worth either a second SSD target, or accepting slower
+transcript writes, or a scheduled copy rather than a junction (which keeps the hot path
+on C: and bounds the loss to one interval instead of everything). The corpus is private
+and must never enter this public repo under any of those options.
 
 ## Left from the 2026-09-09 audit
 

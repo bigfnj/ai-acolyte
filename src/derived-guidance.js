@@ -35,12 +35,12 @@ const RULE_LIMIT = 200;
 
 // The rule text is not this repo's, and it ends up interpolated into a code span in the
 // user's own instruction file. `~/.claude/remote-settings.json` is a local, client-refreshed
-// cache, so any local process that can write it picks that string — and only one of the two
-// sources that feed `costliestRules` sanitises it: the managed-hits side goes through
-// `clean(observation.managedRule, 200)` in `auto-learn-manager.js:1793`, while the
-// inert-family side reaches `addCost` at :1139 as `String(rule)`. Sanitising here, at the
-// interpolation rather than at one of the suppliers, is what makes the block safe whichever
-// path produced the rule.
+// cache, so any local process that can write it picks that string. Both suppliers of
+// `costliestRules` now apply `clean`: the managed-hits side at
+// `auto-learn-manager.js:1793`, and the inert-family side, which calls `addCost` at :1139,
+// inside `addCost` itself at `auto-learn-manager.js:1129`. But `clean` only collapses
+// control characters and whitespace; it knows nothing about a code span. Sanitising HERE,
+// at the interpolation, is what escapes the backtick and the comment opener.
 //
 // Same transform the hit table already applies — control characters and whitespace runs
 // collapse to a single space, trimmed, 200 characters — plus the two things a code span

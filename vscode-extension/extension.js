@@ -628,29 +628,29 @@ function recallStatus() {
   return { py, modelDir, venv, model, state };
 }
 
-// Fetch the CPU recall model on demand into RECALL_MODEL_HOME. Same asset
-// recall.py/desktopPet already ship (bge-small-en-v1.5, int8 ONNX, ~32MB). The model is
-// gitignored and stays out of the VSIX (only the vocab is committed and bundled) because
-// 32MB per release would be re-downloaded on every upgrade. Source is
-// Xenova/bge-small-en-v1.5 on Hugging Face (a public repo, no token). Follows
-// redirects itself (Node's https doesn't) since HF's /resolve/ URLs 302 to a CDN host.
+// Fetch the CPU recall model on demand into RECALL_MODEL_HOME: the same bge-small-en-v1.5 int8 ONNX asset (~32MB) recall.py
+// and desktopPet ship. Gitignored and kept out of the VSIX (only the vocab is committed and bundled) because 32MB per release would be re-downloaded on every upgrade.
 const RECALL_MODEL_URL = 'https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx';
 const RECALL_MODEL_MIN_BYTES = 5 * 1024 * 1024; // sanity floor — a bad URL/auth wall serves a small HTML page, not the binary
 
-function httpsGetFollow(url, onResponse, redirectsLeft = 5) {
-  const req = https.get(url, { headers: { 'User-Agent': 'permission-wildcarding' } }, (res) => {
+// Source is Xenova/bge-small-en-v1.5 on Hugging Face (a public repo, no token), whose /resolve/ URLs always 302 to a CDN
+// host, so this follows redirects itself (Node's https doesn't). It returns the HANDLE, not the req, because every hop
+// builds a fresh req: a Cancel aimed at the one the caller was handed destroyed a socket that had already finished
+// redirecting while the 32MB body ran to completion, and between a 3xx and the next hop there is no live req at all.
+function httpsGetFollow(url, onResponse, redirectsLeft = 5, handle = { req: null, cancelled: false, destroy(err) { handle.cancelled = true; handle.req?.destroy(err); } }) {
+  const req = handle.req = https.get(url, { headers: { 'User-Agent': 'permission-wildcarding' } }, (res) => {
     const loc = res.headers.location;
     if (loc && res.statusCode >= 300 && res.statusCode < 400) {
       res.resume(); // drain so the socket can be reused
       if (redirectsLeft <= 0) { onResponse(null, new Error('too many redirects')); return; }
-      httpsGetFollow(new URL(loc, url).toString(), onResponse, redirectsLeft - 1);
+      if (!handle.cancelled) httpsGetFollow(new URL(loc, url).toString(), onResponse, redirectsLeft - 1, handle);
       return;
     }
     onResponse(res, null);
   });
   req.on('error', (err) => onResponse(null, err));
   req.setTimeout(30000, () => req.destroy(new Error('timed out')));
-  return req;
+  return handle;
 }
 
 // Downloads to `<dest>.tmp` and renames on success so a cancelled/failed run never
@@ -684,7 +684,7 @@ function downloadRecallModel() {
       }
 
       const out = fs.createWriteStream(tmp);
-      let received = 0, total = 0, reported = 0, activeReq = null;
+      let received = 0, total = 0, reported = 0, transfer = null;   // the redirect-following handle, not one request
 
       const fail = (err) => {
         out.close();
@@ -693,9 +693,9 @@ function downloadRecallModel() {
         resolve(false);
       };
 
-      token.onCancellationRequested(() => activeReq?.destroy(new Error('cancelled')));
+      token.onCancellationRequested(() => transfer?.destroy(new Error('cancelled')));
 
-      activeReq = httpsGetFollow(RECALL_MODEL_URL, (res, err) => {
+      transfer = httpsGetFollow(RECALL_MODEL_URL, (res, err) => {
         if (err) { fail(err); return; }
         if (res.statusCode !== 200) { res.resume(); fail(new Error(`HTTP ${res.statusCode}`)); return; }
         total = Number(res.headers['content-length'] || 0);

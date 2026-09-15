@@ -27,6 +27,16 @@ const { EventEmitter } = require('node:events');
 
 const extensionPath = require.resolve('../vscode-extension/extension');
 
+// node:test has NO default per-test timeout (--test-timeout defaults to Infinity), and every
+// test below awaits something the extension is supposed to settle. A regression that leaves
+// one of those promises pending therefore hangs the runner instead of failing it: no name, no
+// assertion, no output, and on CI a job killed at the job limit with nothing to read. Almost
+// every test here is a teardown test, which is exactly the class that produces a pending
+// promise when it breaks — the drain has no deadline, so a runner that never settles never
+// lets deactivate() resolve. 30s is ~17x the slowest test in this file (1.7s), so it cannot
+// fire on a slow box; it only converts a hang into one named failure.
+const TEST_TIMEOUT = { timeout: 30000 };
+
 function disposable() { return { dispose() {} }; }
 
 function tick(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -65,6 +75,53 @@ class WedgedWorker extends EventEmitter {
   terminate() { this.terminated = true; return Promise.resolve(0); }
 }
 
+// A stand-in for node:https that starts no socket. Every request is recorded and the test
+// drives the response by hand, because the thing under test is WHICH request a cancel
+// reaches — and that is decided by how the redirect follower hands requests back, not by
+// anything the network does. `destroy` records and then fires the 'error' handler, which
+// is what a real destroyed request does and what carries the failure back to the caller.
+function fakeHttps(requests) {
+  return {
+    get(url, _options, onResponse) {
+      const req = {
+        url,
+        destroyed: false,
+        destroyedWith: null,
+        timeoutMs: 0,
+        handlers: {},
+        on(event, cb) { req.handlers[event] = cb; return req; },
+        setTimeout(ms, cb) { req.timeoutMs = ms; req.handlers.timeout = cb; return req; },
+        destroy(err) {
+          req.destroyed = true;
+          req.destroyedWith = err || null;
+          req.handlers.error?.(err || new Error('socket destroyed'));
+        },
+        // What the server would have said. Synchronous on purpose: the redirect hop the
+        // follower takes in response is exactly the step being observed.
+        respond(res) { onResponse(res); },
+      };
+      requests.push(req);
+      return req;
+    },
+  };
+}
+
+// A 3xx that points somewhere else, and the 200 that finally carries the body. The body
+// response never emits data, so the transfer stays in flight for the test to cancel.
+function redirectTo(location) {
+  return { statusCode: 302, headers: { location }, resume() {} };
+}
+
+function bodyResponse() {
+  return {
+    statusCode: 200,
+    headers: { 'content-length': String(32 * 1024 * 1024) },
+    resume() {},
+    on() {},
+    pipe() {},
+  };
+}
+
 function harness(tempHome, options = {}) {
   const commands = new Map();
   const watchers = [];
@@ -81,6 +138,12 @@ function harness(tempHome, options = {}) {
   const statuses = [];
   const errors = [];
   const infos = [];
+  const warnings = [];
+  // Every https.get the extension made, newest last, and every withProgress run with the
+  // cancellation callbacks its task registered. Both exist for the model download: the
+  // redirect follower builds one request per hop and only the last is live.
+  const httpsRequests = [];
+  const progressRuns = [];
   const settings = { ...(options.settings || {}) };
   // The status-bar items the extension asked for, with a disposed flag. VS Code disposes
   // the item through context.subscriptions after deactivate() resolves, and whether
@@ -131,8 +194,18 @@ function harness(tempHome, options = {}) {
       setStatusBarMessage(message) { statuses.push(String(message)); },
       showErrorMessage(message) { errors.push(String(message)); },
       showInformationMessage(message) { infos.push(String(message)); return Promise.resolve(undefined); },
-      showWarningMessage(message) { return Promise.resolve(undefined); },
-      withProgress(_options, task) { return task({ report() {} }, { onCancellationRequested() {} }); },
+      showWarningMessage(message) { warnings.push(String(message)); return Promise.resolve(options.warningChoice); },
+      // CAPTURED, not stubbed. The model download is the extension's only cancellable
+      // progress, and whether Cancel reaches the request that is actually transferring is
+      // unobservable unless the token handed to the task is retained.
+      withProgress(progressOptions, task) {
+        const cancels = [];
+        progressRuns.push({ options: progressOptions, cancels });
+        return task(
+          { report() {} },
+          { onCancellationRequested(cb) { cancels.push(cb); return disposable(); } }
+        );
+      },
     },
     workspace: {
       isTrusted: true,
@@ -171,6 +244,7 @@ function harness(tempHome, options = {}) {
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
+    if (request === 'https' && parent?.filename === extensionPath) return fakeHttps(httpsRequests);
     if (request === 'child_process' && parent?.filename === extensionPath) {
       // Every spawn is captured with the ChildProcess handle the extension gets
       // back, so a test can assert what deactivate did to it and then deliver
@@ -286,7 +360,10 @@ function harness(tempHome, options = {}) {
     discoverCalls,
     errors,
     extension,
+    httpsRequests,
     infos,
+    progressRuns,
+    warnings,
     memoryDirs,
     reconcilers,
     settings,
@@ -382,14 +459,18 @@ function memoryCorpus(t) {
 
 // The two passive probes recall spawns are gated on, satisfied with empty files
 // so the gate opens on any platform and nothing real is ever executed.
-function fakeRecallEnvironment(t) {
+// `model: false` leaves the vocab in place and the .onnx out, which is the state that
+// makes rebuildRecall offer the download instead of spawning python. recallModelDir()
+// requires BOTH files in one dir, so a vocab-only dir reads as model-missing while
+// recallVocabSource() still finds something to seed from — the real first-run shape.
+function fakeRecallEnvironment(t, { model = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-toolbox-'));
   const python = path.join(root, 'python', '.venv', 'Scripts', 'python.exe');
   fs.mkdirSync(path.dirname(python), { recursive: true });
   fs.writeFileSync(python, '');
   const models = path.join(root, 'models');
   fs.mkdirSync(models, { recursive: true });
-  fs.writeFileSync(path.join(models, 'bge-small.onnx'), '');
+  if (model) fs.writeFileSync(path.join(models, 'bge-small.onnx'), '');
   fs.writeFileSync(path.join(models, 'bge-small.vocab.txt'), '');
   const previous = { toolbox: process.env.CODEX_TOOLBOX, models: process.env.RECALL_MODEL_DIR };
   process.env.CODEX_TOOLBOX = root;
@@ -404,7 +485,7 @@ function fakeRecallEnvironment(t) {
   return { python };
 }
 
-test('a python child that outlives the extension is killed, and says nothing after', async (t) => {
+test('a python child that outlives the extension is killed, and says nothing after', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const corpus = memoryCorpus(t);
   fakeRecallEnvironment(t);
@@ -474,7 +555,7 @@ test('extension.js keeps no second copy of the memory configuration', () => {
 // pushes the item into context.subscriptions, so VS Code disposes it on teardown while the
 // variable stays truthy — the guard passed on precisely the state it looks like it exists
 // to catch.
-test('a watcher event after teardown does not repaint a disposed status-bar item', async (t) => {
+test('a watcher event after teardown does not repaint a disposed status-bar item', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const app = harness(home);
   try {
@@ -504,7 +585,7 @@ test('a watcher event after teardown does not repaint a disposed status-bar item
 // recallStatus() and cfg() — and it is not a one-shot: the 10 s startup timer is, but
 // memBounce re-enters on every MEMORY.md write, so a deterministic throw recurred silently
 // on every trigger and a broken run logged identically to a working one.
-test('a throw inside the background recall sync is recorded, not swallowed', async (t) => {
+test('a throw inside the background recall sync is recorded, not swallowed', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const corpus = memoryCorpus(t);
   fakeRecallEnvironment(t);
@@ -530,7 +611,7 @@ test('a throw inside the background recall sync is recorded, not swallowed', asy
 // Claude Code derives the project slug from the working directory, so a session launched
 // from a different root mints a new store — unwatched until a window reload, which for the
 // *.md set means automatic gate recompilation simply does not see it.
-test('a memory store that appears later is watched without a window reload', async (t) => {
+test('a memory store that appears later is watched without a window reload', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const first = memoryCorpus(t);
   const second = memoryCorpus(t);
@@ -568,7 +649,7 @@ test('a memory store that appears later is watched without a window reload', asy
   }
 });
 
-test('a memory store that goes away leaves no watcher behind', async (t) => {
+test('a memory store that goes away leaves no watcher behind', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const first = memoryCorpus(t);
   const second = memoryCorpus(t);
@@ -601,7 +682,7 @@ test('a memory store that goes away leaves no watcher behind', async (t) => {
   }
 });
 
-test('a reconcile after teardown builds nothing, and the disposer drains what is left', async (t) => {
+test('a reconcile after teardown builds nothing, and the disposer drains what is left', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const first = memoryCorpus(t);
   const second = memoryCorpus(t);
@@ -625,7 +706,7 @@ test('a reconcile after teardown builds nothing, and the disposer drains what is
   }
 });
 
-test('a gate refresh cannot rewrite the instruction files after deactivate', async (t) => {
+test('a gate refresh cannot rewrite the instruction files after deactivate', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const userText = '# My global instructions\n\nAlways use the toolbox python.\n';
   const claudeMd = path.join(home, '.claude', 'CLAUDE.md');
@@ -654,7 +735,7 @@ test('a gate refresh cannot rewrite the instruction files after deactivate', asy
   }
 });
 
-test('the Auto Learn busy latch does not survive a teardown', async (t) => {
+test('the Auto Learn busy latch does not survive a teardown', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });
   try {
@@ -680,7 +761,7 @@ test('the Auto Learn busy latch does not survive a teardown', async (t) => {
   }
 });
 
-test('a same-realm re-activate gets a fresh Auto Learn worker runner', async (t) => {
+test('a same-realm re-activate gets a fresh Auto Learn worker runner', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });
   try {
@@ -704,7 +785,7 @@ test('a same-realm re-activate gets a fresh Auto Learn worker runner', async (t)
   }
 });
 
-test('an Auto Learn operation arriving after deactivate does not start a worker', async (t) => {
+test('an Auto Learn operation arriving after deactivate does not start a worker', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });
   try {
@@ -744,7 +825,7 @@ const UNGENERALIZED = JSON.stringify({
   permissions: { allow: ['Bash(git status --short)', 'Bash(git status --long)'], deny: [] },
 }, null, 2) + '\n';
 
-test('a settings.json change is acted on while the extension is live', async (t) => {
+test('a settings.json change is acted on while the extension is live', TEST_TIMEOUT, async (t) => {
   // The control. Without it, the teardown test below cannot distinguish "the
   // guard stopped the write" from "there was no write to stop".
   const home = tempHome(t);
@@ -763,7 +844,7 @@ test('a settings.json change is acted on while the extension is live', async (t)
   }
 });
 
-test('a watcher event during deactivate cannot re-arm a cleared timer', async (t) => {
+test('a watcher event during deactivate cannot re-arm a cleared timer', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const settingsPath = path.join(home, '.claude', 'settings.json');
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });
@@ -790,7 +871,7 @@ test('a watcher event during deactivate cannot re-arm a cleared timer', async (t
 });
 
 
-test('a configuration change after teardown does not rewrite the instruction files', async (t) => {
+test('a configuration change after teardown does not rewrite the instruction files', TEST_TIMEOUT, async (t) => {
   // ensureGates was guarded in the lifecycle pass; ensureGuidance, its twin, was
   // not — and it writes ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. The
   // configuration listener stays live until VS Code disposes the subscriptions,
@@ -827,7 +908,7 @@ test('a configuration change after teardown does not rewrite the instruction fil
     await app.dispose();
   }
 });
-test('a configuration change after teardown arms no Auto Learn timer', async (t) => {
+test('a configuration change after teardown arms no Auto Learn timer', TEST_TIMEOUT, async (t) => {
   // scheduleAutoLearn and resetAutoLearnTimer were the two schedulers the guard
   // pass missed. resetAutoLearnTimer is the worse of the two: it arms a
   // 5-minute setInterval, and one armed after deactivate() has cleared the
@@ -851,7 +932,7 @@ test('a configuration change after teardown arms no Auto Learn timer', async (t)
   }
 });
 
-test('a re-activate during the drain keeps its own dashboard and memory lint', async (t) => {
+test('a re-activate during the drain keeps its own dashboard and memory lint', TEST_TIMEOUT, async (t) => {
   // The drain has no deadline by deliberate decision. If the host's deactivate
   // timeout expires and a same-realm activate() runs during it, the OLD
   // deactivate's continuation resumes — and it used to null `dashboard` and
@@ -925,7 +1006,7 @@ test('a re-activate during the drain keeps its own dashboard and memory lint', a
 });
 
 
-test('a re-activate releases a busy latch that a wedged scan left set', async (t) => {
+test('a re-activate releases a busy latch that a wedged scan left set', TEST_TIMEOUT, async (t) => {
   // A regression introduced by the activationGeneration guard added earlier the
   // same day. That guard is right about the case it names — a predecessor's
   // continuation must not clear a latch the SUCCESSOR owns — but it left the
@@ -984,7 +1065,7 @@ test('a re-activate releases a busy latch that a wedged scan left set', async (t
 });
 
 
-test('a wedged predecessor does not steal the successor\u2019s worker runner', async (t) => {
+test('a wedged predecessor does not steal the successor\u2019s worker runner', TEST_TIMEOUT, async (t) => {
   // The other side of the re-activate fix, and a hazard that fix introduced.
   //
   // activate() now drops a stranded runner so a wedged drain cannot leave the
@@ -1038,6 +1119,72 @@ test('a wedged predecessor does not steal the successor\u2019s worker runner', a
     await Promise.allSettled([second, successorTeardown]);
   } finally {
     for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
+// Cancel on the 32MB model download was a no-op on every real download, and the shape of
+// httpsGetFollow is why. It followed redirects itself and returned the req it had just
+// built, so the caller retained the FIRST hop's request. The comment above the function
+// records that Hugging Face's /resolve/ URLs always 302 to a CDN host, so by the time the
+// body is transferring that first request is finished and destroying it reaches nothing —
+// the transfer ran to completion and the file was renamed into place anyway.
+//
+// These two tests split the fix along its two failure modes: a cancel DURING the body,
+// and a cancel in the gap between a 3xx and the hop it triggers, where no request is live
+// to destroy at all.
+async function startModelDownload(t) {
+  const home = tempHome(t);
+  const corpus = memoryCorpus(t);
+  fakeRecallEnvironment(t, { model: false });
+  const app = harness(home, { memoryDir: corpus, warningChoice: 'Download' });
+  const rebuild = app.commands.get('permission-wildcarding.rebuildRecall')();
+  await tick(50);
+  assert.equal(app.httpsRequests.length, 1,
+    'precondition: the download started and issued its first request — a box that already '
+    + 'holds bge-small takes the spawn path instead and this test would prove nothing');
+  const run = app.progressRuns.at(-1);
+  assert.equal(run.options.cancellable, true, 'precondition: the progress offers Cancel');
+  assert.equal(run.cancels.length, 1, 'precondition: the task registered a cancel handler');
+  return { app, rebuild, cancel: () => { for (const cb of run.cancels) cb(); } };
+}
+
+test('cancelling the model download destroys the request that is actually transferring', TEST_TIMEOUT, async (t) => {
+  const { app, rebuild, cancel } = await startModelDownload(t);
+  try {
+    app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+    assert.equal(app.httpsRequests.length, 2, 'the 302 was followed onto a second request');
+    app.httpsRequests[1].respond(bodyResponse());
+
+    cancel();
+
+    assert.equal(app.httpsRequests[1].destroyed, true,
+      'Cancel destroyed the first hop, which finished redirecting long ago, and left the '
+      + 'request carrying the 32MB body running');
+    assert.equal(app.httpsRequests[0].destroyed, false,
+      'the finished first hop was destroyed instead of the live one');
+    await rebuild;
+    assert.ok(app.errors.some((m) => m.includes('cancelled')),
+      'the cancellation was reported as a failed download, not swallowed');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a cancel between redirect hops stops the next hop instead of starting it', TEST_TIMEOUT, async (t) => {
+  const { app, rebuild, cancel } = await startModelDownload(t);
+  try {
+    // The window the sticky flag exists for: the request is destroyed while its 302 is
+    // already queued, so the follower is still about to recurse and there is no live
+    // request for destroy() to have reached.
+    cancel();
+    app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+
+    assert.equal(app.httpsRequests.length, 1,
+      'a cancelled download followed its redirect anyway and opened a fresh connection '
+      + 'that nothing was holding, so nothing could ever stop it');
+    await rebuild;
+  } finally {
     await app.dispose();
   }
 });

@@ -624,9 +624,18 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
     order = sorted(names, key=lambda n: (-fused.get(n, 0.0), n))
     rv, rl = _rank_map(cos, names), _rank_map(bm, names)
     out = [{"name": n, "score": fused.get(n, 0.0),
-            "desc": files.get(n, {}).get("desc", ""),
+            # In lexical mode idx["files"] is empty, so this used to print nothing at all.
+            # lex["text"][n] already holds the raw file, so the description costs a parse
+            # of text we are carrying anyway rather than a second read.
+            "desc": (files.get(n, {}).get("desc")
+                     or parse_meta((lex or {}).get("text", {}).get(n, ""))[0]),
             "cos": cos.get(n), "bm25": bm.get(n),
-            "rank_vec": rv[n] + 1 if cos else None,
+            # Both guards are per-DOCUMENT membership. rank_vec used to test `if cos`,
+            # the truthiness of the whole per-query dict, so in hybrid a document with no
+            # cached vector still received a rank while a document no query term touched
+            # correctly received None. Two columns, two meanings, and the fusion bench
+            # these exist for would have read them as comparable.
+            "rank_vec": rv[n] + 1 if n in cos else None,
             "rank_lex": rl[n] + 1 if n in bm else None,
             "text": (lex or {}).get("text", {}).get(n)} for n in order]
     return out[:k] if k else out
@@ -710,7 +719,11 @@ def lint():
         print(f"\n  no MEMORY.md at {index} -- nothing to lint\n")
         return
     mem = open(index, encoding="utf-8", errors="replace").read()
-    total = len(mem.encode("utf-8"))
+    # getsize, not len(mem.encode()). Python text mode normalises CRLF to LF, so the
+    # encoded length undercounts by one byte per line against what is actually on disk:
+    # 6564 against 6837 here. memoryLint.js measures the real file and so did not agree,
+    # and the loader that enforces the 25 KB half of the cap reads bytes too.
+    total = os.path.getsize(index)
     print(f'\n  MEMORY.md: {total} bytes (~{total // 4} tokens loaded every session), '
           f'target < {LINT_TOTAL_WARN}')
     if total > LINT_TOTAL_WARN:

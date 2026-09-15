@@ -87,7 +87,14 @@ function recallIndexStatus(dir) {
   return base;
 }
 
+// `readRecallIndex` is deliberately NOT exported: recallIndexCount and recallIndexStatus
+// are its only callers and both live in this file.
+//
+// `MTIME_TOLERANCE_MS` has no importer either and is kept ON PURPOSE. It is the third
+// cross-language constant this module reconciles against recall.py, the drift test the
+// header promises does not yet pin it, and a branch in flight is adding one that imports
+// this name. Removing it now would be a rename for that branch to undo.
 module.exports = {
   MEMORY_INDEX_NAME, RECALL_EMBED_ID, RECALL_INDEX_NAME, MTIME_TOLERANCE_MS,
-  indexableMemories, readRecallIndex, recallIndexCount, recallIndexStatus,
+  indexableMemories, recallIndexCount, recallIndexStatus,
 };

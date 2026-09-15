@@ -818,7 +818,15 @@ function autoSyncRecallIfStale() {
       }
       dashboard?.refresh();
     }));
-  } catch { /* auto-sync is best-effort — never break anything else */ }
+  } catch (err) {
+    // Best-effort, but never silent. Three reachable throwers sit inside this try --
+    // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
+    // index could stop syncing for the life of the window with no trace anywhere.
+    // It also recurs: :1981's timer is one-shot, but memBounce re-enters here on every
+    // MEMORY.md write, so a deterministic throw fires again on every trigger and a broken
+    // run logged identically to a working one.
+    console.error('permission-wildcarding: auto recall sync could not run —', err);
+  }
 }
 
 async function setRecallPath() {
@@ -1988,78 +1996,132 @@ function activate(context) {
     // the card ended up reporting live memory data for a linter that was off.
     memoryLint = new MemoryLint();
     memoryLint.activate(context);
+    // The two watcher sets below reconcile on the LINTER's cadence rather than a third
+    // timer of their own: it already re-discovers these same directories every 5 minutes,
+    // on every MEMORY.md save or open, and 300 ms after every external write. Registering
+    // the subscriber before the initial build is harmless -- the build below is
+    // unconditional -- and keeping it inside this try means a linter that failed to
+    // activate cannot take the initial build down with it.
+    context.subscriptions.push(memoryLint.onReconcile(() => reconcileMemoryWatchers()));
   } catch (err) {
     console.error('permission-wildcarding: memory lint failed to activate —', err);
   }
 
-  // Keep the dashboard's Memory card live as MEMORY.md changes (an agent editing it
-  // outside the editor still fires this). Best-effort — the card also refreshes on
-  // panel visibility and after a rebuild, so a watcher failure is non-fatal.
-  //
-  // memoryConf(), not a hand-built literal, so the memory.* keys are enumerated in exactly one
-  // place. But `dir: ''` is restored ON PURPOSE, and it is not the staleness the first version
-  // of this comment blamed: discoverDirs reads ONLY conf.dir, so the missing `maxLines` in the
-  // old literal could not produce any behaviour at all.
-  //
-  // The real reason to override it: memory.dir answers "which store do I LINT", and these
-  // watchers ask "which stores exist". Passing the pin through conflated them, and
-  // discoverDirs returns [] for a configured dir with no MEMORY.md (a typo, or a store not
-  // written to yet). Both loops then ran zero times, built zero watchers, and logged nothing --
-  // silently disabling automatic gate recompilation, since the *.md watcher below is one of
-  // only two callers of compileGates.
-  const watchConf = { ...memoryConf(), dir: '' };
+  // The initial build of both memory-store watcher sets. Every later rebuild comes through
+  // the reconcile subscriber above.
   try {
-    for (const dir of discoverDirs(watchConf)) {
-      const w = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(vscode.Uri.file(dir), 'MEMORY.md')
-      );
-      const bump = () => {
-        clearTimeout(memBounce);
-        memBounce = setTimeout(() => { dashboard?.refresh(); autoSyncRecallIfStale(); }, 350);
-      };
-      w.onDidChange(bump); w.onDidCreate(bump); w.onDidDelete(bump);
-      context.subscriptions.push(w);
-    }
+    reconcileMemoryWatchers();
+    // ONE disposer for both sets, not one subscription per watcher. The sets churn as
+    // stores come and go, and pushing each watcher would grow context.subscriptions for the
+    // life of the window with entries that reconcileMemoryWatchers has already disposed --
+    // the same leak shape the folder-change watchers were fixed for.
+    context.subscriptions.push({ dispose: () => disposeMemoryWatchers() });
   } catch (err) {
-    console.error('permission-wildcarding: memory-card watcher failed —', err);
+    console.error('permission-wildcarding: memory-store watchers failed —', err);
   }
+}
 
-  // Recompile the gates when the corpus that produced them changes.
-  //
-  // A SessionStart hook would be the obvious home for this and it does not work under a
-  // managed policy. Enforcement of `allowManagedHooksOnly` is PER EVENT: a user hook runs
-  // only on an event the managed policy itself defines. Measured on a box whose policy
-  // defines PostToolUse and nothing else — a user PostToolUse canary fired 4 times out of 4,
-  // while a real session start and a /clear both left the compiled file untouched.
-  //
-  // A memory file changing is the better trigger regardless. It is the actual cause, it
-  // fires once per edit instead of once per session, and the extension is not a hook, so no
-  // policy can switch it off. Gated on the block already being installed, so this never
-  // spawns python for anyone who has not opted in.
+// ── the two memory-store watcher sets this file owns ──────────────────────────
+// Keyed by store directory so they can be RECONCILED rather than built once at activation.
+// memoryLint.js documents this hazard in its own header and solves it for its own set with
+// syncWatchers() plus a periodic re-discovery; these two never got that fix, and they are
+// the ones wired to the gate compiler. Claude Code derives the project slug from the
+// working directory, so a session launched from a different root mints a new store: it went
+// unwatched until a window reload, and a store that went away left a dead watcher until
+// deactivate().
+const memoryCardWatchers = new Map();    // dir -> MEMORY.md watcher, keeps the Memory card live
+const gatesCorpusWatchers = new Map();   // dir -> *.md watcher, triggers the gate recompile
+
+// Every store on disk, read from the LIVE configuration on each call -- which is half of
+// what makes a reconcile a reconcile, since memory.* can change at runtime.
+//
+// memoryConf(), not a hand-built literal, so the memory.* keys are enumerated in exactly one
+// place. But `dir: ''` is restored ON PURPOSE, and it is not the staleness the first version
+// of this comment blamed: discoverDirs reads ONLY conf.dir, so the missing `maxLines` in the
+// old literal could not produce any behaviour at all.
+//
+// The real reason to override it: memory.dir answers "which store do I LINT", and these
+// watchers ask "which stores exist". Passing the pin through conflated them, and
+// discoverDirs returns [] for a configured dir with no MEMORY.md (a typo, or a store not
+// written to yet). Both loops then ran zero times, built zero watchers, and logged nothing --
+// silently disabling automatic gate recompilation, since the *.md watcher is one of only two
+// callers of compileGates.
+function memoryStoreDirs() {
+  const watchConf = { ...memoryConf(), dir: '' };
+  return discoverDirs(watchConf);
+}
+
+// Keep the dashboard's Memory card live as MEMORY.md changes (an agent editing it outside
+// the editor still fires this). Best-effort — the card also refreshes on panel visibility
+// and after a rebuild, so a watcher failure is non-fatal.
+function memoryCardBump() {
+  clearTimeout(memBounce);
+  memBounce = setTimeout(() => { dashboard?.refresh(); autoSyncRecallIfStale(); }, 350);
+}
+
+// Recompile the gates when the corpus that produced them changes.
+//
+// A SessionStart hook would be the obvious home for this and it does not work under a
+// managed policy. Enforcement of `allowManagedHooksOnly` is PER EVENT: a user hook runs
+// only on an event the managed policy itself defines. Measured on a box whose policy
+// defines PostToolUse and nothing else — a user PostToolUse canary fired 4 times out of 4,
+// while a real session start and a /clear both left the compiled file untouched.
+//
+// A memory file changing is the better trigger regardless. It is the actual cause, it
+// fires once per edit instead of once per session, and the extension is not a hook, so no
+// policy can switch it off. Gated on the block already being installed, so this never
+// spawns python for anyone who has not opted in.
+function gatesCorpusBump(uri) {
+  // The index carries hooks, never gate blocks, and it changes far more often.
+  if (uri && path.basename(uri.fsPath) === 'MEMORY.md') return;
+  if (!gatesEnabled()) return;
   try {
-    for (const dir of discoverDirs(watchConf)) {
-      const w = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(vscode.Uri.file(dir), '*.md')
-      );
-      const bump = (uri) => {
-        // The index carries hooks, never gate blocks, and it changes far more often.
-        if (uri && path.basename(uri.fsPath) === 'MEMORY.md') return;
-        if (!gatesEnabled()) return;
-        try {
-          if (!gatesStatusAll().some((state) => state.on)) return;
-        } catch { return; }
-        clearTimeout(gatesBounce);
-        // Long debounce on purpose: editing a memory tends to save several times, and each
-        // compile is a python spawn.
-        gatesBounce = setTimeout(() => {
-          compileGates({ quiet: true }).then((ok) => { if (ok) ensureGates(); });
-        }, 2000);
-      };
-      w.onDidChange(bump); w.onDidCreate(bump); w.onDidDelete(bump);
-      context.subscriptions.push(w);
+    if (!gatesStatusAll().some((state) => state.on)) return;
+  } catch { return; }
+  clearTimeout(gatesBounce);
+  // Long debounce on purpose: editing a memory tends to save several times, and each
+  // compile is a python spawn.
+  gatesBounce = setTimeout(() => {
+    compileGates({ quiet: true }).then((ok) => { if (ok) ensureGates(); });
+  }, 2000);
+}
+
+// Add watchers for dirs that appeared, drop the ones whose dir went away. memoryLint.js's
+// syncWatchers, applied to a second and third set.
+function syncWatcherSet(watchers, dirs, glob, handler) {
+  for (const [dir, watcher] of watchers) {
+    if (dirs.has(dir)) continue;
+    try { watcher.dispose(); } catch { /* already gone with the extension host */ }
+    watchers.delete(dir);
+  }
+  for (const dir of dirs) {
+    if (watchers.has(dir)) continue;
+    const w = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(dir), glob)
+    );
+    w.onDidChange(handler); w.onDidCreate(handler); w.onDidDelete(handler);
+    watchers.set(dir, w);
+  }
+}
+
+function reconcileMemoryWatchers() {
+  // Every path in here can land after teardown: the linter's own debounce and 5-minute
+  // interval both survive deactivate() until VS Code drains the subscriptions, and a
+  // rebuild then creates watchers into maps nothing will drain again.
+  if (deactivated) return;
+  // ONE discovery for both sets. Two would double the readdir/existsSync cost of every
+  // reconcile and could hand the two sets different answers if a store appeared between them.
+  const dirs = new Set(memoryStoreDirs());
+  syncWatcherSet(memoryCardWatchers, dirs, 'MEMORY.md', memoryCardBump);
+  syncWatcherSet(gatesCorpusWatchers, dirs, '*.md', gatesCorpusBump);
+}
+
+function disposeMemoryWatchers() {
+  for (const watchers of [memoryCardWatchers, gatesCorpusWatchers]) {
+    for (const [, watcher] of watchers) {
+      try { watcher.dispose(); } catch { /* nothing left to release */ }
     }
-  } catch (err) {
-    console.error('permission-wildcarding: gates corpus watcher failed —', err);
+    watchers.clear();
   }
 }
 
@@ -2117,7 +2179,14 @@ function frictionSummary(state = frictionState()) {
 }
 
 function updateStatusBar() {
-  if (!statusBar) return;
+  // `deactivated` first, because `!statusBar` alone cannot be true after the first
+  // activation: the slot is assigned once and nulled nowhere, including in deactivate(),
+  // which nulls seven other retainers. Worse than merely dead -- activate() pushes the item
+  // into context.subscriptions, so VS Code DISPOSES it on teardown while this variable stays
+  // truthy, and the guard passed on exactly the state it looks like it exists to catch.
+  // Reachable from the Codex config.toml and requirements-bundle watchers, which stay live
+  // until VS Code drains the subscriptions after deactivate() resolves.
+  if (deactivated || !statusBar) return;
   const state = frictionState();
   const anyOn = state.claude !== 'prompts' || state.codex === 'max';
   statusBar.text = `${anyOn ? '$(zap)' : '$(shield)'} ${frictionSummary(state)}`;

@@ -82,6 +82,20 @@ function harness(tempHome, options = {}) {
   const errors = [];
   const infos = [];
   const settings = { ...(options.settings || {}) };
+  // The status-bar items the extension asked for, with a disposed flag. VS Code disposes
+  // the item through context.subscriptions after deactivate() resolves, and whether
+  // anything paints it AFTERWARDS is the only observable for the teardown guard.
+  const statusBarItems = [];
+  // The stores discoverDirs reports, MUTABLE so a test can make one appear or vanish the
+  // way a new project slug does, and the conf each call was handed.
+  const memoryDirs = options.memoryDir ? [options.memoryDir] : [];
+  const discoverCalls = [];
+  // Whatever extension.js registered through MemoryLint.onReconcile, so a test can drive
+  // the linter's cadence without running the real linter.
+  const reconcilers = [];
+  // Everything pushed into context.subscriptions, so a test can do what VS Code does after
+  // deactivate() and drain them.
+  const subscriptions = [];
   let provider = null;
 
   const vscode = {
@@ -98,7 +112,17 @@ function harness(tempHome, options = {}) {
       executeCommand() {},
     },
     window: {
-      createStatusBarItem() { return { hide() {}, show() {}, dispose() {} }; },
+      createStatusBarItem() {
+        const item = {
+          disposed: false, paintsAfterDispose: 0,
+          text: '', tooltip: '', backgroundColor: undefined,
+          hide() {},
+          show() { if (item.disposed) item.paintsAfterDispose += 1; },
+          dispose() { item.disposed = true; },
+        };
+        statusBarItems.push(item);
+        return item;
+      },
       createOutputChannel() { return { appendLine() {}, clear() {}, show() {}, dispose() {} }; },
       // CAPTURED. Whether a push reaches the webview is the only way to see
       // that `dashboard` still points at the live provider — the other
@@ -116,11 +140,11 @@ function harness(tempHome, options = {}) {
       createFileSystemWatcher(pattern) {
         const handlers = { change: [], create: [], delete: [] };
         const watcher = {
-          pattern,
+          pattern, disposed: false,
           onDidChange(cb) { handlers.change.push(cb); return disposable(); },
           onDidCreate(cb) { handlers.create.push(cb); return disposable(); },
           onDidDelete(cb) { handlers.delete.push(cb); return disposable(); },
-          dispose() {},
+          dispose() { watcher.disposed = true; },
           fire(kind, argument) { for (const cb of handlers[kind]) cb(argument); },
         };
         watchers.push(watcher);
@@ -183,11 +207,24 @@ function harness(tempHome, options = {}) {
     }
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
-        MemoryLint: class MemoryLint { activate() {} },
+        MemoryLint: class MemoryLint {
+          activate() {}
+
+          // CAPTURED. extension.js hangs its two memory-store watcher sets off this hook
+          // instead of arming a third timer, so this is the only way a test can drive a
+          // reconcile without running the real linter.
+          onReconcile(fn) {
+            reconcilers.push(fn);
+            return { dispose: () => { reconcilers.splice(reconcilers.indexOf(fn), 1); } };
+          }
+        },
         // Load-bearing, unlike the cfg stub in the six harnesses that return
         // `discoverDirs: () => []`: this one really does build watchers, so a missing cfg
         // makes discoverDirs(memoryConf()) throw inside the watcher try/catch and both
         // watchers vanish. The MEMORY.md watcher test below is what catches that.
+        //
+        // `dir` is the PIN, and it is set whenever the harness has a memory dir, so the
+        // conf recorded in discoverCalls below can prove the watchers strip it.
         cfg: () => ({
           enabled: true,
           dir: options.memoryDir || '',
@@ -195,19 +232,25 @@ function harness(tempHome, options = {}) {
           totalBudget: 12000,
           maxLines: 200,
         }),
-        memoryReport: () => (options.memoryDir
-          ? {
-            conf: {
-              enabled: true, dir: options.memoryDir, lineBudget: 300, totalBudget: 12000,
-              maxLines: 200,
-            },
-            dir: options.memoryDir,
-            report: {
-              tokens: 10, bytes: 40, fileCount: 1, over: [], broken: [], unresolved: [],
-            },
-          }
-          : { conf: {}, dir: null, report: null }),
-        discoverDirs: () => (options.memoryDir ? [options.memoryDir] : []),
+        memoryReport: () => {
+          // One reachable thrower inside autoSyncRecallIfStale's try, so the catch can be
+          // made to run on demand. recallIndexStatus is NOT one: it is internally
+          // try/caught at every fs call in src/recall-index.js.
+          if (options.memoryReportThrows) throw new Error('memory store unreadable');
+          return memoryDirs.length
+            ? {
+              conf: {
+                enabled: true, dir: memoryDirs[0], lineBudget: 300, totalBudget: 12000,
+                maxLines: 200,
+              },
+              dir: memoryDirs[0],
+              report: {
+                tokens: 10, bytes: 40, fileCount: 1, over: [], broken: [], unresolved: [],
+              },
+            }
+            : { conf: {}, dir: null, report: null };
+        },
+        discoverDirs: (conf) => { discoverCalls.push(conf); return [...memoryDirs]; },
       };
     }
     return originalLoad.call(this, request, parent, isMain);
@@ -237,14 +280,20 @@ function harness(tempHome, options = {}) {
 
   purge();
   const extension = require(extensionPath);
-  extension.activate({ subscriptions: [] });
+  extension.activate({ subscriptions });
   return {
     commands,
+    discoverCalls,
     errors,
     extension,
     infos,
+    memoryDirs,
+    reconcilers,
     settings,
+    statusBarItems,
+    subscriptions,
     intervals,
+    watchers,
     // Mutable, so a test can change a setting the way the Settings UI does and
     // then fire the configuration listener.
     settings,
@@ -263,6 +312,29 @@ function harness(tempHome, options = {}) {
       assert.ok(hit, `no watcher registered for ${name}`);
       return hit;
     },
+    // Every watcher ever built over one store dir, disposed ones included. A reconcile is
+    // judged on both halves — what it created and what it released — so the list must not
+    // forget the dead ones.
+    watchersIn(dir) {
+      return watchers.filter((watcher) => watcher.pattern?.base?.fsPath === dir);
+    },
+    watcherIn(dir, name) {
+      const hit = watchers.find((watcher) => watcher.pattern?.base?.fsPath === dir
+        && watcher.pattern?.pattern === name && !watcher.disposed);
+      assert.ok(hit, `no live ${name} watcher for ${dir}`);
+      return hit;
+    },
+    // What the memory linter's 5-minute backstop, and every MEMORY.md event, does.
+    fireMemoryReconcile() {
+      assert.ok(reconcilers.length > 0, 'nothing subscribed to the memory reconcile');
+      for (const fn of reconcilers) fn();
+    },
+    // What VS Code does after deactivate() resolves.
+    disposeSubscriptions() {
+      for (const item of subscriptions) {
+        if (typeof item?.dispose === 'function') item.dispose();
+      }
+    },
     reactivate() { extension.activate({ subscriptions: [] }); },
     // Always, even when a test already deactivated to observe the teardown: a
     // second call is a no-op, and an activation left running keeps a
@@ -275,6 +347,17 @@ function harness(tempHome, options = {}) {
       purge();
     },
   };
+}
+
+// console.error is the house channel for "this ran degraded". A test that asserts a
+// failure was RECORDED has to read it, because a swallowed throw and a logged one are
+// otherwise byte-identical from outside.
+function captureConsoleError(t) {
+  const messages = [];
+  const original = console.error;
+  console.error = (...args) => { messages.push(args.map((a) => String(a)).join(' ')); };
+  t.after(() => { console.error = original; });
+  return messages;
 }
 
 function tempHome(t) {
@@ -366,6 +449,11 @@ test('every execFile in the extension hands its child over to be killable', () =
 // Two hand-built copies used to live at the memory-card and gates watcher sites, and both
 // were wrong in the same two ways: they passed `dir: ''` so a pinned memory.dir was ignored,
 // and they had already fallen a key behind when `maxLines` was added to cfg().
+//
+// Both assertions below are NEGATIVES, which is the only source shape worth pinning: that
+// no second copy of the configuration exists, and that no second, unreconciled discovery
+// site exists. What the surviving site DOES is covered behaviourally by the reconcile tests
+// further down, which read the conf each call was handed.
 test('extension.js keeps no second copy of the memory configuration', () => {
   const source = fs.readFileSync(extensionPath, 'utf8');
   // `lineBudget` appears nowhere else in extension.js, so its mere presence means a literal
@@ -373,14 +461,168 @@ test('extension.js keeps no second copy of the memory configuration', () => {
   // matches an object literal assigning it.
   assert.equal(/lineBudget/.test(source), false, 'a hand-built memory conf is back');
   assert.equal(/totalBudget:\s*\d/.test(source), false, 'a hand-built memory conf is back');
-  assert.equal((source.match(/discoverDirs\(watchConf\)/g) || []).length, 2,
-    'both memory watchers must discover from the live configuration');
-  // And they must override the lint pin. memory.dir says which store to LINT; these watchers
-  // ask which stores EXIST. Passing the pin through made discoverDirs return [] for a
-  // configured dir with no MEMORY.md, which built zero watchers and silently stopped automatic
-  // gate recompilation, because the *.md watcher is one of only two compileGates callers.
-  assert.match(source, /const watchConf = \{ \.\.\.memoryConf\(\), dir: '' \};/,
-    'the watchers must discover every store, not only a pinned one');
+  // ONE call site, inside memoryStoreDirs(). It used to be two loops, each enumerating the
+  // stores once at activation and never again. A second call site is a second watcher set
+  // that no reconcile rebuilds, which is exactly the defect that was fixed.
+  assert.equal((source.match(/discoverDirs\(/g) || []).length, 1,
+    'a second, unreconciled memory-store discovery is back');
+});
+
+// `updateStatusBar` opened with `if (!statusBar) return;`, and that condition could not be
+// false after the first activation: the slot is assigned once and nulled nowhere, including
+// in deactivate(), which nulls seven other retainers. It is worse than dead. activate()
+// pushes the item into context.subscriptions, so VS Code disposes it on teardown while the
+// variable stays truthy — the guard passed on precisely the state it looks like it exists
+// to catch.
+test('a watcher event after teardown does not repaint a disposed status-bar item', async (t) => {
+  const home = tempHome(t);
+  const app = harness(home);
+  try {
+    const [item] = app.statusBarItems;
+    assert.ok(item, 'precondition: activation created the friction indicator');
+    assert.equal(item.disposed, false);
+
+    await app.extension.deactivate();
+    // What VS Code does next, and what `!statusBar` could never see.
+    app.disposeSubscriptions();
+    assert.equal(item.disposed, true, 'precondition: the host disposed the item');
+
+    // The Codex config watcher is one of five handlers that call updateStatusBar()
+    // unconditionally, and every one of them stays live until the subscriptions drain.
+    item.paintsAfterDispose = 0;
+    app.watcherFor('config.toml').fire('change', { fsPath: 'config.toml' });
+
+    assert.equal(item.paintsAfterDispose, 0,
+      'a torn-down extension repainted a status-bar item VS Code had already disposed');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// autoSyncRecallIfStale ended in `} catch { /* auto-sync is best-effort */ }` with no
+// logging at all. Three reachable throwers sit inside that try — memoryReport(),
+// recallStatus() and cfg() — and it is not a one-shot: the 10 s startup timer is, but
+// memBounce re-enters on every MEMORY.md write, so a deterministic throw recurred silently
+// on every trigger and a broken run logged identically to a working one.
+test('a throw inside the background recall sync is recorded, not swallowed', async (t) => {
+  const home = tempHome(t);
+  const corpus = memoryCorpus(t);
+  fakeRecallEnvironment(t);
+  const logged = captureConsoleError(t);
+  const app = harness(home, { memoryDir: corpus, memoryReportThrows: true });
+  try {
+    logged.length = 0;
+    app.watcherFor('MEMORY.md').fire('change', { fsPath: path.join(corpus, 'MEMORY.md') });
+    await tick(450);
+
+    assert.equal(app.spawns.length, 0, 'precondition: the throw came before the spawn');
+    assert.ok(
+      logged.some((m) => /auto recall sync/.test(m) && /memory store unreadable/.test(m)),
+      'the recall index can stop syncing for the life of the window with no trace anywhere; '
+      + `saw: ${JSON.stringify(logged)}`,
+    );
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The two memory-store watcher sets were built once inside activate() and never revisited.
+// Claude Code derives the project slug from the working directory, so a session launched
+// from a different root mints a new store — unwatched until a window reload, which for the
+// *.md set means automatic gate recompilation simply does not see it.
+test('a memory store that appears later is watched without a window reload', async (t) => {
+  const home = tempHome(t);
+  const first = memoryCorpus(t);
+  const second = memoryCorpus(t);
+  fakeRecallEnvironment(t);
+  const app = harness(home, { memoryDir: first });
+  try {
+    assert.equal(app.watchersIn(second).length, 0,
+      'precondition: the second store did not exist at activation');
+
+    // This harness PINS memory.dir, and the store discovery must strip it: the pin answers
+    // "which store do I lint", not "which stores exist". Passing it through made
+    // discoverDirs return [] for a pin with no MEMORY.md, which built zero watchers and
+    // silently stopped gate recompilation, since the *.md watcher is one of only two
+    // compileGates callers.
+    assert.ok(app.discoverCalls.length > 0, 'precondition: the watchers discovered at all');
+    assert.ok(app.discoverCalls.every((conf) => conf.dir === ''),
+      'a pinned memory.dir reached the store discovery');
+    assert.ok(app.discoverCalls.every((conf) => conf.maxLines === 200),
+      'the rest of the live configuration must arrive intact, not as a hand-built literal');
+
+    app.memoryDirs.push(second);
+    app.fireMemoryReconcile();
+
+    assert.deepEqual(app.watchersIn(second).map((w) => w.pattern.pattern).sort(),
+      ['*.md', 'MEMORY.md'],
+      'both sets have to follow a new store, not only the Memory card');
+
+    // Wired, not merely created. An edit in the new store has to reach the work the
+    // watcher exists to trigger.
+    app.watcherIn(second, 'MEMORY.md').fire('change', { fsPath: path.join(second, 'MEMORY.md') });
+    await tick(450);
+    assert.equal(app.spawns.length, 1, 'the new store’s watcher is connected to nothing');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a memory store that goes away leaves no watcher behind', async (t) => {
+  const home = tempHome(t);
+  const first = memoryCorpus(t);
+  const second = memoryCorpus(t);
+  const app = harness(home, { memoryDir: first });
+  try {
+    app.memoryDirs.push(second);
+    app.fireMemoryReconcile();
+    const built = app.watchersIn(second);
+    assert.equal(built.length, 2, 'precondition: the second store was watched');
+
+    // The store moves to a new slug, or the project is deleted.
+    app.memoryDirs.splice(app.memoryDirs.indexOf(second), 1);
+    app.fireMemoryReconcile();
+
+    assert.equal(built.filter((w) => !w.disposed).length, 0,
+      'a dead watcher was left holding a directory that no longer exists');
+    assert.equal(app.watchersIn(second).length, 2,
+      'and nothing rebuilt a watcher for a store that is gone');
+
+    // Idempotent. A reconcile every 5 minutes that replaced every watcher each time would
+    // churn handles for the life of the window and lose queued events with them.
+    const before = app.watchersIn(first).filter((w) => !w.disposed);
+    app.fireMemoryReconcile();
+    const after = app.watchersIn(first).filter((w) => !w.disposed);
+    assert.equal(after.length, before.length);
+    assert.ok(after.every((w, i) => w === before[i]),
+      'a reconcile that changes nothing must keep the watchers it already has');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a reconcile after teardown builds nothing, and the disposer drains what is left', async (t) => {
+  const home = tempHome(t);
+  const first = memoryCorpus(t);
+  const second = memoryCorpus(t);
+  const app = harness(home, { memoryDir: first });
+  try {
+    await app.extension.deactivate();
+
+    // The real window: the linter's own debounce and its 5-minute interval both survive
+    // deactivate() until VS Code drains the subscriptions, so a reconcile can still arrive
+    // here — into maps nothing would ever drain again.
+    app.memoryDirs.push(second);
+    app.fireMemoryReconcile();
+    assert.equal(app.watchersIn(second).length, 0,
+      'a torn-down host built a watcher per discovered store');
+
+    app.disposeSubscriptions();
+    assert.equal(app.watchersIn(first).filter((w) => !w.disposed).length, 0,
+      'the single disposer must release whatever the reconcile currently holds');
+  } finally {
+    await app.dispose();
+  }
 });
 
 test('a gate refresh cannot rewrite the instruction files after deactivate', async (t) => {

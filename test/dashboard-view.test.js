@@ -160,7 +160,7 @@ function harness(tempHome, opts = {}) {
     }
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
-        MemoryLint: class MemoryLint { activate() {} },
+        MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
         // COUNTED, not just stubbed. The real memoryReport is 6.99 ms and 25 fs
         // syscalls against a live corpus, and _push used to call it twice for two
         // cards that need disjoint parts of one result. How many times it is

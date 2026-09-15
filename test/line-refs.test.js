@@ -43,7 +43,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  checkBounds, collectRefs, tracked, stripRefs, anchorsFrom,
+  checkBounds, checkVacuous, isVacuousSpan, collectRefs, tracked, stripRefs, anchorsFrom,
 } = require('../scripts/check-line-refs.js');
 
 test('every file:line reference resolves to a real file and a line inside it', () => {
@@ -74,6 +74,62 @@ test('the reference extractor still finds the corpus it is meant to police', () 
   // whole class of reference cannot hide behind the other's count.
   assert.ok(refs.some((r) => r.kind === 'doc'), 'no references found in tracked .md files');
   assert.ok(refs.some((r) => r.kind === 'comment'), 'no references found in source comments');
+});
+
+// The predicate, pinned directly. The corpus assertion below cannot do this job: the
+// tree has zero offenders, so emptying VACUOUS_LINE or flipping `every` to `some` leaves
+// it green. Every case here is one the corpus reached at some point during the
+// 2026-09-14 pass.
+test('the vacuous-line predicate accepts exactly what nobody could have meant', () => {
+  assert.equal(isVacuousSpan(['']), true, 'a blank line');
+  assert.equal(isVacuousSpan(['    ']), true, 'whitespace only');
+  assert.equal(isVacuousSpan(['  }']), true, 'a bare closing brace');
+  assert.equal(isVacuousSpan(['      };']), true, 'with a semicolon');
+  assert.equal(isVacuousSpan(['  });']), true, 'a closing call');
+  assert.equal(isVacuousSpan(['', '  }', '   ']), true, 'a range of nothing but those');
+
+  // The other side, which is what stops this gate eating real references.
+  assert.equal(isVacuousSpan(['const VERSION = 1;']), false, 'real code');
+  assert.equal(isVacuousSpan(['  // a comment is a legitimate target here']), false,
+    'this repo documents itself in comments, so a comment line is a real target');
+  assert.equal(isVacuousSpan(['}', 'const x = 1;']), false,
+    'a range that STARTS on a brace but covers real code is a reference to that code');
+  assert.equal(isVacuousSpan([]), false, 'an empty span is checkBounds business, not this');
+});
+
+// The SECOND objective check, and the only other one that can be asserted.
+//
+// checkBounds catches a reference to a line that does not exist. This catches one that
+// exists and says nothing: a blank line, or punctuation that only closes a block. No
+// anchor, no prose, no judgement — nobody documents a closing brace, so a reference
+// that lands on one is wrong however the sentence around it reads. That is exactly why
+// it can be a test while the STALE verdict stays a report.
+//
+// Reachable, not theoretical. The tree held 13 of these when the 2026-09-14 correction
+// pass began, including one written an hour earlier in that same session. They are at
+// zero now, which is what makes this a gate rather than a backlog entry.
+//
+// A range counts only when EVERY line in it is vacuous. Testing just the start line
+// called two references wrong whose ranges go on to cover real code.
+test('no file:line reference points at a blank line or a bare closing brace', () => {
+  // A floor first, for the reason the sibling test above spells out: zero references
+  // examined is zero offenders and a green run, and this assertion would go quiet in
+  // exactly the way that looks like success.
+  const examined = collectRefs(tracked()).length;
+  assert.ok(
+    examined >= 100,
+    `only ${examined} references were extracted, so this test proved nothing`
+  );
+
+  const bad = checkVacuous();
+  const detail = bad.map((b) => `  ${b.where}\n      ${b.reason}`).join('\n');
+  assert.equal(
+    bad.length,
+    0,
+    `${bad.length} reference(s) point at a line that says nothing:\n${detail}\n\n` +
+      'Find what the prose actually meant and cite that line. If the code it named was ' +
+      'deleted rather than moved, say so in the prose instead of pointing at the gap.'
+  );
 });
 
 // A reference is stripped out of the prose before the anchor hunt, so that the file

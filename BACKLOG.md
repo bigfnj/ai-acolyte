@@ -225,9 +225,9 @@ scope. As it stands, the lint's one actionable finding class is guaranteed noise
 
 ### Small, off-axis, confirmed
 
-- `scripts/auto-mode-audit.js:95` deletes the sandbox before `:97-104` returns
-  `sandbox` in the report, so report.sandbox names a deleted directory on every
-  run without `--keep`.
+- The `fs.rmSync(sandbox, ...)` at `scripts/auto-mode-audit.js:94` deletes the sandbox
+  before the `return {` at `scripts/auto-mode-audit.js:96-102` reports `sandbox`, so
+  `report.sandbox` names a deleted directory on every run without `--keep`.
 - `src/policy-lock.js:92-96`: if openSync succeeds but writeFileSync/fsyncSync
   throws, removeOwnedLock cannot JSON.parse the empty file and returns false,
   orphaning the lock until the staleness path reclaims it.
@@ -385,10 +385,10 @@ is wider than the check:
 - `src/derived-guidance.js:57-63` says truncation is 200 chars, but the escaping
   runs AFTER `.slice(0, RULE_LIMIT)`, so `&lt;!--` expansion can push the output
   past 200. The test only measures `'x'.repeat(400)`, which never escapes.
-- `test/settings-write.test.js:127` asserts `onWrite` fires once on success;
-  nothing asserts it does NOT fire when `writeAllow` throws, and nothing asserts
-  the CLI writer has no `onWrite` — that "deliberate rather than dropped" question
-  rests entirely on a comment.
+- `'the hook fires once, after a successful write'` at `test/settings-write.test.js:128`
+  asserts `onWrite` fires once on success; nothing asserts it does NOT fire when
+  `writeAllow` throws, and nothing asserts the CLI writer has no `onWrite` — that
+  "deliberate rather than dropped" question rests entirely on a comment.
 - `test/extension-lifecycle-async.test.js`'s `trackChild` check is a source-text
   scan for `trackChild(execFile(`, so a correct `const c = execFile(...);
   trackChild(c);` would fail it and a `spawn()` would slip past.
@@ -1222,43 +1222,44 @@ shape and passes for the right
 reason, but it documents an accident rather than a decision. Pre-existing, not from this work, and
 that fixture is currently the only place it is recorded.
 
-### Most `file:line` references in this repo point at the wrong line
+### What is left of the `file:line` rot, after the 2026-09-14 correction pass
 
-`node scripts/check-line-refs.js` reports **154 references: OK 39, NEAR 13, STALE 59,
-UNVERIFIABLE 43** on `main` at the time of writing. An earlier pass fixed 30 by hand out of a
-then-population of 159. The headline number was never the question; what the STALE verdict MEANS
-was, because the checker judges by picking an identifier out of the surrounding prose and testing
-whether it sits at the cited line, which is a heuristic and not a proof either way.
+The pass is done and most of this is closed. Measured rates, the checker bug it uncovered and
+the rule about what a STALE verdict is worth are in `docs/engineering-record.md`; only the
+residue belongs here.
 
-Both cheap bounds are useless here. **Zero** of the 115 non-OK references point past the end of
-their target file, so the crude test clears all of them. And "the cited line exists" is satisfied
-by a reference that is 1,425 lines off inside the right file, which is the one confirmed error
-found so far. So this was hand-sampled instead, 16 STALE verdicts across three populations:
+`node scripts/check-line-refs.js` now reports **162 references: OK 107, NEAR 15, STALE 23,
+UNVERIFIABLE 17, 0 BROKEN**, against OK 39 / STALE 60 / UNVERIFIABLE 47 before.
 
-| Population | Checked | Genuinely wrong |
-|---|---|---|
-| `BACKLOG.md`, sections predating today | 8 | 7 |
-| `docs/engineering-record.md` and source comments | 8 | 6 |
-| Backlog entries written today against current code | ~10 | 0 |
+**Not all 40 remaining rows are defects, and a future pass should not treat them as a worklist.**
+Every one was read against its target during the pass. Three known-good categories:
 
-So roughly **80% of STALE verdicts on older prose are real**, and the rot reaches code comments
-and `docs/engineering-record.md`, which was created today and inherited its citations from
-backlog text written before the code moved. Examples, each verified by eye:
-`src/fixed-point-cache.js:70` cites `src/permissions.js:594` for `APPROVE_DIR` and lands on a
-comment about MAX snapshots; `src/history-adapters.js:1005` cites
-`src/auto-learn-manager.js:1367` for `within(root, undefined)` and lands on
-`} catch { conflicts.push(change.path); }`.
+- References the checker misjudges because its anchor comes from a neighbouring clause.
+  The lazy-require NOTE about `require.cache` at `bin/wildcard-perms:11-26` is the standing
+  example, cited correctly from two places and reported STALE from both.
+- One deliberate STALE in `docs/engineering-record.md`, which cites where a retracted figure was
+  WRONGLY said to live and then corrects it. Making it verifiable would destroy the point.
+- Three references to code that was DELETED rather than moved, so there is no line to point at:
+  the two dead webview switch arms, whose removal the comment naming `autoLearnApply` at
+  `test/dashboard-view.test.js:300` records, and `readAllow`, which no longer exists anywhere
+  in the extension.
 
-The entries written today invert it: every one hand-checked was correct and flagged anyway,
-because the anchor heuristic picks from the whole paragraph and those paragraphs cite four files
-each. The checker is accurate on ordinary one-citation prose and noisy on dense prose, so its
-output needs reading, not bulk-applying.
+What is genuinely open:
 
-Why it matters more than it looks: a citation is how the next session finds the code an entry is
-about. At 39 OK out of 154, the 36 open entries in this file mostly point somewhere wrong, which
-is a direct tax on the "focus on features" goal. Worth a dedicated pass, and worth scoping the
-checker's anchor to the sentence holding the citation rather than the paragraph before trusting
-any future count.
+- **The residual UNVERIFIABLE rows are prose that never names anything literal.** Each can be
+  made checkable by quoting the identifier that actually sits at the cited line, which is what
+  converted 13 rows to OK during the pass. Worth doing opportunistically when a sentence is being
+  edited anyway, not as a sweep.
+- **Five entries elsewhere in this file look closed by current code** and, under this file's own
+  "closed items are removed" rule, want deleting rather than renumbering. `src/agent-guidance.js`
+  now computes a mid-file `separator` and `escapeMarker` guards `blockRange` against a body
+  carrying its own END marker, which refutes both halves of the managed-block fusion entry;
+  `src/local-settings.js` documents the Set plus shared index as landed while the perf bullet
+  still calls `grantedBy` linear; and the `list()` fallback named in the `manager.getStatus()`
+  bullet is gone.
+- **One bullet is refuted, not stale.** It claimed `bin/wildcard-perms` had no `return` on a
+  `finish()` call. Line 282 now reads
+  `if (!settings || typeof settings !== 'object') return finish(input, false);`.
 
 ### CI is running on borrowed time: the pinned actions target a deprecated Node
 

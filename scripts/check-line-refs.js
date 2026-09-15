@@ -544,6 +544,58 @@ function judge(ref, index) {
 // are correct. This half cannot do that. A reference either resolves or it does
 // not, so it is safe to assert, and it is fast: no per-anchor scan of the target
 // file, which is what makes the full report take seconds.
+// A line that carries nothing a reader could have meant. Blank, or punctuation that
+// only closes a block someone else opened.
+//
+// Deliberately NOT "a comment line" or "an import": this repo documents itself in
+// comments, so a comment is a perfectly good target, and several references name a
+// require on purpose.
+const VACUOUS_LINE = new Set(['}', '};', '},', ')', ');', ']', '];', '})', '});']);
+
+// Exported and unit-tested separately from checkVacuous, because the tree currently has
+// ZERO offenders: an assertion that the offender list is empty stays green if someone
+// empties VACUOUS_LINE or flips `every` to `some`, so the corpus test alone cannot pin
+// this predicate. The unit test can.
+function isVacuousSpan(span) {
+  return span.length > 0 && span.every((l) => l.trim() === '' || VACUOUS_LINE.has(l.trim()));
+}
+
+// References that point at a blank line or a bare closing brace.
+//
+// This is the second OBJECTIVE check, alongside checkBounds. It needs no anchor, no
+// prose and no judgement: nobody documents a closing brace, so a reference that lands
+// on one is wrong however you read the sentence around it. That is what makes it
+// assertable where the STALE verdict is not.
+//
+// A RANGE counts only when EVERY line in it is vacuous. A range whose first line is a
+// closing brace but which then covers real code is a reference to that code, and an
+// earlier draft of this check that tested only the start line called two such
+// references wrong. 13 references in the tree matched the loose rule and 6 matched the
+// strict one; the difference was entirely ranges.
+function checkVacuous() {
+  const files = tracked();
+  const index = buildIndex(files);
+  const bad = [];
+  for (const ref of collectRefs(files)) {
+    const res = resolveTarget(index, ref.target, ref.source);
+    if (res.ambiguous || res.missing) continue;   // checkBounds owns those
+    const lines = linesOf(res.rel);
+    if (!lines) continue;
+    const span = lines.slice(ref.start - 1, ref.end);
+    if (!span.length) continue;                   // out of bounds is checkBounds' call
+    if (!isVacuousSpan(span)) continue;
+    bad.push({
+      ...ref,
+      resolved: res.rel,
+      where: `${ref.source}:${ref.sourceLine} -> ${ref.raw}`,
+      reason: span.length === 1
+        ? `${res.rel}:${ref.start} is ${span[0].trim() === '' ? 'a blank line' : `just ${span[0].trim()}`}`
+        : `every line of ${res.rel}:${ref.start}-${ref.end} is blank or a bare closing brace`,
+    });
+  }
+  return bad;
+}
+
 function checkBounds() {
   const files = tracked();
   const index = buildIndex(files);
@@ -648,4 +700,6 @@ if (require.main === module) main();
 // backtick-stripping bug. They are the smallest seam that can observe it: the
 // symptom is an anchor going missing between those two calls, and nothing the
 // CLI prints distinguishes "no anchor in the prose" from "the anchor was eaten".
-module.exports = { collectRefs, tracked, checkBounds, stripRefs, anchorsFrom };
+module.exports = {
+  collectRefs, tracked, checkBounds, checkVacuous, isVacuousSpan, stripRefs, anchorsFrom,
+};

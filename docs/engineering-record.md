@@ -768,3 +768,54 @@ Bump `vscode-extension/package.json` and the root `package.json` together.
 `test/installers.test.js:455` — "the two package manifests report the same version" —
 asserts they agree, and the extension manifest is authoritative because `release.yml`
 defaults its version input to it.
+
+## `file:line` rot: measured rates, and what a STALE verdict is worth
+
+From the correction pass of 2026-09-14, which took the tree from OK 39 / STALE 60 /
+UNVERIFIABLE 47 to OK 107 / STALE 23 / UNVERIFIABLE 17 across 162 references. Read this
+before running another pass, and before trusting a raw count from
+`node scripts/check-line-refs.js`.
+
+**A STALE verdict is a candidate, not a proof, and the real rate was measured twice.**
+A 16-reference hand sample put the share of STALE verdicts that are genuinely wrong at
+about 80%. A full pass over all 73 non-OK rows in `BACKLOG.md` measured it at **34
+changed against 39 left alone**, and **27 of 42 STALE**. So roughly two STALE in three
+are real and one in three is a correct reference the checker misjudged, and most
+UNVERIFIABLE rows were simply fine. **The 80% figure is retracted**; it came from too
+small a sample. Never bulk-apply the checker's `suggest` field: in the cases examined it
+named a neighbouring symbol often enough to be wrong on its own.
+
+**Neither cheap automated bound decides anything.** Zero of the 115 non-OK references
+pointed past the end of their target file, so "past EOF" clears all of them. And "the
+cited line exists" is satisfied by a reference that is 1,425 lines off inside the right
+file, which was the one confirmed transcription error of the pass. Only reading both
+ends settles it.
+
+**The rot is churn-driven, so it recurs.** 71% of the unresolved references pointed into
+files that this single effort touched, and 99% into files touched in the last 120
+commits. A concrete measure of the speed: a citation of `counts = Counter(terms)` in
+`memory/recall.py` was verified by hand at line 470 and was wrong about an hour later,
+in the same session, because merging a branch added 14 lines above it and moved that
+statement to 484. A correction pass is therefore maintenance, not a fix. (Written
+without the `file:line` form on purpose, so an example of a WRONG reference does not
+enter the checker's own count as a real one.)
+
+**Writing the anchor next to the citation is what makes a reference survivable.** Prose
+that quotes the identifier actually sitting at the cited line can be checked by machine
+forever; prose that only describes the code can never be checked by anything and rots
+silently. Quoting the symbol converted 13 rows straight to OK in `BACKLOG.md` alone and
+took `docs/engineering-record.md` from 2 verifiable citations to 19.
+
+**Anchor placement before or after the citation is NOT a rule** — that belief was a
+workaround for a defect, now fixed. `judge()` stripped a reference from the prose but
+left the backticks around it, so a backticked reference collapsed to an orphan pair that
+paired with the next real anchor's opening backtick and shifted every code span after
+it. Two agents hit it independently on different files and both concluded the anchor had
+to come first. It does not. See the note on `REF_STRIP_RE` in
+`scripts/check-line-refs.js`, and the regression test
+`an anchor written AFTER a backticked reference is still extracted`.
+
+**Some references cannot be fixed and should not be chased.** Code that was deleted
+rather than moved has no line to point at. A citation whose whole purpose is to record
+where a retracted figure was wrongly said to live must stay wrong to make its point.
+Both are in the tree on purpose.

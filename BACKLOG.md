@@ -1072,12 +1072,40 @@ its method. One is stale.
 One agent read the whole seven-branch diff, ran the suite, and built a 37-mutation harness over a
 copy of the tree. 32 of 37 fired. Everything below was measured on this box that day.
 
-### Re-filed: three records the BACKLOG split dropped
+### Re-filed: four records the BACKLOG split dropped
 
-The split removed `### Interesting, off-axis` as closed. Four of its seven bullets were fixed that
-day; three were not, are in neither new file, and their code is unchanged. They were deliberate
-"known and accepted" records, and deleting a record is how a known issue becomes a rediscovery.
-Re-verified against current code before re-filing.
+Two headings were classified closed while carrying bullets that were not. `### Interesting,
+off-axis` had seven bullets, four of which were fixed that day. `### Two unvalidated external
+inputs reach a policy or instruction file` had two, one of which was fixed. The other four are in
+neither new file and their code is unchanged. All four re-verified against current code before
+re-filing.
+
+The lesson is about the check, not the split: a heading-level count reconciles whether or not the
+bullets inside a heading were all closed, so it cannot detect this class at all. The first pass of
+the follow-up check missed it a second way. It counted sub-items with `^\*\*`, which matches this
+file's bold-paragraph style but not its `- **bold list item**` style, and so found ZERO of the
+seven bullets in the section it was written to examine. A degenerate axis in the detector, exactly
+the failure the differential-test gate describes. The corrected pattern is
+`^(?:[-*]\s+)?\*\*`, and it flagged both headings immediately.
+
+**Project `settings.local.json` is promoted to user scope with no trust gate on the CLI path.**
+`bin/wildcard-perms:348-351` takes `cwd` from the hook's stdin JSON, `:332-333` tests that project
+for `.claude/settings.local.json`, and `:340` calls `drainUnderLock(cwd)`, which promotes that
+project's local allow entries into USER-scope allow on the next tool call and announces it with one
+stderr line at `:399-402`, on a path that is quiet by design. The gate is `PROMOTABLE` at
+`src/local-settings.js:56`, which tests PORTABILITY, never provenance: a repo that commits
+`.claude/settings.local.json` containing `Bash(curl *)`, `Bash(python *)` or `Bash(node *)` clears
+it and lands in the user's global allow list. The extension refuses exactly this for an untrusted
+workspace (`vscode-extension/extension.js:2631-2634`, "an untrusted window reads but never
+writes", plus `:909` and `:2664`); the CLI has no equivalent, and VS Code trust has no CLI
+analogue. May be inherent to a CLI, but it deserves a decision rather than an accident. This is the
+highest-consequence item in this section.
+
+The sibling bullet under that heading IS closed and should not be re-raised: managed rule text now
+gets `clean()` at the table (`src/auto-learn-manager.js:1129`) and `cleanRule()` at the
+interpolation (`src/derived-guidance.js:51`, exported at `:357`).
+
+The three from `Interesting, off-axis`:
 
 **A bare `~` in `backupMirrorPath` resolves to the home directory itself.** `mirrorBackupPath()` at
 `vscode-extension/extension.js:204-206` does `path.join(os.homedir(), raw.slice(1).replace(/^[\\/]+/, ''))`.

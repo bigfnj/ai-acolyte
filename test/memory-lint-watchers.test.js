@@ -377,8 +377,11 @@ test('lintMemory stays registered when the lint is disabled, and says so', () =>
       'the command package.json advertises must exist even with the lint off');
     // ...and the feature really is off, so this is not just "enabled ignored".
     assert.equal(lint.watchers.size, 0, 'no watchers when disabled');
-    assert.equal(h.intervals.length, 0, 'no reconcile timer when disabled');
     assert.equal(lint.diags, null, 'no diagnostic collection when disabled');
+    // The one thing that IS built on this path besides the command. It used to be armed
+    // inside initialize(), below the enabled check, and this assertion read `0`; see
+    // 'a window that starts with the lint DISABLED still reconciles on the backstop'.
+    assert.equal(h.intervals.length, 1, 'the backstop is armed even with the lint off');
 
     // Invoking it must report, not throw: activate() never built this.channel
     // on the disabled path, and showReport() used to dereference it.
@@ -453,14 +456,18 @@ test('enabling the lint at runtime builds it, without a window reload', () => {
     assert.equal(h.registered.length, 1, 'the palette entry is always registered');
     assert.equal(lint.diags, null, 'no diagnostic collection yet');
     assert.equal(lint.status, null, 'no gauge yet');
-    assert.equal(h.intervals.length, 0, 'and no reconcile timer');
+    // The backstop is the exception: it is armed above the enabled check, because it is
+    // the only thing that drives a reconcile while the rest of the linter is unbuilt.
+    assert.equal(h.intervals.length, 1, 'the backstop is armed on the disabled path');
 
     overrides['memory.enabled'] = true;
     lint.reconfigure();
 
     assert.ok(lint.diags, 'the diagnostic collection is built on demand');
     assert.ok(lint.status, 'and the gauge');
-    assert.equal(h.intervals.length, 1, 'and the reconcile timer is armed');
+    // Not "armed": still ONE. The build must not arm a second interval over the timer
+    // activate() already owns, which is what moving setInterval out of initialize() buys.
+    assert.equal(h.intervals.length, 1, 'and still exactly one backstop, not a second');
     assert.equal(lint.watchers.size, 1, 'and a watcher exists for the store');
     assert.ok(h.statusText.some((t) => /mem: \d+/.test(t)), 'and the gauge was painted');
     assert.equal(h.registered.length, 1, 'the command is still registered exactly once');
@@ -638,6 +645,108 @@ test('every refresh notifies the reconcile subscribers, enabled or not', () => {
     const afterDispose = calls;
     lint.refresh();
     assert.equal(calls, afterDispose, 'a disposed subscription must stop being called');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// The sibling above starts ENABLED, so all it can drive is enabled-THEN-disabled: by the
+// time it flips memory.enabled off, initialize() has already armed the backstop and its
+// `h.intervals.length === 1` precondition holds for that reason alone. This is the other
+// order, and it is the one that was broken.
+//
+// activate() returns before initialize() when memory.enabled is false, and every caller of
+// refresh() used to live in initialize() — the save/open/editor listeners and the 5-minute
+// backstop alike. refresh() is what runs notifyReconcile(), so a window that OPENED with
+// the lint off never notified again for its whole life: extension.js hangs both of its
+// memory-store watcher sets off this hook instead of a third timer, so they got their one
+// build at activation and nothing rebuilt them. A store that appeared later went unwatched
+// — taking automatic gate recompilation with it, since the gates corpus watcher is one of
+// only two callers of compileGates — and one that went away left a live watcher on a dead
+// directory until deactivate().
+test('a window that starts with the lint DISABLED still reconciles on the backstop', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-off-notify-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');
+  writeStore(dir, '# Memory Index\n\n- [one](one.md) — hook\n');
+  fs.writeFileSync(path.join(dir, 'one.md'), 'body\n', 'utf8');
+
+  // OFF AT ACTIVATION. Not flipped off afterwards — that is the sibling's fixture.
+  const overrides = { 'memory.enabled': false };
+  const h = harness(tempHome, overrides);
+  try {
+    const lint = new h.loaded.MemoryLint();
+    let calls = 0;
+    lint.onReconcile(() => { calls += 1; });
+    lint.activate({ subscriptions: [] });
+
+    assert.equal(lint.diags, null,
+      'precondition: the lint really is off, so initialize() was skipped and no listener exists');
+    assert.equal(h.intervals.length, 1,
+      'the backstop has to be armed above the enabled check, or nothing calls refresh() again');
+
+    h.intervals[0].fn();
+    assert.equal(calls, 1, 'the backstop tick is the whole of this path\'s reconcile');
+    h.intervals[0].fn();
+    assert.equal(calls, 2, 'and it keeps reconciling — one tick is not a cadence');
+
+    // The tick has to be SAFE with nothing built: refresh() takes its disabled early
+    // return, where status and diags are optional-chained and the watcher Map is empty.
+    assert.equal(lint.watchers.size, 0, 'the lint is still off, so it built no watchers');
+    assert.equal(h.statusText.length, 0, 'and painted no gauge');
+
+    // The tick is also what notices a false -> true flip on a host where extension.js's
+    // configuration listener does not exist: that listener is guarded by
+    // `typeof vscode.workspace.onDidChangeConfiguration === 'function'`. A tick that
+    // called refresh() directly would throw here — past the enabled check refresh()
+    // dereferences this.diags, which is still null.
+    overrides['memory.enabled'] = true;
+    h.intervals[0].fn();
+    assert.ok(lint.diags, 'the tick builds the half activate() skipped');
+    assert.equal(lint.watchers.size, 1, 'and the store is watched from that tick on');
+    assert.equal(h.intervals.length, 1, 'building must not arm a second backstop');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// The other half of arming the backstop above the enabled check: the disposer that clears
+// it has to move up with it. Left behind in initialize(), a window that started with the
+// lint off pushed nothing into context.subscriptions, so the interval outlived
+// deactivate() and went on calling reconfigure() against a torn-down instance. The
+// enabled-path version of this is 'reconfigure does nothing once the instance is torn
+// down' above, which cannot see the disabled path for the same reason.
+test('a disabled-at-activation window does not leak the backstop past deactivate', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-off-teardown-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');
+  writeStore(dir, '# Memory Index\n\n- [one](one.md) — hook\n');
+
+  const h = harness(tempHome, { 'memory.enabled': false });
+  try {
+    const lint = new h.loaded.MemoryLint();
+    let calls = 0;
+    lint.onReconcile(() => { calls += 1; });
+    const subscriptions = [];
+    lint.activate({ subscriptions });
+    assert.equal(h.intervals.length, 1, 'precondition: the backstop is running');
+    // A NONZERO baseline, or the last assertion in this test is `0 === 0` and passes for
+    // a reason with nothing to do with teardown.
+    h.intervals[0].fn();
+    assert.equal(calls, 1, 'precondition: a live tick really does reconcile');
+
+    // What VS Code does at deactivate.
+    for (const sub of subscriptions) sub.dispose();
+    assert.equal(lint.disposed, true, 'the disposed flag is set from the disabled path too');
+    assert.equal(lint.timer, null, 'and the interval handle is cleared, not merely forgotten');
+
+    // An already-dispatched tick is not recalled by clearInterval. Stated for the record:
+    // TWO independent early returns stop it on this path, reconfigure()'s and refresh()'s,
+    // so deleting either one alone leaves this line green and it takes both to turn it
+    // red. It is depth behind the two assertions above, which are what the disposer hoist
+    // is actually mutation-tested on — not a substitute for them.
+    h.intervals[0].fn();
+    assert.equal(calls, 1, 'a tick in flight at teardown must find the instance inert');
   } finally {
     h.restore();
     fs.rmSync(tempHome, { recursive: true, force: true });

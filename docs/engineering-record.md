@@ -281,13 +281,24 @@ window at `onStartupFinished`.
 
 ### The dashboard's remaining duplicate reads
 
-Deferred with a reason, not forgotten. `readSettings()` runs 3-4x per `_push`
-(`extension.js` at the push itself, in `autoLearnCardData`, in `frictionState`,
-and via `localCardData`'s `readUserSettings`) with the value already in hand at
-the top. Hoisting it needs signature changes in three more functions and would
-save ~0.3 ms — and `frictionState()` may legitimately want a fresh read, so
-threading a stale one trades a sub-millisecond gain for a possible correctness
-regression. Not worth it.
+Deferred with a reason, not forgotten. The file is read 3-4x per `_push`
+(`extension.js` at the push itself, then `readSettings()` in `autoLearnCardData`,
+in `frictionState`, and via `localCardData`'s `readUserSettings`) with the value
+already in hand at the top. Hoisting it needs signature changes in three more
+functions and would save ~0.3 ms — and `frictionState()` may legitimately want a
+fresh read, so threading a stale one trades a sub-millisecond gain for a possible
+correctness regression. Not worth it.
+
+One of them was not in that class and is gone. The three-state pill added a
+`readSettingsState()` beside the push's own `readSettings()`, so `_push` opened
+and parsed the file **twice before the first card was built** — for two values
+that come out of one call, since `readSettingsState()` returns the parsed object
+beside the state. Deleting the duplicate needed no signature change anywhere and
+carries no stale-read risk, because the two reads it collapses were taken
+microseconds apart and could already disagree: Claude Code rewrites
+settings.json on every approval, `/model` and `/effort`. Filed here so the
+deferral above is not read as covering it. No timing figure is claimed for the
+removal; it is a deletion, not an optimisation.
 
 Likewise `CLAUDE.md` and `~/.codex/AGENTS.md` are read 2x each because
 `guidanceCardData` and `gatesCardData` both walk `installedGuidanceTargets()`,

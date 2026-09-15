@@ -854,7 +854,7 @@ async function setRecallPath() {
 // used to carry. The cost is a function of how many files the memory corpus
 // holds, so it drifts upward as the corpus grows: the 2.93 ms / 25-syscall
 // reading (12 readFileSync + 11 existsSync + 2 readdirSync per call) was
-// re-measured the same day at 5.00 min / 5.23 p50 ms and 35 syscalls
+// re-measured the same day at min 5.00 ms / p50 5.23 ms and 35 syscalls
 // (17 readFileSync + 16 existsSync + 2 readdirSync). Neither number is wrong;
 // both are snapshots of a moving corpus, and quoting either as a constant is
 // what made the first one read as a fact. Re-measure before citing a figure.
@@ -2006,7 +2006,12 @@ function activate(context) {
     memoryLint.activate(context);
     // The two watcher sets below reconcile on the LINTER's cadence rather than a third
     // timer of their own: it already re-discovers these same directories every 5 minutes,
-    // on every MEMORY.md save or open, and 300 ms after every external write. Registering
+    // on every MEMORY.md save or open, and 300 ms after every external write. Only the
+    // 5-minute backstop is unconditional — the save/open/write half lives on the linter's
+    // enabled path — which is why memoryLint.activate() arms that timer ABOVE its
+    // `memory.enabled` check. It used to arm it inside initialize(), below that check, so
+    // with the lint switched off these two sets got the one initial build below and were
+    // never reconciled again for the life of the window. Registering
     // the subscriber before the initial build is harmless -- the build below is
     // unconditional -- and keeping it inside this try means a linter that failed to
     // activate cannot take the initial build down with it.
@@ -3319,7 +3324,30 @@ class WildcardingViewProvider {
     if (deactivated || !this.view || this.view.visible === false) return;
     const hint = this.hint;
     this.hint = null;
-    const settings = readSettings();
+    // ONE read of settings.json per push, not two. This used to be `readSettings()` — a
+    // readFileSync plus a JSON.parse — with `readSettingsState()` taking the same file
+    // again for the three-state pill, eleven lines below the note explaining that
+    // memoryReport() was hoisted out of this very function to stop it being computed
+    // twice. readSettingsState() returns the parsed object beside the state, so reading
+    // both off one call REMOVES a read rather than adding one; the same idiom is already
+    // used by onManagedPolicyChanged and restoreFromBackup. Not an optimisation to defend
+    // with a number — it is a deleted duplicate — and it also closes the window where
+    // the two reads disagreed because Claude Code rewrote the file between them.
+    //
+    // The try/catch is the one that used to wrap the settingsState read alone, and it
+    // still yields 'unreadable' on a throw. `settings` then stays null, which is what
+    // readSettings() returned on any failure, so the work-up below is unchanged.
+    // Mapping every non-present state to null matches it too: absent hands back `{}`
+    // and a JSON array or scalar hands back null, and all three uses below
+    // (`settings?.permissions?.allow`, isMaxOn, maxLayers) are optional-chained and
+    // Array-guarded, so `{}`, `null` and a non-object all read the same.
+    let settingsState;
+    let settings = null;
+    try {
+      const liveState = readSettingsState();
+      settingsState = liveState.state;
+      if (liveState.state === SETTINGS_PRESENT) settings = liveState.settings;
+    } catch { settingsState = SETTINGS_UNREADABLE; }
     const allow = Array.isArray(settings?.permissions?.allow) ? settings.permissions.allow : [];
     const wildcards = allow.filter((p) => p.includes('*')).sort();
     // What Wildcard Now would actually change. The "specific" tally is not that
@@ -3354,9 +3382,8 @@ class WildcardingViewProvider {
     // of the two we started with. This shape is also exactly what every test stub
     // for memoryReport returns, so the failure path is the path already covered.
     let memory;
-    let settingsState;
-    try { settingsState = readSettingsState().state; }
-    catch { settingsState = 'unreadable'; }
+    // settingsState is read at the top of this function, off the same
+    // readSettingsState() call that supplies `settings`. See the note there.
     try { memory = memoryReport(); }
     catch { memory = { conf: {}, dir: null, report: null }; }
     this.view.webview.postMessage({

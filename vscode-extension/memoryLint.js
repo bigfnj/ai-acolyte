@@ -285,6 +285,59 @@ class MemoryLint {
     // is a Settings-UI toggle a user can flip at any time.
     this.context = context;
 
+    // The backstop is armed here, ABOVE the enabled check, for the same class of reason
+    // the command registration is. Every other caller of refresh() — the save, open and
+    // active-editor listeners — lives in initialize(), which the enabled check below
+    // skips; with the timer down there too, a window that started with
+    // `memory.enabled: false` ran refresh() exactly never for its whole life.
+    //
+    // refresh() is what runs notifyReconcile(), and extension.js deliberately hangs BOTH
+    // of its memory-store watcher sets off that hook rather than arming a third timer,
+    // on the stated grounds that this instance re-discovers those directories every five
+    // minutes. That justification was only true on the enabled path. With the lint off,
+    // those two sets got their one build at activation and were never reconciled again:
+    // a store that appeared later went unwatched — and with it automatic gate
+    // recompilation, since the gates corpus watcher is one of only two callers of
+    // compileGates — and a store that went away left a live watcher on a dead directory
+    // until deactivate().
+    //
+    // Armed in activate() and nowhere else, so it cannot be double-armed: reconfigure()
+    // builds the skipped half through initialize(), which no longer touches the timer,
+    // and activate() runs once per instance. initialize()'s `if (this.diags) return;` is
+    // what used to carry that guarantee.
+    this.disposed = false;
+    // reconfigure(), not refresh(): a tick has to be able to BUILD. extension.js's
+    // configuration listener is itself conditional on
+    // `typeof vscode.workspace.onDidChangeConfiguration === 'function'`, so on a host
+    // that lacks it this timer is the ONLY thing that ever notices a false -> true flip
+    // — and refresh() past the enabled check dereferences `this.diags` unguarded, which
+    // on a never-initialized instance is a TypeError, not a no-op. reconfigure()
+    // initialises first when the flip has happened, and initialize()'s already-built
+    // guard makes the ordinary enabled tick a plain refresh().
+    this.timer = setInterval(() => this.reconfigure(), RECONCILE_MS);
+    if (typeof this.timer?.unref === 'function') this.timer.unref();
+    // The disposer moves up with the timer it clears, or a disabled-at-activation window
+    // leaks a live interval past deactivate(). It also now sets `disposed` BEFORE the
+    // subscriptions it guards are torn down rather than after, so an already-queued
+    // callback cannot land on half-disposed objects.
+    //
+    // The debounce timer belongs here too. It used to be armed by schedule()
+    // and cleared by nothing: a MEMORY.md write within 300 ms of a reload left
+    // it live, and it then fired refresh() AFTER every subscription was
+    // disposed — clearing a disposed DiagnosticCollection, hiding a disposed
+    // StatusBarItem, and calling syncWatchers(), which creates a fresh watcher
+    // per discovered dir into a map nothing will ever drain again. That is the
+    // same shape as the leak this file is held up elsewhere as the model for.
+    context.subscriptions.push({
+      dispose: () => {
+        this.disposed = true;
+        clearInterval(this.timer);
+        this.timer = null;
+        clearTimeout(this.debounce);
+        this.debounce = null;
+      },
+    });
+
     if (!cfg().enabled) return;
     this.initialize(context);
   }
@@ -327,37 +380,25 @@ class MemoryLint {
       { dispose: () => this.disposeWatchers() }
     );
 
-    // The backstop: a move leaves no live watcher to report it, so re-discover on a timer.
-    this.disposed = false;
-    this.timer = setInterval(() => this.refresh(), RECONCILE_MS);
-    if (typeof this.timer?.unref === 'function') this.timer.unref();
-    // The debounce timer belongs here too. It used to be armed by schedule()
-    // and cleared by nothing: a MEMORY.md write within 300 ms of a reload left
-    // it live, and it then fired refresh() AFTER every subscription above was
-    // disposed — clearing a disposed DiagnosticCollection, hiding a disposed
-    // StatusBarItem, and calling syncWatchers(), which creates a fresh watcher
-    // per discovered dir into a map nothing will ever drain again. That is the
-    // same shape as the leak this file is held up elsewhere as the model for.
-    context.subscriptions.push({
-      dispose: () => {
-        this.disposed = true;
-        clearInterval(this.timer);
-        this.timer = null;
-        clearTimeout(this.debounce);
-        this.debounce = null;
-      },
-    });
+    // The backstop that covers a move — a move leaves no live watcher to report it — is
+    // armed in activate(), not here. See the note there: it has to run on the disabled
+    // path too, because it is the only thing driving extension.js's two watcher sets.
 
     this.refresh();
   }
 
-  // Called when permissionWildcarding.memory.* changes.
+  // Called when permissionWildcarding.memory.* changes, and on every tick of the
+  // 5-minute backstop armed in activate().
   //
   // false -> true has to BUILD what activate() skipped; true -> false is
   // already handled by refresh(), which hides the gauge, clears the diagnostics
-  // and drops the watchers. Both directions used to need a window reload, and
-  // the 5-minute reconcile timer does not exist on the disabled path to cover
-  // for it.
+  // and drops the watchers. Both directions used to need a window reload.
+  //
+  // Reachable with nothing built at all, since the backstop now ticks on the disabled
+  // path: `cfg().enabled` is false there, so refresh() takes its early return, where
+  // `this.status?.hide()` and `this.diags?.clear()` are optional-chained and
+  // disposeWatchers() iterates an empty Map. Nothing below that branch runs, which is
+  // what keeps the unguarded `this.diags.clear()` further down out of reach.
   reconfigure() {
     // The instance outlives its subscriptions on a teardown; rebuilding into a
     // disposed context would leak a watcher per discovered dir into a map
@@ -452,6 +493,10 @@ class MemoryLint {
     // this instance's own watchers were being dropped.
     this.notifyReconcile();
     const conf = cfg();
+    // Optional-chained on purpose, and it is load-bearing rather than defensive: the
+    // backstop now ticks on a window where memory.enabled was false at activation, so
+    // this line runs with `status` and `diags` never created. disposeWatchers() over the
+    // empty Map is a no-op for the same reason.
     if (!conf.enabled) { this.status?.hide(); this.diags?.clear(); this.disposeWatchers(); return; }
     const dirs = discoverDirs(conf);
     this.syncWatchers(dirs);

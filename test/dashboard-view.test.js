@@ -297,14 +297,17 @@ test('every dashboard message reaches its command, and nothing else does', async
     app.provider.resolveWebviewView(ui.view);
     await settle();
 
+    // autoLearnApply and autoLearnMode were removed with their switch arms: the webview has
+    // no sender for either, so this table was the only thing reaching them. A routing test
+    // that posts every type directly cannot tell a live route from a dead one, which is how
+    // both arms stayed alive through three audits. The palette commands they targeted still
+    // exist and are still covered by extension-activation.test.js.
     const routes = [
       ['runNow', 'permission-wildcarding.runNow'],
       ['restore', 'permission-wildcarding.restoreBackup'],
       ['autoLearnScan', 'permission-wildcarding.autoLearnScan'],
       ['autoLearnReview', 'permission-wildcarding.autoLearnReview'],
-      ['autoLearnApply', 'permission-wildcarding.autoLearnApplySafe'],
       ['autoLearnUndo', 'permission-wildcarding.autoLearnUndo'],
-      ['autoLearnMode', 'permission-wildcarding.autoLearnCycleMode'],
       ['autoLearnWhy', 'permission-wildcarding.autoLearnWhy'],
       ['toggleMax', 'permission-wildcarding.toggleMax'],
       ['toggleCodexMax', 'permission-wildcarding.toggleCodexMax'],
@@ -587,6 +590,34 @@ async function memoryCard(t, memory) {
 // but never memoryCardData. This one drives the payload builder for real, because the two
 // halves fail independently: a render that reads a field nobody sets shows a dash forever
 // and every render assertion still passes.
+// existsSync cannot separate present-and-parseable from present-and-corrupt, so a corrupt or
+// mid-write settings.json showed a green Active pill while every writer was refusing with
+// SETTINGS_UNREADABLE. Same shape as the bug already fixed in toggleMax.
+test('a corrupt settings.json is not reported as Active', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const healthy = ui.posted[ui.posted.length - 1];
+    assert.equal(healthy.active, true, 'precondition: a readable file is Active');
+    assert.equal(healthy.settingsState, 'present');
+
+    // Every read of settings.json from here on returns unparseable bytes.
+    app.arm(Array(12).fill('corrupt'));
+    app.provider.refresh();
+    await settle();
+
+    const broken = ui.posted[ui.posted.length - 1];
+    assert.equal(broken.settingsState, 'unreadable',
+      'a present-but-unparseable file is its own state, not absent and not fine');
+    assert.equal(broken.active, false,
+      'the green pill must not claim Active while every writer is refusing');
+  } finally { app.dispose(); }
+});
+
 test('the card payload carries the line count, not just the byte count', async (t) => {
   const env = setup(t);
   env.write({ permissions: { allow: [], deny: [] } });

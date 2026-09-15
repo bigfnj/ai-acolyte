@@ -672,6 +672,78 @@ function extractInvocations(tool, command, metadata = {}) {
     .map((entry) => classifyInvocation({ ...entry.invocation, attribution: entry.attribution }));
 }
 
+// `git.exe status` and `git status` run the same program, so they are one
+// family of evidence. They used to key separately, and each half then counted
+// toward the success threshold on its own: a family with 9 runs one way and 6
+// the other reads as two families that have both failed to earn a grant.
+// Risk classification already normalizes `.exe` away (`normalizeRoot`), so the
+// key was the last place the two spellings were still treated as unrelated.
+//
+// Only the ROOT is normalized, and only the `.exe` suffix. A subcommand is not
+// an executable name, and no other suffix is interchangeable: `foo.cmd` is a
+// different file from `foo`, with different contents, while `foo.exe` is what
+// PATHEXT resolves a bare `foo` to.
+//
+// The permission spellings are NOT unified with the key. `Bash(git status *)`
+// does not match the command `git.exe status`, so collapsing them would revoke
+// a grant the evidence earned; `aggregateObservations` keeps every observed
+// spelling instead, and the exporter emits each one.
+const SHELL_FAMILY_KEY = /^([^\s:]+):([^\s]+)([\s\S]*)$/;
+function normalizeCandidateKey(key) {
+  const text = String(key == null ? '' : key);
+  const match = SHELL_FAMILY_KEY.exec(text);
+  if (!match) return text;
+  return `${match[1]}:${match[2].replace(/\.exe$/i, '')}${match[3]}`;
+}
+
+// The spelling-independent identity of a permission: the same rule with any
+// `.exe` stripped from its command root. Two permissions that agree here are
+// two spellings of one grant rather than two grants.
+const PERMISSION_ROOT = /^([A-Za-z_][A-Za-z0-9_]*)\(([^\s)]+)([\s\S]*)\)$/;
+function normalizePermissionSpelling(permission) {
+  const text = String(permission == null ? '' : permission);
+  const match = PERMISSION_ROOT.exec(text);
+  if (!match) return text;
+  return `${match[1]}(${match[2].replace(/\.exe$/i, '')}${match[3]})`;
+}
+
+// The same identity for a prefix, which is what the Codex exporter renders
+// from. Stripping to an empty root is refused, so a token that is only `.exe`
+// stays as it is rather than becoming an unusable empty command name.
+function normalizePrefixSpelling(prefix) {
+  const parts = (Array.isArray(prefix) ? prefix : []).map(String);
+  if (!parts.length) return parts;
+  const root = parts[0].replace(/\.exe$/i, '');
+  return [root || parts[0], ...parts.slice(1)];
+}
+
+// The canonical spelling of two prefixes for one family, or null when they are
+// genuinely different prefixes. Null is what the caller turns into
+// `prefix-conflict`; without this the `.exe` unification would have made every
+// two-spelling family read as a conflict and lost its auto-safe standing.
+function preferredPrefixSpelling(left, right) {
+  const a = Array.isArray(left) ? left.map(String) : [];
+  const b = Array.isArray(right) ? right.map(String) : [];
+  const canonical = JSON.stringify(normalizePrefixSpelling(a));
+  if (canonical !== JSON.stringify(normalizePrefixSpelling(b))) return null;
+  if (JSON.stringify(a) === canonical) return a;
+  return JSON.stringify(b) === canonical ? b : a;
+}
+
+// Which spelling a family reports as its own. A genuine conflict still nulls
+// the permission exactly as before; only the `.exe` pair is reconciled, and the
+// canonical (suffix-free) spelling wins so the rule a human reads is the one
+// they would have written.
+function preferredPermissionSpelling(left, right) {
+  if (left == null || right == null) return null;
+  if (left === right) return left;
+  const canonical = normalizePermissionSpelling(left);
+  if (canonical !== normalizePermissionSpelling(right)) return null;
+  if (left === canonical) return left;
+  if (right === canonical) return right;
+  return left < right ? left : right;
+}
+
 function candidateKey(invocation) {
   if (!invocation || typeof invocation !== 'object') return null;
   if (invocation.kind === 'tool') {
@@ -683,7 +755,9 @@ function candidateKey(invocation) {
   // A root that cannot be a command name cannot become a permission either, so
   // shell punctuation and split substitutions never earn a family of their own.
   if (!prefix.length || !isBareCommandPart(prefix[0])) return null;
-  return `${shell}:${prefix.map((part) => String(part).trim().toLowerCase()).join(' ')}`;
+  return normalizeCandidateKey(
+    `${shell}:${prefix.map((part) => String(part).trim().toLowerCase()).join(' ')}`,
+  );
 }
 
 function observationOutcome(observation) {
@@ -785,15 +859,28 @@ function aggregateObservations(observations, options = {}) {
           risk: invocation.risk, baseAutoSafe: invocation.autoSafe, autoSafe: false,
           reasons: new Set(invocation.reasons), complex: Boolean(invocation.complex),
           counts: { success: 0, failed: 0, unknown: 0, total: 0 },
-          sources: new Set(), examples: new Set(), threshold,
+          sources: new Set(), examples: new Set(), permissions: new Set(), threshold,
         };
         groups.set(key, candidate);
       } else {
         candidate.risk = maxRisk(candidate.risk, invocation.risk);
         candidate.baseAutoSafe = candidate.baseAutoSafe && invocation.autoSafe;
         candidate.complex = candidate.complex || Boolean(invocation.complex);
-        if (candidate.claudePermission !== invocation.claudePermission) candidate.claudePermission = null;
+        // The group's prefix is what the Codex exporter renders, so it follows
+        // the same canonical spelling the permission does.
+        const mergedPrefix = preferredPrefixSpelling(candidate.prefix, invocation.prefix);
+        if (mergedPrefix) candidate.prefix = mergedPrefix;
+        if (candidate.claudePermission !== invocation.claudePermission) {
+          candidate.claudePermission =
+            preferredPermissionSpelling(candidate.claudePermission, invocation.claudePermission);
+        }
         for (const reason of invocation.reasons) candidate.reasons.add(reason);
+      }
+      // Every spelling actually seen, so the exporter can grant each one. Never
+      // a spelling that was only inferred: a rule for a command nobody ran is
+      // wider than the evidence, which is the line this module does not cross.
+      if (typeof invocation.claudePermission === 'string' && invocation.claudePermission) {
+        candidate.permissions.add(invocation.claudePermission);
       }
 
       const outcome = attributedOutcome(invocation);
@@ -816,6 +903,13 @@ function aggregateObservations(observations, options = {}) {
       reasons: [...candidate.reasons].sort(),
       sources: [...candidate.sources].sort(),
       examples: [...candidate.examples],
+      // Constrained to the family the reported permission belongs to. A real
+      // conflict nulls `claudePermission`, and a family with no permission must
+      // not smuggle one back in through this list.
+      permissions: candidate.claudePermission
+        ? [...candidate.permissions].filter((item) =>
+          normalizePermissionSpelling(item) === normalizePermissionSpelling(candidate.claudePermission)).sort()
+        : [],
       sourceCount: candidate.sources.size,
       successfulRuns: candidate.counts.success,
       failedRuns: candidate.counts.failed,
@@ -838,6 +932,10 @@ module.exports = {
   extractInvocations,
   classifyInvocation,
   candidateKey,
+  normalizeCandidateKey,
+  normalizePermissionSpelling,
+  preferredPermissionSpelling,
+  preferredPrefixSpelling,
   aggregateObservations,
   isAutoSafeCandidate,
   // Exported so the drift test can assert this gate and the exporter's

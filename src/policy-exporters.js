@@ -629,6 +629,34 @@ function candidateClaudePermission(candidate, options) {
   return `${tool}(${tokens.join(' ')} *)`;
 }
 
+// `git status` and `git.exe status` are ONE family of evidence and TWO rules:
+// `Bash(git status *)` does not match the command `git.exe status`, so a family
+// that observed both spellings needs both entries or half its runs bought
+// nothing. Only spellings the candidate actually recorded are emitted, and each
+// one is put through the same safety gate as the primary. An alternate is a
+// grant, not a formatting detail.
+//
+// An independent copy of `normalizePermissionSpelling` from `src/auto-learn.js`,
+// for the same reason the root tables above are copied: this module is the last
+// gate before a rule is written and takes no dependency on the learner it
+// checks. `test/auto-learn-spellings.test.js` asserts the two agree, so a change to
+// one that the other does not follow fails loudly instead of drifting.
+const EXPORTER_PERMISSION_ROOT = /^([A-Za-z_][A-Za-z0-9_]*)\(([^\s)]+)([\s\S]*)\)$/;
+function normalizePermissionSpelling(permission) {
+  const text = String(permission == null ? '' : permission);
+  const match = EXPORTER_PERMISSION_ROOT.exec(text);
+  if (!match) return text;
+  return `${match[1]}(${match[2].replace(/\.exe$/i, '')}${match[3]})`;
+}
+
+function alternateSpellings(candidate, primary) {
+  if (!candidate || typeof candidate !== 'object' || typeof primary !== 'string') return [];
+  const observed = Array.isArray(candidate.permissions) ? candidate.permissions : [];
+  const identity = normalizePermissionSpelling(primary);
+  return observed.filter((item) => typeof item === 'string' && item !== primary &&
+    normalizePermissionSpelling(item) === identity);
+}
+
 function renderClaudePermissions(candidates, options = {}) {
   const permissions = new Set();
   for (const candidate of Array.isArray(candidates) ? candidates : []) {
@@ -641,7 +669,12 @@ function renderClaudePermissions(candidates, options = {}) {
       continue;
     }
     const parsed = parseClaudePermission(rendered);
-    if (claudePermissionIsSafe(parsed, options)) permissions.add(parsed.permission);
+    if (!claudePermissionIsSafe(parsed, options)) continue;
+    permissions.add(parsed.permission);
+    for (const spelling of alternateSpellings(candidate, parsed.permission)) {
+      const other = parseClaudePermission(spelling);
+      if (claudePermissionIsSafe(other, options)) permissions.add(other.permission);
+    }
   }
   return [...permissions].sort((a, b) => a.localeCompare(b));
 }
@@ -727,4 +760,5 @@ module.exports = {
   // independent copy still describe the same set.
   AUTO_SUFFIX_CLOSED_ROOTS,
   AUTO_SAFE_GIT_SUBCOMMANDS,
+  normalizePermissionSpelling,
 };

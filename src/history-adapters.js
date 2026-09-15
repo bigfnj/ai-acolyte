@@ -535,6 +535,22 @@ function findCommandProperty(source, objectStart) {
 // above, with no error anywhere to say so.
 const NESTED_SHELL_METHODS = new Set(['shell_command', 'exec_command']);
 const NESTED_COMMAND_KEYS = new Set(['command', 'cmd']);
+// The same two names again, for the NON-nested shape: a plain `function_call`
+// carrying the command in its arguments rather than a generated script that
+// calls `tools.exec_command(...)`. `src/auto-learn.js:8-11` has known both
+// names for as long as the nested extractor has; this reader knew only
+// `shell_command`, so a rollout emitting `exec_command` directly yielded no
+// observation at all and looked exactly like a session that ran no shell.
+//
+// NOT VERIFIED AGAINST A REAL SAMPLE. No transcript on this machine carries the
+// non-nested `exec_command` shape, so the argument key is accepted in both
+// spellings the nested form is known to use, and nothing else about the record
+// is assumed. An accepted name that never occurs costs one set lookup; a
+// missing one costs the whole corpus, silently, which is the trade the nested
+// extractor already made for the same reason.
+const CODEX_FUNCTION_SHELL_NAMES = new Set([
+  'shell_command', 'functions.shell_command', 'exec_command', 'functions.exec_command',
+]);
 const NESTED_SHELL_CALL_RE = new RegExp(
   `\\btools\\s*\\.\\s*(?:${[...NESTED_SHELL_METHODS].join('|')})\\s*\\(`,
 );
@@ -752,12 +768,14 @@ function parseCodexJsonl(text, options = {}) {
     for (const item of codexItems(record)) {
       if (item.type === 'function_call') {
         const name = String(item.name || '');
-        if (name !== 'shell_command' && name !== 'functions.shell_command') continue;
+        if (!CODEX_FUNCTION_SHELL_NAMES.has(name)) continue;
         const args = jsonObject(item.arguments) || jsonObject(item.input);
-        if (!args || typeof args.command !== 'string' || !args.command.trim()) continue;
+        const commandText = args && typeof args.command === 'string' ? args.command
+          : args && typeof args.cmd === 'string' ? args.cmd : '';
+        if (!commandText.trim()) continue;
         const outerCallId = stringValue(firstDefined(item.call_id, item.callId, item.id));
         const observation = createObservation({
-          source: 'codex', tool, command: args.command, callId: outerCallId,
+          source: 'codex', tool, command: commandText, callId: outerCallId,
           timestamp: firstDefined(record.timestamp, payload.timestamp, item.timestamp),
           cwd: firstDefined(stringValue(args.workdir), state.cwd), session: state.session,
           file, callOffset: location.offset, callEnd: location.end,

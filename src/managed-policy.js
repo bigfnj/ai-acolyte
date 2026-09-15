@@ -72,7 +72,7 @@ function coversPrefix(commandTokens, ruleTokens) {
 function readPolicy(options = {}) {
   const target = options.policyPath || defaultPolicyPath(options.home);
   let raw;
-  try { raw = JSON.parse(fs.readFileSync(target, 'utf8').replace(/^﻿/, '')); }
+  try { raw = JSON.parse(fs.readFileSync(target, 'utf8').replace(/^\uFEFF/, '')); }
   catch (error) {
     // Unreadable and absent are different, and neither is "no policy". A parse
     // failure is reported so a caller can say the check ran degraded rather

@@ -328,3 +328,82 @@ test('the hit table is capped, and eviction keeps the expensive rules', (t) => {
   // A malformed or zero-hit entry is dropped rather than stored as noise.
   assert.ok(Object.values(stored).every((entry) => entry.hits > 0));
 });
+
+// The two suppliers of `costliestRules` disagreed about sanitising the rule
+// text. A managed-hits key has been through `clean(rule, 200)` since it was
+// recorded; the inert-family side arrived as the raw string out of
+// remote-settings.json, and that string is what gets interpolated into the
+// user's CLAUDE.md when a derived mitigation is accepted. remote-settings.json
+// is a local client-refreshed cache, so any local process that can write it
+// could put a control character or a marker into an instruction file.
+const TAB = String.fromCharCode(9);
+test('a managed rule reaching the cost table from the inert-family side is sanitised', (t) => {
+  const { manager } = setup(t, {
+    policy: {
+      permissions: {
+        // A tab inside the rule. `rulePrefix` splits the specifier on
+        // whitespace, so this still governs `git push` and the family really is
+        // inert; only the reported TEXT differs.
+        ask: [`Bash(git${TAB}push:*)`],
+        deny: [], allow: [],
+      },
+    },
+    records: [
+      shellCall('s1', 'git push origin main'), result('s1'),
+      shellCall('s2', 'git push --tags'), result('s2'),
+    ],
+  });
+  manager.scan();
+  const { managed } = manager.status();
+
+  assert.equal(managed.costliestRules.length, 1, 'the family is inert, so there is a cost to report');
+  assert.equal(managed.costliestRules[0].prompts, 2);
+  assert.equal(managed.costliestRules[0].rule, 'Bash(git push:*)',
+    'the whitespace run is collapsed, the same transform the hit table applies');
+  assert.ok(!managed.costliestRules[0].rule.includes(TAB),
+    'no control character reaches the text that is interpolated into CLAUDE.md');
+});
+
+// The sharper half of the same defect: `clean` also TRUNCATES at 200, so a rule
+// long enough to be cut arrived at the cost table under two different keys --
+// the cut one from the hit table, the full one from the inert-family side --
+// and one managed rule was reported as two entries, each understating what it
+// cost. Merging is the condition; the sanitised text is only how it merges.
+const LONG_HOST = `${'a'.repeat(60)}.`.repeat(4) + 'com';
+const LONG_RULE = `WebFetch(domain:${LONG_HOST})`;
+
+function fetchCall(id, url) {
+  return {
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id, name: 'WebFetch', input: { url } }],
+    },
+  };
+}
+
+test('one managed rule is one cost entry even when the two suppliers spell it differently', (t) => {
+  assert.ok(LONG_RULE.length > 200, 'the fixture only means anything if the rule is cut');
+  const { manager } = setup(t, {
+    policy: { permissions: { ask: [LONG_RULE], deny: [], allow: [] } },
+    records: [
+      fetchCall('w1', `https://${LONG_HOST}/one`), result('w1'),
+      fetchCall('w2', `https://${LONG_HOST}/two`), result('w2'),
+    ],
+    state: {
+      version: 1, mode: 'recommend', threshold: 3, candidates: {}, observationHashes: {},
+      cursors: {}, applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
+      codexTargets: {}, managedClaude: {},
+      // As the hit table stores it: already cut to 200 by `clean`.
+      managedHits: { [LONG_RULE.slice(0, 200)]: { hits: 3, tools: ['Read'] } },
+      lastScanAt: null, lastScanStats: null, lastApplication: null,
+    },
+  });
+  manager.scan();
+  const { managed } = manager.status();
+
+  assert.equal(managed.costliestRules.length, 1,
+    'one rule, one row: the two suppliers must key it the same way');
+  assert.equal(managed.costliestRules[0].rule.length, 200);
+  assert.equal(managed.costliestRules[0].prompts, 5, '3 recorded hits plus 2 inert-family runs');
+});

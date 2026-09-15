@@ -23,7 +23,17 @@ const FILE_TOOLS = new Map([
 
 function target(name, input) {
   if (!input || typeof input !== 'object') return undefined;
-  if (name === 'WebFetch') return typeof input.url === 'string' ? input.url : undefined;
+  // The ORIGIN, never the URL. This value becomes `observation.command`, and a
+  // URL carries a path, a query string and sometimes a token in it, so the raw
+  // one put user data on an observation right beside the invariant that says no
+  // path ever leaves the parser. The invariant's assertion is about an observed
+  // FILE path and would not have caught it. Nothing downstream wanted the rest:
+  // `toolInvocation` reduces the value to `host` and `candidate()` drops
+  // `command` before anything is persisted, so the origin is the whole of what
+  // was ever used. An unparseable or non-http URL now yields no target at all,
+  // which drops the observation here instead of carrying it to `toolInvocation`
+  // to be discarded there.
+  if (name === 'WebFetch') return typeof input.url === 'string' ? fetchOrigin(input.url) : undefined;
   // Both arms used to return 'search', so the guard was computed and discarded
   // and a malformed WebSearch block still counted as evidence. Every sibling
   // branch returns undefined on a missing or mistyped field.
@@ -67,6 +77,17 @@ function fetchHost(value) {
     const host = url.hostname.toLowerCase();
     return HOSTNAME.test(host) ? host : null;
   } catch { return null; }
+}
+
+// Scheme and host, and nothing else: no userinfo, port, path, query or
+// fragment. Still a URL rather than a bare host because `fetchHost` above has
+// to be able to re-parse it, and a bare host is not a parseable URL.
+function fetchOrigin(value) {
+  try {
+    const url = new URL(String(value));
+    const host = fetchHost(value);
+    return host ? `${url.protocol}//${host}` : undefined;
+  } catch { return undefined; }
 }
 
 // One observation of a non-shell tool becomes one candidate-shaped record.

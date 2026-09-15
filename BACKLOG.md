@@ -324,26 +324,6 @@ follows is what was confirmed and left. Note two of them independently found the
 same two Tier-1 defects (the installers and the coverage index), which is worth
 knowing when deciding how much to trust a single agent's report.
 
-### The installers have no behavioural test on CI, only static guards
-
-`test/installers.test.js` (new 2026-09-10) drives `install.sh`'s and
-`uninstall.sh`'s real embedded ES modules, so the POSIX half is covered
-everywhere. The PowerShell pair cannot be driven on a POSIX runner, so it gets
-static guards instead: no `-AsHashtable` outside a `#Requires -Version 6`, and
-both scripts must contain a refusal path. The behavioural PowerShell harnesses
-exist but live in a session scratchpad and will be lost.
-
-**Worth doing:** move them into `scripts/` and call them from
-`verify-release.ps1`, or add a `windows-latest` CI job that runs them under
-`powershell.exe` specifically — the defect they catch is invisible under `pwsh`.
-The seam they need: `install.ps1` reads
-`[System.Environment]::GetFolderPath("UserProfile")`, which ignores
-`$env:USERPROFILE`, so the harness copies the script with that one line rewritten.
-(An earlier version of that harness, before the seam was understood, ran the real
-installer against the live `~/.claude` five times. Nothing was lost — the hook was
-already registered, which short-circuits before the write — but it is the reason
-the seam is documented here.)
-
 ### Four test harnesses can still assert against a frozen home
 
 The general form is already recorded above. The specific audit, 2026-09-10:

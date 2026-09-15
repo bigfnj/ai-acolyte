@@ -112,7 +112,14 @@ rm -f "$MEM"/*.md
   printf -- '<!-- gate -->\n- **A gate declared past the 400-char cliff.** Pass: it compiles.\n<!-- /gate -->\n'
 } > "$MEM/deep.md"
 printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
-[ "$(wc -c < "$MEM/deep.md")" -gt 400 ] || fail "fixture is too short to cross the 400-char boundary"
+# Pin the OFFSET of `scope:`, not the file size. The size check passed on a fixture where
+# scope: sat INSIDE the 400-byte window: measured 654 bytes with scope: at 540, and shortening
+# the padding loop from 60 to 42 gives 510 bytes (size check still passes) with scope: at 396,
+# where the text[:400] mutation this test exists to kill would survive silently. The ~100 bytes
+# of gate block appended after the frontmatter is what opens the gap.
+SCOPE_AT="$(grep -bo "scope: global" "$MEM/deep.md" | cut -d: -f1)"
+[ -n "$SCOPE_AT" ] || fail "fixture does not contain scope: global at all"
+[ "$SCOPE_AT" -gt 400 ] || fail "fixture puts scope: at byte $SCOPE_AT, inside the 400-byte window this test exists to cross"
 
 "$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "--gates-compile exited non-zero"
 grep -q 'past the 400-char cliff' "$TMP/.claude/gates.generated.md" \

@@ -34,11 +34,11 @@ const DEFAULT_LIMIT = 3;
 const RULE_LIMIT = 200;
 
 // The rule text is not this repo's, and it ends up interpolated into a code span in the
-// user's own instruction file. `~/.claude/remote-settings.json` is a local, client-refreshed
-// cache, so any local process that can write it picks that string. Both suppliers of
-// `costliestRules` now apply `clean`: the managed-hits side at
-// `auto-learn-manager.js:1793`, and the inert-family side, which calls `addCost` at :1139,
-// inside `addCost` itself at `auto-learn-manager.js:1129`. But `clean` only collapses
+// user's own instruction file. The remote-settings cache it arrives in is local and
+// client-refreshed, so any local process that can write it picks that string. Both
+// suppliers of costliestRules now apply clean: the managed-hits side runs
+// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:1793`, and the
+// inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1129`. But it only
 // control characters and whitespace; it knows nothing about a code span. Sanitising HERE,
 // at the interpolation, is what escapes the backtick and the comment opener.
 //

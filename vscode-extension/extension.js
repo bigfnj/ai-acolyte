@@ -232,7 +232,7 @@ function readBackup() {
 // code path reads first.
 function writeBackupCopies(payload) {
   // writeFileAtomicSync, not a hand-rolled `target + '.tmp'`. That shared name
-  // is exactly the collision src/permissions.js:31-33 exists to prevent —
+  // is exactly the collision src/permissions.js:38-39 exists to prevent —
   // "Unique per-writer temp name so the hook and the VS Code extension (or two
   // extension hosts) never collide on one shared *.wc.tmp" — and this file has
   // seen four extension copies running at once. Two hosts racing on one .tmp can
@@ -847,9 +847,17 @@ async function setRecallPath() {
 //
 // `report` is optional and defaults to a fresh call, so the ~35 non-dashboard
 // callers are unaffected. _push() passes one in because gatesCardData needs a
-// single integer out of the same object, and computing it twice cost 2.93 ms and
-// 25 fs syscalls per refresh (measured: one memoryReport() 6.99 ms, two 9.92 ms,
-// 12 readFileSync + 11 existsSync + 2 readdirSync each).
+// single integer out of the same object, and computing it twice cost roughly
+// 3-5 ms and 25-35 fs syscalls per refresh.
+//
+// A RANGE on purpose, not the constant "2.93 ms and 25 syscalls" this comment
+// used to carry. The cost is a function of how many files the memory corpus
+// holds, so it drifts upward as the corpus grows: the 2.93 ms / 25-syscall
+// reading (12 readFileSync + 11 existsSync + 2 readdirSync per call) was
+// re-measured the same day at 5.00 min / 5.23 p50 ms and 35 syscalls
+// (17 readFileSync + 16 existsSync + 2 readdirSync). Neither number is wrong;
+// both are snapshots of a moving corpus, and quoting either as a constant is
+// what made the first one read as a fact. Re-measure before citing a figure.
 function memoryCardData(precomputed = null) {
   let out = null;
   try {
@@ -2239,7 +2247,7 @@ function toggleCodexMax() {
     // snapshot that alone can restore the previous Codex settings did not land
     // — and falling through to the silent `!res.changed` return told the user
     // nothing at all: Codex MAX stays off while they believe it went on. The
-    // CLI already reports this (bin/wildcard-perms:808 for the Claude half);
+    // CLI already reports this (bin/wildcard-perms:955 for the Claude half);
     // both extension toggles ignored it.
     if (res.error === 'codex-max-snapshot-failed') {
       vscode.window.showErrorMessage(
@@ -2536,7 +2544,7 @@ function runWildcarding(manual = false) {
   // The probe's snapshot is DISCARDED and everything recomputed from a read taken
   // inside the lock. This is not defensive tidiness, it is required:
   // `writeAllow` replays a delta computed against the CALLER's snapshot, and its
-  // own note (src/settings-write.js:145-152) names this caller — "WRONG for one
+  // own note (src/settings-write.js:166-172) names this caller — "WRONG for one
   // whose whole output is a function of the list it read … Such a caller must
   // re-read and recompute first, so `settings` IS `latest` and this degenerates
   // to identity."
@@ -3336,8 +3344,9 @@ class WildcardingViewProvider {
     // One memory report for the whole push, hoisted for the same reason autoLearn
     // above it is: two cards need it and it is not cheap. memoryCardData consumes
     // conf plus six report fields; gatesCardData needs the single integer
-    // report.gateSources, which this call has already computed. Measured 2.93 ms
-    // and 25 fs syscalls saved per refresh.
+    // report.gateSources, which this call has already computed. Saves roughly
+    // 3-5 ms and 25-35 fs syscalls per refresh — a range because the cost scales
+    // with the memory corpus; see the note on memoryCardData.
     //
     // On a throw, fall back to the SHAPE both builders already read as "no card"
     // rather than to null. Passing null would make each builder take its

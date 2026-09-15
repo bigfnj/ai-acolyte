@@ -67,7 +67,7 @@ const KEY_SHAPE = /^\d+:[0-9a-f]{8}:\d+:[0-9a-f]{8}$/;
 // os.homedir() said at require time and then write to the real ~/.claude.
 //
 // Alongside the policy lock, the Auto Learn state and the recall models.
-// src/permissions.js:464 defines the same directory as APPROVE_DIR; joined
+// src/permissions.js:594 defines the same directory as APPROVE_DIR; joined
 // independently here on purpose, since importing it would pull in permissions.js and
 // defeat the entire point of the cache.
 function cachePath({ home = os.homedir(), cacheFile } = {}) {
@@ -186,11 +186,11 @@ function readFixedPoint(options = {}) {
 }
 
 // Did the key land? Best-effort like readBypassState/writeBypassState in
-// src/permissions.js:382-393, and for the same reason: total loss of this file costs
+// src/permissions.js:512-523, and for the same reason: total loss of this file costs
 // exactly one cache miss.
 //
 // Plain writeFileSync, NOT writeFileAtomicSync. That helper's rename retry loop
-// (src/permissions.js:36-46) is sleepSync(20 * (attempt + 1)) over 10 attempts, where
+// (src/permissions.js:43-54) is sleepSync(20 * (attempt + 1)) over 10 attempts, where
 // sleepSync is Atomics.wait — an unyieldable thread block totalling ~1100 ms worst
 // case, on EPERM/EACCES/EBUSY/ETXTBSY, which is exactly what a brand-new temp file in
 // ~/.claude attracts from Defender. Importing a second of stall onto the hook path to

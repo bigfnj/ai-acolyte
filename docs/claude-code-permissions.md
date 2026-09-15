@@ -258,6 +258,39 @@ Two lessons that outrank the rest:
    set as well (`ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`, `find`,
    `wc`, `which`, `diff`, `stat`, `du`, `cd`, read-only `git`) **[docs]**. Those
    grants never prevented a prompt.
+
+   > **The set is closed, and a `hostname` sighting does not widen it.**
+   > The permissions page states the set outright and adds that it **is not
+   > configurable**: to require a prompt for one of these, add an `ask` or `deny`
+   > rule **[docs: permissions — "Read-only commands"]**. It runs in every mode,
+   > except for a path fenced by `blockReadsOutsideWorkingDirectories`. The 14
+   > names above plus read-only `git` ARE the list, not examples drawn from a
+   > longer one.
+   >
+   > An earlier note here inferred the set must be wider, because `hostname` was
+   > seen running with no matching allow entry and no prompt, and `hostname` is
+   > not on the list. **That inference is withdrawn.** It has a simpler
+   > explanation that was never ruled out: the machine it was observed on runs
+   > `defaultMode: auto`, and in auto mode the classifier is the decider for
+   > everything (see section 7's mode table and "Auto mode discards part of your
+   > allow list" below). An unprompted command under auto mode says nothing about
+   > the read-only set, because the classifier would have approved it either way.
+   >
+   > **UNVERIFIED, and this is the part that still needs a probe.** Nobody has run
+   > a per-command experiment that could distinguish the two. If someone does, the
+   > single thing that makes it valid is **pinning the mode to `default`**: run
+   > each candidate with no matching allow entry, no `ask`/`deny` rule, and the
+   > classifier out of the picture, then record whether it prompts. A probe run in
+   > `auto` measures the classifier and cannot answer this question at all, which
+   > is exactly how the `hostname` reading went wrong.
+   > `scripts/auto-mode-audit.js` is also the wrong instrument here: it reads
+   > load-time warnings, not prompt behaviour.
+   >
+   > Until that probe exists, use the list in one direction only. "It is on the
+   > list, therefore the grant was redundant" holds **[docs]**. "It is not on the
+   > list, therefore the grant did something" is [inferred] and is the weaker
+   > claim, because a managed rule, a session approval, or auto mode can each
+   > suppress a prompt on their own.
 2. **PowerShell is where user settings are sovereign.** The managed policy has
    zero PowerShell rules, so every PowerShell family this tool learns is a real
    grant. When measuring value, weight the PowerShell half.

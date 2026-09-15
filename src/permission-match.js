@@ -30,9 +30,12 @@ const COMMAND_TOOLS = new Set(['Bash', 'PowerShell']);
 // a string out, has no such hazard.
 //
 // Why it is worth anything: `ruleMatches` rebuilt a RegExp on every call, and
-// `isCoveredBy` sits inside both quadratic passes of `processAllowList`.
-// Measured on a real 316-entry allow list, one pass was 192,150 compilations
-// and 507 ms; with these two maps it is 316 compilations.
+// `isCoveredBy` SAT inside both passes of `processAllowList` back when those
+// passes were still quadratic. Measured on a real 316-entry allow list, one pass
+// was 192,150 compilations and 507 ms; with these two maps it is 316
+// compilations. Past tense on purpose: the coverage index in permissions.js has
+// since narrowed both passes, so do not read this as a description of the
+// current scan. `isCoveredBy` is still the one that decides every answer.
 //
 // Capped because the lifetime differs by two orders of magnitude between the two
 // callers: the hook process exits after one pass, while the VS Code extension

@@ -345,7 +345,7 @@ test('the MAX-mode PreToolUse hook command is a bare `node` invocation', () => {
   // it is written by BOTH the CLI and the installed VSIX. Nothing covered it at
   // all before this test — and it is the one registration a pure-JS edit could
   // wrap without touching a line of PowerShell. registerApproveHook pushes this
-  // constant verbatim (src/permissions.js:649), so pinning the constant pins what
+  // constant verbatim (src/permissions.js:766), so pinning the constant pins what
   // lands in settings.json.
   //
   // Same two reasons as the installers, and PreToolUse is the worse place to pay

@@ -66,9 +66,12 @@ if (!already) {
   // The bytes as FOUND, not the object we are about to write — `cfg` already
   // has the new hook pushed into it by the line above.
   //
-  // This is the only unlocked, non-atomic write to settings.json in the
-  // project; everything in-process goes through writeFileAtomicSync, which an
-  // install script cannot reach. A copy is the next-best thing.
+  // This is one of FOUR unlocked, non-atomic writes to settings.json in the
+  // project — the others are install.ps1, uninstall.sh and uninstall.ps1, each
+  // of which writes the file the same way. Everything in-process goes through
+  // writeFileAtomicSync and the policy lock, neither of which a standalone
+  // install script can reach. A copy is the next-best thing, and this is the
+  // only one of the four that takes it.
   if (originalRaw !== null) {
     try { writeFileSync(settingsPath + '.pre-install-backup', originalRaw); }
     catch { /* best effort: never block the install on the backup */ }

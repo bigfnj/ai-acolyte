@@ -185,7 +185,7 @@ test('an index inside the line cap says nothing about lines at all', () => {
   }
 });
 
-// memoryLint.js pickPrimaryDir and recall.py:73 _discover_memory_dir answer the same
+// memoryLint.js pickPrimaryDir and recall.py:79 _discover_memory_dir answer the same
 // question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
 // sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.
 // Until these two tests existed, every test that reached pickPrimaryDir had at most one

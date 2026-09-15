@@ -189,15 +189,164 @@ printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
 # carries the same note after that exact mistake survived a mutation twice.
 GATE_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
 [ -n "$GATE_LINT" ] || fail "--lint produced no output at all"
-printf '%s\n' "$GATE_LINT" | grep -q '^    unclosed$' \
+# Sliced to ONE report, not grepped across the whole run. lint() prints several findings as
+# `    <stem>` at the same indent, so a bare stem grep cannot tell which report named the file
+# and a mutation in one is reported against another -- measured: widening the unplaceable-gate
+# predicate made the assertion below fail with "reported a fully paired gate as not compiled",
+# about a report that had not moved. `report_block` takes the lines under a heading, up to the
+# blank line that ends it, so every assertion names the report it is actually about.
+report_block() {   # report_block <lint output> <substring of the heading line>
+  printf '%s\n' "$1" | awk -v want="$2" '
+    index($0, want) { on = 1; next }
+    on && /^[[:space:]]*$/ { exit }
+    on { print }'
+}
+NOT_COMPILED="$(report_block "$GATE_LINT" 'resident-eligible, not compiled')"
+printf '%s\n' "$NOT_COMPILED" | grep -q '^    unclosed$' \
   || fail "--lint did not report the half-written gate as resident-eligible, not compiled"
-printf '%s\n' "$GATE_LINT" | grep -q '^    closed$' \
+printf '%s\n' "$NOT_COMPILED" | grep -q '^    closed$' \
   && fail "--lint reported a fully paired gate as not compiled"
 grep -q 'Pass: this one compiles' "$TMP/.claude/gates.generated.md" \
   || fail "the fully paired gate did not compile"
 grep -q 'Nobody wrote the closing marker' "$TMP/.claude/gates.generated.md" \
   && fail "an unpaired opening marker was compiled into the standing orders"
 echo "ok: --lint reports a gate the compiler skips, using the compiler's own pairing test"
+
+# ------------------------------------- the SAME skip from the other side: a block with no scope:
+# _compile_gates_text() selects on `scope:`, so a fully paired <!-- gate --> block in a file that
+# declares no scope at all is written, reads as a standing order to anyone opening the memory, and
+# is dropped in silence. lint()'s `no_gate` report is the inverse condition and was blind to it.
+# Live when this was written: heredoc-eats-backslashes and xml-comments-reject-double-hyphen both
+# carry a paired block with no scope:, and MEMORY.md lists the first as compiled into CLAUDE.md.
+#
+# Mutation: delete the `gate_no_scope` block from lint(). The first assertion fails, naming this
+# file. Mutating the predicate to `meta[s][2]` alone instead fails the second: a scope:global gate
+# would then be reported as unplaceable.
+#
+# THREE files on one corpus on purpose. `placed` proves the report is not "every gate block", and
+# `local` proves a non-global scope is not a finding -- scope: ai-platform belongs in that repo's
+# CLAUDE.local.md and is installed by hand, so --gates-compile skipping it is correct, not a loss.
+rm -f "$MEM"/*.md "$TMP/.claude/gates.generated.md"
+printf -- '---\nname: orphan\nmetadata:\n  type: reference\n---\n<!-- gate -->\n- **Orphan.** A gate block nobody gave a scope.\n<!-- /gate -->\n' > "$MEM/orphan.md"
+printf -- '---\nname: placed\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Placed.** Pass: this one compiles.\n<!-- /gate -->\n' > "$MEM/placed.md"
+printf -- '---\nname: local\nmetadata:\n  scope: ai-platform\n---\n<!-- gate -->\n- **Local.** Hand-installed in a repo CLAUDE.local.md.\n<!-- /gate -->\n' > "$MEM/local.md"
+printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
+"$PY" "$RECALL" --gates-compile >/dev/null 2>&1 \
+  || fail "--gates-compile exited non-zero on a corpus holding one unscoped gate block"
+ORPHAN_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
+[ -n "$ORPHAN_LINT" ] || fail "--lint produced no output at all"
+UNPLACEABLE="$(report_block "$ORPHAN_LINT" 'nowhere to place it')"
+printf '%s\n' "$UNPLACEABLE" | grep -q '^    orphan$' \
+  || fail "--lint did not report a paired gate block that declares no scope:"
+printf '%s\n' "$UNPLACEABLE" | grep -q '^    placed$' \
+  && fail "--lint reported a scope:global gate block as unplaceable"
+printf '%s\n' "$UNPLACEABLE" | grep -q '^    local$' \
+  && fail "--lint reported a non-global scope as unplaceable; only a MISSING scope is"
+grep -q 'A gate block nobody gave a scope' "$TMP/.claude/gates.generated.md" \
+  && fail "an unscoped gate block was compiled into the standing orders"
+# Printing the finding is half of it; the verdict at the bottom has to agree. Mutation: drop
+# `gate_no_scope` from lint()'s clean condition.
+printf '%s\n' "$ORPHAN_LINT" | grep -q 'clean:' \
+  && fail "--lint reported an unplaceable gate block and still called the corpus clean"
+echo "ok: --lint reports a paired gate block that declares no scope, which the compiler drops"
+
+# ------------------------------------------- a gate block in the INDEX, which nothing can lift
+# _compile_gates_text() skips EXCLUDE unconditionally; lint() built both gate reports from every
+# .md stem, MEMORY included. That is wrong in three separable ways, and excluding the index only
+# fixes two of them -- both reports are INVERSE conditions, so an index carrying a scope AND a
+# correctly paired block satisfies neither and goes unmentioned whichever list they are built
+# from. That is the silent skip: a block written in MEMORY.md is resident in this project only,
+# and is not a standing order anywhere else however global its scope says it is.
+#
+# No live corpus reaches any of this: no MEMORY.md here carries frontmatter, and the lone
+# `<!-- gate -->` in the real index is unpaired prose about this pipeline. A property of the data
+# in a user-edited file, not of the code -- so the case is BUILT here rather than looked for.
+#
+# Three mutations, three different assertions, all naming this file:
+#   delete the `index_gate` report      -> "a gate block in MEMORY.md went unreported"
+#   `gateable` -> `stems` in gate_no_scope -> "named MEMORY in the unplaceable report"  (case B)
+#   `gateable` -> `stems` in no_gate       -> "told the user to add a gate block"       (case C)
+rm -f "$MEM"/*.md "$TMP/.claude/gates.generated.md"
+printf -- '---\nname: keep\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Keep.** Pass: a real gate so the compile is not empty.\n<!-- /gate -->\n' > "$MEM/keep.md"
+# A: scope AND a paired block. The compiler drops it in silence and neither inverse report can
+# mention it, so the only correct behaviour is a report of its own.
+printf -- '---\nname: MEMORY\nmetadata:\n  scope: global\n---\n# Memory Index\n<!-- gate -->\n- **Index gate.** Nothing may ever lift this.\n<!-- /gate -->\n' > "$MEM/MEMORY.md"
+"$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "precondition: the keep gate should compile"
+INDEX_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
+[ -n "$INDEX_LINT" ] || fail "--lint produced no output at all"
+grep -q 'Index gate' "$TMP/.claude/gates.generated.md" \
+  && fail "the compiler lifted a gate block out of MEMORY.md; EXCLUDE no longer holds"
+printf '%s\n' "$INDEX_LINT" | grep -q '^    MEMORY\.md  (move it' \
+  || fail "a gate block in MEMORY.md went unreported; nothing will ever compile it"
+printf '%s\n' "$INDEX_LINT" | grep -q 'clean:' \
+  && fail "--lint reported a gate block nothing can compile and still called the corpus clean"
+# B: a paired block and no scope. Reporting "no scope:" would send the user to add one, which
+# changes nothing, because the index is skipped on its NAME.
+printf -- '---\nname: MEMORY\nmetadata:\n  type: reference\n---\n# Memory Index\n<!-- gate -->\n- **Index gate.** Nothing may ever lift this.\n<!-- /gate -->\n' > "$MEM/MEMORY.md"
+INDEX_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
+report_block "$INDEX_LINT" 'nowhere to place it' | grep -q '^    MEMORY$' \
+  && fail "--lint named MEMORY in the unplaceable report; a scope there would not help"
+# C: a scope and NO block. Same: writing one would not get it compiled either.
+printf -- '---\nname: MEMORY\nmetadata:\n  scope: global\n---\n# Memory Index\n' > "$MEM/MEMORY.md"
+INDEX_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
+report_block "$INDEX_LINT" 'resident-eligible, not compiled' | grep -q '^    MEMORY$' \
+  && fail "--lint told the user to add a gate block to MEMORY.md, which EXCLUDE drops anyway"
+echo "ok: a gate block in the index is reported once, and never as advice that would not help"
+
+# ------------------------------------------------- `clean:` may not assert more than it tests
+# The verdict claims budget, links and standing orders. It tested five of eight printed findings:
+# the byte budget, the attention ceiling and unresolved [[links]] were all absent from the
+# condition, so a 9,757-byte index, 24 entries over the ceiling, with a dangling wiki-link,
+# printed both warnings and then "clean: index within budget, links resolve" underneath them.
+# Three of those words were decorative -- the exact shape of a log line that cannot fail.
+#
+# ONE AXIS PER CORPUS, which is the whole reason this is a loop and not one dirty fixture. The
+# first version varied the ceiling and the wiki-link together and MEASURABLY could not fail:
+# dropping `over_ceiling` from the condition left `unresolved` firing and the suite said ALL
+# PASS. A differential fixture is only as strong as the axes it varies one at a time.
+#
+# Mutation, per arm: drop that arm's term from the condition in lint(). Exactly the arm named
+# fails, naming this file.
+rm -f "$MEM"/*.md "$TMP/.claude/gates.generated.md"
+printf -- '---\nname: g\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Clean.** Pass: nothing to report.\n<!-- /gate -->\n' > "$MEM/g.md"
+
+clean_index() { printf -- '# Memory Index\n\n- [g](g.md) hook\n' > "$MEM/MEMORY.md"; }
+clean_index
+"$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "precondition: the clean corpus should compile"
+CLEAN_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
+printf '%s\n' "$CLEAN_LINT" | grep -q 'clean:' \
+  || fail "a corpus with no findings at all never reaches the clean verdict"
+
+# Each arm perturbs exactly one axis away from that corpus, and asserts BOTH that its own
+# warning fired (or the fixture is degenerate and proves nothing) and that clean: did not.
+#   over_budget   > LINT_TOTAL_WARN bytes, from prose -- entry count and line length untouched
+#   over_ceiling  > LINT_ENTRY_WARN short entries -- 40 x ~20 chars stays well inside the budget
+#   unresolved    one [[link]] to nothing -- one extra short line changes no other axis
+check_axis() {   # check_axis <name> <warning substring>
+  AXIS_LINT="$("$PY" "$RECALL" --lint)" || fail "$1: --lint exited non-zero"
+  printf '%s\n' "$AXIS_LINT" | grep -q "$2" \
+    || fail "degenerate fixture for $1: its own warning never fired, so clean: was not challenged"
+  printf '%s\n' "$AXIS_LINT" | grep -q 'clean:' \
+    && fail "--lint printed the $1 warning and then called the corpus clean"
+}
+
+{ clean_index
+  i=0; while [ $i -lt 200 ]; do
+    printf 'Prose line %03d, padding the index past its byte budget without adding an entry.\n' "$i"
+    i=$((i + 1))
+  done
+} > "$MEM/MEMORY.md"
+check_axis over_budget 'over budget'
+
+{ printf -- '# Memory Index\n\n'
+  i=0; while [ $i -lt 40 ]; do printf -- '- [g](g.md) hook %02d\n' "$i"; i=$((i + 1)); done
+} > "$MEM/MEMORY.md"
+check_axis over_ceiling 'over the attention ceiling'
+
+clean_index
+printf 'A forward link to nothing: [[no-such-memory]]\n' >> "$MEM/MEMORY.md"
+check_axis unresolved 'unresolved \[\[links\]\]'
+echo "ok: the clean verdict tests every finding it prints, not five of eight"
 
 # ---------------------------------------------------------------- gates compile is idempotent
 # gates-stale.sh covers drift-detected and drift-cleared. Nothing covered stability, and an

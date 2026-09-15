@@ -316,25 +316,6 @@ Four phases landed (`1b41205..cd1f50c`): `managed-policy` off the hook path, the
 dashboard's doubled memory report, the last three whole-object writers, and the
 hook fixed-point cache. What follows is what was found and deliberately left.
 
-### Corpus hygiene, owned by concurrent sessions
-
-Not repo issues, recorded so the acceptance board's state is explained rather
-than mysterious. As of 2026-09-10 the board is 27 PASS / 2 FAIL, and both
-failures are in the shared memory corpus, edited by another session ~45 minutes
-before this run:
-
-- `ollama-api-gotchas.md` has `scope: global` with **no `<!-- gate -->` block**,
-  so it is resident-eligible and never compiled — the exact `no_gate` condition.
-  Either add a block or drop the scope.
-- Three files (`deletion-forensics-enabled.md`, `devtoolbox-shim-recovery.md`,
-  `pc-maintenance-deletion-history.md`) still link to
-  `[[pc-maintenance-is-report-only]]`, which was renamed to
-  `pc-maintenance-deletion-history`. A rename left the references behind.
-
-Deliberately NOT fixed here: those files were being actively edited, and writing
-into another session's in-flight work is the same class of defect this whole pass
-was about.
-
 ## Audit of 2026-09-10, second pass
 
 Five read-only agents over the day's work, plus my own verification of each
@@ -454,33 +435,6 @@ call `runNow` on an already-optimal list now exercise the *unlocked probe* path
 and a `backupPolicy` mutant kills 8 of them. What moved is which path they
 cover — `backupPolicy` under the lock is no longer exercised by any of them.
 
-### The memory-gate compiler: four ways to lose a standing gate silently
-
-All reproduced. These matter more than they look, because a gate that vanishes
-takes a safety instruction out of every future session with no error anywhere.
-
-1. **A typo in the CLOSING `<!-- /gate -->` deletes the gate and lint still says
-   clean.** `recall.py` tests only for the OPENING marker when linting, while the
-   compiler requires both. Renaming the closer in one memory compiled **7 gates
-   instead of 8** while lint printed "every standing order compiled", exit 0. The
-   staleness check cannot save you either, because source and artifact go wrong
-   together.
-2. **The `clean:` line asserts three things it never checks** — total bytes,
-   entry count, and unresolved `[[links]]`. A 33 KB / 416-entry index with a
-   broken wiki-link prints both warnings *and* "clean". `memoryLint.js` repeats
-   the same defect and reports an issue count of 0.
-3. **Two gate blocks are written and never compiled** — `heredoc-eats-backslashes`
-   and `xml-comments-reject-double-hyphen` both carry `<!-- gate -->` with no
-   `scope:` line, so the compiler skips them and lint's inverse condition is
-   blind to it.
-4. **`--lint` always exits 0**, so it can never gate CI or a pre-commit hook.
-   And `_fm()` reads only `text[:400]`, so a long `description:` pushes `scope:`
-   out of range and silently drops a gate.
-
-Plus: `memoryLint.js`'s gate selection is a second implementation that disagrees
-with `recall.py` on 2 of 4 inputs, while its comment claims it "mirrors
-recall.py … kept deliberately literal so the two are easy to compare". Nothing
-compares them. Same shape as `coverIndexKey`/`coverLookupKeys`.
 
 ### The launcher guard holds; its harness has gaps
 
@@ -669,58 +623,27 @@ What remains is three source-text or fixture weaknesses in the two memory suites
   source-text pin above does not cover the other half either, so between them the atomic
   write has no assertion that fails when it stops being atomic.
 
-### `bin/wildcard-perms` cannot forward `--gates-allow-empty`
+### `verify-release.ps1`'s `--lint` block has no proof of life
 
-It hardcodes `[recall, '--gates-compile']`. `recall.py --gates-compile --gates-allow-empty` works
-directly, so there is a path, but not through the CLI wrapper or the extension. `--lint` now names
-the direct command when the corpus compiles zero gates, which closes the loop a user could
-otherwise get stuck in. Forwarding the flag properly is still the tidier fix.
+Everything else in the Python-side list is closed; this is the residue, and it is in a file this
+pass could not touch. `scripts/verify-release.ps1:277-287` runs `recall.py --lint` once and then
+asks five questions of the captured text. Four are NEGATIVE (`-not ($lint -match 'over budget')`
+and friends), so all four pass against empty output — a lint that crashed reads identically to a
+lint that found nothing. Only `Check 'lint reports the index clean'` is positive, and it is
+carrying all five.
 
-### Measured and left, Python side
+Two things have changed under it since it was written, and both make that worse:
 
-**`--lint` reads the whole corpus twice.** `lint()` opens every `.md` into `texts`, then
-`_gates_are_stale()` calls `_compile_gates_text()`, which walks `os.listdir` and opens every `.md`
-again. 123 files, 876,284 bytes, read twice per lint, and `--lint` runs from `verify-release.ps1`
-and from the dashboard. Fix without losing the docstring's purity argument: give
-`_compile_gates_text` an optional `texts` map and read only when it is `None`. Measure cold, fresh
-interleaved processes, against the real `~/.claude` and not a temp HOME, n >= 40.
+- **`clean:` no longer prints on this box, for corpus reasons.** `--lint` now reports three
+  `type: feedback` memories with no `scope:` and two paired `<!-- gate -->` blocks with no
+  `scope:` (`heredoc-eats-backslashes`, `xml-comments-reject-double-hyphen`). The one positive
+  check therefore fails on a healthy tree, which is exactly how a check gets muted.
+- **The verdict got stricter.** `clean:` now tests all eight findings it prints rather than five,
+  so more legitimate corpus states will suppress it.
 
-**`rank()` degrades silently on a partial parts tuple.** It refills only when
-`idx is None or names is None`; `lex` is never checked. So `rank(q, mode="hybrid", idx=..., names=...)`
-returns pure-vector ordering at half the score, and `mode="lexical"` with `lex=None` returns every
-score as 0.0 in alphabetical order, which is the exact failure `_check_mode` was added to prevent,
-reached through a different door. `gate_recall.py` passes all four today. One assert closes it.
-
-**`INDEX_PATH` is confirmed vestigial.** Every read is of a function-local rebound inside
-`load_index`/`save_index`. Nothing imports `recall.INDEX_PATH`. The shadowing is what makes a
-reader believe the module constant is live.
-
-**`rank_vec` and `rank_lex` do not mean the same thing.** One is guarded by a per-query dict
-truthiness test, the other by per-document membership, so in hybrid mode a document with no cached
-vector still gets a `rank_vec` while a document no query term touched correctly gets
-`rank_lex = None`. If the fusion bench that justifies keeping these ever gets written, it will read
-them as comparable.
-
-**`_lex_index`'s list branch is live, not dead.** `gate_recall.py` is the sole caller that passes a
-list, and it resolves names against the module-global `MEMORY_DIR` rather than the directory the
-names came from. Harmless only because that bench is single-corpus by construction.
-
-**Fixed: `verify-release.ps1` could not see `--gates refresh` failing.** It captured stdout only,
-and the compile-failure warning goes to stderr, so the check "refresh is silent when nothing
-changed" passed in exactly the steady state where refresh is printing an error every time. It now
-captures `2>&1 | Out-String` (the idiom already used for the installer suite on line 144) and
-asserts `$LASTEXITCODE` alongside the text, so a refresh that fails silently on stdout is caught
-too. Measured against a stub that reproduces `bin/wildcard-perms:635` (stderr warning, exit 0):
-under both PowerShell 7.6.5 and Windows PowerShell 5.1 the old form captured 0 characters and
-would have printed PASS, the new form captures the warning and fails, and a healthy refresh stays
-silent. 5.1 wraps it in a `NativeCommandError` record, so the FAIL detail is wordier there; the
-verdict is the same. The script itself is still unrun by any test, and cannot be: it writes to the
-real `~/.claude`. Its negative `--lint` checks also all pass on empty output; they are covered only
-because a positive check runs first, and that ordering is load-bearing and undocumented.
-
-**Two in-tree figures for the same ONNX session construction disagree by 3x.** `recall.py` says
-"~620 ms (measured on this box)" and `test/recall-index.test.js` says "~210 ms each". Neither names
-its method. One is stale.
+The fix is one line — assert `$lint` is non-empty and `$LASTEXITCODE` is 0 before reading it, the
+pattern already used for the `--gates refresh` capture ten lines above. The script itself stays
+untestable: it writes to the real `~/.claude`.
 
 ## From the 2026-09-14 post-merge audit of `d5d3b85..8cc7fbe`
 
@@ -842,31 +765,6 @@ function. The FINDINGS were all correct; one line number was not. Deleting that 
 been a syntax error rather than a green run, so the number was mis-transcribed into the report
 rather than mis-measured.
 
-### The same silent-gate-skip exists through a second door
-
-Fixing `--lint`'s gate predicate closed the unpaired-marker case. The sibling case is still open
-and was found while fixing it.
-
-`lint()` builds its `no_gate` list from `stems`, which includes `MEMORY`, and it does not apply
-`EXCLUDE`. `_compile_gates_text()` skips `MEMORY.md` unconditionally. So a `MEMORY.md` carrying
-`scope: global` frontmatter AND a correctly paired gate block would compile nothing, and `--lint`
-would once again say nothing about it: exactly the class of silent skip that was just fixed,
-reached by a different route. `vscode-extension/memoryLint.js` already excludes the index for this
-reason, and records it as its divergence #3, so the three implementations are two-for-three in
-agreement rather than three-for-three.
-
-No live corpus hits it today, because no `MEMORY.md` here carries frontmatter at all. That is a
-property of the current data, not a property of the code, and the file is user-edited.
-
-### A pre-existing frontmatter hazard, now written down
-
-**`_fm` matches an indented `scope:` under any other frontmatter key.** The regex is `^\s*scope:`, so
-`scope: global` nested under `metadata:` compiles a gate nobody declared at the top level. The new
-Python fixture that writes `$GATED/g.md`, at `test/recall-py.sh:325-333`, uses exactly that
-shape and passes for the right
-reason, but it documents an accident rather than a decision. Pre-existing, not from this work, and
-that fixture is currently the only place it is recorded.
-
 ### What is left of the `file:line` rot, after the 2026-09-14 correction pass
 
 The pass is done and most of this is closed. Measured rates, the checker bug it uncovered and
@@ -931,13 +829,13 @@ gh-release v3.
 No numbers asserted. This repo's rule is that a figure is real only when measured cold, in fresh
 interleaved processes, against a purpose-built variant with the change removed.
 
-**The `numpy` matmul at `memory/recall.py:624-630`** replaced a Python dot product per document. Its
+**The `numpy` matmul at `memory/recall.py:636-642`** replaced a Python dot product per document. Its
 own comment says "Immaterial for one CLI query, real across a bench run", which is the honest
 framing. To settle: run `memory/bench/gate_recall.py` cold in fresh interleaved processes against a
 variant with the matmul reverted, over the 24-question set, and report the per-query MEDIAN. The
 ~620 ms ONNX session dominates the total and would swamp the signal.
 
-**`counts = Counter(terms)` at `memory/recall.py:482-484`** is almost certainly unmeasurable end to end on a 123-file
+**`counts = Counter(terms)` at `memory/recall.py:497-499`** is almost certainly unmeasurable end to end on a 123-file
 corpus. What would prove otherwise: `_lex_index` alone, timed in fresh processes over a synthetic
 corpus ten times the size, with the hand-rolled loop restored in the comparison variant. Low value.
 

@@ -319,9 +319,18 @@ _BGE = None
 
 
 def _bge():
-    """One ONNX session per process. Constructing it costs ~620 ms (measured on this box), most of a warm query's wall
-    time. search() used to build its own AFTER build_or_update had already built one, so a query
-    that followed an edit paid for the 34 MB session twice. Every caller inside this module goes
+    """One ONNX session per process. Construction is most of a warm query's wall time, and two
+    in-tree figures for it used to disagree threefold with no method beside either (~620 here,
+    ~210 in test/recall-index.test.js). Re-measured 2026-09-14: ONE construction per FRESH
+    process, timed around the Bge() call only, 35 processes in two batches. The very first, with
+    the 34 MB model not yet in the OS file cache, took 674 ms; the remaining 34, cache warm,
+    ran min 239 / p50 264 / max 313 ms. So the two old numbers were not in conflict, they were
+    two regimes with neither named -- and the COLD one was being quoted in warm arguments.
+
+    The warm figure is the one to quote here and at the two call sites that cite this: each of
+    them is about a SECOND construction in a live process, which can never be the cold read.
+    search() used to build its own AFTER build_or_update had already built one, so a query that
+    followed an edit paid for the 34 MB session twice. Every caller inside this module goes
     through here; selftest() still constructs Bge directly because construction is what it tests.
     """
     global _BGE
@@ -464,10 +473,16 @@ def _lex_index(names):
     avgdl are corpus-GLOBAL, so editing one file invalidates them all, which is a different
     invalidation model from the per-file (mtime, size) one recall_index.json uses. Persisting
     would add a staleness axis src/recall-index.js structurally cannot see, to save ~80 ms on a
-    command whose ONNX session construction alone costs ~620 ms.
+    command whose ONNX session construction alone costs ~264 ms (see _bge for the method).
 
     No stopword list: frontmatter boilerplate appears in nearly every file, so Robertson IDF
     flattens it without one (`the` -> 0.021, `backslash` -> 3.535).
+
+    `names` as a LIST is live, not dead, and it is the weaker of the two shapes: it resolves
+    each name against the module-global MEMORY_DIR rather than the directory the names came
+    from, so a caller holding names from a SECOND corpus would silently read the wrong files.
+    bench/gate_recall.py is the only list caller and is single-corpus by construction, which is
+    the only reason this is harmless. Pass the {name: path} dict from anywhere else.
     """
     tf, dl, text, df = {}, {}, {}, {}
     for n, path in names.items() if isinstance(names, dict) else ((n, os.path.join(MEMORY_DIR, n))
@@ -602,8 +617,9 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
         "rrf"      reciprocal rank fusion instead of min-max; the A/B for "hybrid"
 
     idx/lex/emb/names are the query-independent pieces. Pass them in to score many queries
-    against one corpus: the ONNX session alone is ~620 ms, which is most of what a benchmark would
-    otherwise be measuring. Returns the top k as dicts, best first; k=0 means all.
+    against one corpus: the ONNX session alone is ~264 ms (see _bge for the method), which is most
+    of what a benchmark would otherwise be measuring. Returns the top k as dicts, best first;
+    k=0 means all.
     """
     _check_mode(mode)
     if idx is None or names is None:
@@ -696,6 +712,15 @@ def _fm(text, key):
     `metadata:`, older ones are flat -- so match the key at any indent instead of parsing
     YAML. `^\\s*type:` cannot collide with `node_type:`: only whitespace may precede it.
 
+    The indent tolerance is the DESIGN, not an accident to be tightened later. It was once
+    filed as a hazard -- "`scope: global` nested under `metadata:` compiles a gate nobody
+    declared at the top level" -- which had the corpus exactly backwards. Measured
+    2026-09-14: 16 of the 19 memories carrying `scope:` nest it under `metadata:`, and all 16
+    of the currently compiled gates are among them, because that is the shape Claude Code's
+    own memory writer emits. `type:` is nested in the same blocks. Requiring column 0 for
+    either key would silently compile ZERO gates off the real corpus and break every fixture
+    in test/recall-py.sh. Anchoring to the `---` block below is what keeps this safe.
+
     Scoped to the real `---` block rather than a byte window. It used to read text[:400], which
     cut mid-value: 6 files in the live corpus misread `type:` (5 as "", and one as "r"), so they
     escaped the lint's demotion check. 38 of 119 frontmatter blocks are already longer than 400
@@ -734,7 +759,13 @@ def _strip_code(text):
 
 
 def lint():
-    """Audit the always-loaded index for bloat and broken links. No model needed."""
+    """Audit the always-loaded index for bloat and broken links. No model needed.
+
+    Exits 0 whatever it finds, deliberately. It is a REPORTER, and its two harnesses
+    (test/recall-py.sh, test/gates-stale.sh) read the exit status to tell "lint crashed"
+    apart from "lint found something" -- both run lint over corpora seeded to be wrong.
+    The release gate does not need the status either: scripts/verify-release.ps1 asserts
+    each condition out of the text, line by line, which is stricter than one bit."""
     index = os.path.join(MEMORY_DIR, "MEMORY.md")
     if not os.path.exists(index):
         print(f"\n  no MEMORY.md at {index} -- nothing to lint\n")
@@ -747,7 +778,11 @@ def lint():
     total = os.path.getsize(index)
     print(f'\n  MEMORY.md: {total} bytes (~{total // 4} tokens loaded every session), '
           f'target < {LINT_TOTAL_WARN}')
-    if total > LINT_TOTAL_WARN:
+    # Bound to a name and carried down to the `clean:` verdict. Printing a `!` here and then
+    # announcing "index within budget" at the bottom is the failure this whole file is about:
+    # a summary line that asserts more than its condition tests.
+    over_budget = total > LINT_TOTAL_WARN
+    if over_budget:
         print(f"  ! index is {total - LINT_TOTAL_WARN} bytes over budget")
     print()
 
@@ -768,7 +803,8 @@ def lint():
     entries = [ln for ln in mem.splitlines() if ln.startswith("- ")]
     print(f"  {len(entries)} resident index entries" +
           (f", target < {LINT_ENTRY_WARN}" if LINT_ENTRY_WARN else " (no ceiling set yet)"))
-    if LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN:
+    over_ceiling = bool(LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN)
+    if over_ceiling:
         print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
     print()
 
@@ -801,11 +837,61 @@ def lint():
             print(f"    {s}")
         print()
 
-    no_gate = [s for s in stems if meta[s][1] == "global" and not meta[s][2]]
+    # The gate reports below describe what the COMPILER would do, and the compiler skips the
+    # index unconditionally, so they have to skip it too. Split ONCE, here, rather than testing
+    # the same rule in each report -- two copies of one rule is how the reports came to disagree
+    # with the compiler in the first place. `stems` stays whole: the link resolver above still
+    # has to know the index file exists.
+    #
+    # Left whole, both reports lie about MEMORY.md in opposite directions. A scope:global index
+    # with no block is reported as a gate to go and write, which the compiler would then ignore;
+    # an index with a block and no scope is reported as needing one, which would not help either.
+    #
+    # And splitting is still only half, because both are INVERSE conditions: an index carrying a
+    # scope AND a correctly paired block satisfies neither and goes unmentioned whichever list
+    # they are built from. That is the silent skip itself, and `index_gate` is what speaks to it.
+    #
+    # No live corpus reaches any of this: no MEMORY.md here carries frontmatter, and the lone
+    # `<!-- gate -->` in the real index is unpaired prose describing this very pipeline. A
+    # property of the data in a user-edited file, not of the code.
+    # vscode-extension/memoryLint.js already skips the index, and records it as divergence #3.
+    gateable, index_only = [], []
+    for s in stems:
+        (index_only if s + ".md" in EXCLUDE else gateable).append(s)
+
+    # The compiler never lifts a block out of the index, so one written there is resident in
+    # THIS project only -- never a standing order anywhere else, whatever its scope says.
+    index_gate = [s for s in index_only if meta[s][2]]
+    if index_gate:
+        print(f"  {GATE_BEGIN} block inside the always-loaded index "
+              f"-- resident here, never compiled for any other project:")
+        for s in index_gate:
+            print(f"    {s}.md  (move it to its own memory file)")
+        print()
+
+    no_gate = [s for s in gateable if meta[s][1] == "global" and not meta[s][2]]
     if no_gate:
         print(f"  scope: global with no {GATE_BEGIN} ... {GATE_END} block "
               f"-- resident-eligible, not compiled:")
         for s in no_gate:
+            print(f"    {s}")
+        print()
+
+    # The inverse skip, and the one nothing reported. The compiler selects on `scope:`, so a
+    # fully paired gate block in a file with no scope: line at all is written, looks compiled to
+    # anyone reading the memory, and is dropped in silence. Live as this is written:
+    # heredoc-eats-backslashes and xml-comments-reject-double-hyphen both carry a paired block,
+    # both are type: reference with no scope:, and MEMORY.md lists the first as compiled.
+    #
+    # A non-global scope is NOT a finding -- `scope: ai-platform` belongs in that repo's
+    # CLAUDE.local.md and is installed by hand, so --gates-compile skipping it is correct.
+    # Only a block with nowhere to go is unplaceable, which is the same defect the feedback
+    # `no_scope` report above names, reached from the gate side instead of the type side.
+    gate_no_scope = [s for s in gateable if meta[s][2] and not meta[s][1]]
+    if gate_no_scope:
+        print(f"  {GATE_BEGIN} block with no `scope:` -- written, never compiled, "
+              f"nowhere to place it:")
+        for s in gate_no_scope:
             print(f"    {s}")
         print()
 
@@ -870,7 +956,15 @@ def lint():
     # holding a single project or reference memory, which is every real one, and
     # it contradicted this very message -- which claims budget, links and standing
     # orders, and says nothing about residency advice.
-    if not (over or broken or no_scope or no_gate or stale_gates):
+    #
+    # Everything else the run PRINTS is a condition, because this line names it. It used to
+    # test five of eight: a 9,757-byte index, 24 entries over the attention ceiling and an
+    # unresolved [[link]] all printed their warnings and then "clean: index within budget,
+    # links resolve" printed underneath them. Three of the words in this sentence were
+    # decorative. If a finding is worth a line above, it is worth a bit here -- and if it is
+    # not (demote), the message must not claim it.
+    if not (over_budget or over_ceiling or over or broken or unresolved
+            or no_scope or no_gate or gate_no_scope or index_gate or stale_gates):
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
 
 

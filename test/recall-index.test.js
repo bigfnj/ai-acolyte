@@ -216,7 +216,10 @@ test('recall.py still picks the memory dir by file count, not mtime', () => {
 
 test('recall.py constructs the ONNX session once per process', () => {
   // search() used to build its own Bge() after build_or_update had already built one, so a
-  // query that followed an edit loaded the 34 MB session twice, ~210 ms each. Counting
+  // query that followed an edit loaded the 34 MB session twice. ~264 ms each -- the number and
+  // its method live at recall.py's _bge(), which is the one place that should carry them; this
+  // file and recall.py used to quote 210 and 620 for the same thing, neither stating a method,
+  // and the gap was simply warm file cache against cold. Counting
   // assignments rather than calls: a bare `Bge()` also appears in a docstring, and pinning a
   // prose mention would make this fail on a comment edit.
   const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');

@@ -795,20 +795,6 @@ on a hit holds exactly 2 modules. The dominant remaining term is **not fs** — 
 is the stdin round-trip at 3.78 min / 5.48 p50 ms, of which only ~1.2 ms is
 stream overhead the hook controls.
 
-### Housekeeping
-
-**6,692 stale directories in `%TEMP%`** from pre-fix runs (`pw-gates` 3073,
-`pw-local` 1535, `pw-guidance` 942, `permission-wildcarding-backup` 325; oldest
-2026-08-19). The leak itself is fixed and measured at 0 per run. Clearing the
-residue is a one-time manual sweep, deliberately not automated:
-
-```
-Get-ChildItem $env:TEMP -Directory |
-  Where-Object { $_.Name -match '^(permission-wildcarding|pw|codex-max)-' } |
-  Remove-Item -Recurse -Force
-```
-
-
 ---
 
 ## From the 2026-09-14 hybrid-recall work

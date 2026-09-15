@@ -1002,7 +1002,7 @@ function continuedFingerprint(prior, size) {
 // `session_meta` line. An append slice starts at `prior.size - overlapBytes`,
 // so the head is absent, both stay undefined, and the manager then drops the
 // observation outright when a workspace root is configured
-// (`src/auto-learn-manager.js:1367`, `within(root, undefined) === false`) --
+// (`src/auto-learn-manager.js:1769`, `within(root, undefined) === false`) --
 // or keeps it under a SECOND identity, because `session` is part of
 // `identityParts` (:75-77). Two ids for one call defeat the `observationHashes`
 // dedupe and inflate `counts.success`, which is what gates auto-safe apply.

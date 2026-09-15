@@ -1434,7 +1434,7 @@ function createAutoLearnManager(options = {}) {
     // A key with no candidate is treated as not-retainable, which is what the
     // Codex sibling below already does by way of `normalizePrefix`'s guard.
     // Pruning the orphaned keys instead would discard claims-registry
-    // provenance, so that stays in BACKLOG.
+    // provenance, so that stays recorded. See docs/engineering-record.md.
     let nextClaude = useClaude
       ? oldClaude.filter((key) => state.candidates[key] && (state.candidates[key].autoSafe ||
         (oldReviewedClaude.has(key) && claudeEligible(state.candidates[key], true))))

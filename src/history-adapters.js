@@ -1242,8 +1242,9 @@ function scanHistoryFiles(options = {}) {
       // A first-sight failure therefore still records no cursor and is re-read
       // next scan. That is deliberate: the alternative, inventing a cursor we
       // did not earn, trades a bounded I/O cost for permanent data loss. Making
-      // it skip-until-changed needs a failure-tracking structure of its own,
-      // which is in BACKLOG rather than smuggled in here.
+      // it skip-until-changed needs a failure-tracking structure of its own, and
+      // that is a design decision, not an omission. The reasoning above is the
+      // whole of it; there is no backlog entry to go and read.
       if (safe && prior) cursors[cursorKey] = prior;
       files.push({ path: file, source: entry.source, mode: 'error', size: stat.size, error: error.message });
     }

@@ -1,0 +1,745 @@
+# Engineering record
+
+What this project already decided, measured, or disproved. **Not a queue.** Open work lives
+in `BACKLOG.md`; this file exists so a later session does not re-derive an answer,
+or re-propose something already refuted with evidence.
+
+Split out of `BACKLOG.md` on 2026-09-14, when that file had reached 2,509 lines.
+Its own preamble said closed items are removed since git holds the history, and that had
+never once been practised: measured across twelve commits the file only ever grew. That pass
+deleted 34 closed entries, moved 27 here, and left 36 genuinely open ones behind.
+
+Four kinds of thing are here, and the distinction matters:
+
+- **Refuted.** Built, measured, and found not to work. The `Refuted optimizations`
+  section is explicitly a do-not-retry list.
+- **Retracted.** Figures published in this repo and later found wrong, sometimes with the
+  sign reversed. Read the correction, not the original.
+- **Constraints.** Facts that decide how a future change must be shaped, such as what
+  `runWildcarding`'s lock actually guarantees, or where an fs measurement is valid.
+- **Standing decisions.** Calls the maintainer made deliberately. Not debt, and not to be
+  reopened without asking.
+
+The measurement protocol this project holds itself to, stated here because it is the rule
+most often broken: **a performance figure is only real measured cold, in fresh interleaved
+processes, against a purpose-built variant with the change removed.** Every figure here that
+was not taken that way turned out to be wrong. The end-to-end noise floor for a ~60 ms spawn
+on this machine is roughly +/-2 ms min and +/-5 ms p50, so any in-process saving under ~2 ms
+is unmeasurable at the process level.
+
+---
+
+## Verified working, nothing to do
+
+Auto Learn applies. Both symptoms that opened the 2026-09-02/03 work are gone,
+confirmed on a real machine 2026-09-03: `~/.codex/rules/permission-wildcarding.rules`
+written with 43 `prefix_rule` entries, state `applied.claude` 23 and
+`applied.codex` 50, `lastApplication` set across `claude`, `claude-claims` and
+`codex`, Review count back to 0.
+
+The allow/deny backup is mirrored off-tree. Added 2026-09-09 after the event
+below: the primary copy at `~/.claude/backups/allow-list.latest.json` sits inside
+the directory it exists to survive the reset of, which is why the 423 live entries
+came back that day on the extension's in-memory copy rather than off disk. It now
+dual-writes to `~/.permission-wildcarding/allow-list.latest.json`, overridable via
+`permissionWildcarding.backupMirrorPath` for another volume; restore reads the
+primary and falls back to the mirror.
+
+Mutation-tested rather than merely green, since three of the four assertions are
+about a second file that a naive implementation writes anyway: dropping the mirror
+write kills 3 tests, dropping the read fallback kills exactly the recovery test,
+and replacing the fallback with a **union** kills exactly the stale-mirror test —
+that last one added because the fallback-not-union decision was initially
+untested, and a union would resurrect a deliberately pruned entry. Suite 290
+tests, 289 pass, 1 POSIX-only skip, 0 fail.
+
+Tiers 1-3 of the 2026-09-09 audit are burned down, 2026-09-10. Thirteen entries
+above were removed as closed; the commits carry the mutation results that justify
+each. Headlines, all measured on this machine:
+
+- **The hook locks and rebases.** It was the highest-frequency writer of
+  settings.json and the only one that neither locked nor re-read. Two phases now:
+  the unlocked read is a negative test only, and the changed path takes one lock
+  covering both the write and the drain, discards the snapshot and recomputes
+  inside it. Replaying the delta instead would have lost a permission outright —
+  `Bash(npm test)` granted while MAX was on, marked removed by the stale pass and
+  deleted after `--max off` deliberately preserved it. Interleaved measurement,
+  n=14 each: min 157 / median 175 ms before AND after, so the common path is
+  unchanged.
+- **processAllowList: 57 -> 6 ms warm, 85.8 -> 11.6 ms cold** at 423 entries, and
+  the same index now serves the other two coverage pools (policy-guard's worst
+  case 15.5 -> 6.47 ms). `isCoveredBy` is untouched and still decides every
+  answer; the index only narrows, so only a false negative could change a result.
+  The differential test found one on its first run — `Bash(rm -rf /*)` has its
+  star inside the last token — which is why token-misaligned rules go to the
+  linear fallback.
+- **Codex evidence is observable again.** `extractNestedShellCommands` accepted
+  only `tools.shell_command` while `auto-learn.js` already knew `exec_command`, so
+  current Codex transcripts yielded ZERO observations in every mode. Fixing the
+  extractor alone was not enough: `customExecCanAttributeSuccess` matched the same
+  narrow set, which would have left every call permanently `unknown` and
+  `counts.success` at 0. Append-mode `cwd`/`session` are now re-seeded by reading
+  forward to the first newline — a fixed-size read cannot work, because the real
+  `session_meta` line is 22,095 bytes of Codex system prompt.
+- **The extension no longer outlives its own async work.** One `deactivated` flag,
+  released on re-activate; all four `execFile` children tracked and killed; the
+  worker runner nulled and the busy latch cleared, so a same-realm re-activate is
+  not permanently stuck rejecting "Auto Learn is deactivating".
+- **The dashboard is under test at all** — 8 tests including a permanent backtick
+  guard over the `_html` template literal, after three syntax breaks came from
+  one. No production export was needed: capturing argument 2 of
+  `registerWebviewViewProvider` was the whole unlock.
+- **The release harness is committable**, parameterized by four environment
+  variables with auto-discovery, and verified both configured (16 PASS) and
+  entirely bare (14 PASS, 6 INFO) so a fresh clone gets skips rather than red.
+
+Suite: **297 -> 337 passing**, 2 platform skips, 0 fail, CI green on ubuntu and
+windows x node 20 and 22.
+
+### The coverage index's residual cost, and the trigger that replaced the old one
+
+Live split is now 401 indexed / **3** fallback (2026-09-10), after star-free rules
+were dropped from the pool entirely — they cannot cover anything, and 20 of the
+previous 23 fallback entries were star-free. Cold `processAllowList` measured
+~12.5 -> ~9.3 ms in matched processes.
+
+The residual cost is O(n x fallback), because a rule with a glob INSIDE a token
+(`Bash(g* *)`, `Bash(mkfs* *)`) cannot be found by a literal-prefix lookup. That
+class is still quadratic — measured n=1600 at 238.5 ms — but it **cannot grow from
+this tool's own operation**: `generalizePermission`/`mineWildcard` only emit
+`Tool(root *)` with root matching `/^[A-Za-z][\w.-]*$/`, so no `*` can land inside
+a token. The live count is 3, all `mcp__*__*`.
+
+So the old "revisit if the fallback share passes ~20%" trigger is retired: the
+number that could actually grow was the star-free count, and it is gone.
+**New trigger: revisit only if `stats().fallback` exceeds ~25 entries**, which
+would mean a starter-pack change or hand-written glob-in-token rules. Indexing
+that class is possible (bucket on the mandatory literal prefix before the first
+`*`, which the compiled regex is anchored on) but is not warranted at 3 entries.
+
+Worth remembering how the one bug here got out: the index's whole safety argument
+is that only a false NEGATIVE can change an answer, and a false negative shipped.
+`coverIndexKey` treated `:` as a token boundary and `coverLookupKeys` did not, so
+colon-form wildcards on non-command tools — including three `Skill(...)` entries in
+`patterns/starter-pack.json` — were indexed under a key no lookup could generate,
+and being indexed were not in the fallback either. The differential test's
+generator only emitted `Bash`/`PowerShell`, where matching rewrites `:*` to ` *`,
+so 300 random cases per run could not reach it. Fixed and covered three ways
+2026-09-10. The lesson is about the CORPUS, not the code: a differential test is
+only as good as the axes its generator actually varies.
+
+### Killing a child can orphan its grandchild
+
+`deactivate()` now kills the four tracked `execFile` children, but `recall.py`
+re-execs itself into the toolbox venv (`RECALL_REEXEC=1`), so killing the
+immediate child can leave the process that actually does the embedding running. A
+process-group kill (`taskkill /T` on Windows) is what would make this certain.
+
+### Module state that still survives deactivate
+
+Re-measured 2026-09-10: 28 module-level mutables, **9 reset** by `deactivate()`,
+19 surviving. The five that held real memory are now dropped — `dashboard` and
+`memoryLint` each retained the whole `ExtensionContext`, and
+`autoLearnManager`/`autoLearnManagerKey`/`autoLearnCardCache` held parsed history
+state, the largest thing this extension builds.
+
+What remains is inert by inspection: eleven timer handles (`debounceTimer`,
+`recallSyncTimer`, `memBounce`, `gatesBounce`, `autoLearnBounce`, `autoLearnTimer`,
+`policyBounce`, `localDrainBounce`, `dashboardBounce`) which are all cleared above
+— holding a dead handle costs nothing — plus scalars (`lockedRetries`,
+`localDrainRetries`, `localDrainAt`, `recallRebuildAt`, `lastRun`,
+`autoLearnLastError`, `autoLearnFailureCount`, `autoLearnNextRetryAt`) and two
+disposed objects (`statusBar`, `policyLock`).
+
+Two of the scalars have a real if minor effect across a same-realm re-activate:
+`autoLearnNextRetryAt` carries a backoff over, and `autoLearnFailureCount` carries
+the count that computes it. Not worth a change on its own; worth doing next time
+this file is open.
+
+### Non-interactive runs refuse every output redirection
+
+Measured 2026-09-03, Claude Code 2.1.258. Four `-p` probes were refused with
+"Output redirection to '<path>' was blocked … may only write to files in the
+allowed working directories", including a target inside the session's own working
+directory that the refusal itself listed as allowed. The identical redirect
+succeeded in an interactive session. Reads as `-p` failing closed because it
+cannot prompt, with a message naming the wrong reason. Not this project's bug;
+recorded because it invalidates any redirect experiment run through `-p`.
+
+### Claude Code's built-in read-only command set — the inference was wrong, the probe is still owed
+
+**Investigated read-only 2026-09-14. The conclusion below is withdrawn; the doc
+now carries an honest marker instead of a confident claim either way.**
+
+Original: `hostname` ran with no matching allow entry and no prompt, so the
+built-in set is wider than the 14 commands `docs/claude-code-permissions.md`
+lists from the docs. The list is used to argue which pack entries are redundant,
+so it is worth pinning down before acting on that argument again.
+`scripts/auto-mode-audit.js` is the wrong tool (it reads load-time warnings);
+this needs a per-command probe.
+
+**What checking actually found:**
+
+- The official permissions page states the set outright, names the same 14 plus
+  read-only `git`, and adds that it **is not configurable** — to require a prompt
+  for one of them you add an `ask` or `deny` rule. It reads as a closed list, not
+  as examples. `hostname` is not in it, and neither are `date`, `whoami`, `uname`
+  or `df`.
+- So "the set is wider" does not follow from the sighting. **The sighting has a
+  simpler explanation that was never ruled out:** the machine it was taken on
+  runs `permissions.defaultMode: auto`, and in auto mode the classifier decides
+  everything. This file already documents that mode, in the section table and in
+  "Auto mode discards part of your allow list". An unprompted command under auto
+  says nothing about the read-only set, because the classifier would have allowed
+  it regardless. The starter pack does not contain a `hostname` entry either, so
+  the pack was not the explanation.
+- **The probe is still owed, and it now has a precondition it did not have
+  before: pin the mode to `default`.** Run each candidate with no matching allow
+  entry, no `ask`/`deny` rule and the classifier out of the picture, then record
+  whether it prompts. A probe run in `auto` measures the classifier and cannot
+  answer this question at all — which is exactly how the `hostname` reading went
+  wrong the first time.
+- Running that probe needs a live Claude Code and is a behavioural experiment;
+  no amount of reading settles it, so it was not attempted here.
+  `docs/claude-code-permissions.md` now carries the withdrawal, the closed-set
+  citation, and the one-directional rule: "it is on the list, so the grant was
+  redundant" holds; "it is not on the list, so the grant did something" does not.
+
+### Two things the burn-down proved about this file's own claims
+
+Worth keeping because both were wrong here for a while:
+
+- The drift-test entry said `test/policy-guard.test.js` compared against a third
+  hand-copy in `autoLearnUi.js`. That was true once; commit `5566628` replaced
+  it with a delegation, so the test did reach the canonical matcher and STILL
+  could not fail, because all eight of its cases happened to agree. A test can
+  be vacuous without being wired wrong.
+- The Codex entry said ~40% of resolvable evidence was discarded, from a probe
+  that counted output payloads. Re-measured with the real parser: 30 of 6,870
+  observations, 28 of them failures, and no candidate changed disposition. Count
+  the thing the code counts, not the thing that looks like it.
+
+### A single transcript will eventually exceed the 512 MB string limit
+
+`parseHistorySlice` does `buffer.toString('utf8')` on a whole file, which throws
+`ERR_STRING_TOO_LONG` past `MAX_STRING_LENGTH` (536,870,888 on Node 24). Largest
+transcript measured is 70.4 MB and a session file only grows. Peak RSS is roughly
+4x file size (286 MB while scanning that one file; 508 MB for a full-corpus
+pass), because the code holds the Buffer, then the whole string, then a split
+array of every line. An `onObservation` callback instead of one returned array
+would cap the retained half; streaming by line would cap the transient half.
+
+**Trigger: revisit when any single transcript passes 200 MB.** Largest is
+70.4 MB today, so there is roughly 7x headroom, and the fix is a rewrite of the
+code path every other feature depends on.
+
+### Inert bookkeeping candidates
+
+Around a quarter of candidates are complex with no permission, so they can never
+render a rule, never appear in Review, and cost no prompts: shell keywords
+(`for`, `done`) and quoted-executable basenames. Masking is not at fault, checked
+against bash heredocs and both PowerShell here-string forms. Cosmetic only.
+
+### Optimization, measured and ranked
+
+All from the 2026-09-10 pass. The hook's own sync I/O is clean — one
+`readFileSync` (0.16 ms) and one `existsSync` (0.18 ms) on the common path, no
+per-candidate I/O, no lock. Of a 66 ms process wall, ~50 ms is spawn + node boot
+and not ours.
+
+| Item | Measured | Frequency |
+|---|---|---|
+| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. ~~**The retracted 2.3 ms figure still ships in a code comment at `src/permissions.js:686-687`**, in the very commit whose message retracts it~~ — **FIXED 2026-09-14.** It shipped at `src/permissions.js:10`, not 686-687; the reference in this very sentence was itself stale. The header now names ~0.9 ms and says why 2.3 ms was wrong | ~0.9 ms | per hook call |
+| A fixed-point cache keyed on a CONTENT HASH of settings.json lets the hook skip the read, the module load and the pass | our-code p50 11.80 -> 2.46 ms; wall 62.3 -> 53.6 ms; 30/30 hits | per hook call |
+| ~~`memoryReport()` runs TWICE per dashboard refresh~~ **DONE 2026-09-10.** "11.22 ms" was the COMBINED cost of both calls, not the saving — the second is much cheaper because the file cache and the JIT are warm. Measured directly, 11 interleaved fresh processes: one call 6.99 ms, two 9.92 ms, so hoisting saves **2.93 ms** and 25 fs syscalls | 2.93 ms | per refresh |
+| `runWildcarding` takes the policy lock even on the unchanged path; the CLI hook was deliberately changed not to | lock cycle 3.72 ms of 9.60 ms, plus contention with Auto Learn | per settings.json write |
+
+Two notes worth keeping. The fixed-point cache **needs a decision, not just
+work**: it adds a new cache file on the hook path. Use a pure-JS hash, not
+`crypto` — `require('crypto')` alone is 3.5 ms and ate 40% of the win
+(re-measured 2026-09-10 by a second party at 4.65 p50 / 3.40 min cold, so this
+is conservative). Every failure mode is "miss -> full pass".
+
+**CORRECTED 2026-09-10.** The sentence that used to end this paragraph — "a
+forced-miss run measured 15.72 vs 18.28 ms, so there is no cold-path regression"
+— is **wrong, with the sign backwards**, and those two numbers are not the same
+quantity. Against a purpose-built no-cache variant, two independent runs agree
+that the **miss path costs 2.4–3.9 ms MORE** than having no cache at all
+(n=41: +3.90 p50 / +2.44 min; n=21: +4.81 / +2.54). In-process accounting
+agrees: module load 1.97 + stamp 0.53 + hash 0.72 + failed key read 0.23 + key
+write 1.07.
+
+It is still clearly the right trade — saving 9.2 against a cost of 3.9 puts
+break-even at a **30% hit rate** and the real rate is near 100% — but the claim
+must be *restated*, not deleted. Every settings.json change now costs a few ms
+more than it did before the cache existed.
+
+And the opposite conclusion for the extension, recorded so nobody applies the
+hook's lesson by analogy: its eager requires are **not** worth making lazy.
+Activation is 31.4 ms of requires plus 53.5 ms of `activate()`, paid once per
+window at `onStartupFinished`.
+
+### The dashboard's remaining duplicate reads
+
+Deferred with a reason, not forgotten. `readSettings()` runs 3-4x per `_push`
+(`extension.js` at the push itself, in `autoLearnCardData`, in `frictionState`,
+and via `localCardData`'s `readUserSettings`) with the value already in hand at
+the top. Hoisting it needs signature changes in three more functions and would
+save ~0.3 ms — and `frictionState()` may legitimately want a fresh read, so
+threading a stale one trades a sub-millisecond gain for a possible correctness
+regression. Not worth it.
+
+Likewise `CLAUDE.md` and `~/.codex/AGENTS.md` are read 2x each because
+`guidanceCardData` and `gatesCardData` both walk `installedGuidanceTargets()`,
+and `gates.generated.md` is read 3-5x because `gatesStatus` (`src/agent-gates.js`)
+reads it twice in one expression when gates are installed.
+
+**The hazard that makes these riskier than they look:** `compiledGateCount()`
+calls `readCompiled()` with **no home argument** deliberately, per the
+no-singleton discipline documented in `agent-gates.js` and `agent-guidance.js` —
+paths are resolved at CALL time so a test with a mocked home reads the mocked
+file. A hoisted compiled-text value must be home-bound or a mocked-home test
+silently reads the real file and passes for the wrong reason.
+
+### The fixed-point cache's known limits
+
+Both accepted, both worth knowing before extending it.
+
+**A code change that preserves BOTH mtime and size is invisible.** The version
+segment stats `src/permissions.js` and `src/permission-match.js`. `git checkout`
+sets a fresh mtime so the motivating case (bisecting the generalizer) is covered;
+hashing the ~43 KB of source instead would close it for ~0.1 ms plus I/O.
+
+**The key covers `processAllowList` and nothing else.** Verified that the allow
+array plus the code in those two files is the complete input set —
+`patterns/starter-pack.json` is read at exactly one place, inside `--seed`, and
+no policy read feeds the pass. If the hit path is ever widened to skip anything
+else (the local-settings drain, managed policy, the MAX markers), those inputs are
+NOT in the key and a third stat is required. A hit currently skips only the
+generalization pass; `finish()` is still reached on all five of `run()`'s tails,
+so the drain gate is unaffected.
+
+**If the extension ever adopts it**, the cache belongs in memory, not in the
+shared file: the extension host is long-lived, and its copy of the generalizer is
+the generated mirror `vscode-extension/src/`, not the root path the version
+segment stats.
+
+## Deferred by the maintainer
+
+### The 13 blanket wrapper grants in the starter pack
+
+`Bash(bash|sh|python|python3|node|npx|pwsh|powershell *)`, `PowerShell(& *)`,
+`PowerShell(python|python3|powershell|node *)`. Each is an arbitrary-execution
+grant, the learner refuses to propose these exact shapes, and the Codex exporter
+rejects one of them as "too broad" while the Claude seed installs it. Left in
+place on the maintainer's call 2026-09-03. Note that auto mode discards most of
+this class at load, so they are inert there and live in manual, which is the mode
+MAX switches to.
+
+### An audit of a live allow list
+
+Turning the same measurement on a real ~300-entry list to report which entries
+are broader than the evidence supports. Offered and deferred.
+
+
+---
+
+### Fixed in this pass
+
+- **`writeTransform` could destroy the whole settings.json and report success.**
+  `absent -> {}` was treated as the legitimate first run on *every* attempt,
+  including retries. Reproduced end to end: `--max on` with one external delete
+  inside the transform replaced 432 allow entries plus `model`, `effortLevel` and
+  `agentPushNotifEnabled` with 7 blanket entries, recorded an **empty** allow
+  snapshot, and exited 0. Now refuses on the read, ahead of a second transform
+  call, so `applyMax` never snapshots `{}`.
+- **`deniesLost` gated on `Array.isArray`,** so `deny: "Bash(rm -rf *)"` was
+  written away with `wrote: true`. Now compared by value for non-array shapes.
+- **`deactivate()` nulled its retainers after the awaited drain,** so a same-realm
+  re-activate had its `dashboard` and `memoryLint` nulled by the old teardown's
+  continuation — 0 pushes reached the successor's live webview and all ~35
+  `dashboard?.refresh()` call sites were permanent no-ops.
+- **Three post-teardown writers** (`ensureGuidance`, `scheduleAutoLearn`,
+  `resetAutoLearnTimer`) now carry the `deactivated` guard.
+- **Test isolation:** `delete require.cache[extensionPath]` left every `src/`
+  module holding the first harness's `os` stub, so later tests resolved
+  `home = os.homedir()` defaults to an earlier test's deleted temp home. Suite-wide
+  temp-dir leak 3/run -> 0.
+- **`SETTINGS_CONTENDED_CODE` now has a production consumer** — the vanish
+  refusal above. The earlier entry calling it unconsumed is resolved.
+
+### Refuted optimizations — do not retry
+
+Each was built and measured, not reasoned about:
+
+- **`NODE_COMPILE_CACHE`**: 1.88 p50 / 2.73 min **worse** on a hit, 2.86 / 2.06
+  worse on a miss.
+- **Doing the fs work before installing the stdin listeners**, so the 5.68 ms
+  pipe wait overlaps our sync work: **1.27 p50 worse**. The stdin wait is not
+  overlappable.
+- **Inlining the cache module** to remove a whole module load: −0.14 p50 /
+  −0.02 min. Zero.
+- **`utf8` instead of a Buffer read** for settings.json: −0.56 / −0.41 ms, below
+  the noise floor.
+
+And the governing measurement fact: **the end-to-end noise floor for a ~60 ms
+spawn on this machine is roughly ±2 ms in min and ±5 ms in p50**, so any
+in-process saving under ~2 ms is unmeasurable at the process level. Three
+candidates whose in-process cost measured 1–2 ms each came out at exactly zero
+end-to-end. In-process stage timings do **not** add up to end-to-end deltas.
+
+### The scope probe is a safety mechanism, not dead weight
+
+Recorded because it reads as removable and is not. Stages 1–3 of
+`processAllowList` are 54% of the pass and `coveredByScope` returns 0 on the
+live list — but dropping the probe diverges on 1 of 83 differential cases, and
+the divergence is a permission **widening**: on
+`['Bash(rm -rf /*)', 'Bash(rm -rf /home)', 'Bash(rm -rf /home/x)']` the shipped
+pass yields `['Bash(rm -rf /*)']` and the probe-free version yields
+**`['Bash(rm *)']`**, because `Bash(rm -rf /home)` generalizes to `Bash(rm *)`
+and only the probe keeps it specific long enough for prune to drop it.
+
+It reads as dead weight on the live list *precisely because* that list is
+already a fixed point, which is the only state in which it must fire zero times.
+
+### Claims from today's commits that do not hold
+
+- **`f041031`'s `preMax`/`wroteOnto` change is behaviour-neutral and completely
+  untested.** Its message calls it a correctness fix — "both halves now come from
+  ONE read" — but the old code was `applyMax(settings, turningOn)`, whose
+  `res.settings` was computed **in memory from `settings`**. There was one read
+  then and one now. Two mutants at `extension.js:2254` (`preMax` = the post-MAX
+  list; `preMax = []`) both **SURVIVED** the full 400-test suite. The four purge
+  assertions in `test/policy-backup.test.js` guard the filter and the
+  `MAX_ALLOW_CORE` constant; the only thing that varies with the argument is
+  `detectMcpServers`, and no test asserts an `mcp__*` blanket entry leaves the
+  backup. Control: restoring the top-level `require('../src/permissions')` **is**
+  caught, so that guard is real and this one is not.
+- **`if (!res.changed)` in `toggleMax` is unreachable,** and the commit has it
+  backwards: deriving `turningOn = !isMaxOn(latest)` from the same `latest` is
+  exactly what makes it un-reachable. 65 shapes of `latest` enumerated (5 allow
+  sets x 3 hook states x 4 modes, plus `{}`, `null`, non-array allow, bare
+  `hooks`): **0 yielded `changed: false`**. `extension.js:2235`'s wording also
+  reads backwards — "MAX is already OFF" in response to a click asking for ON.
+- **The version badge's degradation claim is false for the case it names.** For a
+  **malformed** manifest the catch never runs: Node refuses to load
+  `extension.js` at all (`ERR_INVALID_PACKAGE_CONFIG` at
+  `getNearestParentPackageJSON`), so there is no dashboard to degrade. The guard
+  does work for a manifest that is absent or valid-but-versionless.
+- **`compiledGateCount`'s bullet fallback is unreachable** on any corpus
+  `recall.py` can emit (0 of 8 gate sections has more than one top-level bullet).
+  Kept as defensive, but it is not a tested path.
+
+### Structural notes carried forward
+
+- **The `writeTransform` shape and deny guards judge the transform's OUTPUT,** so
+  unlike the `SETTINGS_UNREADABLE` refusal they cannot run before it. By the time
+  either throws, `applyMax`'s snapshot and approve script have landed. Tolerable
+  only because both transforms are idempotent overwrites, so the leftovers are
+  inert. **A future transform whose side effects are not idempotent must not use
+  this writer** — now stated in the code as well.
+- **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
+  but not `bin/wildcard-perms:278`,** where the allow-array extraction lives.
+  Changing *which* field feeds the pass would not invalidate existing keys.
+- **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
+  `extension.js` (`SETTINGS`, `BACKUP_DIR`, `MIRROR_BACKUP_DEFAULT`,
+  `PROJECTS_DIR`, `CODEX_SESSIONS_DIR`, `RECALL_MODEL_HOME`) and 6 in `src/`
+  (`codex-max.js` x3, `permissions.js` x3 — `BYPASS_STATE_FILE`,
+  `MAX_STATE_FILE`, `APPROVE_DIR` — plus `policy-lock.js`'s `POLICY_LOCK_PATH`).
+  The `require.cache` purge is now consistent across the four extension-harness
+  test files, which is what made the frozen homes harmless; the constants remain
+  a trap for the next harness.
+- **~6650 leftover temp directories** had accumulated in `%TEMP%` on the dev
+  machine from the leak fixed above. The leak is closed; clearing the historical
+  residue is a one-time manual step, deliberately not automated.
+
+
+---
+
+## MEASUREMENT HAZARD (mechanism CORRECTED below — read to the end)
+
+**Read this before benchmarking anything in this project, and before trusting any
+fs figure recorded in this file.**
+
+Byte-identical files, same count, same volume, both arms interleaved in one
+process with a rotating order, warm, n=31:
+
+| location | 17-file read | per file | 17-file stat | per file |
+|---|---|---|---|---|
+| `~/.claude/projects/.../memory` | **1.46 ms** p50 | 0.086 ms | 0.90 ms | 0.053 ms |
+| a `%TEMP%` copy of the same bytes | **8.54 ms** p50 | 0.502 ms | 0.83 ms | 0.049 ms |
+
+**Reads: 5.9x. Stats: unaffected.** So the ratio between "read every file" and
+"stat every file" is **1.6x in the real location and 10.3x in a temp dir** — which
+inverts the conclusion of any stat-stamp-versus-read optimization.
+
+I ruled out the obvious alternative explanation. A **fixed-path** `%TEMP%` corpus
+measured twice — once with the files freshly created, once with them established
+from the previous run — gave **7.69 ms and 7.72 ms**. Identical. It is not
+first-touch cost and not a Defender scan-on-create; it is the location,
+persistently. (Defender exclusions could not be read to confirm the mechanism —
+`Get-MpPreference` requires elevation — and the mechanism does not change the
+measurement.)
+
+**Why this mattered.** The 2026-09-10 optimization audit measured the extension
+"against a temp `HOME` mirroring the live corpus", so every fs figure it produced
+for the extension is inflated ~6x on its read component. That is the single cause
+of three refuted rows in the table above. The audit even observed the anomaly —
+"only `~/.claude/settings.json`, which every process on this box hammers, gets
+down to 0.159 ms" — and attributed it to that file being *frequently accessed*
+rather than to *where it lives*.
+
+### MECHANISM CORRECTED — it is the file EXTENSION, plus a path exclusion
+
+The "6x in `%TEMP%`" framing above reproduces reliably and is still the wrong
+explanation. Cross-testing content x location x size x **extension** — 19 files
+of 2,700 identical bytes in ONE directory, warm, n=41, ms per file:
+
+```
+.js 0.095   .cjs 0.093   |   .md 0.505  .json 0.514  .txt 0.512
+                             .mjs 0.517  .ts 0.508   .ps1 0.509  (no ext) 0.513
+```
+
+The dominant variable is the **extension**, not the directory. A separate path
+effect sits on top: byte-identical `.md` reads at **0.084 ms** inside
+`~/.claude` versus **0.491-0.532 ms** in `%TEMP%`, `C:\Users\<user>` and
+another volume. `statSync` is barely affected either way. That is the signature
+of Defender exclusions — by extension for `.js`/`.cjs`, by path for `~/.claude`.
+Unconfirmed: `Get-MpPreference` needs elevation, so this is inferred from
+behaviour.
+
+**The corrected rule, which is narrower than my first version:**
+
+- **`require()` of a `.js` module is location-independent.** Cold module-load
+  and require-chain figures measured in a sandbox are **valid**. The blanket
+  "sandbox fs numbers are wrong" was too broad and would have discarded good
+  measurements — including the 212-byte-floor result above, which used `.js`
+  files outside the repo and therefore still stands.
+- **`.json` and `.md` reads are 4-6x inflated outside the excluded path.** The
+  dashboard's own 87-call fs plan measures **4.87 min / 5.61 p50 ms** against
+  the real `~/.claude` and **18.99 / 20.82** against a byte-identical sandbox
+  mirror: 15.3 ms p50 of pure artifact. So the three refuted rows above are
+  still correctly refuted; only the reason changes.
+- So "read every file" versus "stat every file" is **1.6x where the data lives
+  and 10.3x in a sandbox**, which inverts the conclusion of any
+  stat-stamp-versus-read optimization.
+- CPU-bound measurements (`processAllowList`, `coverLookupKeys`) are unaffected
+  by either effect and are the most trustworthy figures in this file.
+
+Worth confirming elevated, because it changes where every future fs measurement
+in this project should be sited.
+
+## Whole-object settings.json writers: FIVE sites, not one
+
+The earlier entry naming `src/auto-learn-manager.js:1178-1218` as "a third
+unrebased whole-object writer" was right but incomplete, and the migration is
+harder than it looked.
+
+Sanctioned writers: `src/settings-write.js:166` (`writeAllow`, rebasing merge)
+and `:322` (`writeTransform`, CAS + verbatim).
+
+Unrebased whole-object writers still outstanding:
+
+| Site | Nature |
+|---|---|
+| `src/auto-learn-manager.js:1178-1181` → written `:1218` | The apply path. Has an `unchanged()` recheck at `:1213-1217`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `src/auto-learn-manager.js:1500-1502` → written `:1546` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `src/auto-learn-manager.js:1025` | `rollback()` writes back `change.before.content` — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1021`. |
+| `src/auto-learn-manager.js:1565` | `undo()`'s inner rollback, same shape, `:1561` hash guard. |
+| `src/local-settings.js:245` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:201` read → `:245` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
+
+**Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
+needs a **two-file atomic window**: `updateClaudeClaims` mutates `claims` in
+place, and both `nextManagedClaude` (persisted into `state.managedClaude`) and
+the claims *file* content are derived from that same read. Neither existing
+writer supports two files. `writeTransform`'s retry loop would re-run only the
+settings.json transform and leave attempt N-1's claims content — **a silently
+corrupt claims registry, which is worse than today's throw.**
+
+Three further blockers for whoever attempts it:
+- Neither writer takes a backup, and `undo()` depends on `beforeHash` and
+  `existed`. `change.afterHash` must be recorded from what the writer *actually
+  wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
+- `rollback()` at `:1025` blindly restores `change.before.content`. If the writer
+  rebased onto fresher bytes, rollback reverts the concurrent change — the exact
+  bug, at the failure site.
+- The new vanish guard in `writeTransform` would make `rollback()` **re-create a
+  settings.json an external actor deliberately deleted.** That is a new defect
+  the migration would introduce, and no existing test would catch it.
+
+**Prerequisite, now being addressed:** `grep "Policy changed" test/` returns
+nothing. The entire "detect and throw" behaviour that justifies this writer's
+safety is unpinned, so swapping it for a retrying writer would pass the full
+suite silently.
+
+## `runWildcarding`'s lock: the constraint that decides any refactor
+
+Recorded because it is easy to get wrong and the failure is a data loss, not a
+slowdown. `writeAllow` replays a **delta computed against the caller's
+snapshot**, and its own note at `src/settings-write.js:166-172` names this
+caller: *"WRONG for one whose whole output is a function of the list it read …
+Such a caller must re-read and recompute first."*
+
+Today `runWildcarding` satisfies that **by accident of structure** — its
+`readSettings()` happens to sit inside the lock, so the snapshot is nearly
+`latest`. **Moving the read out of the lock without an authoritative in-lock
+re-read and recompute reintroduces the MAX / `Bash(npm test)` deletion bug**
+documented at `bin/wildcard-perms:354-368`.
+
+Two further traps for that refactor, both real:
+- **Key on file BYTES, not the parsed allow list.** The unchanged path is where a
+  hand-added deny rule first reaches the backup (`extension.js:2360-2363`); a
+  key on the allow list makes a deny-only edit a hit, and that rule never gets
+  backed up. Two byte sequences can also parse equal.
+- **Keep `backupPolicy` on the unchanged path.** It is the only thing that
+  rebuilds a *deleted* backup — not hypothetical: on 2026-09-09 every directory
+  under `~/.claude` was recreated and this path is what restored the mirror. It
+  self-short-circuits when the union is unchanged, so it costs a read, not a
+  write. Skipping it would also make five `test/policy-backup.test.js` tests go
+  **vacuous rather than fail**, which is the "one early return away from becoming
+  vacuous" hazard already recorded for that file.
+- `lockedRetries` is reset only on the lock-completed path, so an early return
+  that never reaches the lock strands the retry budget.
+
+An in-memory memo (skip the pass entirely, not just the lock) carries five
+further hazards and is deliberately NOT being done: a deleted backup never
+rebuilt, deny-only edits lost, poisoning the memo on a busy-lock-deferred pass
+(the one way to genuinely *miss* a generalization — only ever record a
+"no work due" verdict from the same read, never after a write, a busy lock, or a
+`SETTINGS_UNREADABLE`), the `lockedRetries` reset, and array aliasing
+(`processAllowList` returns its input array for an empty/non-array input).
+
+Also worth folding in eventually: activation takes **two** lock acquisitions
+back to back — `runWildcarding()` then `drainLocal()` — which is the shape
+`bin/wildcard-perms:311-329` was deliberately fixed away from for the hook.
+
+## `preMax` is misnamed, and the audit's read of it was wrong too
+
+`vscode-extension/extension.js:2254`. Two corrections:
+
+- **It cannot be reverted.** `f041031` deleted the `readSettings()` call
+  entirely, so there is no in-scope expression to revert to. The mutation that
+  would actually test the change — `preMax = <the earlier read's allow>` —
+  **cannot be written against the current code.** The audit's two surviving
+  mutants therefore do not test the change; they test whether `detectMcpServers`
+  matters.
+- **The name and its comment are both wrong.** When turning MAX *off*,
+  `wroteOnto?.permissions?.allow` is the **MAX-ON on-disk list**, not the pre-MAX
+  list — the pre-MAX list lives only in the sidecar snapshot and is re-unioned by
+  `disableMaxAllow`. The comment at `:2249-2252` repeats the error.
+
+Why both mutants survive, verified by running the real functions on both existing
+fixtures (byte-identical purge sets for all three variants):
+`buildMaxAllowSet`'s first seven elements are the `MAX_ALLOW_CORE` **constant**,
+so only the `mcp__*` tail varies — and `detectMcpServers` matches the *prefix*
+`mcp__S__`, so any specific `mcp__S__tool` surviving into the restored list still
+yields server `S`. The only discriminating input is an `mcp__<S>__*` blanket that
+lands **while MAX is on**, for a server with no other `mcp__S__`-prefixed entry.
+
+### The per-project memory split is deferred, and the reason is not technical
+
+`RECALL_MEMORY_DIRS` now makes a split *possible*: search spans corpora while `--lint` and
+`--gates-compile` stay on the primary. What is not done is physically relocating memories
+into per-project directories.
+
+It only pays off if sessions are launched inside each project, which is not current
+practice. Doing it would mean writing `.claude/settings.json` into 13 other repos, several
+public, while a concurrent session was demonstrably active in at least one of them (two
+`ILT-wt-*` worktrees appeared during this work). And it buys little that the index diet did
+not already buy: deleting the slug vocabulary took `MEMORY.md` from 163 lines to 84, which
+was the whole point.
+
+Revisit only if launching per-project becomes the habit. Until then this is speculative
+restructuring of a live memory store.
+
+### The retrieval gate cannot run in CI, and its question set cannot be published
+
+`memory/bench/gate_recall.py` is committed; `memory/bench/queries.json` is gitignored,
+because it maps a private corpus (the same reason `bench_embed.py`'s query set is). So the
+gate is reproducible only on a machine with both the corpus and the model.
+
+`test/recall-py.sh` covers the *mechanics* against synthetic fixtures and is the thing that
+would catch a regression. The quality numbers are a local measurement, not a CI gate, and the
+commit message is where they live. Naming this so a later reader does not mistake the absence
+of a CI job for an oversight.
+
+### min-max versus RRF is unresolved, and 24 queries cannot resolve it
+
+Measured on the 24-question set: min-max MRR 0.830, RRF 0.832, identical R@1 (0.79), R@3
+(0.83) and median (1.0). RRF was marginally better on worst rank (39 vs 48).
+
+Min-max ships as the default on a structural argument rather than a measured one: RRF fuses
+ranks, so a document *no* query term touches scores as merely "last" rather than abstaining,
+and its floor sits only 3x below its ceiling. Min-max lets the lexical leg contribute exactly
+0.0 when it separates nothing, degrading to pure cosine. `mode="rrf"` is reachable from
+`rank()` with no CLI flag so the question stays open.
+
+`FUSE_W` swept 0.3-0.8: R@1 flat at 0.79 across 0.4-0.7, MRR flat, only worst-case monotonic
+(22 at w=0.3, 48 at 0.5, 76 at 0.7). Left at 0.5 deliberately. **Do not tune it on this query
+set**, `memory/bench/README.md` already says R@1 swings of one or two queries are noise at
+twice this sample size.
+
+### A gate that the unchanged code also passes is not a gate
+
+Worth recording as a method note, because it nearly shipped. The plan specified the retrieval
+gate as "median rank <= 2". Every mode scores a median of 1.0 on this corpus, vector-only
+included, so that criterion would have passed against completely unchanged code. R@1 is what
+moves (0.58 → 0.79) and is what the resident slug vocabulary was actually buying.
+
+`gate_recall.py` now gates on R@1 with an MRR-lift proof, and `--fuse-w 1.0` is the built-in
+mutation: it disables the lexical leg, collapses hybrid onto vector exactly, and must exit 1.
+
+### `EMBED_CHAR_CAP` is decorative and the real cap is four times smaller
+
+`EMBED_CHAR_CAP = 8000` looks like the limit on what gets embedded. It is not: `_encode`
+truncates to 256 tokens, which on this corpus means a median of ~832 characters, 26% of the
+already-capped text, worst case 9%.
+
+bge-small's real context window is 512, so doubling the token cap is one line and doubles the
+visible prefix of every file. It is not free: it needs an `EMBED_ID` bump and a full re-embed,
+and `EMBED_ID` is pinned in `recall.py`, `src/recall-index.js` and asserted equal in
+`test/recall-index.test.js`, so three files move together. Unmeasured in isolation:
+`bench_report.md`'s "bge-small +qprefix" row conflates the window with the query prefix, so
+that row is not evidence either way. Complement to BM25, not a substitute: an 8,000-char file
+would still be ~75% invisible.
+
+### This repo now ships two products under one name
+
+`memory/` plus `src/agent-gates.js`, `src/recall-index.js`, `vscode-extension/memoryLint.js`
+and the Memory card are a memory-management tool. The permission-wildcarding half is a
+different tool. They share the VS Code extension for a real reason, under a managed policy
+that defines only `PostToolUse`, the extension is the only durable automation surface, which
+is what `## Design principle: watch the cause, don't hook the event` is about.
+
+The cost is discoverability: nobody searching for an agent-memory tool finds
+"permission-wildcarding", and the README (58 KB) and this file (107 KB) both carry two
+products' worth of material. Not proposing a split, the coupling is genuine and two release
+trains sharing a 34 MB model asset would be worse. Recording it so the naming question is
+asked deliberately rather than discovered.
+
+---
+
+### Repo state and product state diverge until a release is cut
+
+`vscode-extension/memory/recall.py` is a gitignored build artifact regenerated by
+`scripts/package.mjs`, and `recallScriptPath()` prefers that bundled copy over the checkout. So
+after any merge touching `memory/recall.py`, the installed extension keeps running the previous
+version until `npm run package` and a reinstall. For c369e58 that meant the extension's own
+`autoSyncRecallIfStale` loop kept hitting the unconverging deletion bug the merge had just
+fixed, for as long as the VSIX was stale.
+
+Not a contract break, and the interface is identical across versions. Worth stating as a release
+rule: a merge that changes `memory/recall.py` is not in the product until the VSIX is rebuilt.
+
+### The version bump is half of that release rule
+
+Rebuilding is not enough on its own. `4471fe5` set the manifest pair to 1.4.4 and a VSIX was built
+from it. Commits `8ce8c3a` and `312f86c` then changed `extension.js` and `memory/recall.py` on top
+of that without touching the version, so a freshly built `permission-wildcarding-1.4.4.vsix` and
+the earlier 1.4.4 named two different builds. VS Code keys upgrades on the version string, so
+installing an equal version over an existing one is a silent no-op, which presents to a user as
+"in-place upgrades do not work". Bumped to 1.4.5 on 2026-09-14.
+
+Bump `vscode-extension/package.json` and the root `package.json` together.
+`test/installers.test.js:455` asserts they agree, and the extension manifest is authoritative
+because `release.yml` defaults its version input to it.

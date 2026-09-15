@@ -1149,8 +1149,8 @@ already in `pruneGrantKeys`: delete a record whose two lists both emptied.
 without returning are exhausting `MAX_ATTEMPTS` or breaking on a non-retryable code, and both assign
 `lastErr` at `:50`. So the guard is dead and the `process.emitWarning` always fires when the fallback
 is reached. Behaviour is right and preserving the cause is a genuine improvement over discarding it,
-but mutating the guard to `if (false)` survived the whole of `test/settings-write.test.js`: nothing
-anywhere asserts the warning exists. Either assert it or drop the guard, so the code stops implying a
+but mutating the guard to `if (false)` leaves the suite at 517/515/0: nothing anywhere asserts the
+warning exists. Either assert it or drop the guard, so the code stops implying a
 false branch exists.
 
 **`MIN_SUPPORTED_VERSION` cannot change an outcome.** Mutating the check at
@@ -1164,14 +1164,23 @@ one is not documented at all.
 ### New behaviour with no coverage
 
 **`candidateFingerprint` records `permissions` and nothing asserts it.**
-`src/auto-learn-manager.js:1553` added `permissions: item.permissions`, with a comment explaining
-that a family which gained a second spelling is a different grant from the one a human approved.
-Deleting the line left the suite green.
+`src/auto-learn-manager.js:128`, inside `candidateFingerprint` at `:123`, adds
+`permissions: item.permissions` with a comment explaining that a family which gained a second
+spelling is a different grant from the one a human approved. Deleting the line leaves the suite at
+517/515/0, identical to baseline.
 
-**`src/auto-learn.js:912-915`'s `candidate.claudePermission` ternary is belt and braces.** Mutating
-it to always-true left the suite green: `normalizePermissionSpelling(null)` returns `''` and the
-filter below drops everything regardless. Not a bug. `test/auto-learn-spellings.test.js:82-95` does
-not discriminate it, so the guard could be deleted tomorrow with no signal.
+**`src/auto-learn.js:909-912`'s `candidate.claudePermission` ternary is belt and braces.** Mutating
+it to always-true leaves the suite at 517/515/0: `normalizePermissionSpelling(null)` returns `''`
+and the filter below drops everything regardless. Not a bug.
+`test/auto-learn-spellings.test.js:82-95` does not discriminate it, so the guard could be deleted
+tomorrow with no signal.
+
+All four survived mutations in this section were re-run independently in a detached worktree after
+the audit reported them, because the audit's citation for the first one pointed at
+`src/auto-learn-manager.js:1553`, which is `const parent = current.find(...)` in an unrelated
+function. The FINDINGS were all correct; one line number was not. Deleting that line would have
+been a syntax error rather than a green run, so the number was mis-transcribed into the report
+rather than mis-measured.
 
 ### A pre-existing frontmatter hazard, now written down
 

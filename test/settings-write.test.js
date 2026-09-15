@@ -20,6 +20,7 @@ const {
   SETTINGS_ABSENT, SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
   SETTINGS_CONTENDED_CODE,
 } = require('../src/settings-write');
+const { writeFileAtomicSync } = require('../src/permissions');
 
 function tempSettings(t, value) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-write-'));
@@ -589,4 +590,47 @@ test('a settings.json that vanishes between reads is absent, but an unreadable o
     fs.readFileSync = realRead;
     fs.existsSync = realExists;
   }
+});
+
+// writeFileAtomicSync gives up its atomic guarantee on this path and writes in place.
+// That is the right call — losing the update is worse than a brief partial-read window —
+// but it must SAY why, or a rename that fails for a real reason (a cross-device target, a
+// permissions problem) looks exactly like a healthy run.
+//
+// Nothing asserted this. The emitWarning sat behind `if (lastErr)`, which no reachable
+// input could make false, and mutating that guard to `if (false)` left the whole suite
+// green. A silent fallback is the "log line that cannot fail" shape from the other side:
+// the only evidence the atomic path was abandoned, with nothing checking it appears.
+test('the in-place fallback names the cause it gave the atomic guarantee up for', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-atomic-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'settings.json');
+
+  const warnings = [];
+  const onWarning = (w) => warnings.push(w);
+  process.on('warning', onWarning);
+
+  // EXDEV is deliberately NOT in RETRYABLE_RENAME_CODES, so the loop breaks on the first
+  // attempt and the test does not sit through 1.1 s of backoff to reach the branch.
+  const realRename = fs.renameSync;
+  fs.renameSync = () => { const err = new Error('cross-device link'); err.code = 'EXDEV'; throw err; };
+  try {
+    writeFileAtomicSync(target, '{"ok":true}\n');
+  } finally {
+    fs.renameSync = realRename;
+  }
+
+  // emitWarning fires on the next tick, so flush the queue before asserting.
+  await new Promise((resolve) => setImmediate(resolve));
+  process.off('warning', onWarning);
+
+  const fallback = warnings.filter((w) => w.name === 'PermissionWildcardingAtomicFallback');
+  assert.equal(fallback.length, 1, `expected exactly one fallback warning, got ${warnings.length}`);
+  assert.match(fallback[0].message, /EXDEV/,
+    'the warning must carry the rename error CODE, not just say a fallback happened');
+
+  // The whole point of the fallback: the update is not lost.
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"ok":true}\n');
+  // And it does not leave its temp file behind on the way.
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
 });

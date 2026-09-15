@@ -65,10 +65,10 @@ function writeFileAtomicSync(target, content) {
   // non-retryable rename failure fell silently into the in-place write with the
   // original cause discarded. Say what went wrong: this is the branch where the
   // atomic guarantee was given up, and it should not be silent about why.
-  if (lastErr) {
-    process.emitWarning(`writeFileAtomicSync: rename failed (${lastErr.code || lastErr.message}), `
-      + 'wrote in place instead', 'PermissionWildcardingAtomicFallback');
-  }
+  // Unconditional, and it used to be guarded by `if (lastErr)`, which no reachable input
+  // could make false: both exits from the loop run the catch above, so lastErr is always set.
+  process.emitWarning(`writeFileAtomicSync: rename failed (${lastErr.code || lastErr.message}), `
+    + 'wrote in place instead', 'PermissionWildcardingAtomicFallback');
   try {
     fs.writeFileSync(target, content, 'utf8');
   } finally {

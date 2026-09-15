@@ -386,7 +386,7 @@ is wider than the check:
 - `src/derived-guidance.js:57-63` says truncation is 200 chars, but the escaping
   runs AFTER `.slice(0, RULE_LIMIT)`, so `&lt;!--` expansion can push the output
   past 200. The test only measures `'x'.repeat(400)`, which never escapes.
-- `'the hook fires once, after a successful write'` at `test/settings-write.test.js:128`
+- `'the hook fires once, after a successful write'` at `test/settings-write.test.js:129`
   asserts `onWrite` fires once on success; nothing asserts it does NOT fire when
   `writeAllow` throws, and nothing asserts the CLI writer has no `onWrite` — that
   "deliberate rather than dropped" question rests entirely on a comment.

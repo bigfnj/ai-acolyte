@@ -108,7 +108,6 @@ def _discover_memory_dir():
 
 
 MEMORY_DIR = os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir()
-INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
 # This count rule is the AUTHORITY. Two other places pick a corpus -- memoryLint.js
 # pickPrimaryDir and scripts/verify-release.ps1 Find-MemoryDir -- and both used to sort by
 # MEMORY.md mtime instead. The extension pins RECALL_MEMORY_DIR from its copy on every spawn, so
@@ -267,12 +266,24 @@ class Bge:
         return pieces
 
     def _encode(self, text):
+        # Stop at the cap instead of wordpiecing the whole input and slicing at the end. The
+        # model only ever sees 256 ids, so everything past that was tokenized and thrown away:
+        # measured 87.6 ms uncapped against 3.2 ms on a 211 KB file, producing IDENTICAL ids.
+        # Vector-identical by construction, so no EMBED_ID bump and no re-embed.
+        #
+        # 255 because the loop leaves room for the closing SEP appended below, which is what the
+        # old `ids[:255] + [SEP]` slice produced.
         ids = [self.vocab[CLS]]
         for w in self._basic(text):
             for p in self._wordpiece(w):
+                if len(ids) >= 255:
+                    break
                 ids.append(self.vocab.get(p, self.vocab[UNK]))
+            else:
+                continue
+            break
         ids.append(self.vocab[SEP])
-        return ids[:255] + [self.vocab[SEP]] if len(ids) > 256 else ids
+        return ids
 
     def embed(self, text):
         ids = self._encode(text or " ")
@@ -340,7 +351,10 @@ def save_index(idx, mem_dir=None):
     json.dump(idx, open(...)) left a truncated cache behind if anything interrupted it, and
     load_index's bare except turned that into a silent full re-embed."""
     INDEX_PATH = _index_path(mem_dir or MEMORY_DIR)
-    tmp = INDEX_PATH + ".tmp"
+    # Pid in the temp name. os.replace is atomic, but two writers racing into one fixed
+    # ".tmp" path interleave BEFORE the replace, and the extension's 15-minute auto-sync
+    # runs against the same store a CLI query may be updating.
+    tmp = f"{INDEX_PATH}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(idx, f)
     os.replace(tmp, INDEX_PATH)
@@ -579,6 +593,12 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
     _check_mode(mode)
     if idx is None or names is None:
         idx, lex, emb, names = _retriever(mode)
+    # A partial tuple used to degrade in silence: `lex` was never checked, so passing
+    # idx+names with lex=None returned pure-vector ordering at exactly half score in
+    # hybrid, and every score 0.0 in alphabetical order in lexical. That is the same
+    # failure _check_mode above exists to prevent, reached through a different door.
+    if lex is None and mode in ("hybrid", "lexical", "rrf"):
+        raise ValueError(f"rank(mode={mode!r}) needs lex; pass all four parts or none")
     files = idx["files"]
     if not names:
         return []
@@ -818,7 +838,26 @@ def lint():
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
 
 
-GATES_OUT = os.path.expanduser(r"~/.claude/gates.generated.md")
+# normpath because expanduser substitutes a backslash HOME into a forward-slash literal and
+# leaves the rest, producing `C:\Users\Admin/.claude/gates.generated.md`. It opens fine, but it
+# is interpolated into the refusal messages below, where a mixed-separator path reads like a bug
+# in the thing reporting the bug.
+GATES_OUT = os.path.normpath(os.path.expanduser(r"~/.claude/gates.generated.md"))
+
+
+def _installed_gate_bytes():
+    """Size of the standing orders currently installed, or 0 if there are effectively none.
+
+    `.strip()` matches readCompiled()'s definition of "compiled" in src/agent-gates.js, so this
+    counts exactly what that installer would have treated as real content. Shared by the two
+    refusal paths in compile_gates() so they cannot drift apart: both are the same hazard, which
+    is a compile that produces nothing while something is already installed and live.
+    """
+    try:
+        existing = open(GATES_OUT, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return 0
+    return len(existing) if existing.strip() else 0
 
 
 def _compile_gates_text():
@@ -871,7 +910,19 @@ def compile_gates(allow_empty=False):
     what lets this run unattended."""
     # A missing memory dir is a normal state (a fresh machine, a mocked HOME), not a crash.
     # This can run from a hook, where an unhandled traceback would land in the agent's face.
+    #
+    # But it is NOT normal when standing orders are already installed, and this returned 0 for
+    # both cases. A typo'd RECALL_MEMORY_DIR therefore printed "nothing to compile" and exited
+    # success, which bin/wildcard-perms reads as a clean compile and extension.js chains into
+    # ensureGates() -- reinstalling stale bytes and reporting that it worked. Same hazard as an
+    # empty compile, reached by a different door, so it gets the same test: a fresh machine has
+    # nothing installed and stays a quiet no-op.
     if not os.path.isdir(MEMORY_DIR):
+        installed = 0 if allow_empty else _installed_gate_bytes()
+        if installed:
+            sys.exit(f"[recall] no memory dir at {MEMORY_DIR}, but {GATES_OUT} holds "
+                     f"{installed} bytes of standing orders. Check RECALL_MEMORY_DIR, or pass "
+                     f"--gates-allow-empty to erase them.")
         print(f"\n  no memory dir at {MEMORY_DIR} -- nothing to compile\n")
         return
 
@@ -892,14 +943,11 @@ def compile_gates(allow_empty=False):
     # normal path. `.strip()` matches readCompiled()'s definition of "compiled" in
     # src/agent-gates.js, so this refuses exactly when that would have installed something.
     if not names and not allow_empty:
-        try:
-            existing = open(GATES_OUT, encoding="utf-8", errors="replace").read()
-        except OSError:
-            existing = ""
-        if existing.strip():
+        installed = _installed_gate_bytes()
+        if installed:
             # Kept short on purpose: extension.js slices this stderr at 300 chars before
             # showing it. 226 with this box's real paths, so both names survive the slice.
-            sys.exit(f"[recall] refusing to empty {GATES_OUT} ({len(existing)} bytes): "
+            sys.exit(f"[recall] refusing to empty {GATES_OUT} ({installed} bytes): "
                      f"no gate blocks in {MEMORY_DIR}. Check RECALL_MEMORY_DIR, or pass "
                      f"--gates-allow-empty to erase every gate.")
 

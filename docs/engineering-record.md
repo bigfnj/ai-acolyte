@@ -210,7 +210,7 @@ this needs a per-command probe.
 Worth keeping because both were wrong here for a while:
 
 - The drift-test entry said `test/policy-guard.test.js` compared against a third
-  hand-copy in `autoLearnUi.js`. That was true once; commit `5566628` replaced
+  hand-copy in `autoLearnUi.js`. That was true once; commit `103b7e8` replaced
   it with a delegation, so the test did reach the canonical matcher and STILL
   could not fail, because all eight of its cases happened to agree. A test can
   be vacuous without being wired wrong.
@@ -736,7 +736,7 @@ that defines only `PostToolUse`, the extension is the only durable automation su
 is what `## Design principle: watch the cause, don't hook the event` is about.
 
 The cost is discoverability: nobody searching for an agent-memory tool finds
-"permission-wildcarding", and the README (58 KB) and this file (107 KB) both carry two
+"permission-wildcarding", and the README (68 KB) and this file (54 KB) both carry two
 products' worth of material. Not proposing a split, the coupling is genuine and two release
 trains sharing a 34 MB model asset would be worse. Recording it so the naming question is
 asked deliberately rather than discovered.

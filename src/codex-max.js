@@ -10,13 +10,13 @@
 // sandbox_mode = "danger-full-access" as well would remove the last thing in
 // Codex capable of refusing a command; that stays an explicit user decision.
 //
-// It aims for "never" but does not insist on it. An enterprise requirements
-// bundle can declare which policies are legal at all — a real one reads
-// allowed_approval_policies = ["on-request", "untrusted"], with "never" simply
-// absent. Writing a forbidden value would not defeat the policy, only produce a
-// config Codex rejects, so the toggle settles for the least-friction value the
-// org permits and reports that it did. Where the org allows "never", nothing
-// changes. See targetApproval below.
+// It aims for "never" and REFUSES rather than downgrading. An enterprise
+// requirements bundle can declare which policies are legal at all — a real one
+// reads allowed_approval_policies = ["on-request", "untrusted"], with "never"
+// simply absent. targetApproval still computes the least-friction permitted
+// value, but the caller writes NOTHING when "never" is missing: it returns
+// `blockedBy: 'enterprise-policy'` with `sandboxUntouched`, because a silent
+// downgrade is not the toggle the user asked for. See targetApproval below.
 //
 // The file is edited surgically, line by line, never parsed and re-serialised.
 // A real config.toml carries literal-string Windows paths ('\\?\C:\...'),
@@ -144,8 +144,8 @@ function writeCodexMaxState(state, statePath = CODEX_MAX_STATE_FILE) {
 //
 // where "never" — the value this toggle would like to write — is simply absent.
 // Writing a forbidden value is not a way to win an argument with policy; it just
-// produces a config Codex will reject. So the toggle asks first and settles for
-// the least-friction value the org actually permits.
+// produces a config Codex will reject. This computes the least-friction permitted
+// value; the caller REFUSES when "never" is absent rather than writing it.
 const CODEX_BUNDLE_CACHE = path.join(os.homedir(), '.codex', 'cloud-config-bundle-cache.json');
 // Ordered least-friction first, so "best allowed" is a scan down this list.
 const APPROVAL_BY_FRICTION = ['never', 'on-request', 'untrusted'];

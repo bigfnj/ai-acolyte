@@ -440,7 +440,7 @@ echo "ok: the refusal reports the installed gates' real byte count, not its char
 # ------------------------------------ MEMORY_DIR is normalised before any message interpolates it
 # _discover_memory_dir builds on expanduser("~/.claude/projects"), which substitutes a backslash
 # HOME into a forward-slash literal and leaves the rest: the primary corpus read
-# `C:\Users\Admin/.claude/projects\d---ai-work\memory` on this box. GATES_OUT was normpath'd for
+# `C:\Users\<user>/.claude/projects\<slug>\memory` on this box. GATES_OUT was normpath'd for
 # exactly this reason -- it lands in the two compile_gates() refusals, where a mixed-separator
 # path reads like a bug in the thing reporting the bug -- and MEMORY_DIR, which lands in the SAME
 # two messages, was not. Mutation: drop the normpath() around the MEMORY_DIR assignment.

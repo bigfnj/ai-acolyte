@@ -771,10 +771,14 @@ The pass is done and most of this is closed. Measured rates, the checker bug it 
 the rule about what a STALE verdict is worth are in `docs/engineering-record.md`; only the
 residue belongs here.
 
-`node scripts/check-line-refs.js` now reports **162 references: OK 107, NEAR 15, STALE 23,
-UNVERIFIABLE 17, 0 BROKEN**, against OK 39 / STALE 60 / UNVERIFIABLE 47 before.
+`node scripts/check-line-refs.js` reports **170 references: OK 125, NEAR 15, STALE 17,
+UNVERIFIABLE 13, 0 BROKEN** as of 2026-09-15, against OK 39 / STALE 60 / UNVERIFIABLE 47 before
+the pass. The count grew because the README audit ADDED 21 verified citations; the OK share is
+what moved, not the total. Re-measure before quoting this rather than trusting the number: an
+earlier version of this paragraph went stale within a day.
 
-**Not all 40 remaining rows are defects, and a future pass should not treat them as a worklist.**
+**Not all 45 remaining non-OK rows are defects, and a future pass should not treat them as a
+worklist.**
 Every one was read against its target during the pass. Three known-good categories:
 
 - References the checker misjudges because its anchor comes from a neighbouring clause.

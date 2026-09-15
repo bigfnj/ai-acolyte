@@ -12,9 +12,11 @@
 # bin/wildcard-perms 874 CR bytes, memory/recall.py 529, memory/bench/bench_embed.py
 # 446, scripts/package.mjs 55.
 #
-# Deliberately NOT `* text=auto`: the four tracked .ps1 files (install.ps1,
-# uninstall.ps1, memory/bench/run.ps1, scripts/verify-release.ps1) have no shebang,
-# are Windows-only, and CRLF is correct for them.
+# Deliberately NOT `* text=auto`: the FIVE tracked .ps1 files (install.ps1,
+# uninstall.ps1, memory/bench/run.ps1, scripts/verify-release.ps1,
+# scripts/verify-installers.ps1) have no shebang, are Windows-only, and CRLF is
+# correct for them. That list said "four" and omitted verify-installers.ps1 until
+# 2026-09-15; a hand-maintained count beside the thing it counts drifts.
 #
 # Adding rules here does not renormalise an existing checkout — that needs
 # `git add --renormalize .` once, which is why the earlier claim that "the working
@@ -26,3 +28,10 @@
 
 # Extensionless, so no glob reaches it. This is the hook itself.
 bin/wildcard-perms text eol=lf
+
+# The one shebang'd .js. NOT a blanket `*.js`: every other tracked .js is CRLF in the
+# working tree here, so a blanket rule would renormalise the whole tree for no gain.
+# Measured 2026-09-15: 705 CR in the working tree against 0 in the index, which is
+# exactly the drift this file's header describes, regressed for a file added after
+# that fix landed. Nothing guards this; no test mentions .gitattributes.
+scripts/check-line-refs.js text eol=lf

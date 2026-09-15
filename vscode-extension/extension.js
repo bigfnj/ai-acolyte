@@ -591,7 +591,7 @@ function recallModelCandidates() {
     script ? path.join(path.dirname(script), 'models') : '',
     path.join(__dirname, 'memory', 'models'),
     path.join(__dirname, '..', 'memory', 'models'),
-    'D:\\.ai-work\\projects\\desktopPet\\src\\Models',
+    // No absolute path here, ever: this list used to end with the author's own working root.
   ].filter(Boolean);
 }
 
@@ -628,8 +628,8 @@ function recallStatus() {
   return { py, modelDir, venv, model, state };
 }
 
-// Fetch the CPU recall model on demand into RECALL_MODEL_HOME: the same bge-small-en-v1.5 int8 ONNX asset (~32MB) recall.py
-// and desktopPet ship. Gitignored and kept out of the VSIX (only the vocab is committed and bundled) because 32MB per release would be re-downloaded on every upgrade.
+// Fetch the CPU recall model on demand into RECALL_MODEL_HOME: the same bge-small-en-v1.5 int8 ONNX asset (~32MB) that
+// memory/recall.py loads. Gitignored and kept out of the VSIX (only the vocab is committed and bundled) because 32MB per release would be re-downloaded on every upgrade.
 const RECALL_MODEL_URL = 'https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx';
 const RECALL_MODEL_MIN_BYTES = 5 * 1024 * 1024; // sanity floor — a bad URL/auth wall serves a small HTML page, not the binary
 

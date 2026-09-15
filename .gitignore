@@ -24,10 +24,25 @@ AGENTS.md
 # public repository.
 CLAUDE.local.md
 .claude/settings.local.json
+# Agent scratch state. `.claude/` as a whole is NOT ignored, because a project may
+# legitimately want to SHARE .claude/settings.json publicly; these are the subpaths
+# no repo should ever carry. The worktrees stub is invisible today only because git
+# does not track empty directories, so the first file an agent drops there would be
+# stageable on a public repo.
+.claude/worktrees/
+.claude/agents/
 .codex/
 .cursorrules
+.cursor/
 .windsurfrules
+.aider*
+.continue/
 SESSION_*
+
+# Never, on any repo: local environment files.
+.env
+.env.*
+!.env.example
 
 # electron crash log dropped in the repo root
 debug.log

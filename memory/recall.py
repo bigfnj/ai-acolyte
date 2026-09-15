@@ -6,9 +6,9 @@ on-demand second layer: ask a plain-language question and it finds the memory *f
 that mean the same thing, so "have I solved X before?" works across projects even when
 the words differ from the hook. `--lint` audits the index for bloat and broken links.
 
-Embeddings run on the CPU via a local bge-small-en-v1.5 ONNX model (the same asset
-desktopPet ships) -- always available, no GPU, no Ollama, no MCP, no hooks, so it runs
-untouched under the corporate managed policy. Vectors are cached and only changed files
+Embeddings run on the CPU via a local bge-small-en-v1.5 ONNX model (the int8 ONNX
+export of BAAI/bge-small-en-v1.5) -- always available, no GPU, no Ollama, no MCP, no
+hooks, so it runs under a managed policy. Vectors are cached and only changed files
 re-embed on the next run.
 
 Ranking is hybrid: the embedding cosine, fused with BM25 over the WHOLE file. The two
@@ -73,8 +73,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 # Claude Code derives the project slug from the working directory, so the corpus moves
-# whenever the working root is renamed (D:\.claude -> D:\.ai-work did exactly that on
-# 2026-08-20 and left the old default pointing at a deleted directory). Discover the
+# whenever the working root is renamed (that happened here on 2026-08-20 and left the
+# old hardcoded default pointing at a deleted directory). Discover the
 # store instead of hardcoding one slug: pick the ~/.claude/projects/*/memory holding the
 # most memory files, and only fall back to a literal when nothing is found.
 def _discover_memory_dir():
@@ -105,12 +105,12 @@ def _discover_memory_dir():
             continue
         if count > best_count:
             best, best_count = candidate, count
-    return best or os.path.join(root, "d---ai-work", "memory")
+    return best or os.path.join(root, "memory")  # slug-free: a hardcoded one named the author's root
 
 
 # normpath for the same reason GATES_OUT gets it: expanduser substitutes a backslash HOME into
 # the forward-slash literal in _discover_memory_dir and leaves the rest, so this read
-# `C:\Users\Admin/.claude/projects\d---ai-work\memory` -- and it is interpolated into the same
+# `C:\Users\<user>/.claude/projects\<slug>\memory` -- and it is interpolated into the same
 # two compile_gates() refusal messages, where a mixed-separator path reads like a bug in the
 # thing reporting the bug. Separator-only, so the message LENGTH does not move (228 and 226
 # chars here, both still inside extension.js's 300-char stderr slice).
@@ -229,7 +229,7 @@ def _model_dir():
         if d and os.path.exists(os.path.join(d, "bge-small.onnx")):
             return d
     sys.exit("[recall] bge-small.onnx not found. Put it in ./models or set RECALL_MODEL_DIR "
-             "(copy from desktopPet/src/Models, or export BAAI/bge-small-en-v1.5 to ONNX).")
+             "(the int8 ONNX export of BAAI/bge-small-en-v1.5; the extension can fetch it).")
 
 
 class Bge:
@@ -559,8 +559,8 @@ def _display_keys(dirs):
     answerable from the printed line alone."""
     # Labels must be unique before they are used to disambiguate, or they disambiguate nothing.
     # Two corpora whose parent directories share a name -- a backup at
-    # D:\backup\d---ai-work\memory beside the live d---ai-work, the likeliest thing anyone would
-    # actually add -- both resolve to the slug "d---ai-work", so the qualified key collided and
+    # a backup copy beside the live store, the likeliest thing anyone would
+    # actually add -- both resolve to the SAME parent-directory slug, so the qualified key collided and
     # the last writer silently won. That removed the primary's copy of EVERY shared filename
     # from search, which is the exact failure this qualification exists to prevent.
     labels, used = {}, {}
@@ -969,7 +969,7 @@ def lint():
 
 
 # normpath because expanduser substitutes a backslash HOME into a forward-slash literal and
-# leaves the rest, producing `C:\Users\Admin/.claude/gates.generated.md`. It opens fine, but it
+# leaves the rest, producing `C:\Users\<user>/.claude/gates.generated.md`. It opens fine, but it
 # is interpolated into the refusal messages below, where a mixed-separator path reads like a bug
 # in the thing reporting the bug.
 GATES_OUT = os.path.normpath(os.path.expanduser(r"~/.claude/gates.generated.md"))

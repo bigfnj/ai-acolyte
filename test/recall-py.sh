@@ -165,6 +165,40 @@ grep -q 'Declared behind a BOM' "$TMP/.claude/gates.generated.md" \
   || fail "a gated memory written with a UTF-8 BOM dropped out of the compiled standing orders"
 echo "ok: a UTF-8 BOM before the frontmatter fence does not hide a gate"
 
+# ------------------------------------------ --lint and the compiler must make the SAME gate test
+# The linter asked `GATE_BEGIN in text`; the compiler requires GATE_BEGIN(.*?)GATE_END. So a
+# memory with an opening marker and no closing one compiled NOTHING and was left out of the
+# "resident-eligible, not compiled" report -- the one line that exists to say so. Not
+# hypothetical: on the live corpus project_memory_gates.md is scope:global with a lone
+# `<!-- gate -->` in prose, and --lint reported nothing at all about it.
+#
+# Mutation: put `GATE_BEGIN in text` back in lint()'s meta[] tuple. `unclosed` then vanishes from
+# the report and the first assertion below fails, naming this file.
+#
+# Both halves are asserted over ONE corpus on purpose. Asserting only the report would also pass
+# if the COMPILER were widened to match the linter, which loses the same gate from the other
+# direction: half a gate block would become a standing order.
+rm -f "$MEM"/*.md "$TMP/.claude/gates.generated.md"
+printf -- '---\nname: closed\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Closed.** Pass: this one compiles.\n<!-- /gate -->\n' > "$MEM/closed.md"
+printf -- '---\nname: unclosed\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Unclosed.** Nobody wrote the closing marker.\n' > "$MEM/unclosed.md"
+printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
+"$PY" "$RECALL" --gates-compile >/dev/null 2>&1 \
+  || fail "--gates-compile exited non-zero on a corpus holding one half-written gate"
+# Captured in THIS shell, and the exit status checked before the text is read: `lint | grep`
+# would run `fail` in a subshell and let a CRASHED lint read as a silent pass. gates-stale.sh
+# carries the same note after that exact mistake survived a mutation twice.
+GATE_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero"
+[ -n "$GATE_LINT" ] || fail "--lint produced no output at all"
+printf '%s\n' "$GATE_LINT" | grep -q '^    unclosed$' \
+  || fail "--lint did not report the half-written gate as resident-eligible, not compiled"
+printf '%s\n' "$GATE_LINT" | grep -q '^    closed$' \
+  && fail "--lint reported a fully paired gate as not compiled"
+grep -q 'Pass: this one compiles' "$TMP/.claude/gates.generated.md" \
+  || fail "the fully paired gate did not compile"
+grep -q 'Nobody wrote the closing marker' "$TMP/.claude/gates.generated.md" \
+  && fail "an unpaired opening marker was compiled into the standing orders"
+echo "ok: --lint reports a gate the compiler skips, using the compiler's own pairing test"
+
 # ---------------------------------------------------------------- gates compile is idempotent
 # gates-stale.sh covers drift-detected and drift-cleared. Nothing covered stability, and an
 # unstable compile would make --lint report STALE forever.
@@ -228,6 +262,54 @@ RC=$?
 [ "$RC" = "0" ] || fail "--gates-allow-empty must compile cleanly, exited $RC"
 [ -s "$GATES" ] && fail "--gates-allow-empty did not empty the compiled gates"
 echo "ok: --gates-allow-empty still lets a deliberate 'delete every gate' through"
+
+# --------------------------------------- the refusal's "N bytes" has to be BYTES, not characters
+# _installed_gate_bytes() read the file in TEXT mode and returned len(), so the number the refusal
+# prints at the user was a CHARACTER count: 5864 against a real 5872 on the live gate file. The
+# helper's name says bytes, the message says bytes, and lint() had the identical unit error
+# against MEMORY.md 130 lines above. Mutation: put `len(existing)` back -- both assertions below
+# fire (the shipped `fail` exits on the first), and the second names the wrong number outright.
+#
+# The em-dash is the whole fixture. With an ASCII-only gate the two counts are EQUAL and this
+# test cannot fail however broken the helper is, so the counts are compared first and the run
+# stops if they ever coincide. An axis that does not vary is not an axis.
+rm -f "$MEM"/*.md "$GATES"
+printf -- '---\nname: wide\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Wide.** Pass: an em-dash \xe2\x80\x94 makes bytes and characters differ.\n<!-- /gate -->\n' > "$MEM/wide.md"
+printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
+"$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "precondition: the em-dash gate should compile"
+SIZE="$(wc -c < "$GATES" | tr -d ' ')"
+CHARS="$("$PY" -c "import sys;print(len(open(sys.argv[1],encoding='utf-8').read()))" "$GATES")"
+[ "$SIZE" != "$CHARS" ] \
+  || fail "fixture is degenerate: $GATES is $SIZE bytes and $CHARS chars, so this cannot fail"
+ERR="$(RECALL_MEMORY_DIR="$GATELESS" "$PY" "$RECALL" --gates-compile 2>&1 >/dev/null)"
+printf '%s\n' "$ERR" | grep -qF "($SIZE bytes)" \
+  || fail "the refusal does not report the file's real size of $SIZE bytes: '$ERR'"
+printf '%s\n' "$ERR" | grep -qF "($CHARS bytes)" \
+  && fail "the refusal reported $CHARS -- the CHARACTER count -- and called it bytes: '$ERR'"
+echo "ok: the refusal reports the installed gates' real byte count, not its character count"
+
+# ------------------------------------ MEMORY_DIR is normalised before any message interpolates it
+# _discover_memory_dir builds on expanduser("~/.claude/projects"), which substitutes a backslash
+# HOME into a forward-slash literal and leaves the rest: the primary corpus read
+# `C:\Users\Admin/.claude/projects\d---ai-work\memory` on this box. GATES_OUT was normpath'd for
+# exactly this reason -- it lands in the two compile_gates() refusals, where a mixed-separator
+# path reads like a bug in the thing reporting the bug -- and MEMORY_DIR, which lands in the SAME
+# two messages, was not. Mutation: drop the normpath() around the MEMORY_DIR assignment.
+#
+# The redundant `.` is built INSIDE python, not passed through the shell: MSYS rewrites anything
+# path-shaped on its way into python.exe (see the note in the gateless block above), and a fixture
+# the shell has already normalised is a fixture that cannot fail. The first assertion proves the
+# raw value really is non-normal on whatever platform this is running on.
+"$PY" - "$RECALL" <<'PY' || fail "MEMORY_DIR is not normalised, so both refusal messages print a mixed-separator path"
+import os, runpy, sys
+recall = sys.argv[1]
+raw = os.path.join(os.environ["RECALL_MEMORY_DIR"], ".", "")
+assert raw != os.path.normpath(raw), f"degenerate fixture: {raw!r} is already normal"
+os.environ["RECALL_MEMORY_DIR"] = raw
+got = runpy.run_path(recall)["MEMORY_DIR"]
+assert got == os.path.normpath(raw), f"MEMORY_DIR kept the raw form {got!r}"
+PY
+echo "ok: MEMORY_DIR is normalised, so the refusal messages name one separator style"
 
 # ------------------------------------------- a MISSING dir is the third route to the same loss
 # The guard above catches a corpus that compiles zero gates. It did NOT catch a corpus that is

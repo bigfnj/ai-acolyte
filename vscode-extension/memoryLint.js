@@ -17,13 +17,14 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-// recall.py's EXCLUDE (recall.py:173): the index is just hooks, so it is never a search
+// recall.py's EXCLUDE (recall.py:179): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:207-208), and the pattern _compile_gates_text
-// actually selects on: `re.search(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END),
-// text, re.DOTALL)`. BOTH markers are required, in order. Testing only for the opening one
+// recall.py's gate markers (recall.py:213-214), and the pattern _compile_gates_text
+// actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
+// `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
+// with its --lint. BOTH markers are required, in order. Testing only for the opening one
 // counted a gate source recall.py does not compile, and on the live corpus that is not
 // hypothetical: one scope:global memory carries an opening marker, no closing marker, and a
 // lone `<!-- gate -->` that is prose describing this very pipeline.
@@ -232,7 +233,7 @@ function fullReport(dir, conf) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:836 excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:924 excludes it.
   let gateSources = 0;
   for (const f of files) {
     let raw;

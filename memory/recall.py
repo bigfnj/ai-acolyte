@@ -810,7 +810,7 @@ def lint():
     # when both are stale together it reports "current". The extension's watcher recompiles
     # on edit, but a CLI-only user, or one with the extension closed, has no other signal.
     # This is the one place the source is compared to what a recompile would produce.
-    stale_gates = _gates_are_stale()
+    stale_gates = _gates_are_stale(texts)
     if stale_gates:
         print("  gates.generated.md is STALE: a gate block changed since the last compile.")
         # Both commands below REFUSE when the corpus compiles nothing, and neither
@@ -818,7 +818,7 @@ def lint():
         # advising them unconditionally sent a user who had legitimately deleted their last gate
         # into a loop: lint says run X, X refuses, refresh warns on every session forever. Name
         # the escape hatch in the one case where the ordinary advice cannot work.
-        if not _compile_gates_text()[1]:
+        if not _compile_gates_text(texts)[1]:
             print("    this corpus compiles ZERO gate blocks, so --gates-compile will REFUSE")
             print("    rather than erase what is installed. If that is a surprise, check")
             print("    RECALL_MEMORY_DIR: it is probably pointing at the wrong corpus. If you")
@@ -873,7 +873,7 @@ def _installed_gate_bytes():
     return len(existing) if existing.strip() else 0
 
 
-def _compile_gates_text():
+def _compile_gates_text(texts=None):
     """The compiled gates file as bytes, WITHOUT writing it. Pure over the corpus, so both
     the compiler and the lint drift-check produce identical output from the same memories --
     which is the whole point: lint can ask "would a recompile change the file?" without a
@@ -882,12 +882,22 @@ def _compile_gates_text():
     Selected on scope, not type. Residency is a question of reach, and a `reference` can be
     every bit as resident-worthy as a `feedback` when its failure is silent -- a heredoc
     eating backslashes raises nothing, so no trigger ever fires. The gate block is the opt-in.
-    Sorted by filename and hashed so a re-run is byte-identical."""
+    Sorted by filename and hashed so a re-run is byte-identical.
+
+    `texts` is an optional {stem: text} map for a caller that has already read the corpus.
+    --lint reads every .md into exactly such a map and then called this twice, so the 123
+    files were opened three times in one run for one answer. Passing the map keeps this
+    function pure over the corpus, which is the property the drift check depends on: it
+    still derives the answer from the same bytes, it just stops re-reading them."""
     blocks = []
     for name in sorted(os.listdir(MEMORY_DIR)):
         if not name.endswith(".md") or name in EXCLUDE:
             continue
-        text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace").read()
+        stem = name[:-3]
+        text = (texts.get(stem) if texts is not None else None)
+        if text is None:
+            text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8",
+                        errors="replace").read()
         if _fm(text, "scope") != "global":
             continue
         m = re.search(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), text, re.DOTALL)
@@ -905,14 +915,14 @@ def _compile_gates_text():
     return out, [name for name, _ in blocks]
 
 
-def _gates_are_stale():
+def _gates_are_stale(texts=None):
     """True when a recompile would change gates.generated.md -- i.e. someone edited a gate
     block in a memory but never ran --gates-compile. This is the failure the whole feature
     exists to prevent, one level up: a standing order silently out of date. Only meaningful
     once gates have been compiled at least once, so a never-compiled corpus is not 'stale'."""
     if not os.path.isdir(MEMORY_DIR) or not os.path.exists(GATES_OUT):
         return False
-    fresh, _ = _compile_gates_text()
+    fresh, _ = _compile_gates_text(texts)
     on_disk = open(GATES_OUT, encoding="utf-8", errors="replace").read()
     return fresh != on_disk
 

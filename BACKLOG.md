@@ -894,10 +894,16 @@ deletion, and the false short-circuit justification. These are what was measured
 
 Fixed 2026-09-14 on `bl-extension`, each with a mutation that named one test: the
 `updateStatusBar` guard, the `showReport()` null dereference, the swallowing
-`autoSyncRecallIfStale` catch, and three of the four dead export entries. `MTIME_TOLERANCE_MS`
-is still exported, on purpose — see below — and `test/dead-exports.test.js` now holds it with
-the reason in writing rather than leaving it to look like an oversight. Struck through as they
-are closed; the notes stay because they name the reproduction.
+`autoSyncRecallIfStale` catch, and all four dead export entries. Struck through as they are
+closed; the notes stay because they name the reproduction.
+
+`MTIME_TOLERANCE_MS` was the fourth, and it took two rounds. It was first HELD rather than
+removed, with the written reason "a branch in flight adds the drift test that imports it". That
+branch landed and the drift test it referred to does not import the name: it pins `recall.py`'s
+source instead. The reason outlived its truth by one merge, which is the failure mode a HELD list
+with written reasons is supposed to prevent and does not, because nothing re-checks the reason.
+Export and HELD entry both removed 2026-09-14; the constant and its use in `entryMatchesFile`
+are untouched.
 
 **`refresh()` lints the primary `MEMORY.md` twice.** `memoryLint.refresh()` calls `fastLint` for
 every discovered dir, primary included, then calls it again for the primary. Counted on the real
@@ -938,9 +944,13 @@ Nothing imports it and nothing pins it, so if recall.py's mtime precision change
 `entryMatchesFile` starts reporting false staleness and no test notices. The drift test that
 would catch it already exists and already reads recall.py's source.
 
-Still open, and now visible instead of silent: the export is HELD in `test/dead-exports.test.js`
-with that reason, so it reads as a debt rather than as a name nobody pruned. Writing the drift
-assertion is what closes it.
+CLOSED 2026-09-14. `test/recall-index.test.js:184` is the drift pin, and it pins the right side:
+it asserts `recall.py` still writes `"mtime": st.st_mtime` as float seconds, that `st_mtime_ns`
+appears nowhere, and that the Python-side staleness comparison uses the unit it writes. Switching
+`recall.py` to nanoseconds now fails a named test instead of silently making every file read as
+changed. Its own comment records why the pre-existing round-trip test did not cover this: that
+one asserts `stale === false`, which passes for any tolerance at or above the real drift, so it
+pins the behaviour and says nothing about the value or the unit.
 
 **~~Dead exports, re-measured.~~ THREE OF FOUR REMOVED 2026-09-14.** `fullReport` was genuinely
 dead: its only two references outside its own file are comments. `pickPrimaryDir` and `fastLint`
@@ -950,9 +960,9 @@ In `src/recall-index.js`, `readRecallIndex` and `MTIME_TOLERANCE_MS` had no impo
 `src/tool-learn.js` exported `MCP_TOOL`, which nothing imports, though the constant is live
 inside the file. Removing export entries is free; removing the functions is not.
 
-Removed: `fullReport`, `readRecallIndex`, `MCP_TOOL` — export entry only, every function kept.
-Kept: `MTIME_TOLERANCE_MS`, deliberately, because a branch in flight adds the drift test that
-imports it. `test/dead-exports.test.js` now enforces the whole distinction: a name is either
+Removed: `fullReport`, `readRecallIndex`, `MCP_TOOL` and, on a second pass once its held reason
+expired, `MTIME_TOLERANCE_MS` — export entry only, every function and constant kept.
+`test/dead-exports.test.js` now enforces the whole distinction: a name is either
 destructured from a require of its module somewhere, or listed in `HELD` with the reason in
 writing. The test-only names carry that reason too, so they stop reading as oversights. It fires
 on a re-added dead export and on a `HELD` entry that gained a real importer, both mutated.
@@ -1189,6 +1199,44 @@ rather than mis-measured.
 Python fixture at `test/recall-py.sh:243-251` writes exactly that shape and passes for the right
 reason, but it documents an accident rather than a decision. Pre-existing, not from this work, and
 that fixture is currently the only place it is recorded.
+
+### Most `file:line` references in this repo point at the wrong line
+
+`node scripts/check-line-refs.js` reports **154 references: OK 39, NEAR 13, STALE 59,
+UNVERIFIABLE 43** on `main` at the time of writing. An earlier pass fixed 30 by hand out of a
+then-population of 159. The headline number was never the question; what the STALE verdict MEANS
+was, because the checker judges by picking an identifier out of the surrounding prose and testing
+whether it sits at the cited line, which is a heuristic and not a proof either way.
+
+Both cheap bounds are useless here. **Zero** of the 115 non-OK references point past the end of
+their target file, so the crude test clears all of them. And "the cited line exists" is satisfied
+by a reference that is 1,425 lines off inside the right file, which is the one confirmed error
+found so far. So this was hand-sampled instead, 16 STALE verdicts across three populations:
+
+| Population | Checked | Genuinely wrong |
+|---|---|---|
+| `BACKLOG.md`, sections predating today | 8 | 7 |
+| `docs/engineering-record.md` and source comments | 8 | 6 |
+| Backlog entries written today against current code | ~10 | 0 |
+
+So roughly **80% of STALE verdicts on older prose are real**, and the rot reaches code comments
+and `docs/engineering-record.md`, which was created today and inherited its citations from
+backlog text written before the code moved. Examples, each verified by eye:
+`src/fixed-point-cache.js:70` cites `src/permissions.js:594` for `APPROVE_DIR` and lands on a
+comment about MAX snapshots; `src/history-adapters.js:1005` cites
+`src/auto-learn-manager.js:1367` for `within(root, undefined)` and lands on
+`} catch { conflicts.push(change.path); }`.
+
+The entries written today invert it: every one hand-checked was correct and flagged anyway,
+because the anchor heuristic picks from the whole paragraph and those paragraphs cite four files
+each. The checker is accurate on ordinary one-citation prose and noisy on dense prose, so its
+output needs reading, not bulk-applying.
+
+Why it matters more than it looks: a citation is how the next session finds the code an entry is
+about. At 39 OK out of 154, the 36 open entries in this file mostly point somewhere wrong, which
+is a direct tax on the "focus on features" goal. Worth a dedicated pass, and worth scoping the
+checker's anchor to the sentence holding the citation rather than the paragraph before trusting
+any future count.
 
 ### Optimization proposals, each with the measurement that would settle it
 

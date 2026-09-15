@@ -1192,6 +1192,22 @@ function. The FINDINGS were all correct; one line number was not. Deleting that 
 been a syntax error rather than a green run, so the number was mis-transcribed into the report
 rather than mis-measured.
 
+### The same silent-gate-skip exists through a second door
+
+Fixing `--lint`'s gate predicate closed the unpaired-marker case. The sibling case is still open
+and was found while fixing it.
+
+`lint()` builds its `no_gate` list from `stems`, which includes `MEMORY`, and it does not apply
+`EXCLUDE`. `_compile_gates_text()` skips `MEMORY.md` unconditionally. So a `MEMORY.md` carrying
+`scope: global` frontmatter AND a correctly paired gate block would compile nothing, and `--lint`
+would once again say nothing about it: exactly the class of silent skip that was just fixed,
+reached by a different route. `vscode-extension/memoryLint.js` already excludes the index for this
+reason, and records it as its divergence #3, so the three implementations are two-for-three in
+agreement rather than three-for-three.
+
+No live corpus hits it today, because no `MEMORY.md` here carries frontmatter at all. That is a
+property of the current data, not a property of the code, and the file is user-edited.
+
 ### A pre-existing frontmatter hazard, now written down
 
 **`_fm` matches an indented `scope:` under any other frontmatter key.** The regex is `^\s*scope:`, so

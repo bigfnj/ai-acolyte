@@ -121,4 +121,8 @@ function toolInvocation(name, value, metadata = {}) {
   return null;
 }
 
-module.exports = { isLearnableTool, toolInvocation, toolTarget: target, toolPath, MCP_TOOL };
+// `MCP_TOOL` is deliberately NOT exported. The constant is live -- target(),
+// isLearnableTool() and toolInvocation() all test against it -- but every one of those
+// callers is in this file, and all four requires across the repo destructure only the four
+// names below. `isLearnableTool` is the question a caller outside this file actually has.
+module.exports = { isLearnableTool, toolInvocation, toolTarget: target, toolPath };

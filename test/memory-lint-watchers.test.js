@@ -23,6 +23,10 @@ function harness(tempHome, overrides = {}) {
   // not found", and it depends on config.
   const registered = [];
   const info = [];
+  // Separate from `info`, because the two answer different questions. An information
+  // message is "the feature is off"; an error is "the file you asked about is there and
+  // could not be read", and showReport used to answer the second by throwing.
+  const errors = [];
   const vscode = {
     RelativePattern: class RelativePattern {
       constructor(base, pattern) { this.base = base; this.pattern = pattern; }
@@ -55,6 +59,7 @@ function harness(tempHome, overrides = {}) {
       // Recorded, not stubbed empty: with the lint disabled the report has
       // nowhere to write, so what it TELLS the user is the whole behaviour.
       showInformationMessage: (message) => { info.push(message); return Promise.resolve(); },
+      showErrorMessage: (message) => { errors.push(message); return Promise.resolve(); },
     },
     workspace: {
       getConfiguration: () => ({
@@ -91,7 +96,7 @@ function harness(tempHome, overrides = {}) {
     global.setInterval = originalSetInterval;
     delete require.cache[modulePath];
   };
-  return { loaded, created, statusText, intervals, registered, info, restore };
+  return { loaded, created, statusText, intervals, registered, info, errors, restore };
 }
 
 function writeStore(dir, indexBody) {
@@ -520,6 +525,149 @@ test('reconfigure does nothing once the instance is torn down', () => {
     assert.equal(lint.watchers.size, 0, 'no watcher was created after teardown');
     assert.equal(h.intervals.length, 1, 'and no second reconcile timer');
   } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// showReport() called fullReport(dir, conf) and read r.memPath on the next line. fullReport
+// returns null whenever fastLint does, and fastLint returns null on any readFileSync throw.
+// refresh() guards this correctly at its own fastLint call, twelve lines away; the palette
+// command did not.
+test('the report names the file it could not read instead of throwing', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-unreadable-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---eisdir', 'memory');
+  fs.mkdirSync(dir, { recursive: true });
+  // MEMORY.md as a DIRECTORY. discoverDirs only tests existsSync, so the store is
+  // discovered exactly as a healthy one is, and the read then fails EISDIR. A permissions
+  // error and a Windows sharing violation arrive at the same null.
+  fs.mkdirSync(path.join(dir, 'MEMORY.md'));
+
+  const h = harness(tempHome);
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    assert.deepEqual(h.loaded.discoverDirs(h.loaded.cfg()), [dir],
+      'precondition: the store is discovered, so the report really does reach fullReport');
+
+    assert.doesNotThrow(() => lint.showReport(),
+      'showReport dereferenced a null that its sibling null-checks');
+    assert.match(h.errors.join(' '), /could not be read/,
+      'a palette command has to say what went wrong, not fail silently');
+    assert.match(h.errors.join(' '), /MEMORY\.md/, 'and name the file');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// The Gates card offers "Compile gates" only when the corpus has something to compile, and
+// it asks this file for the count while recall.py is the thing that actually compiles. The
+// two disagreed on the live corpus: 17 here against 16 there. All three divergences below
+// are the same class, a test WIDER than the compiler's, so a gate recall.py silently skips
+// still lit the button. Under the old rule this fixture counted 4.
+test('a gate source is counted only when recall.py would compile it', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-gates-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---gates', 'memory');
+  fs.mkdirSync(dir, { recursive: true });
+
+  const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
+  const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
+
+  // The index itself. recall.py:836 skips EXCLUDE before it looks at anything else, so a
+  // MEMORY.md carrying frontmatter and a gate block is still not a gate source.
+  fs.writeFileSync(path.join(dir, 'MEMORY.md'),
+    fm('global') + '# Memory Index\n\n' + block, 'utf8');
+  // The only one that counts.
+  fs.writeFileSync(path.join(dir, 'compiled.md'), fm('global') + block, 'utf8');
+  // The live divergence: opening marker, NO closing marker. recall.py searches for
+  // GATE_BEGIN(.*?)GATE_END, so this compiles nothing.
+  fs.writeFileSync(path.join(dir, 'unclosed.md'),
+    fm('global') + '<!-- gate -->\n- a rule nobody closed\n', 'utf8');
+  // A memory that DOCUMENTS gate syntax. `scope: global` appears on its own line in a
+  // fenced example, and the frontmatter says project. Testing raw text counted it.
+  fs.writeFileSync(path.join(dir, 'documents-gates.md'),
+    fm('project') + 'How the pipeline selects:\n\n```\nscope: global\n```\n\n' + block, 'utf8');
+  // The divergence in the other direction. recall.py's _fm strips quotes off the value, and
+  // the old regex required a bare word, so a quoted scope was a gate this UNDER-counted.
+  fs.writeFileSync(path.join(dir, 'quoted-scope.md'), fm('"global"') + block, 'utf8');
+  // Controls, so the two surviving conditions are not merely along for the ride.
+  fs.writeFileSync(path.join(dir, 'other-scope.md'), fm('project') + block, 'utf8');
+  fs.writeFileSync(path.join(dir, 'no-gate.md'), fm('global') + 'resident-eligible, not compiled\n', 'utf8');
+
+  const h = harness(tempHome);
+  try {
+    assert.equal(h.loaded.memoryReport().report.gateSources, 2,
+      'the count has to match what recall.py --gates-compile would lift, file for file');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// The two watcher sets in extension.js hang off this hook rather than a third timer of
+// their own, so whether refresh() notifies is the whole of their reconcile.
+test('every refresh notifies the reconcile subscribers, enabled or not', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-notify-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---on', 'memory');
+  writeStore(dir, '# Memory Index\n\n- [one](one.md) — hook\n');
+
+  const overrides = {};
+  const h = harness(tempHome, overrides);
+  try {
+    const lint = new h.loaded.MemoryLint();
+    let calls = 0;
+    const subscription = lint.onReconcile(() => { calls += 1; });
+    lint.activate({ subscriptions: [] });
+    assert.ok(calls > 0, 'the initial refresh has to notify');
+
+    const afterActivate = calls;
+    assert.equal(h.intervals.length, 1, 'precondition: the backstop timer is armed');
+    h.intervals[0].fn();
+    assert.equal(calls, afterActivate + 1, 'the 5-minute backstop is what covers a move');
+
+    // Above the enabled check, not below it. A subscriber's watcher set does not honour
+    // memory.enabled, so a notify that stopped at the disabled early return would freeze
+    // those sets for as long as the lint was off.
+    overrides['memory.enabled'] = false;
+    const beforeDisable = calls;
+    lint.reconfigure();
+    assert.ok(calls > beforeDisable, 'a disabled refresh still has to notify');
+
+    subscription.dispose();
+    const afterDispose = calls;
+    lint.refresh();
+    assert.equal(calls, afterDispose, 'a disposed subscription must stop being called');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// A subscriber is other people's code from this file's point of view, and it runs inside
+// the refresh that paints the gauge.
+test('a throwing reconcile subscriber is reported, and does not stop the refresh', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-notify-throw-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---on', 'memory');
+  writeStore(dir, '# Memory Index\n\n- [one](one.md) — hook\n');
+
+  const h = harness(tempHome);
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => { logged.push(args.map((a) => String(a)).join(' ')); };
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.onReconcile(() => { throw new Error('subscriber exploded'); });
+    let second = 0;
+    lint.onReconcile(() => { second += 1; });
+    lint.activate({ subscriptions: [] });
+
+    assert.ok(second > 0, 'one bad subscriber must not skip the next one');
+    assert.ok(h.statusText.length > 0, 'and must not stop the gauge being painted');
+    assert.ok(logged.some((m) => /subscriber exploded/.test(m)),
+      `the failure has to be recorded, not swallowed; saw: ${JSON.stringify(logged)}`);
+  } finally {
+    console.error = originalError;
     h.restore();
     fs.rmSync(tempHome, { recursive: true, force: true });
   }

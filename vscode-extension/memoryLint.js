@@ -17,6 +17,40 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
+// recall.py's EXCLUDE (recall.py:173): the index is just hooks, so it is never a search
+// target and never a gate source.
+const MEMORY_INDEX = 'MEMORY.md';
+
+// recall.py's gate markers (recall.py:207-208), and the pattern _compile_gates_text
+// actually selects on: `re.search(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END),
+// text, re.DOTALL)`. BOTH markers are required, in order. Testing only for the opening one
+// counted a gate source recall.py does not compile, and on the live corpus that is not
+// hypothetical: one scope:global memory carries an opening marker, no closing marker, and a
+// lone `<!-- gate -->` that is prose describing this very pipeline.
+const GATE_BEGIN = '<!-- gate -->';
+const GATE_END = '<!-- /gate -->';
+const GATE_BLOCK = new RegExp(`${escapeRe(GATE_BEGIN)}[\\s\\S]*?${escapeRe(GATE_END)}`);
+
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// One frontmatter scalar, scoped to the real `---` block. recall.py's _fm, transliterated.
+//
+// Scoped rather than searched over the whole text for the reason recall.py records: this
+// corpus contains memories that DOCUMENT gate syntax, so a whole-text match on
+// `scope: global` compiles a gate nobody declared. A leading UTF-8 BOM and blank lines are
+// tolerated because PowerShell 5.1's `Out-File -Encoding utf8` writes one, and a memory
+// edited by a one-liner would otherwise drop out of the count with nothing reporting it.
+function frontmatter(text, key) {
+  const head = text.replace(/^[﻿ \t\r\n]+/, '');
+  if (!head.startsWith('---')) return '';
+  const end = head.indexOf('\n---', 3);
+  if (end === -1) return '';
+  const m = head.slice(3, end).match(new RegExp(`^\\s*${key}:\\s*(.+)$`, 'm'));
+  return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
+}
+
 // Backstop cadence for re-discovering the memory store. A file watcher can only
 // report on a directory that exists when the watcher is made, so when the store
 // MOVES every watcher dies at once and no surviving watcher can say so. Same
@@ -191,6 +225,14 @@ function fullReport(dir, conf) {
   // (NOT type) plus the presence of a gate block. Kept deliberately literal so
   // the two are easy to compare; recall.py stays the authority that actually
   // compiles, and this is only ever used to decide whether to offer the action.
+  //
+  // "Literal" is the whole point, and it was three ways short of it. Measured on the live
+  // corpus this counted 17 where recall.py compiles 16. All three divergences are the same
+  // class -- a test that is WIDER than the one the compiler makes -- so a gate the compiler
+  // would silently skip still lit the button:
+  //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
+  //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
+  //   3. MEMORY.md is excluded, exactly as recall.py:836 excludes it.
   let gateSources = 0;
   for (const f of files) {
     let raw;
@@ -199,7 +241,9 @@ function fullReport(dir, conf) {
     valid.add(norm(f.slice(0, -3)));
     const nm = raw.slice(0, 400).match(/^\s*name:\s*(.+)$/m);
     if (nm) valid.add(norm(nm[1].trim().replace(/^["']|["']$/g, '')));
-    if (/^\s*scope:\s*global\s*$/m.test(raw) && raw.includes('<!-- gate -->')) gateSources += 1;
+    if (f !== MEMORY_INDEX && frontmatter(raw, 'scope') === 'global' && GATE_BLOCK.test(raw)) {
+      gateSources += 1;
+    }
   }
   const unresolved = [...new Set(
     [...stripCode(all).matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]).filter((l) => !valid.has(norm(l)))
@@ -215,6 +259,8 @@ class MemoryLint {
     this.watchers = new Map();
     this.debounce = null;
     this.timer = null;
+    // Subscribers notified on every refresh(); see onReconcile().
+    this.reconcilers = new Set();
     // The ExtensionContext, kept so reconfigure() can build the enabled half
     // after activation. Only ever read; never disposed from here.
     this.context = null;
@@ -350,6 +396,35 @@ class MemoryLint {
     this.watchers.clear();
   }
 
+  // Run `fn` whenever this instance re-discovers the memory stores. Returns a Disposable.
+  //
+  // extension.js owns two MORE watcher sets over the same directories -- the dashboard
+  // card's MEMORY.md watcher and the gates corpus *.md watcher -- and neither had a
+  // reconcile, so a store that appeared later went unwatched until a window reload and one
+  // that disappeared left a dead watcher until deactivate(). Rather than arm a third timer
+  // over directories this instance is already re-discovering, they hang off this hook:
+  // refresh() runs on the 5-minute backstop, on every MEMORY.md save or open, on every
+  // activation of one in the editor, and 300 ms after every external write.
+  //
+  // A subscriber re-runs its OWN discovery on purpose. `memory.dir` answers "which store do
+  // I LINT"; those watchers ask "which stores EXIST", and handing this instance's dirs over
+  // would conflate the two -- the exact conflation that once built zero watchers and
+  // silently disabled automatic gate recompilation.
+  onReconcile(fn) {
+    this.reconcilers.add(fn);
+    return { dispose: () => this.reconcilers.delete(fn) };
+  }
+
+  notifyReconcile() {
+    for (const fn of this.reconcilers) {
+      try {
+        fn();
+      } catch (err) {
+        console.error('permission-wildcarding: a memory reconcile subscriber failed —', err);
+      }
+    }
+  }
+
   isMemory(doc) {
     return doc && path.basename(doc.fileName) === 'MEMORY.md'
       && doc.fileName.replace(/\\/g, '/').includes('/.claude/projects/');
@@ -371,6 +446,11 @@ class MemoryLint {
     // sitting in the microtask queue. Everything below touches objects VS Code
     // has disposed, and `this.diags.clear()` is not even optional-chained.
     if (this.disposed) return;
+    // Above the enabled check, not below it. A subscriber's watcher set does not honour
+    // memory.enabled -- discoverDirs reads only conf.dir -- so a notify that stopped at the
+    // disabled early return would freeze those sets for as long as the lint was off, while
+    // this instance's own watchers were being dropped.
+    this.notifyReconcile();
     const conf = cfg();
     if (!conf.enabled) { this.status?.hide(); this.diags?.clear(); this.disposeWatchers(); return; }
     const dirs = discoverDirs(conf);
@@ -445,6 +525,20 @@ class MemoryLint {
       return;
     }
     const r = fullReport(dir, conf);
+    // The same guard refresh() has at its own fastLint call. fullReport returns null
+    // whenever fastLint does, and fastLint returns null on any readFileSync throw --
+    // MEMORY.md existing as a DIRECTORY is enough, because discoverDirs only tests
+    // existsSync and the read then fails EISDIR. A permissions error or a Windows sharing
+    // violation reaches it the same way. This is a palette command, so the answer is to say
+    // which file could not be read, not to throw into the extension host log where nobody
+    // who clicked the gauge will look.
+    if (!r) {
+      vscode.window.showErrorMessage(
+        `permission-wildcarding: ${path.join(dir, MEMORY_INDEX)} exists but could not be read `
+        + '(a directory of that name, a permissions error, or a sharing violation).'
+      );
+      return;
+    }
     const ch = this.channel;
     ch.clear();
     ch.appendLine(`Memory lint — ${r.memPath.replace(os.homedir(), '~')}`);
@@ -499,4 +593,11 @@ function memoryReport() {
   return { conf, dir, report: dir ? fullReport(dir, conf) : null };
 }
 
-module.exports = { MemoryLint, cfg, fastLint, fullReport, discoverDirs, pickPrimaryDir, memoryReport };
+// `fullReport` is deliberately NOT exported: its only callers are showReport() and
+// memoryReport(), both in this file, and a dead export entry is a standing invitation to
+// import a function no consumer has ever exercised. The function stays; the entry goes.
+// `fastLint` and `pickPrimaryDir` look similar and are NOT the same case -- they have no
+// production importer either, but test/memory-line-cap.test.js and
+// test/memory-lint-watchers.test.js call them directly, and those calls are the
+// mutation-killing assertions for the line cap and the store-selection rule.
+module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport };

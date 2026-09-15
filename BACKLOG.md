@@ -1846,13 +1846,20 @@ In lexical mode `idx["files"]` is empty, so `files.get(n, {}).get("desc", "")` r
 the description is never printed. Cosmetic, and gratuitous: `lex["text"][n]` already holds the
 raw file, so `parse_meta(r["text"])[0]` would restore it for nothing.
 
-### `memoryLint.js` counts 17 gate sources where `recall.py` compiles 16
+### ~~`memoryLint.js` counts 17 gate sources where `recall.py` compiles 16~~ — FIXED 2026-09-14
 
-Pre-existing, not from this work. `memoryLint.js:131` tests `scope: global` plus
+Pre-existing, not from this work. `memoryLint.js:131` tested `scope: global` plus
 `raw.includes('<!-- gate -->')`; `recall.py` requires the closing marker too, and
 `project_memory_gates.md` has an opening marker with no `<!-- /gate -->`. The count only decides
-whether the dashboard offers the compile action, so the off-by-one is cosmetic. It also differs
-on `scope: "global"` with quotes, which `_fm` accepts and the regex does not.
+whether the dashboard offers the compile action, so the off-by-one is cosmetic. It also differed
+on `scope: "global"` with quotes, which `_fm` accepts and the regex did not.
+
+Fixed by matching all four of `_compile_gates_text`'s conditions rather than two: both gate
+markers in order (`GATE_BLOCK`), `scope` read from the real `---` block (`frontmatter()`, a
+transliteration of `_fm`, which strips quotes), and `MEMORY.md` excluded the way `recall.py:836`
+excludes it. Three of the four divergences over-counted; the quoted scope under-counted.
+Pinned by `test/memory-lint-watchers.test.js`, whose fixture scores 4 under the old rule and 2
+under the new one, with a control file per axis.
 
 ### Repo state and product state diverge until a release is cut
 
@@ -2100,29 +2107,46 @@ tool executes out of `C:\Anthropic\.Git`, so the plan would kill the shell carry
 Recorded in the `reference_git_push_gh_helper` memory too, which is where a session will
 actually look.
 
-### The two memory-store watchers are still never reconciled
+### ~~The two memory-store watchers are still never reconciled~~ — FIXED 2026-09-14
 
-`extension.js:2005` and `:2033` enumerate stores once at activation and build a watcher per
-store. There is no equivalent of `memoryLint`'s `syncWatchers` and no periodic re-discovery, so
-a store that appears later is unwatched until a window reload, and one that disappears leaves a
+`extension.js:2005` and `:2033` enumerated stores once at activation and built a watcher per
+store. There was no equivalent of `memoryLint`'s `syncWatchers` and no periodic re-discovery, so
+a store that appeared later was unwatched until a window reload, and one that disappeared left a
 dead watcher on `context.subscriptions` until `deactivate()`. `memoryLint`'s own 5-minute
-reconcile does not help; it only drives `memoryLint.refresh()`.
+reconcile did not help; it only drove `memoryLint.refresh()`.
 
-Lower priority than it was: with the selection rule fixed, an unwatched new store no longer
-risks a mis-targeted gate compile. Narrowing the `*.md` watcher to the primary dir would change
-*which events recompile* and deserves its own commit and test.
+Fixed the cheap way this entry already recommended, and the reason it is the cheap way is that
+the alternative needs a timer of its own: `MemoryLint` gained `onReconcile(fn)`, notified from
+the top of `refresh()`, and `extension.js` subscribes with `reconcileMemoryWatchers()`. Both sets
+are now `Map`s keyed by store dir, synced through one `syncWatcherSet()` — memoryLint's
+`syncWatchers` applied to a second and third set — from ONE discovery per reconcile, and drained
+by ONE `context.subscriptions` entry instead of one per watcher, so the list no longer grows with
+the churn. The `deactivated` guard is inside the reconcile, because the linter's debounce and
+interval both outlive `deactivate()` until VS Code drains the subscriptions.
 
-The cheap version is to reuse what already exists rather than add a third timer: `memoryLint`
-documents this exact hazard in its own header and solves it with a 5-minute reconcile plus
-`syncWatchers()` rebuilt from discovery inside `refresh()`. The `MemoryLint` instance self-heals;
-the two copies in `extension.js` never got that fix, and they are the ones wired to the gate
-compiler. Same applies to a runtime change of `memory.dir`: the config listener calls
-`memoryLint.reconfigure()` and `dashboard.refresh()`, neither of which rebuilds those two sets.
+Two things this deliberately did not do. The subscriber re-runs its OWN discovery rather than
+taking the linter's dirs: `memory.dir` pins which store to LINT and these watchers ask which
+stores EXIST, and conflating them is what once built zero watchers. And narrowing the `*.md`
+watcher to the primary dir would change *which events recompile*; it still deserves its own
+commit and test.
+
+Residual, and honest: the reconcile rides the linter's cadence, so it only has a periodic
+backstop while `memory.enabled` is true. With the lint off, `refresh()` is reached only from
+`reconfigure()`. That is not a regression — there was no reconcile at all before — but it is a
+real gap, and it is the same pre-existing inconsistency recorded below as "`discoverDirs` reads
+only `conf.dir`": these two watcher sets do not honour `memory.enabled` in the first place.
 
 ### Audit of 2026-09-14, two agents over the store-consolidation commits
 
 Fixed in the follow-up commit: the silent `mdCount` zero, the pinned-`memory.dir` watcher
 deletion, and the false short-circuit justification. These are what was measured and left.
+
+Fixed 2026-09-14 on `bl-extension`, each with a mutation that named one test: the
+`updateStatusBar` guard, the `showReport()` null dereference, the swallowing
+`autoSyncRecallIfStale` catch, and three of the four dead export entries. `MTIME_TOLERANCE_MS`
+is still exported, on purpose — see below — and `test/dead-exports.test.js` now holds it with
+the reason in writing rather than leaving it to look like an oversight. Struck through as they
+are closed; the notes stay because they name the reproduction.
 
 **`refresh()` lints the primary `MEMORY.md` twice.** `memoryLint.refresh()` calls `fastLint` for
 every discovered dir, primary included, then calls it again for the primary. Counted on the real
@@ -2140,7 +2164,7 @@ protocol this file already mandates.
 `pickPrimaryDir` into `fullReport` removes one. Measure on `_push()` end to end, not on
 `memoryReport()` alone, because `_push` is what a user waits on.
 
-**`updateStatusBar`'s guard cannot be false.** It reads `if (!statusBar) return;`, and
+**~~`updateStatusBar`'s guard cannot be false.~~ FIXED.** It read `if (!statusBar) return;`, and
 `statusBar` is assigned once at activation and set to `null` nowhere, including in
 `deactivate()` where four other retainers are nulled. So after the first activation the
 condition is false forever, including after VS Code has disposed the item. Every other
@@ -2148,7 +2172,7 @@ teardown-reachable path in that file checks `deactivated`; this one does not. Re
 a watcher callback already dispatched when teardown lands. One word fixes it:
 `if (deactivated || !statusBar) return;`.
 
-**`showReport()` dereferences a value its sibling null-checks.** It calls `fullReport(dir, conf)`
+**~~`showReport()` dereferences a value its sibling null-checks.~~ FIXED.** It called `fullReport(dir, conf)`
 and immediately reads `r.memPath`. `fullReport` returns `null` whenever `fastLint` does, which is
 any `readFileSync` failure. `refresh()` guards this correctly; `showReport()` does not. Nameable
 input: `MEMORY.md` exists as a *directory*, so `discoverDirs`'s `existsSync` passes and the read
@@ -2163,21 +2187,36 @@ Nothing imports it and nothing pins it, so if recall.py's mtime precision change
 `entryMatchesFile` starts reporting false staleness and no test notices. The drift test that
 would catch it already exists and already reads recall.py's source.
 
-**Dead exports, re-measured.** `fullReport` is genuinely dead: its only two references outside
-its own file are comments. `pickPrimaryDir` and `fastLint` are **test-only, not dead** (the
-earlier "no external consumer" note is partly refuted: `pickPrimaryDir` gained six real test
-references and they are the mutation-killing assertions). In `src/recall-index.js`,
-`readRecallIndex` and `MTIME_TOLERANCE_MS` have no importer at all. `src/tool-learn.js` exports
-`MCP_TOOL`, which nothing imports, though the constant is live inside the file. Removing export
-entries is free; removing the functions is not.
+Still open, and now visible instead of silent: the export is HELD in `test/dead-exports.test.js`
+with that reason, so it reads as a debt rather than as a name nobody pruned. Writing the drift
+assertion is what closes it.
+
+**~~Dead exports, re-measured.~~ THREE OF FOUR REMOVED 2026-09-14.** `fullReport` was genuinely
+dead: its only two references outside its own file are comments. `pickPrimaryDir` and `fastLint`
+are **test-only, not dead** (the earlier "no external consumer" note is partly refuted:
+`pickPrimaryDir` gained six real test references and they are the mutation-killing assertions).
+In `src/recall-index.js`, `readRecallIndex` and `MTIME_TOLERANCE_MS` had no importer at all.
+`src/tool-learn.js` exported `MCP_TOOL`, which nothing imports, though the constant is live
+inside the file. Removing export entries is free; removing the functions is not.
+
+Removed: `fullReport`, `readRecallIndex`, `MCP_TOOL` — export entry only, every function kept.
+Kept: `MTIME_TOLERANCE_MS`, deliberately, because a branch in flight adds the drift test that
+imports it. `test/dead-exports.test.js` now enforces the whole distinction: a name is either
+destructured from a require of its module somewhere, or listed in `HELD` with the reason in
+writing. The test-only names carry that reason too, so they stop reading as oversights. It fires
+on a re-added dead export and on a `HELD` entry that gained a real importer, both mutated.
 
 **`discoverDirs` reads only `conf.dir`.** `enabled`, `lineBudget`, `totalBudget` and `maxLines`
 are inert in every call. That means `memory.enabled: false` does not stop the two watcher sets
 being built, which is a live inconsistency with `memoryCardData`, which does honour it.
 Pre-existing, and teaching `discoverDirs` about `enabled` would be a behaviour change.
 
-**`autoSyncRecallIfStale`'s outer catch discards everything.** If `recallIndexStatus` throws, the
-silent recall sync stops working and nothing anywhere records it.
+**~~`autoSyncRecallIfStale`'s outer catch discards everything.~~ FIXED.** Two corrections to the
+original claim. `recallIndexStatus` is NOT a reachable thrower: src/recall-index.js is internally
+try/caught at :33, :41 and :81. The reachable ones inside the same try are `memoryReport()`,
+`recallStatus()` and `cfg()`. And it was not a one-shot: :1981 is a single timer, but `memBounce`
+re-enters on every MEMORY.md write, so a deterministic throw recurred silently on every trigger
+and a broken run logged identically to a working one. Now `console.error`s, the house style here.
 
 ### Four assertions that could not fail, three of them fixed
 

@@ -1160,8 +1160,21 @@ record is added per Codex target at `src/auto-learn-manager.js:968` and `:1622`,
 one. `pruneGrantKeys` at `:788-791` now empties the `applied` and `reviewed` lists inside an obsolete
 record but leaves the record, so an abandoned target becomes a permanently retained
 `{applied: [], reviewed: []}` of roughly 50 bytes. Every other axis is capped (candidates 1000,
-pruned 2000, cursors 5000, observation hashes 20000, managed hits 200). Two lines if anyone is
-already in `pruneGrantKeys`: delete a record whose two lists both emptied.
+pruned 2000, cursors 5000, observation hashes 20000, managed hits 200).
+
+**The obvious two-line fix is NOT safe, checked 2026-09-14.** Deleting a record whose two lists
+both emptied looks free, and is not, because the empty-map state is load-bearing elsewhere. The
+seeding branch `Object.keys(state.codexTargets).length === 0` at `src/auto-learn-manager.js:969`
+adopts the legacy flat `state.applied.codex` into the FIRST target ever seen, and that is a
+one-time migration. Evicting the last surviving record puts the map back to empty and re-arms it,
+so the next target seen takes the migration path instead of starting clean. The traced outcome is
+harmless today, because `:972` keeps the flat field mirrored to the current target so a re-seed
+copies an empty list, but that is a property of the current mirroring rather than of the eviction,
+and it is an unreasonable amount of reasoning to accept for roughly 50 bytes per abandoned target.
+
+If it is ever worth doing, the eviction has to be paired with a separate "migration already ran"
+marker so the seeding branch stops depending on the map being empty. Do not do one without the
+other.
 
 **`MIN_SUPPORTED_VERSION` cannot change an outcome.** Mutating the check at
 `src/auto-learn-manager.js:62` to `if (false) return null` left the suite green, because any

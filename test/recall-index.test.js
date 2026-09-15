@@ -181,6 +181,25 @@ test('the constants shared with recall.py have not drifted', () => {
   assert.match(source, /if args\.list:\s*\r?\n\s*idx = build_or_update\(\)/);
 });
 
+test('recall.py still writes mtime as float SECONDS, which is what the tolerance assumes', () => {
+  // MTIME_TOLERANCE_MS is the third constant shared across the language boundary, and it was
+  // the only one nothing pinned. It exists because recall.py stores st_mtime (float seconds)
+  // and Node compares against stats.mtimeMs, so entryMatchesFile multiplies by 1000 and allows
+  // 1ms of float slack. Switch recall.py to st_mtime_ns, or round it, and that arithmetic is
+  // silently wrong in the direction that matters: every file reads as changed, or none does.
+  //
+  // The existing test 'the mtime float round-trip does not read as a change' does NOT cover
+  // this. It asserts stale === false, which passes for any tolerance at or above the real
+  // drift, so it pins the behaviour and says nothing about the value or the unit.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');
+  assert.match(source, /"mtime": st\.st_mtime(?!_)/,
+    'recall.py no longer writes st_mtime as float seconds, so MTIME_TOLERANCE_MS is wrong');
+  assert.equal(/st_mtime_ns/.test(source), false,
+    'recall.py switched to nanoseconds; the Node side multiplies seconds by 1000');
+  assert.match(source, /\.get\("mtime"\) != st\.st_mtime(?!_)/,
+    'the Python-side staleness comparison no longer uses the same unit it writes');
+});
+
 test('recall.py still picks the memory dir by file count, not mtime', () => {
   // The second copy of this rule is vscode-extension/memoryLint.js pickPrimaryDir, and the
   // extension OVERRIDES recall.py's discovery with it by pinning RECALL_MEMORY_DIR on every

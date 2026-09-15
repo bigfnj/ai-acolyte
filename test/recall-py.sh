@@ -112,7 +112,14 @@ rm -f "$MEM"/*.md
   printf -- '<!-- gate -->\n- **A gate declared past the 400-char cliff.** Pass: it compiles.\n<!-- /gate -->\n'
 } > "$MEM/deep.md"
 printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
-[ "$(wc -c < "$MEM/deep.md")" -gt 400 ] || fail "fixture is too short to cross the 400-char boundary"
+# Pin the OFFSET of `scope:`, not the file size. The size check passed on a fixture where
+# scope: sat INSIDE the 400-byte window: measured 654 bytes with scope: at 540, and shortening
+# the padding loop from 60 to 42 gives 510 bytes (size check still passes) with scope: at 396,
+# where the text[:400] mutation this test exists to kill would survive silently. The ~100 bytes
+# of gate block appended after the frontmatter is what opens the gap.
+SCOPE_AT="$(grep -bo "scope: global" "$MEM/deep.md" | cut -d: -f1)"
+[ -n "$SCOPE_AT" ] || fail "fixture does not contain scope: global at all"
+[ "$SCOPE_AT" -gt 400 ] || fail "fixture puts scope: at byte $SCOPE_AT, inside the 400-byte window this test exists to cross"
 
 "$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "--gates-compile exited non-zero"
 grep -q 'past the 400-char cliff' "$TMP/.claude/gates.generated.md" \
@@ -221,6 +228,63 @@ RC=$?
 [ "$RC" = "0" ] || fail "--gates-allow-empty must compile cleanly, exited $RC"
 [ -s "$GATES" ] && fail "--gates-allow-empty did not empty the compiled gates"
 echo "ok: --gates-allow-empty still lets a deliberate 'delete every gate' through"
+
+# ------------------------------------------- a MISSING dir is the third route to the same loss
+# The guard above catches a corpus that compiles zero gates. It did NOT catch a corpus that is
+# not there at all: compile_gates returned early, printed "nothing to compile" and exited 0, so
+# bin/wildcard-perms read a clean compile and extension.js chained into ensureGates() and
+# reinstalled stale bytes reporting success. A typo'd RECALL_MEMORY_DIR is the likeliest way to
+# reach it. Mutation: move the `if not os.path.isdir(MEMORY_DIR)` block back above the guard.
+# The preceding test deliberately emptied the compiled file, so establish the state this
+# one needs rather than inheriting it: a real gate, compiled and installed.
+GATED="$TMP/gated"; mkdir -p "$GATED"
+printf -- '# Memory Index
+' > "$GATED/MEMORY.md"
+printf -- '---
+name: g
+metadata:
+  scope: global
+---
+<!-- gate -->
+- **A real gate.** Pass: it compiles.
+<!-- /gate -->
+' > "$GATED/g.md"
+RECALL_MEMORY_DIR="$GATED" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "precondition: compiling a gated corpus should succeed"
+BEFORE="$(cat "$GATES")"
+[ -n "$BEFORE" ] || fail "precondition: expected compiled gates on disk after a gated compile"
+RECALL_MEMORY_DIR="$TMP/no-such-corpus" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
+RC=$?
+[ "$RC" != "0" ] || fail "a missing memory dir exited 0, so the caller treats it as a clean compile"
+[ "$(cat "$GATES")" = "$BEFORE" ] || fail "a missing memory dir changed the installed standing orders"
+echo "ok: a missing memory dir refuses too, instead of reporting a clean compile"
+
+# ...and a genuinely fresh machine, with nothing installed, stays a quiet no-op rather than
+# becoming a wall. Same test separates the two cases. Mutation: drop the `installed` check.
+mv "$GATES" "$GATES.away"
+RECALL_MEMORY_DIR="$TMP/no-such-corpus" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
+RC=$?
+mv "$GATES.away" "$GATES"
+[ "$RC" = "0" ] || fail "a fresh machine with no compiled gates must stay a no-op, exited $RC"
+echo "ok: a fresh machine with nothing installed is still a quiet no-op"
+
+# ------------------------------------------------ rank() must refuse a partial parts tuple
+# Passing idx+names with lex=None silently returned pure-vector ordering at exactly half score
+# in hybrid, and every score 0.0 in alphabetical order in lexical -- the same failure
+# _check_mode exists to prevent, reached through a different door. Mutation: delete the
+# `if lex is None` raise in rank().
+ERR="$("$PY" -c "
+import importlib.util, sys
+s = importlib.util.spec_from_file_location('recall', sys.argv[1])
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+try:
+    m.rank('q', mode='lexical', idx={'files': {}}, names=['a.md'], lex=None, emb=None)
+    print('NO-RAISE')
+except ValueError as e:
+    print('RAISED', e)
+" "$RECALL" 2>&1)"
+echo "$ERR" | grep -q RAISED || fail "rank() accepted a partial parts tuple: $ERR"
+echo "$ERR" | grep -q lex || fail "the error does not name the missing part: $ERR"
+echo "ok: rank() refuses a partial parts tuple instead of degrading in silence"
 
 # ---------------------------------------------------------------- MEMORY_DIRS spans corpora
 # A renamed working root strands its old store: _discover_memory_dir takes the single largest and

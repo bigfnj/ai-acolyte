@@ -42,6 +42,7 @@ Config via env:
 Retrieval quality is measured by bench/gate_recall.py, not asserted here.
 """
 import os, sys, re, json, math, argparse, hashlib, unicodedata
+from collections import Counter
 
 # --- runtime shim: onnxruntime + numpy live in the DevToolbox venv, not system python.
 # Re-run under the venv python via subprocess (NOT os.execv -- Windows detaches the
@@ -108,7 +109,6 @@ def _discover_memory_dir():
 
 
 MEMORY_DIR = os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir()
-INDEX_PATH = os.path.join(MEMORY_DIR, "recall_index.json")
 # This count rule is the AUTHORITY. Two other places pick a corpus -- memoryLint.js
 # pickPrimaryDir and scripts/verify-release.ps1 Find-MemoryDir -- and both used to sort by
 # MEMORY.md mtime instead. The extension pins RECALL_MEMORY_DIR from its copy on every spawn, so
@@ -267,12 +267,24 @@ class Bge:
         return pieces
 
     def _encode(self, text):
+        # Stop at the cap instead of wordpiecing the whole input and slicing at the end. The
+        # model only ever sees 256 ids, so everything past that was tokenized and thrown away:
+        # measured 87.6 ms uncapped against 3.2 ms on a 211 KB file, producing IDENTICAL ids.
+        # Vector-identical by construction, so no EMBED_ID bump and no re-embed.
+        #
+        # 255 because the loop leaves room for the closing SEP appended below, which is what the
+        # old `ids[:255] + [SEP]` slice produced.
         ids = [self.vocab[CLS]]
         for w in self._basic(text):
             for p in self._wordpiece(w):
+                if len(ids) >= 255:
+                    break
                 ids.append(self.vocab.get(p, self.vocab[UNK]))
+            else:
+                continue
+            break
         ids.append(self.vocab[SEP])
-        return ids[:255] + [self.vocab[SEP]] if len(ids) > 256 else ids
+        return ids
 
     def embed(self, text):
         ids = self._encode(text or " ")
@@ -340,7 +352,10 @@ def save_index(idx, mem_dir=None):
     json.dump(idx, open(...)) left a truncated cache behind if anything interrupted it, and
     load_index's bare except turned that into a silent full re-embed."""
     INDEX_PATH = _index_path(mem_dir or MEMORY_DIR)
-    tmp = INDEX_PATH + ".tmp"
+    # Pid in the temp name. os.replace is atomic, but two writers racing into one fixed
+    # ".tmp" path interleave BEFORE the replace, and the extension's 15-minute auto-sync
+    # runs against the same store a CLI query may be updating.
+    tmp = f"{INDEX_PATH}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(idx, f)
     os.replace(tmp, INDEX_PATH)
@@ -450,9 +465,9 @@ def _lex_index(names):
         text[n] = raw
         # The description is already inside raw; counting it again would double-weight it.
         terms = _slug_terms(n) * LEX_SLUG_WEIGHT + _lex_terms(raw)
-        counts = {}
-        for t in terms:
-            counts[t] = counts.get(t, 0) + 1
+        # Counter, not a hand-rolled loop: it is a dict subclass, so tf[n] and every
+        # downstream use are unchanged, and the counting runs in C.
+        counts = Counter(terms)
         tf[n], dl[n] = counts, len(terms)
         for t in counts:
             df[t] = df.get(t, 0) + 1
@@ -579,6 +594,12 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
     _check_mode(mode)
     if idx is None or names is None:
         idx, lex, emb, names = _retriever(mode)
+    # A partial tuple used to degrade in silence: `lex` was never checked, so passing
+    # idx+names with lex=None returned pure-vector ordering at exactly half score in
+    # hybrid, and every score 0.0 in alphabetical order in lexical. That is the same
+    # failure _check_mode above exists to prevent, reached through a different door.
+    if lex is None and mode in ("hybrid", "lexical", "rrf"):
+        raise ValueError(f"rank(mode={mode!r}) needs lex; pass all four parts or none")
     files = idx["files"]
     if not names:
         return []
@@ -586,7 +607,13 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
     cos = {}
     if mode in ("hybrid", "vector", "rrf"):
         q = (emb or _bge()).embed(query)
-        cos = {n: sum(a * b for a, b in zip(q, files[n]["vec"])) for n in names if n in files}
+        # One matrix multiply instead of a Python-level dot product per document. The
+        # vectors are already lists and numpy is already imported, so this is the same
+        # arithmetic in C. Immaterial for one CLI query, real across a bench run.
+        hit = [n for n in names if n in files]
+        if hit:
+            mat = np.asarray([files[n]["vec"] for n in hit], dtype=np.float64)
+            cos = dict(zip(hit, (mat @ np.asarray(q, dtype=np.float64)).tolist()))
     bm = _bm25(query, lex) if mode in ("hybrid", "lexical", "rrf") and lex else {}
 
     if mode == "vector":
@@ -604,9 +631,18 @@ def rank(query, k=6, mode="hybrid", idx=None, lex=None, emb=None, names=None):
     order = sorted(names, key=lambda n: (-fused.get(n, 0.0), n))
     rv, rl = _rank_map(cos, names), _rank_map(bm, names)
     out = [{"name": n, "score": fused.get(n, 0.0),
-            "desc": files.get(n, {}).get("desc", ""),
+            # In lexical mode idx["files"] is empty, so this used to print nothing at all.
+            # lex["text"][n] already holds the raw file, so the description costs a parse
+            # of text we are carrying anyway rather than a second read.
+            "desc": (files.get(n, {}).get("desc")
+                     or parse_meta((lex or {}).get("text", {}).get(n, ""))[0]),
             "cos": cos.get(n), "bm25": bm.get(n),
-            "rank_vec": rv[n] + 1 if cos else None,
+            # Both guards are per-DOCUMENT membership. rank_vec used to test `if cos`,
+            # the truthiness of the whole per-query dict, so in hybrid a document with no
+            # cached vector still received a rank while a document no query term touched
+            # correctly received None. Two columns, two meanings, and the fusion bench
+            # these exist for would have read them as comparable.
+            "rank_vec": rv[n] + 1 if n in cos else None,
             "rank_lex": rl[n] + 1 if n in bm else None,
             "text": (lex or {}).get("text", {}).get(n)} for n in order]
     return out[:k] if k else out
@@ -690,7 +726,11 @@ def lint():
         print(f"\n  no MEMORY.md at {index} -- nothing to lint\n")
         return
     mem = open(index, encoding="utf-8", errors="replace").read()
-    total = len(mem.encode("utf-8"))
+    # getsize, not len(mem.encode()). Python text mode normalises CRLF to LF, so the
+    # encoded length undercounts by one byte per line against what is actually on disk:
+    # 6564 against 6837 here. memoryLint.js measures the real file and so did not agree,
+    # and the loader that enforces the 25 KB half of the cap reads bytes too.
+    total = os.path.getsize(index)
     print(f'\n  MEMORY.md: {total} bytes (~{total // 4} tokens loaded every session), '
           f'target < {LINT_TOTAL_WARN}')
     if total > LINT_TOTAL_WARN:
@@ -777,7 +817,7 @@ def lint():
     # when both are stale together it reports "current". The extension's watcher recompiles
     # on edit, but a CLI-only user, or one with the extension closed, has no other signal.
     # This is the one place the source is compared to what a recompile would produce.
-    stale_gates = _gates_are_stale()
+    stale_gates = _gates_are_stale(texts)
     if stale_gates:
         print("  gates.generated.md is STALE: a gate block changed since the last compile.")
         # Both commands below REFUSE when the corpus compiles nothing, and neither
@@ -785,7 +825,7 @@ def lint():
         # advising them unconditionally sent a user who had legitimately deleted their last gate
         # into a loop: lint says run X, X refuses, refresh warns on every session forever. Name
         # the escape hatch in the one case where the ordinary advice cannot work.
-        if not _compile_gates_text()[1]:
+        if not _compile_gates_text(texts)[1]:
             print("    this corpus compiles ZERO gate blocks, so --gates-compile will REFUSE")
             print("    rather than erase what is installed. If that is a surprise, check")
             print("    RECALL_MEMORY_DIR: it is probably pointing at the wrong corpus. If you")
@@ -818,10 +858,29 @@ def lint():
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
 
 
-GATES_OUT = os.path.expanduser(r"~/.claude/gates.generated.md")
+# normpath because expanduser substitutes a backslash HOME into a forward-slash literal and
+# leaves the rest, producing `C:\Users\Admin/.claude/gates.generated.md`. It opens fine, but it
+# is interpolated into the refusal messages below, where a mixed-separator path reads like a bug
+# in the thing reporting the bug.
+GATES_OUT = os.path.normpath(os.path.expanduser(r"~/.claude/gates.generated.md"))
 
 
-def _compile_gates_text():
+def _installed_gate_bytes():
+    """Size of the standing orders currently installed, or 0 if there are effectively none.
+
+    `.strip()` matches readCompiled()'s definition of "compiled" in src/agent-gates.js, so this
+    counts exactly what that installer would have treated as real content. Shared by the two
+    refusal paths in compile_gates() so they cannot drift apart: both are the same hazard, which
+    is a compile that produces nothing while something is already installed and live.
+    """
+    try:
+        existing = open(GATES_OUT, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return 0
+    return len(existing) if existing.strip() else 0
+
+
+def _compile_gates_text(texts=None):
     """The compiled gates file as bytes, WITHOUT writing it. Pure over the corpus, so both
     the compiler and the lint drift-check produce identical output from the same memories --
     which is the whole point: lint can ask "would a recompile change the file?" without a
@@ -830,12 +889,22 @@ def _compile_gates_text():
     Selected on scope, not type. Residency is a question of reach, and a `reference` can be
     every bit as resident-worthy as a `feedback` when its failure is silent -- a heredoc
     eating backslashes raises nothing, so no trigger ever fires. The gate block is the opt-in.
-    Sorted by filename and hashed so a re-run is byte-identical."""
+    Sorted by filename and hashed so a re-run is byte-identical.
+
+    `texts` is an optional {stem: text} map for a caller that has already read the corpus.
+    --lint reads every .md into exactly such a map and then called this twice, so the 123
+    files were opened three times in one run for one answer. Passing the map keeps this
+    function pure over the corpus, which is the property the drift check depends on: it
+    still derives the answer from the same bytes, it just stops re-reading them."""
     blocks = []
     for name in sorted(os.listdir(MEMORY_DIR)):
         if not name.endswith(".md") or name in EXCLUDE:
             continue
-        text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace").read()
+        stem = name[:-3]
+        text = (texts.get(stem) if texts is not None else None)
+        if text is None:
+            text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8",
+                        errors="replace").read()
         if _fm(text, "scope") != "global":
             continue
         m = re.search(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), text, re.DOTALL)
@@ -853,14 +922,14 @@ def _compile_gates_text():
     return out, [name for name, _ in blocks]
 
 
-def _gates_are_stale():
+def _gates_are_stale(texts=None):
     """True when a recompile would change gates.generated.md -- i.e. someone edited a gate
     block in a memory but never ran --gates-compile. This is the failure the whole feature
     exists to prevent, one level up: a standing order silently out of date. Only meaningful
     once gates have been compiled at least once, so a never-compiled corpus is not 'stale'."""
     if not os.path.isdir(MEMORY_DIR) or not os.path.exists(GATES_OUT):
         return False
-    fresh, _ = _compile_gates_text()
+    fresh, _ = _compile_gates_text(texts)
     on_disk = open(GATES_OUT, encoding="utf-8", errors="replace").read()
     return fresh != on_disk
 
@@ -871,7 +940,19 @@ def compile_gates(allow_empty=False):
     what lets this run unattended."""
     # A missing memory dir is a normal state (a fresh machine, a mocked HOME), not a crash.
     # This can run from a hook, where an unhandled traceback would land in the agent's face.
+    #
+    # But it is NOT normal when standing orders are already installed, and this returned 0 for
+    # both cases. A typo'd RECALL_MEMORY_DIR therefore printed "nothing to compile" and exited
+    # success, which bin/wildcard-perms reads as a clean compile and extension.js chains into
+    # ensureGates() -- reinstalling stale bytes and reporting that it worked. Same hazard as an
+    # empty compile, reached by a different door, so it gets the same test: a fresh machine has
+    # nothing installed and stays a quiet no-op.
     if not os.path.isdir(MEMORY_DIR):
+        installed = 0 if allow_empty else _installed_gate_bytes()
+        if installed:
+            sys.exit(f"[recall] no memory dir at {MEMORY_DIR}, but {GATES_OUT} holds "
+                     f"{installed} bytes of standing orders. Check RECALL_MEMORY_DIR, or pass "
+                     f"--gates-allow-empty to erase them.")
         print(f"\n  no memory dir at {MEMORY_DIR} -- nothing to compile\n")
         return
 
@@ -892,14 +973,11 @@ def compile_gates(allow_empty=False):
     # normal path. `.strip()` matches readCompiled()'s definition of "compiled" in
     # src/agent-gates.js, so this refuses exactly when that would have installed something.
     if not names and not allow_empty:
-        try:
-            existing = open(GATES_OUT, encoding="utf-8", errors="replace").read()
-        except OSError:
-            existing = ""
-        if existing.strip():
+        installed = _installed_gate_bytes()
+        if installed:
             # Kept short on purpose: extension.js slices this stderr at 300 chars before
             # showing it. 226 with this box's real paths, so both names survive the slice.
-            sys.exit(f"[recall] refusing to empty {GATES_OUT} ({len(existing)} bytes): "
+            sys.exit(f"[recall] refusing to empty {GATES_OUT} ({installed} bytes): "
                      f"no gate blocks in {MEMORY_DIR}. Check RECALL_MEMORY_DIR, or pass "
                      f"--gates-allow-empty to erase every gate.")
 

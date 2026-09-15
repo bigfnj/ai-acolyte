@@ -174,7 +174,7 @@ function anchorsFrom(text) {
   const push = (raw, kind) => {
     const v = String(raw).trim();
     if (!v || v.length < 3) return;
-    const key = kind + ' ' + v;
+    const key = kind + '\u0000' + v;
     if (seen.has(key)) return;
     seen.add(key);
     out.push({ text: v, kind });
@@ -610,6 +610,11 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = {
-  collectRefs, judge, buildIndex, tracked, anchorsFrom, findAnchor, isStrong, flatten, checkBounds,
-};
+// test/line-refs.test.js is the only importer, and these three are what it takes.
+// `judge`, `buildIndex`, `anchorsFrom`, `findAnchor`, `isStrong` and `flatten` were
+// listed here as well and no file anywhere destructured one of them, so the list was
+// advertising six functions through a door nobody had opened — the first caller to
+// use one would also be the first to exercise it. The FUNCTIONS stay: main() calls
+// every one of them, and removing an export entry is free while removing a function
+// is not.
+module.exports = { collectRefs, tracked, checkBounds };

@@ -6,7 +6,10 @@
 // so the extension can decide whether spawning python is worth it. recall.py's
 // build_or_update() stays the authority, and every predicate here mirrors the
 // comparison it makes (name set, size, mtime, embed identity) so the two agree
-// on what "current" means. A drift test pins the two shared constants.
+// on what "current" means. Drift tests pin all three shared constants: two by
+// importing them, and the mtime tolerance by reading recall.py's source for the
+// unit it writes, since the tolerance is an arithmetic assumption about that unit
+// rather than a value the two sides exchange.
 //
 // The rule that is easy to get wrong: MEMORY.md is the always-loaded index, and
 // recall.py excludes it from the corpus. Counting it as an indexable file makes
@@ -90,11 +93,12 @@ function recallIndexStatus(dir) {
 // `readRecallIndex` is deliberately NOT exported: recallIndexCount and recallIndexStatus
 // are its only callers and both live in this file.
 //
-// `MTIME_TOLERANCE_MS` has no importer either and is kept ON PURPOSE. It is the third
-// cross-language constant this module reconciles against recall.py, the drift test the
-// header promises does not yet pin it, and a branch in flight is adding one that imports
-// this name. Removing it now would be a rename for that branch to undo.
+// `MTIME_TOLERANCE_MS` is not exported either, and no longer needs to be. It was held on
+// the dead-export list for a branch in flight that was going to import it; that branch has
+// landed, as the 'recall.py still writes mtime as float SECONDS' test, and it pins the
+// constant by reading recall.py's source rather than by requiring this name. The constant
+// and its use in entryMatchesFile stay — only the export entry goes.
 module.exports = {
-  MEMORY_INDEX_NAME, RECALL_EMBED_ID, RECALL_INDEX_NAME, MTIME_TOLERANCE_MS,
+  MEMORY_INDEX_NAME, RECALL_EMBED_ID, RECALL_INDEX_NAME,
   indexableMemories, recallIndexCount, recallIndexStatus,
 };

@@ -25,12 +25,6 @@ const ROOT = path.resolve(__dirname, '..');
 
 // Held on purpose. The key is the export; the value is why, and is printed on failure.
 const HELD = {
-  'src/recall-index.js': {
-    MTIME_TOLERANCE_MS:
-      'the third cross-language constant this module reconciles against recall.py, and the '
-      + 'only one the promised drift test does not yet pin. A branch in flight adds a test '
-      + 'that imports this name; removing it now would be a rename for that branch to undo.',
-  },
   'vscode-extension/memoryLint.js': {
     fastLint:
       'test-only, not dead: test/memory-line-cap.test.js calls it directly through '

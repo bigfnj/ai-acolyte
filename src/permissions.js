@@ -46,7 +46,11 @@ function writeFileAtomicSync(target, content) {
     } catch (err) {
       lastErr = err;
       if (!RETRYABLE_RENAME_CODES.has(err.code)) break;
-      sleepSync(20 * (attempt + 1)); // 20,40,…,200ms — ~1.1s total worst case
+      // No sleep after the LAST attempt: nothing follows it to retry, so the final
+      // 200ms bought nothing and was a fifth of the 1.1s worst case. That window is
+      // Atomics.wait, an unyieldable thread block, and in the extension it blocks the
+      // extension-host thread, which is why the fixed-point cache uses a plain write.
+      if (attempt < MAX_ATTEMPTS - 1) sleepSync(20 * (attempt + 1)); // 20,40,…,180ms
     }
   }
 
@@ -54,6 +58,14 @@ function writeFileAtomicSync(target, content) {
   // place as a last resort — non-atomic, but settings.json is small and losing
   // the update is worse than a brief window where a reader might see a partial
   // file (both readers here already tolerate a failed parse).
+  // lastErr was assigned on every failed attempt and read on NO path, so a
+  // non-retryable rename failure fell silently into the in-place write with the
+  // original cause discarded. Say what went wrong: this is the branch where the
+  // atomic guarantee was given up, and it should not be silent about why.
+  if (lastErr) {
+    process.emitWarning(`writeFileAtomicSync: rename failed (${lastErr.code || lastErr.message}), `
+      + 'wrote in place instead', 'PermissionWildcardingAtomicFallback');
+  }
   try {
     fs.writeFileSync(target, content, 'utf8');
   } finally {

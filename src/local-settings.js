@@ -29,7 +29,7 @@ const os = require('os');
 const path = require('path');
 
 const {
-  generalizePermission, isCoveredBy, createCoverIndex, isMaxAllowOn, writeFileAtomicSync,
+  generalizePermission, createCoverIndex, isMaxAllowOn, writeFileAtomicSync,
   BASH_SCRIPT_KEYWORDS,
 } = require('./permissions');
 // The same glob matcher the policy guard uses to decide whether managed policy

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createPolicyLock, POLICY_LOCK_CODE } = require('../src/policy-lock');
+const { createPolicyLock, POLICY_LOCK_CODE, POLICY_LOCK_BUSY_MESSAGE } = require('../src/policy-lock');
 
 function tempLock(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-lock-'));
@@ -30,6 +30,24 @@ test('one holder at a time, and the lock is released on both paths', (t) => {
   assert.ok(!fs.existsSync(lockPath), 'released after the callback throws');
 
   assert.equal(second.locked(() => 'ran'), 'ran');
+});
+
+// One string per condition. The thrown message used to be a second wording of the same
+// fact ("Auto Learn is already running (lock: …)") that every consumer threw away and
+// replaced with POLICY_LOCK_BUSY_MESSAGE by hand, so the two could drift and only the
+// discarded one carried the lock path. The constant IS the default now, and a caller with
+// a different condition to describe — the instruction-file lock in agent-guidance.js —
+// supplies `busyMessage` instead of inheriting a message about Auto Learn.
+test('the thrown message is the one the consumers show, and a supplier can override it', (t) => {
+  const lockPath = tempLock(t);
+  const held = createPolicyLock({ lockPath });
+  held.locked(() => {
+    assert.throws(() => createPolicyLock({ lockPath }).locked(() => {}),
+      (error) => error.message === POLICY_LOCK_BUSY_MESSAGE);
+    assert.throws(
+      () => createPolicyLock({ lockPath, busyMessage: (target) => `mine: ${target}` }).locked(() => {}),
+      (error) => error.message === `mine: ${lockPath}`);
+  });
 });
 
 test('a lock left by a dead process is reclaimed, a live one is not', (t) => {
@@ -57,6 +75,41 @@ test('an ownerless lock is only reclaimed once it is stale', (t) => {
 
   const impatient = createPolicyLock({ lockPath, staleMs: 0 });
   assert.equal(impatient.locked(() => 'reclaimed'), 'reclaimed');
+});
+
+// The orphan `locked()` leaves behind if it dies mid-acquire: `openSync(..., 'wx')`
+// creates the file and the metadata is written as a SECOND step, so a crash in between
+// leaves a lock with no pid to probe. `recoverLock` then falls to the age test, which
+// used to refuse for the full stale window — ten minutes, for a write that takes
+// milliseconds, on a path a user is now waiting on through the instruction-file lock.
+test('a zero-byte lock is honoured for a short grace, not the full stale window', (t) => {
+  const lockPath = tempLock(t);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const patient = () => createPolicyLock({ lockPath, staleMs: 10 * 60 * 1000 });
+  const atAge = (contents, ms) => {
+    fs.writeFileSync(lockPath, contents);
+    const when = new Date(Date.now() - ms);
+    fs.utimesSync(lockPath, when, when);
+  };
+
+  // Well past any honest holder of a hole that is open for under a millisecond.
+  atAge('', 30_000);
+  assert.equal(patient().locked(() => 'reclaimed'), 'reclaimed');
+
+  // Inside the grace it is still held: an empty lock is also what a HEALTHY holder
+  // looks like for that window, so reclaiming on sight would evict a live writer.
+  atAge('', 0);
+  assert.throws(() => patient().locked(() => {}), (error) => error.code === POLICY_LOCK_CODE);
+
+  // A non-empty ownerless lock is untouched by the grace and still waits out the
+  // full window — otherwise this would be a five-second stale window for every lock.
+  atAge('not json\n', 30_000);
+  assert.throws(() => patient().locked(() => {}), (error) => error.code === POLICY_LOCK_CODE);
+
+  // And an explicit smaller staleMs keeps meaning what it says rather than being
+  // lengthened to the grace.
+  atAge('', 0);
+  assert.equal(createPolicyLock({ lockPath, staleMs: 0 }).locked(() => 'now'), 'now');
 });
 
 // The reclaim boundary, made deterministic. The test above reaches it only by

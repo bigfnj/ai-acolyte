@@ -181,6 +181,15 @@ function createManagedBlock({ begin, end, body }) {
       const separator = head.length === 0 ? ''
         : tail.length === 0 ? '\n'
           : '\n'.repeat(Math.max(1, range.start - above - 1) + Math.max(0, below - range.end - 1));
+      // End of file is the one branch that is deliberately NOT byte-exact, and it cannot
+      // be. The install below adds no separator to a file already ending "\n\n" and one
+      // to a file ending "\n", so both reach this point as the SAME two newlines above
+      // the block: what would tell them apart is gone before removal runs. One of the two
+      // round trips has to lose a byte, and it is this one — `"notes\n\n"` comes back as
+      // `"notes\n"`, the single trailing newline a file with no final newline at all has
+      // always been normalised to. The alternative is an install that always inserts its
+      // own blank line, which buys byte-exactness at end of file by giving every ordinary
+      // file a visible second blank line above the block. Pinned in test/agent-guidance.test.js.
       const next = head + separator + tail;
       return { changed: next !== current, text: next };
     }
@@ -222,9 +231,70 @@ function guidanceStatus(file = guidancePath(), block = SHELL_BLOCK) {
   return { path: file, readable: true, on: block.has(text), current: block.isCurrent(text) };
 }
 
+// ── One lock per instruction file, held across the whole read-decide-write ────
+//
+// FIVE writers share `~/.claude/CLAUDE.md`: `--guidance` and `--gates` from the CLI, the
+// extension's guidance and gates toggles, and the derived-guidance reconcile in
+// `src/derived-guidance.js`. Only the last ran under a lock at all, and it took the
+// POLICY lock — the one that guards settings.json, which none of the other four take, so
+// it bought nothing here. The window is not hypothetical: the extension recompiles gates
+// on a memory-directory change, so an automatic write can land in the middle of a manual
+// `wildcard-perms --guidance off`.
+//
+// Marker fencing does not make that safe, which is the part worth saying out loud. Every
+// writer reads the WHOLE file, computes a whole new file, and writes it back. A write
+// that lands between another writer's read and its own write is not merged into it — it
+// is erased, and the user's own notes go with it. The single-slot backups
+// (`*.pre-guidance`, `*.pre-gates`, `*.pre-derived`) then make it permanent, because the
+// next toggle copies the damaged file over the good copy.
+//
+// Keyed on the TARGET FILE rather than one global path: CLAUDE.md and AGENTS.md share no
+// state and `setGuidanceAll` writes them in a loop, so a global lock would serialise two
+// writes that cannot conflict. A sibling lock file also keeps a test that writes to a
+// temp file out of the real `~/.claude`, which a home-derived path would not.
+//
+// Ordering, so this cannot deadlock: `decideDerived` takes the policy lock and then
+// reaches this one through `setDerivedGuidance`. Nothing takes this lock and then the
+// policy lock, so there is exactly one order and no cycle.
+const INSTRUCTION_LOCK_SUFFIX = '.wildcarding.lock';
+// The work under this lock is one read, a string operation and two atomic writes. Ten
+// minutes — `policy-lock`'s default, sized for a full transcript scan — is the wrong
+// order of magnitude for deciding that a holder of THIS lock has died.
+const INSTRUCTION_LOCK_STALE_MS = 30 * 1000;
+
+function instructionLockPath(file) {
+  return `${path.resolve(file)}${INSTRUCTION_LOCK_SUFFIX}`;
+}
+
+// Run `write` holding the file's lock; call `onBusy` with the reason if someone else
+// holds it. Reported, never waited on and never forced: every caller already renders a
+// per-target `error` row, so "another process is writing this file, nothing changed"
+// arrives through the path they already have, and the next command or activation
+// retries. Waiting would instead make a toggle hang on the extension host thread.
+function withInstructionLock(file, write, onBusy) {
+  // Lazily required: `policy-lock.js` resolves its own default path from os.homedir() at
+  // require time, and this module is loaded by tests that mock the home directory.
+  const { createPolicyLock, POLICY_LOCK_CODE } = require('./policy-lock');
+  const lock = createPolicyLock({
+    lockPath: instructionLockPath(file),
+    staleMs: INSTRUCTION_LOCK_STALE_MS,
+    busyMessage: () => `${file} is being written by another permission-wildcarding process`,
+  });
+  try {
+    return lock.locked(write);
+  } catch (error) {
+    if (error?.code === POLICY_LOCK_CODE) return onBusy(error.message);
+    throw error;
+  }
+}
+
 // Drive the change. Backs the file up on first modification — this is the user's
 // own instruction file, and a managed block that ate someone's notes would be
 // unforgivable even though the marker logic says it cannot.
+//
+// The read is INSIDE the lock, not above it. A lock taken around the write alone would
+// still let a second writer land between this one's read and its own write, which is the
+// interleaving itself rather than a smaller version of it.
 function setGuidance(on, {
   file = guidancePath(),
   backupDir = path.join(os.homedir(), '.claude', 'backups'),
@@ -233,23 +303,28 @@ function setGuidance(on, {
   backupName = 'CLAUDE.md.pre-guidance',
   block = SHELL_BLOCK,
 } = {}) {
-  const text = readGuidanceFile(file);
-  if (text === null) return { changed: false, error: `cannot read ${file}`, path: file, on: false };
+  return withInstructionLock(file, () => {
+    const text = readGuidanceFile(file);
+    if (text === null) return { changed: false, error: `cannot read ${file}`, path: file, on: false };
 
-  const result = block.apply(text, on);
-  if (!result.changed) return { changed: false, path: file, on: block.has(text), error: null };
+    const result = block.apply(text, on);
+    if (!result.changed) return { changed: false, path: file, on: block.has(text), error: null };
 
-  try {
-    if (text.length) {
-      fs.mkdirSync(backupDir, { recursive: true });
-      writeFileAtomicSync(path.join(backupDir, backupName), text);
+    try {
+      if (text.length) {
+        fs.mkdirSync(backupDir, { recursive: true });
+        writeFileAtomicSync(path.join(backupDir, backupName), text);
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      writeFileAtomicSync(file, result.text);
+    } catch (error) {
+      return { changed: false, path: file, on: block.has(text), error: error.message };
     }
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    writeFileAtomicSync(file, result.text);
-  } catch (error) {
-    return { changed: false, path: file, on: block.has(text), error: error.message };
-  }
-  return { changed: true, path: file, on: !!on, error: null };
+    return { changed: true, path: file, on: !!on, error: null };
+  // A contended file reports `on: false` for the same reason the unreadable branch above
+  // does — the state could not be read. No caller reads `on` off a row carrying an
+  // `error`: the CLI and the extension both report the error and move to the next target.
+  }, (busy) => ({ changed: false, path: file, on: false, error: busy }));
 }
 
 // Every installed agent's file, as one call — what the CLI and the extension
@@ -279,4 +354,5 @@ module.exports = {
   guidanceBlock, hasGuidance, isCurrent, applyGuidance,
   guidanceStatus, setGuidance, guidanceStatusAll, setGuidanceAll,
   createManagedBlock, escapeMarker, SHELL_BLOCK,
+  instructionLockPath, withInstructionLock,
 };

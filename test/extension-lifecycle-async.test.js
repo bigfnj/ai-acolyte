@@ -245,6 +245,7 @@ function harness(tempHome, options = {}) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
     if (request === 'https' && parent?.filename === extensionPath) return fakeHttps(httpsRequests);
+    if (request === 'fs' && parent?.filename === extensionPath) return fsHidingRecallModel(fs);
     if (request === 'child_process' && parent?.filename === extensionPath) {
       // Every spawn is captured with the ChildProcess handle the extension gets
       // back, so a test can assert what deactivate did to it and then deliver
@@ -463,6 +464,36 @@ function memoryCorpus(t) {
 // makes rebuildRecall offer the download instead of spawning python. recallModelDir()
 // requires BOTH files in one dir, so a vocab-only dir reads as model-missing while
 // recallVocabSource() still finds something to seed from — the real first-run shape.
+// Set while a test has asked for a box with NO bge-small. See fakeRecallEnvironment.
+let recallModelHidden = null;
+
+// `recallModelCandidates()` probes SIX directories, and setting RECALL_MODEL_DIR
+// neutralises exactly one of them. Two of the rest are resolved from extension.js's own
+// __dirname, so on a checkout that has ever run the Python tool, `<repo>/memory/models`
+// holds a real 34 MB bge-small and the extension correctly decides no download is needed.
+//
+// That made the download tests pass on CI and on a fresh clone, and fail on the machine
+// this feature was built on, with `reqs: 0` and a progress task that had already started.
+// The precondition assert is what caught it rather than the tests quietly proving nothing.
+//
+// Hiding only the MODEL file, and only outside the test's own dir, is the narrow version:
+// the vocab still resolves (fakeRecallEnvironment always writes one, and RECALL_MODEL_DIR
+// is probed first), so recallVocabSource() keeps working and only the "is there a usable
+// model" answer changes.
+function fsHidingRecallModel(realFs) {
+  return {
+    ...realFs,
+    existsSync(target) {
+      if (recallModelHidden) {
+        const resolved = path.resolve(String(target));
+        if (path.basename(resolved) === 'bge-small.onnx'
+            && !resolved.startsWith(recallModelHidden)) return false;
+      }
+      return realFs.existsSync(target);
+    },
+  };
+}
+
 function fakeRecallEnvironment(t, { model = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-toolbox-'));
   const python = path.join(root, 'python', '.venv', 'Scripts', 'python.exe');
@@ -475,7 +506,10 @@ function fakeRecallEnvironment(t, { model = true } = {}) {
   const previous = { toolbox: process.env.CODEX_TOOLBOX, models: process.env.RECALL_MODEL_DIR };
   process.env.CODEX_TOOLBOX = root;
   process.env.RECALL_MODEL_DIR = models;
+  // A model-free box means model-free EVERYWHERE the extension looks, not just here.
+  if (!model) recallModelHidden = path.resolve(models);
   t.after(() => {
+    recallModelHidden = null;
     if (previous.toolbox === undefined) delete process.env.CODEX_TOOLBOX;
     else process.env.CODEX_TOOLBOX = previous.toolbox;
     if (previous.models === undefined) delete process.env.RECALL_MODEL_DIR;

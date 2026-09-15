@@ -297,14 +297,17 @@ test('every dashboard message reaches its command, and nothing else does', async
     app.provider.resolveWebviewView(ui.view);
     await settle();
 
+    // autoLearnApply and autoLearnMode were removed with their switch arms: the webview has
+    // no sender for either, so this table was the only thing reaching them. A routing test
+    // that posts every type directly cannot tell a live route from a dead one, which is how
+    // both arms stayed alive through three audits. The palette commands they targeted still
+    // exist and are still covered by extension-activation.test.js.
     const routes = [
       ['runNow', 'permission-wildcarding.runNow'],
       ['restore', 'permission-wildcarding.restoreBackup'],
       ['autoLearnScan', 'permission-wildcarding.autoLearnScan'],
       ['autoLearnReview', 'permission-wildcarding.autoLearnReview'],
-      ['autoLearnApply', 'permission-wildcarding.autoLearnApplySafe'],
       ['autoLearnUndo', 'permission-wildcarding.autoLearnUndo'],
-      ['autoLearnMode', 'permission-wildcarding.autoLearnCycleMode'],
       ['autoLearnWhy', 'permission-wildcarding.autoLearnWhy'],
       ['toggleMax', 'permission-wildcarding.toggleMax'],
       ['toggleCodexMax', 'permission-wildcarding.toggleCodexMax'],

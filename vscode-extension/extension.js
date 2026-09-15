@@ -3223,9 +3223,7 @@ class WildcardingViewProvider {
         case 'restore':      vscode.commands.executeCommand('permission-wildcarding.restoreBackup'); break;
         case 'autoLearnScan': vscode.commands.executeCommand('permission-wildcarding.autoLearnScan'); break;
         case 'autoLearnReview': vscode.commands.executeCommand('permission-wildcarding.autoLearnReview'); break;
-        case 'autoLearnApply': vscode.commands.executeCommand('permission-wildcarding.autoLearnApplySafe'); break;
         case 'autoLearnUndo': vscode.commands.executeCommand('permission-wildcarding.autoLearnUndo'); break;
-        case 'autoLearnMode': vscode.commands.executeCommand('permission-wildcarding.autoLearnCycleMode'); break;
         case 'autoLearnWhy': vscode.commands.executeCommand('permission-wildcarding.autoLearnWhy'); break;
         case 'toggleMax':    vscode.commands.executeCommand('permission-wildcarding.toggleMax'); break;
         case 'toggleCodexMax': vscode.commands.executeCommand('permission-wildcarding.toggleCodexMax'); break;
@@ -3470,7 +3468,6 @@ class WildcardingViewProvider {
               margin: 2px 2px 6px; cursor: pointer; user-select: none; }
   .listhead:hover .h { color: var(--vscode-textLink-foreground); }
   .listhead .h { font-weight: 600; }
-  #chev { display: inline-block; width: 1em; font-size: 10px; }
   ul { list-style: none; margin: 0; padding: 0; }
   li { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 4px; }
   li:hover { background: var(--vscode-list-hoverBackground); }
@@ -3668,8 +3665,8 @@ class WildcardingViewProvider {
   </section>
 
   <section class="row">
-    <div class="rowhead" id="toggle" data-row="list" title="Click to collapse / expand">
-      <span class="chev" id="chev">▸</span><span class="glyph">✱</span>
+    <div class="rowhead" data-row="list" title="Click to collapse / expand">
+      <span class="chev">▸</span><span class="glyph">✱</span>
       <span class="rowname">Wildcards tracked</span><span class="rowstate" id="wcount"></span>
     </div>
     <div class="rowbody" id="bodyList" hidden><ul id="list"></ul></div>

@@ -1710,6 +1710,16 @@ Method note that changed three verdicts: **comment mentions are not references.*
     this documents") with no literal string to match. There is nothing to check
     those against short of reading both ends, and a guess would be worse than the
     stale number.
+  - **`test/line-refs.test.js` asserts only the objective half** — every
+    reference resolves to a real file and a line inside it — plus a count floor
+    so that assertion cannot pass vacuously if the extractor stops matching. The
+    STALE verdict is deliberately not asserted, for the precision reason above: a
+    gate that cries wolf gets suppressed and takes the real signal with it.
+    - It found a defect on its first tracked run: the checker's OWN format
+      illustrations (`src/foo` style dangling examples) became references the
+      moment the file was committed. Hence a line-scoped `line-refs` + `:ignore`
+      marker. Line-scoped on purpose — a file that uses it for one illustration
+      is still policed for its real references, and a mutation proves that.
   - **Bare `:NNN` continuation references are NOT covered** (`(`:489`)`,
     `(`:3206`)`). They carry no filename, so the checker cannot resolve them; the
     ones fixed in this pass were fixed by hand alongside their named sibling.

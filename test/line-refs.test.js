@@ -30,6 +30,14 @@
 //
 // Cost: ~0.13 s, because it resolves paths and counts lines and does no
 // per-anchor scan of the target.
+//
+// ESCAPE HATCH: a line carrying the marker `line-refs` + `:ignore` has its
+// references skipped. Documentation ABOUT the reference format has to contain
+// references that dangle on purpose, and scripts/check-line-refs.js tripped this
+// very test the moment it became tracked. The marker is LINE-scoped, not
+// file-scoped, so a file that uses it for one illustration is still policed for
+// its own real references. Reach for it only for an example, never to silence a
+// reference that should have been fixed.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

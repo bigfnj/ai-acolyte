@@ -3347,11 +3347,20 @@ class WildcardingViewProvider {
     // of the two we started with. This shape is also exactly what every test stub
     // for memoryReport returns, so the failure path is the path already covered.
     let memory;
+    let settingsState;
+    try { settingsState = readSettingsState().state; }
+    catch { settingsState = 'unreadable'; }
     try { memory = memoryReport(); }
     catch { memory = { conf: {}, dir: null, report: null }; }
     this.view.webview.postMessage({
       type: 'data',
-      active: fs.existsSync(SETTINGS),
+      // Three states, not existsSync. A corrupt or mid-write settings.json EXISTS, so the
+      // pill read a green "Active" while every writer was throwing SETTINGS_UNREADABLE.
+      // This is the mirror of the bug already fixed in toggleMax, and readSettingsState
+      // was built for exactly this distinction. `active` stays a boolean for the two
+      // callers that only care whether writes can proceed; settingsState carries the third.
+      active: settingsState === 'present',
+      settingsState,
       settingsPath: SETTINGS.replace(os.homedir(), '~'),
       version: extensionVersion(),
       codexWatching,
@@ -4013,7 +4022,11 @@ class WildcardingViewProvider {
 
   function render(d) {
     $('dot').className = 'dot' + (d.active ? '' : ' idle');
-    $('statusText').textContent = d.active ? 'Active' : 'Idle — settings.json not found';
+    // Was a two-way d.active branch, which told a user whose file
+    // was corrupt that it did not exist. Two different faults, two different fixes.
+    $('statusText').textContent = d.settingsState === 'unreadable'
+      ? 'settings.json unreadable — writes are refused'
+      : (d.active ? 'Active' : 'Idle — settings.json not found');
     // Empty string when the manifest could not be read, which renders as nothing
     // rather than as 'v' or 'undefined'.
     $('version').textContent = d.version ? 'v' + d.version : '';

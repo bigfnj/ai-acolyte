@@ -108,7 +108,13 @@ def _discover_memory_dir():
     return best or os.path.join(root, "d---ai-work", "memory")
 
 
-MEMORY_DIR = os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir()
+# normpath for the same reason GATES_OUT gets it: expanduser substitutes a backslash HOME into
+# the forward-slash literal in _discover_memory_dir and leaves the rest, so this read
+# `C:\Users\Admin/.claude/projects\d---ai-work\memory` -- and it is interpolated into the same
+# two compile_gates() refusal messages, where a mixed-separator path reads like a bug in the
+# thing reporting the bug. Separator-only, so the message LENGTH does not move (228 and 226
+# chars here, both still inside extension.js's 300-char stderr slice).
+MEMORY_DIR = os.path.normpath(os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir())
 # This count rule is the AUTHORITY. Two other places pick a corpus -- memoryLint.js
 # pickPrimaryDir and scripts/verify-release.ps1 Find-MemoryDir -- and both used to sort by
 # MEMORY.md mtime instead. The extension pins RECALL_MEMORY_DIR from its copy on every spawn, so
@@ -206,6 +212,14 @@ LINT_ENTRY_WARN = 16           # resident entries. Attention dilutes per-entry, 
                                # headroom for a few triggers. 0 would mean report-only.
 GATE_BEGIN = "<!-- gate -->"   # a scope:global memory's resident lines, lifted verbatim into
 GATE_END = "<!-- /gate -->"    # the managed CLAUDE.md block so the compiler needs no judgement
+# ONE pairing test, used by BOTH _compile_gates_text() and --lint's "resident-eligible, not
+# compiled" report. They had two, and the linter's was the wider one: it asked `GATE_BEGIN in
+# text`, so a memory carrying an opening marker and no closing marker compiled NOTHING and was
+# omitted from the only report that exists to say so. Not hypothetical -- on the live corpus
+# project_memory_gates.md is scope:global with one lone `<!-- gate -->` in prose describing this
+# very pipeline, and --lint stayed silent about it. vscode-extension/memoryLint.js was narrowed
+# to this rule on 2026-09-14; sharing one object is what stops the authority drifting off it.
+GATE_BLOCK = re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)
 UNK, CLS, SEP = "[UNK]", "[CLS]", "[SEP]"
 
 
@@ -747,8 +761,9 @@ def lint():
         texts[stem] = text
         valid.add(_norm(stem)); valid.add(_norm(_fm(text, "name") or stem))
         # Frontmatter reads are scoped to the --- block, but a gate block can sit anywhere in
-        # the body, so that one looks at the whole file.
-        meta[stem] = (_fm(text, "type"), _fm(text, "scope"), GATE_BEGIN in text)
+        # the body, so that one looks at the whole file. GATE_BLOCK, not `GATE_BEGIN in text`:
+        # this answers "would the compiler take this file?", and the compiler needs the PAIR.
+        meta[stem] = (_fm(text, "type"), _fm(text, "scope"), bool(GATE_BLOCK.search(text)))
 
     entries = [ln for ln in mem.splitlines() if ln.startswith("- ")]
     print(f"  {len(entries)} resident index entries" +
@@ -788,7 +803,8 @@ def lint():
 
     no_gate = [s for s in stems if meta[s][1] == "global" and not meta[s][2]]
     if no_gate:
-        print(f"  scope: global with no {GATE_BEGIN} block -- resident-eligible, not compiled:")
+        print(f"  scope: global with no {GATE_BEGIN} ... {GATE_END} block "
+              f"-- resident-eligible, not compiled:")
         for s in no_gate:
             print(f"    {s}")
         print()
@@ -872,12 +888,19 @@ def _installed_gate_bytes():
     counts exactly what that installer would have treated as real content. Shared by the two
     refusal paths in compile_gates() so they cannot drift apart: both are the same hazard, which
     is a compile that produces nothing while something is already installed and live.
+
+    Two reads, on purpose. The text decides whether there is CONTENT (blank-but-present is 0,
+    which is what the installer's guard means by "nothing compiled"); getsize reports the SIZE.
+    They are not the same number: text mode decodes UTF-8, so `len(text)` counts CHARACTERS and
+    undercounts by one per continuation byte -- 5864 against a real 5872 on this box's gate file,
+    from the em-dashes and arrows in the gate text. The name says bytes, the refusal string
+    prints it at the user, and lint() had the identical unit error against MEMORY.md.
     """
     try:
         existing = open(GATES_OUT, encoding="utf-8", errors="replace").read()
+        return os.path.getsize(GATES_OUT) if existing.strip() else 0
     except OSError:
         return 0
-    return len(existing) if existing.strip() else 0
 
 
 def _compile_gates_text(texts=None):
@@ -907,7 +930,7 @@ def _compile_gates_text(texts=None):
                         errors="replace").read()
         if _fm(text, "scope") != "global":
             continue
-        m = re.search(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), text, re.DOTALL)
+        m = GATE_BLOCK.search(text)
         if m:
             blocks.append((name, m.group(1).strip()))
 
@@ -975,8 +998,10 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: extension.js slices this stderr at 300 chars before
-            # showing it. 226 with this box's real paths, so both names survive the slice.
+            # Kept short on purpose: extension.js:2977 slices this stderr at 300 chars before
+            # showing it. Re-measured 2026-09-14 after MEMORY_DIR was normpath'd and `installed`
+            # became a real byte count: 226 here, and 228 for the sibling refusal above. Both
+            # still fit, and both still name GATES_OUT and MEMORY_DIR inside the slice.
             sys.exit(f"[recall] refusing to empty {GATES_OUT} ({installed} bytes): "
                      f"no gate blocks in {MEMORY_DIR}. Check RECALL_MEMORY_DIR, or pass "
                      f"--gates-allow-empty to erase every gate.")

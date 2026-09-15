@@ -5,8 +5,18 @@
   session, which is what fires the SessionStart hook). It checks everything that can be
   checked from outside the editor, then prints a short list of things only eyes can confirm.
 
-  Nothing here writes to your instruction files, your memory, or your settings. It is all
-  reads plus the node test suite.
+  This is NOT a read-only script, whatever an earlier version of this header said. Three
+  places write, all of them to the real ~/.claude:
+
+    * the CLI section runs `--gates refresh`, which recompiles ~/.claude/gates.generated.md
+      and reinstalls the managed block in CLAUDE.md and .codex/AGENTS.md,
+    * the freshness section re-stamps the LastWriteTime of one gated memory file, by design,
+      to prove the extension's watcher reacts,
+    * the installer suite writes inside its own sandbox home, not yours.
+
+  Nothing here edits the BODY of a memory or a setting. Everything else is a read plus the
+  node test suite. That is why no automated test drives this file: it would recompile the
+  machine's live instruction files as a side effect.
 
       powershell -ExecutionPolicy Bypass -File scripts\verify-release.ps1
 
@@ -236,10 +246,23 @@ if (-not (Test-Path $cli)) {
 
     # Refresh must be silent when nothing changed: a SessionStart hook's stdout can be
     # folded into session context, so noise here costs tokens every single session.
-    $r = & node $cli --gates refresh
-    $rText = ($r -join '').Trim()
-    Check '--gates refresh is silent when nothing changed' ($rText.Length -eq 0) `
-        "printed: '$rText'"
+    #
+    # 2>&1 is load-bearing, and its absence is what this check used to hide. The one failure
+    # worth catching here -- recall.py's compile step failing, so refresh installs whatever
+    # was last compiled and every session gets a stale block -- is announced on STDERR by
+    # bin/wildcard-perms ("--gates refresh: compile failed, installing whatever was last
+    # compiled"). Capturing stdout alone, that text went to the console, $rText stayed empty,
+    # and the board printed PASS loudest in exactly the state the check exists to report.
+    # Same idiom as the installer suite above; $ErrorActionPreference is 'Continue', so the
+    # merged stream arrives as data rather than a throw. Read $LASTEXITCODE before anything
+    # else runs, and assert on it too: a refresh that exits non-zero but prints nothing to
+    # stdout is still a broken refresh.
+    $r = (& node $cli --gates refresh 2>&1) | Out-String
+    $rCode = $LASTEXITCODE
+    if ($null -eq $r) { $r = '' }
+    $rText = $r.Trim()
+    Check '--gates refresh is silent and exits 0 when nothing changed' `
+        (($rText.Length -eq 0) -and ($rCode -eq 0)) "exit $rCode, printed: '$rText'"
 }
 
 # --------------------------------------------------------------- memory index

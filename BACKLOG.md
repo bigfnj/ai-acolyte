@@ -1907,6 +1907,23 @@ Fixed on both sides, because either alone leaves a hole:
 `package.json` from `MANIFESTS`, and stubbing out each of the checker's two comparisons, each
 produce exactly one failure naming the right assertion. 3/3 killed.
 
+**Later: the VSIX half of that check proved less than the sentence above claims.** `existsSync`
+on `permission-wildcarding-<version>.vsix` is satisfied by a same-version artefact from an
+earlier build, and a working checkout accumulates them, seven here (1.4.2 through 1.4.8) at the
+time of writing. So a packaging step that did nothing passed, and `release.yml` uploads `*.vsix`.
+`scripts/package.mjs` now writes `.vsix-build.json` immediately before it invokes `vsce`, and the
+checker requires the artefact to be at least as new as that stamp and the stamp to name the
+artefact the **manifests** imply. The name is still derived from the manifest, never from the
+stamp: a post-condition that takes its expectation from the step it audits agrees with that
+step's bugs. Rejected on the way: mtime-vs-process-start (inverted, the checker runs after
+packaging, so nothing would ever pass); mtime-vs-`vscode-extension/package.json` (`syncVersion`
+writes nothing without an override and nothing even with one when the manifest already carries
+that version, so the mtime is usually just the checkout time); and the synced
+`vscode-extension/src/` tree (measured: `fs.cpSync` keeps the source mtime on Windows and takes
+"now" on Linux, so one comparison would mean two different things on a dev box and on the ubuntu
+runner). Thirteen cases now; 5/5 mutations killed, including `<` tightened to `<=`, which is what
+pins the same-millisecond case that a fast machine would otherwise fail at random.
+
 One seam is left uncovered and is deliberate. The wiring from `package.mjs`'s `argv[2]` into
 `syncVersion` is exercised locally only through the no-change branch (`node scripts/package.mjs
 v1.4.5` against manifests already at 1.4.5, which proves argv reaches the sync and the output
@@ -2274,11 +2291,18 @@ them as comparable.
 list, and it resolves names against the module-global `MEMORY_DIR` rather than the directory the
 names came from. Harmless only because that bench is single-corpus by construction.
 
-**`verify-release.ps1` cannot see `--gates refresh` failing.** It captures stdout only, and the
-compile-failure warning goes to stderr, so the check "refresh is silent when nothing changed"
-passes in exactly the steady state where refresh is printing an error every time. Add `2>&1` or
-check `$LASTEXITCODE`. Its negative `--lint` checks also all pass on empty output; they are covered
-only because a positive check runs first, and that ordering is load-bearing and undocumented.
+**Fixed: `verify-release.ps1` could not see `--gates refresh` failing.** It captured stdout only,
+and the compile-failure warning goes to stderr, so the check "refresh is silent when nothing
+changed" passed in exactly the steady state where refresh is printing an error every time. It now
+captures `2>&1 | Out-String` (the idiom already used for the installer suite on line 144) and
+asserts `$LASTEXITCODE` alongside the text, so a refresh that fails silently on stdout is caught
+too. Measured against a stub that reproduces `bin/wildcard-perms:635` (stderr warning, exit 0):
+under both PowerShell 7.6.5 and Windows PowerShell 5.1 the old form captured 0 characters and
+would have printed PASS, the new form captures the warning and fails, and a healthy refresh stays
+silent. 5.1 wraps it in a `NativeCommandError` record, so the FAIL detail is wordier there; the
+verdict is the same. The script itself is still unrun by any test, and cannot be: it writes to the
+real `~/.claude`. Its negative `--lint` checks also all pass on empty output; they are covered only
+because a positive check runs first, and that ordering is load-bearing and undocumented.
 
 **Two in-tree figures for the same ONNX session construction disagree by 3x.** `recall.py` says
 "~620 ms (measured on this box)" and `test/recall-index.test.js` says "~210 ms each". Neither names

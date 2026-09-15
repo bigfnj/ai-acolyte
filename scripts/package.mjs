@@ -12,6 +12,7 @@ import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { artefactName, writeBuildStamp } from './build-stamp.mjs';
 import { syncVersion } from './sync-version.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,8 +48,12 @@ if (applied?.changed.length) {
 }
 const pkg = JSON.parse(readFileSync(join(ext, 'package.json'), 'utf8'));
 
-// 3. Package.
-const out = join(root, `permission-wildcarding-${pkg.version}.vsix`);
+// 3. Package. The stamp goes down FIRST and stays first: its mtime is the only thing that
+// tells scripts/check-version-sync.mjs this build's artefact from the same-version leftover
+// of an earlier one. Written after vsce instead, it would be newer than the artefact it
+// vouches for, and every build -- honest ones included -- would be reported as stale.
+const out = join(root, artefactName(pkg.version));
+writeBuildStamp(root, pkg.version);
 execSync(`npx --yes @vscode/vsce package --no-dependencies -o "${out}"`, {
   cwd: ext,
   stdio: 'inherit',

@@ -7,9 +7,12 @@ const path = require('path');
 const { ruleMatches, sameRule } = require('./permission-match');
 // NOTE: `./managed-policy` is deliberately NOT required here. It is reachable from
 // exactly one function, maxLayers(), and requiring it at module scope cost the
-// PostToolUse hook 2.3 ms on EVERY tool call for a module the hook never reaches.
-// See the lazy require inside maxLayers, and the same reasoning written out at
-// bin/wildcard-perms:11-26.
+// PostToolUse hook ~0.9 ms on EVERY tool call for a module the hook never reaches.
+// NOT 2.3 ms, which is what this line used to say: that figure came from a stub
+// harness that had already pre-cached permission-match, so it measured this file's
+// marginal cost rather than the chain's. The measurement history and the two
+// independent runs that settled it are written out at the lazy require inside
+// maxLayers. Same reasoning for the discipline itself at bin/wildcard-perms:11-26.
 
 // Rename codes that are transient on Windows: another process (Claude Code
 // writing settings.json, Defender/Search indexer scanning the temp file, or a

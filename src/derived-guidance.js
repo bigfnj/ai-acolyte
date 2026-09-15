@@ -37,8 +37,8 @@ const RULE_LIMIT = 200;
 // user's own instruction file. `~/.claude/remote-settings.json` is a local, client-refreshed
 // cache, so any local process that can write it picks that string — and only one of the two
 // sources that feed `costliestRules` sanitises it: the managed-hits side goes through
-// `clean(observation.managedRule, 200)` in `auto-learn-manager.js:1391`, while the
-// inert-family side reaches `addCost` at :787 as `String(rule)`. Sanitising here, at the
+// `clean(observation.managedRule, 200)` in `auto-learn-manager.js:1400`, while the
+// inert-family side reaches `addCost` at :802 as `String(rule)`. Sanitising here, at the
 // interpolation rather than at one of the suppliers, is what makes the block safe whichever
 // path produced the rule.
 //

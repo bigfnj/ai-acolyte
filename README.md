@@ -19,22 +19,34 @@ subcommand. The safety boundary for the legacy hook is still your
 
 ## What's here
 
-- **`bin/wildcard-perms`** — the hook executable and CLI (Node); also supports
-  `--learn scan|status|apply|undo|hits`, `--seed`, `--drain [--dry-run]` (project-local
-  approvals), `--guidance on|off|status` (agent shell style),
-  `--guidance derived|accept|decline|reset` (mitigations earned from measured cost),
-  `--gates on|off|status|refresh` (memory gates), `--max on|off|status`
-  (MAX mode), and `--bypass on|off|status` (see below).
+- **`bin/wildcard-perms`** — the hook executable and CLI (Node). Run with no
+  arguments it is the `PostToolUse` hook. All eight verbs, matching `VERBS` in
+  that file: `--learn scan|status|apply|undo|hits`, `--seed`,
+  `--drain [--dry-run]` (project-local approvals), `--guidance on|off|status`
+  (agent shell style) and `--guidance derived|accept|decline|reset` (mitigations
+  earned from measured cost), `--gates on|off|status|refresh` (memory gates),
+  `--codex-max on|off|status` (the Codex-side analogue of MAX, see below),
+  `--max on|off|status` (MAX mode), and `--bypass on|off|status` (see below).
+  `--help` (or `-h`) prints the usage for all of them, and `--version` (or `-V`)
+  prints the root `package.json` version. An unrecognized flag prints the usage
+  and exits 2 rather than falling through to hook mode.
 - **`src/permissions.js`** — the live Claude allow-list generalization logic, a
   legacy syntax-only mining helper, and the MAX-mode and bypass toggles.
 - **`src/auto-learn.js`**, **`src/history-adapters.js`**, **`src/auto-learn-manager.js`**,
   **`src/auto-learn-worker.js`**, and **`src/policy-exporters.js`** — the shared
-  cross-agent learner, correlated-outcome history adapters, background worker, state manager,
-  and separate Claude Code / Codex policy exporters.
+  cross-agent learner, correlated-outcome history adapters, the stateful manager
+  that orchestrates a scan and owns the durable state, the `worker_threads`
+  background runner that hosts that manager off the extension host thread, and
+  separate Claude Code / Codex policy exporters.
 - **`src/tool-learn.js`** — the non-shell families (MCP tool, web fetch, file tool) and the
   limits on what each may ever propose.
-- **`src/policy-lock.js`** — the advisory lock every policy writer takes, so Auto Learn and
-  the wildcarding pass cannot interleave on `settings.json`.
+- **`src/policy-lock.js`** — the advisory lock every *in-process* policy writer
+  takes, so Auto Learn and the wildcarding pass cannot interleave on
+  `settings.json`. The four shell installers are the exception: `install.sh`,
+  `install.ps1`, `uninstall.sh` and `uninstall.ps1` each rewrite `settings.json`
+  without the lock and without `writeFileAtomicSync`, because a standalone script
+  cannot reach either. `install.sh` writes a `.pre-install-backup` copy first as
+  the next-best thing. Do not run an installer while a scan is in flight.
 - **`src/local-settings.js`** — the project-local drain: which of a project's
   `.claude/settings.local.json` approvals are portable enough to promote to user scope,
   and the promote-verify-prune order that makes removing one loss-free (see below).
@@ -46,6 +58,30 @@ subcommand. The safety boundary for the legacy hook is still your
 - **`src/agent-gates.js`** — the second managed block: your own standing orders, compiled
   out of your Claude Code file memory by `recall.py --gates-compile`. Separate markers and
   a separate switch, so neither block can turn the other off (see below).
+- **`src/permission-match.js`** — one implementation of Claude Code's documented
+  rule matching, shared by the wildcarding pass and the dashboard so the two
+  cannot drift apart. Its citations live in `docs/claude-code-permissions.md`.
+- **`src/settings-write.js`** — the one rebasing writer for
+  `~/.claude/settings.json`, used by the CLI, the hook and the extension alike, so
+  a concurrent edit is re-read rather than clobbered.
+- **`src/fixed-point-cache.js`** — the hook's "are these exact bytes already known
+  to be a fixed point of `processAllowList`?" cache, so the overwhelmingly common
+  no-op tool call skips the whole pass. It writes a user-visible artefact at
+  `~/.claude/wildcarding/fixed-point.json`, keyed on the `mtimeMs:size` of the
+  code that produced it, so it self-invalidates on an in-place checkout. Deleting
+  it costs exactly one cache miss.
+- **`src/managed-policy.js`** — reads the managed policy Claude Code caches on
+  disk, so the learner can tell a grant that will work from one that cannot.
+- **`src/policy-guard.js`** — keeps prior approvals friction-free when org policy
+  tightens, including the console-managed case that arrives without a file.
+- **`src/derived-guidance.js`** — turns a managed rule the allow list can never
+  beat into a behavioural mitigation, since precedence puts managed `ask` above
+  every user allow.
+- **`src/codex-max.js`** — the Codex-side analogue of MAX mode, writing Codex's
+  own `config.toml` rather than `settings.json`.
+- **`src/exec-resolve.js`** — Windows CLI launch resolution: `PATHEXT` finds
+  `codex.cmd` but `CreateProcess` does not consult it, so a bare `spawn('codex')`
+  fails `ENOENT` and naming the shim outright fails too.
 - **`memory/recall.py`** / **`src/recall-index.js`** — the CPU hybrid-recall script
   (bge-small ONNX cosine fused with BM25 over the whole file), which the VSIX bundles, and
   the shared staleness predicate the extension uses to decide whether re-embedding is
@@ -71,10 +107,17 @@ subcommand. The safety boundary for the legacy hook is still your
   will stop a prompt.
 - **`vscode-extension/`** — optional VS Code extension. Watches `settings.json` live
   and wildcards on change, and adds an **Activity Bar dashboard** (asterisk icon):
-  an "Active" status card, live tallies (approved / wildcards / specific), a
-  **Wildcard Now** button, cross-agent **Auto Learn** controls (see below), and a
-  collapsible list of tracked wildcards — each with a one-click prune (✕), and a **⚡ MAX**
-  toggle (skip every prompt — see below) with a status-bar indicator while it's on. It also
+  a hero card carrying the "Active" / "Idle" state, the version, the approved
+  total and a **Wildcard Now** button; then one collapsible row per area, each
+  closed by default and summarised on the right so a row only has to be opened to
+  act on it. Rows cover live tallies (approved / wildcards / specific),
+  cross-agent **Auto Learn** controls (see below), and the tracked wildcards —
+  each with a one-click prune (✕), capped at the first 12 so the list cannot
+  become the panel. A **⚡ MAX** toggle (skip every prompt — see below) sits
+  alongside. The status-bar indicator is **always** present, not only while MAX is
+  on: it reads `$(shield)` with the current friction state for Claude and Codex
+  when prompts are active, and switches to `$(zap)` on a warning background when
+  either agent has prompts off. Clicking it toggles Claude MAX. It also
   keeps a high-water-mark backup of the allow list **and the deny list** at
   `~/.claude/backups/allow-list.latest.json` and offers **Restore prunes from backup**, so an
   org policy that resets `settings.json` (e.g. `allowManagedHooksOnly`) can't permanently lose
@@ -95,11 +138,29 @@ subcommand. The safety boundary for the legacy hook is still your
 
 The hook and VS Code extension install independently. The hook performs live Claude
 wildcarding. The extension adds the dashboard and automatic cross-agent history learner; the
-same Auto Learn service is also available through the CLI. Both need **Node >= 18**.
+same Auto Learn service is also available through the CLI. Both need
+**Node >= 20** — the floor CI actually tests (`test.yml` runs 20 and 22 on Linux
+and Windows). Node 18 is past end of life and nothing here exercises it.
 
 ## Install the hook
 
-Registers the `PostToolUse` hook in `~/.claude/settings.json`.
+Registers the `PostToolUse` hook in `~/.claude/settings.json`, and then **asks
+whether to seed the starter pack into your allow list**. Read the next paragraph
+before you run either installer: the prompt is the last chance to decline, and
+answering `y` merges the pack immediately.
+
+> **Heads up — the starter pack is 395 entries and intentionally includes broad
+> and destructive roots.** Legacy entries such as `Bash(git *)`, `Bash(gh *)`,
+> `Bash(npm *)`, and `Bash(docker *)` stay broad, while `Bash(rm *)`,
+> `PowerShell(Remove-Item *)`, and `PowerShell(Stop-Process *)` are in the
+> starter pack because deleting files and killing processes are routine on a real
+> machine, and your `permissions.deny` list still blocks the catastrophic forms
+> (`rm -rf /*`, `mkfs`, `dd of=/dev/*`, disk-format). **If you'd rather keep being
+> prompted for those, remove their lines** from `patterns/starter-pack.json`
+> *before* you run the installer, or answer `N` at the prompt and seed later. You
+> can also delete them from `~/.claude/settings.json` afterward (the VS Code
+> dashboard's per-row ✕ removes one in a click). See `patterns/starter-pack.md`
+> for the full rationale.
 
 ```bash
 ./install.sh        # macOS / Linux / Git Bash
@@ -117,25 +178,17 @@ The two installers register the same hook under two different command strings �
 path pops a "How do you want to open this file?" dialog on every hook fire. Both
 uninstallers match either form, so it does not matter which one you installed
 with; each reports what it removed, and says so plainly when it found nothing.
-Neither touches your allow list.
+Neither **uninstaller** touches your allow list: removing the hook leaves every
+seeded permission in place, so if you seeded and want that undone, edit
+`~/.claude/settings.json` yourself.
 
-Then seed the starter-pack patterns into your allow list if you want its
-friction-first legacy defaults (optional; see `patterns/starter-pack.md` for what's included):
+If you answered `N` at the prompt, you can seed the starter-pack patterns later
+(optional; see `patterns/starter-pack.md` for what's included, and re-read the
+heads-up above first):
 
 ```bash
 bin/wildcard-perms --seed
 ```
-
-> **Heads up — the seed intentionally includes broad and destructive roots.**
-> Legacy entries such as `Bash(git *)`, `Bash(gh *)`, `Bash(npm *)`, and
-> `Bash(docker *)` stay broad, while `Bash(rm *)`, `PowerShell(Remove-Item *)`,
-> and `PowerShell(Stop-Process *)` are in the starter pack
-> because deleting files and killing processes are routine on a real machine, and your
-> `permissions.deny` list still blocks the catastrophic forms (`rm -rf /*`, `mkfs`,
-> `dd of=/dev/*`, disk-format). **If you'd rather keep being prompted for those, remove
-> their lines** from `patterns/starter-pack.json` before seeding, or delete them from
-> `~/.claude/settings.json` afterward (the VS Code dashboard's per-row ✕ removes one in a
-> click). See `patterns/starter-pack.md` for the full rationale.
 
 Restart your Claude Code session so the hook takes effect.
 
@@ -552,8 +605,11 @@ dashboard answers from one state read cached against the state file rather than 
 
 The `PostToolUse` hook fires after every tool call, and it was spending most of
 that time proving nothing had changed. `ruleMatches` rebuilt a RegExp on every
-call, and `isCoveredBy` sits inside both quadratic passes of `processAllowList`,
-so one pass over a real 317-entry allow list was **192,150 regex compilations**.
+call, and `isCoveredBy` **sat** inside both passes of `processAllowList` while
+those passes were still quadratic, so one pass over a real 317-entry allow list
+was **192,150 regex compilations**. Both passes are now narrowed by the coverage
+index described in `src/permissions.js`, so the quadratic scan is no longer what
+this costs; `isCoveredBy` itself is untouched and still decides every answer.
 
 The matcher now memoizes the normalized rule and the compiled pattern, keyed on
 the rule string. Both are pure functions of that string, so nothing can go
@@ -571,11 +627,18 @@ hook AFTER             min 103.5  p50 109.8  p90 119.1   ms
 ```
 
 Five times faster per tool call, with output proven byte-identical rather than
-assumed. What remains is mostly Node itself: 50 ms of that 110 is bare process
-startup. Two smaller wins came with it, `codex-max`/`agent-guidance`/
-`agent-gates` moved to lazy requires since the hook path never uses them, and
-`drainFromHook` now checks whether the project has a `settings.local.json`
-before taking the policy lock rather than after.
+assumed. Read that pair as one A/B of the memoization change on one machine, not
+as the hook's cost today: later runs on different harnesses have landed anywhere
+from ~59 ms measured directly from `node` to ~175 ms whole-hook, and the launcher
+alone accounts for most of that spread (`cmd /c node …` adds ~17 ms, and
+`powershell.exe -Command node …` adds about a second). Compare a figure only with
+one taken the same way. What remains is mostly Node itself: 50 ms of that 110 is
+bare process startup. Two smaller wins came with it, `codex-max`/`agent-guidance`/
+`agent-gates` moved to lazy requires since the hook path never uses them, and the
+drain now checks whether the project has a `settings.local.json` before taking the
+policy lock rather than after. That check has since moved into `finish()`, which
+runs the wildcarding write and the drain under a single lock acquisition; the
+separate `drainFromHook` entry point it used to live in no longer exists.
 
 Auto Learn and the wildcarding pass are two writers of one `settings.json`, so both take the
 same lock at `~/.claude/wildcarding/auto-learn-policy.lock`; the wildcarding pass defers and
@@ -635,7 +698,9 @@ Generated Codex rules default to `~/.codex/rules/permission-wildcarding.rules`. 
 policy. The generated file is dedicated to Auto Learn; `default.rules` is not overwritten.
 
 Use the dashboard or Command Palette to **Scan now**, **Review candidates**,
-**Apply safe candidates**, **Undo last application**, or **Why did this prompt?**. The diagnostic
+**Undo last application**, or **Why did this prompt?**. **Apply safe candidates**
+is Command Palette only — the dashboard has no button for it, even though the
+webview host still carries an `autoLearnApply` arm that nothing sends. The diagnostic
 checks Claude user-settings precedence or visible Codex user/trusted-workspace rules. It cannot
 see managed/system policy, session approval state, or sandbox restrictions, and labels that
 limitation in its result. The CLI equivalents are:
@@ -922,7 +987,12 @@ layer keeps working, which is the whole reason MAX has two layers.
 
 Cutting a GitHub Release builds and attaches the `.vsix` automatically via
 [`.github/workflows/release.yml`](.github/workflows/release.yml). The version is
-taken from the release tag, so you don't hand-edit `package.json`:
+taken from the release tag, so you don't hand-edit either `package.json`.
+`scripts/package.mjs` passes the tag to `syncVersion`, whose `MANIFESTS` list
+covers **both** `vscode-extension/package.json` (the sidebar badge) and the root
+`package.json` (what `wildcard-perms --version` prints). They used to move
+separately, which is how a build once reported 1.4.2 from the CLI and 1.4.4 in
+the badge:
 
 ```bash
 gh release create v1.2.3 --generate-notes
@@ -946,4 +1016,4 @@ history-aware path: it can learn from confirmed successful one-time executions w
 failures as negative evidence and ignoring unanswered calls. The guidance block is the
 prompt-side path: it stops un-generalizable approvals from being created at all.
 
-Requires Node >= 18. MIT licensed.
+Requires Node >= 20. MIT licensed.

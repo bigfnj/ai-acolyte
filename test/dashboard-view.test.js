@@ -935,7 +935,7 @@ test('a concurrent write inside the lock is not flattened by a stale delta', asy
   // away rather than handed to writeAllow.
   //
   // writeAllow replays a delta computed against the CALLER's snapshot onto a
-  // fresh read. Its own note (src/settings-write.js:145-152) says that is "WRONG
+  // fresh read. Its own note (src/settings-write.js:166-172) says that is "WRONG
   // for one whose whole output is a function of the list it read", and names the
   // wildcarding pass as exactly that caller. Until the probe moved out of the
   // lock, runWildcarding satisfied that precondition only BY ACCIDENT, because

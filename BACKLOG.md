@@ -248,25 +248,25 @@ tooling — truncates the range; `apply(text, true)` then leaves the old body ta
 plus an orphaned END marker in the file, accumulating on every toggle.
 
 And there are **five unsynchronized writers** of that one file: CLI guidance
-(`bin/wildcard-perms:422`), CLI gates (`:489`), extension guidance
-(`extension.js:2367,2416`), extension gates (`:2531,2595`) and `decideDerived`
+(`bin/wildcard-perms:579`), CLI gates (`:646`), extension guidance
+(`extension.js:2725,2774`), extension gates (`:2935,2999`) and `decideDerived`
 (`auto-learn-manager.js:921`). Only the last holds a lock, and it is the *policy*
 lock, which none of the others take — so it buys nothing here. The extension also
 recompiles gates automatically on a memory-dir change, so an automatic write can
 race a manual `--guidance off`. Individually recoverable; combined with the two
 findings above, a race can leave the file structurally broken. Note also that the
 instruction-file backups are single-slot fixed names
-(`agent-guidance.js:211`, `derived-guidance.js:308`), so two toggles in a row
+(`agent-guidance.js:233`, `derived-guidance.js:342`), so two toggles in a row
 overwrite the good copy with the bad one.
 
 ### Two unvalidated external inputs reach a policy or instruction file
 
 - **Project `settings.local.json` is promoted to user scope with no trust gate on
-  the CLI path.** `bin/wildcard-perms:252-266` to `src/local-settings.js:172-244`.
+  the CLI path.** `bin/wildcard-perms:330-344` to `src/local-settings.js:190-263`.
   `drainFromHook` takes `cwd` from the hook's stdin and promotes that project's
   local allow entries into **user-scope** allow on the next tool call. The
   extension refuses this for an untrusted workspace
-  (`extension.js:2196-2201`, "an untrusted window reads but never writes"); the
+  (`extension.js:2561-2565`, "an untrusted window reads but never writes"); the
   CLI has no equivalent, and VS Code trust has no CLI analogue. A repo that
   commits `.claude/settings.local.json` containing `Bash(curl *)`,
   `Bash(python *)` or `Bash(node *)` clears `PROMOTABLE` and lands in the user's
@@ -277,7 +277,7 @@ overwrite the good copy with the bad one.
   `src/derived-guidance.js:73` interpolates the rule into a code span in the block
   body. On the `inertFamilies` path the value is `String(rule)` straight from
   `~/.claude/remote-settings.json`, and `addCost`
-  (`auto-learn-manager.js:787`) does **not** apply `clean()` while the sibling
+  (`auto-learn-manager.js:802`) does **not** apply `clean()` while the sibling
   managedHits path at `:1391` does (`clean(observation.managedRule, 200)`). A
   rule containing a backtick, a newline or the END marker escapes the span or
   breaks the block. remote-settings.json is a local client-refreshed cache, so
@@ -407,7 +407,7 @@ leaving an unreachable branch: `managedPolicyPath` (3 reads, 0 writes),
 `successThreshold` — the last two unreachable because `extension.js:887-888` sets
 both spellings on the same object, so the `||` and `??` legs never fire.
 
-Also unreachable: `extension.js:996-997` (`typeof manager?.overview ===
+Also unreachable: `extension.js:1050-1051` (`typeof manager?.overview ===
 'function'` is always true, the same shape as the three fallbacks already
 recorded here), `policy-exporters.js:650-652` (a mergeClaudeAllow overload shim
 nobody calls with an object third argument) and `:658-661` (that third parameter
@@ -453,8 +453,8 @@ empirically 2026-09-10 under both PowerShell editions, including per-hook remova
 that spares a co-located third-party hook, and `memory.enabled` taking effect both
 ways without a window reload. What remains:
 
-- **Two dead webview switch arms**: `extension.js:2814` (autoLearnApply) and
-  `:2816` (autoLearnMode) have no sender. All `type:` literals were enumerated
+- **Two dead webview switch arms**: `extension.js:3165` (autoLearnApply) and
+  `:3167` (autoLearnMode) have no sender. All `type:` literals were enumerated
   (16 senders, 18 arms); the element ids alApply/alMode do not exist. Two
   dashboard buttons were removed and their handlers left behind. Both features
   remain palette-reachable, so this is dead dispatch, not lost functionality.
@@ -485,8 +485,27 @@ scope. As it stands, the lint's one actionable finding class is guaranteed noise
 - `src/policy-lock.js:92-96`: if openSync succeeds but writeFileSync/fsyncSync
   throws, removeOwnedLock cannot JSON.parse the empty file and returns false,
   orphaning the lock until the staleness path reclaims it.
-- `package.json` declares `engines: node >=18`, but CI now tests 20 and 22 and
-  node 18 is past end of life. Either raise the floor or test it.
+- ~~`package.json` declares `engines: node >=18`, but CI now tests 20 and 22 and
+  node 18 is past end of life. Either raise the floor or test it.~~
+  **RAISED TO `>=20` 2026-09-14, not tested at 18.** Reasoning, because the
+  alternative was defensible: node 18 is past end of life and takes no security
+  patches, and this project writes the user's permission policy, so advertising
+  support for an unpatched runtime is a promise it cannot keep. Nothing exercises
+  18 — `test.yml` runs 20 and 22 on ubuntu and windows, `release.yml` builds on
+  20 — so `>=18` was an untested claim, which is the same class of unverified doc
+  claim as everything else in this cluster. Adding an 18 job would have added two
+  jobs to defend an EOL runtime and committed the project to keeping them green.
+  **The floor was raised, not the matrix.**
+  - **This is a support-policy decision, not a technical necessity, and saying so
+    matters.** A search of `src/`, `bin/`, `test/`, `scripts/` and the extension
+    found no API that requires node 20: the `node:` builtins in use are assert,
+    child_process, crypto, events, fs, module, os, path, test, url and
+    worker_threads, with no `mock.timers`, no `structuredClone`, no `fs.glob`, no
+    `util.styleText`, and no `--test-reporter` flags. The code would very likely
+    still run on 18. The claim being fixed is that the project *promises* a floor
+    it never tests, not that 18 is broken.
+  - The two `Node >= 18` statements in README.md moved with it. Nothing asserts
+    the `engines` value, so there was no test to update.
 - A work-domain email address appears as the author of 3 of 48 commits (all
   2026-08-21) in this **public** repo's history. Future commits are already safe:
   the global git identity is a personal address. Rewriting history was declined —
@@ -543,13 +562,44 @@ succeeded in an interactive session. Reads as `-p` failing closed because it
 cannot prompt, with a message naming the wrong reason. Not this project's bug;
 recorded because it invalidates any redirect experiment run through `-p`.
 
-### Claude Code's built-in read-only command set is not fully known
+### Claude Code's built-in read-only command set — the inference was wrong, the probe is still owed
 
-`hostname` ran with no matching allow entry and no prompt, so the built-in set is
-wider than the 14 commands `docs/claude-code-permissions.md` lists from the docs.
-The list is used to argue which pack entries are redundant, so it is worth
-pinning down before acting on that argument again. `scripts/auto-mode-audit.js`
-is the wrong tool (it reads load-time warnings); this needs a per-command probe.
+**Investigated read-only 2026-09-14. The conclusion below is withdrawn; the doc
+now carries an honest marker instead of a confident claim either way.**
+
+Original: `hostname` ran with no matching allow entry and no prompt, so the
+built-in set is wider than the 14 commands `docs/claude-code-permissions.md`
+lists from the docs. The list is used to argue which pack entries are redundant,
+so it is worth pinning down before acting on that argument again.
+`scripts/auto-mode-audit.js` is the wrong tool (it reads load-time warnings);
+this needs a per-command probe.
+
+**What checking actually found:**
+
+- The official permissions page states the set outright, names the same 14 plus
+  read-only `git`, and adds that it **is not configurable** — to require a prompt
+  for one of them you add an `ask` or `deny` rule. It reads as a closed list, not
+  as examples. `hostname` is not in it, and neither are `date`, `whoami`, `uname`
+  or `df`.
+- So "the set is wider" does not follow from the sighting. **The sighting has a
+  simpler explanation that was never ruled out:** the machine it was taken on
+  runs `permissions.defaultMode: auto`, and in auto mode the classifier decides
+  everything. This file already documents that mode, in the section table and in
+  "Auto mode discards part of your allow list". An unprompted command under auto
+  says nothing about the read-only set, because the classifier would have allowed
+  it regardless. The starter pack does not contain a `hostname` entry either, so
+  the pack was not the explanation.
+- **The probe is still owed, and it now has a precondition it did not have
+  before: pin the mode to `default`.** Run each candidate with no matching allow
+  entry, no `ask`/`deny` rule and the classifier out of the picture, then record
+  whether it prompts. A probe run in `auto` measures the classifier and cannot
+  answer this question at all — which is exactly how the `hostname` reading went
+  wrong the first time.
+- Running that probe needs a live Claude Code and is a behavioural experiment;
+  no amount of reading settles it, so it was not attempted here.
+  `docs/claude-code-permissions.md` now carries the withdrawal, the closed-set
+  citation, and the one-directional rule: "it is on the list, so the grant was
+  redundant" holds; "it is not on the list, so the grant did something" does not.
 
 ### `.exe` spellings split a family's evidence
 
@@ -743,9 +793,30 @@ And `uninstall.sh` and `test/gates-stale.sh` were still CRLF in the tree despite
 `*.sh eol=lf` having been added hours earlier — for exactly this reason. A sweep
 of every `eol=lf` file now reports 0 CR across the tree.
 
-### README claims that are now false
+### ~~README claims that are now false~~ — DONE 2026-09-14
 
-Checked line by line 2026-09-10:
+**Reconciled with "README.md — five concrete falsehoods" below, which restates
+most of this list.** They were worked as one set, not applied twice. Outcome per
+item:
+
+- The `policy-lock.js` "every policy writer" claim is **confirmed false and
+  fixed**. All four shell installers write `settings.json` directly and take
+  neither the lock nor `writeFileAtomicSync`: `install.sh:74`, `install.ps1:133`,
+  `uninstall.sh:80`, `uninstall.ps1:144`. The README now says *in-process* writer
+  and names the four exceptions. `install.sh`'s own comment claimed it was "the
+  only unlocked, non-atomic write in the project" — also false, also fixed, and
+  it now records that it is the only one of the four that writes a backup first.
+- The panel description is **fixed**: hero card, stateful rows closed by default,
+  and `LIST_CAP = 12` are all documented now, along with the permanent status-bar
+  indicator.
+- The `isCoveredBy`/timings/`drainFromHook` item duplicates item 3 below and was
+  fixed once.
+- The verb list duplicates the "7 of 10" note below and was fixed once.
+- **The ```powershell fence item needs NO ACTION and is now closed.** The entry
+  says so itself: true now that `-AsHashtable` is gone. Recorded here so the next
+  audit does not re-open it.
+
+Original text follows. Checked line by line 2026-09-10:
 
 - `README.md:36` — "`src/policy-lock.js` — the advisory lock **every** policy
   writer takes". Four `settings.json` writers take neither the lock nor
@@ -840,7 +911,7 @@ and not ours.
 
 | Item | Measured | Frequency |
 |---|---|---|
-| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. **The retracted 2.3 ms figure still ships in a code comment at `src/permissions.js:686-687`**, in the very commit whose message retracts it | ~0.9 ms | per hook call |
+| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. ~~**The retracted 2.3 ms figure still ships in a code comment at `src/permissions.js:686-687`**, in the very commit whose message retracts it~~ — **FIXED 2026-09-14.** It shipped at `src/permissions.js:10`, not 686-687; the reference in this very sentence was itself stale. The header now names ~0.9 ms and says why 2.3 ms was wrong | ~0.9 ms | per hook call |
 | A fixed-point cache keyed on a CONTENT HASH of settings.json lets the hook skip the read, the module load and the pass | our-code p50 11.80 -> 2.46 ms; wall 62.3 -> 53.6 ms; 30/30 hits | per hook call |
 | ~~`memoryReport()` runs TWICE per dashboard refresh~~ **DONE 2026-09-10.** "11.22 ms" was the COMBINED cost of both calls, not the saving — the second is much cheaper because the file cache and the JIT are warm. Measured directly, 11 interleaved fresh processes: one call 6.99 ms, two 9.92 ms, so hoisting saves **2.93 ms** and 25 fs syscalls | 2.93 ms | per refresh |
 | `runWildcarding` takes the policy lock even on the unchanged path; the CLI hook was deliberately changed not to | lock cycle 3.72 ms of 9.60 ms, plus contention with Auto Learn | per settings.json write |
@@ -906,8 +977,8 @@ VSIX gap.
 
 ### Vestigial dashboard markup, with one visible consequence
 
-`id="toggle"` (`extension.js:3205`) has no JS reader at all, and `id="chev"`
-(`:3206`) is superseded by `head.querySelector('.chev')` (`:3234`). The leftover
+`id="toggle"` (`extension.js:3602`) has no JS reader at all, and `id="chev"`
+(`:3603`) is superseded by `head.querySelector('.chev')` (`:3631`). The leftover
 `#chev` CSS rule (`:3008`, `width: 1em; font-size: 10px`) still wins on
 specificity over `.chev` (`:3057`, `width: .8em; font-size: 9px`), so the
 "Wildcards tracked" chevron renders visibly differently from every other row.
@@ -1137,26 +1208,37 @@ This also explains a standing discrepancy: measured directly from node the hook
 is 58.8 hit / 71.9 miss p50, well under the ~88/106 recorded earlier. The
 launcher is most of the gap.
 
-### Retracted figures that still ship inside code comments
+### ~~Retracted figures that still ship inside code comments~~ — CLEARED 2026-09-14
 
-Each of these is a number this file already corrected, still asserted in a
-tracked comment where the next reader will believe it:
+All four are now gone from the tree. Two of them had already been fixed before
+this pass and the entry had not been updated, which is the same failure mode it
+was written about: **two of the four line references in the original list were
+themselves wrong.** Kept as a record, with what was actually found beside each.
 
 - `src/permissions.js:686-687` — "4.803 ms with this eager, 2.476 ms stubbed,
   so the hook was paying ~2.3 ms per tool call". Retracted by its own commit
-  message; the real figure is ~0.9 ms.
+  message; the real figure is ~0.9 ms. **The line reference was wrong.** No such
+  text existed at 686-687. The surviving retracted figure was a bare "2.3 ms" in
+  the module header, and it contradicted the full measurement history written out
+  30 lines from the end of the same file. Now corrected in place, and the header
+  names why 2.3 ms was wrong rather than just dropping it.
 - `src/fixed-point-cache.js:9` — "the ~4.8 ms require chain". Measured 3.32 p50
-  / 2.56 min.
+  / 2.56 min. **Already fixed before this pass**: the module header reads
+  "~3.4 ms require chain" and the comment carries its own explicit retraction of
+  the 4.8 figure.
 - `bin/wildcard-perms:253-254` — "13.2 ms of the hook's own work … against ~1 ms
   to key the file". The total is right **by coincidence**; both terms are wrong
   (require 3.43 not 4.8; pass 9.96 not 8.1) and "~1 ms" omits the cache module's
-  own require, so the real consult is 3.19 ms. That omission is precisely the
-  methodological error `86d2da2` criticises in its own stub harness.
+  own require, so the real consult is 3.19 ms. **Already fixed before this pass**,
+  and the corrected comment now states both wrong terms and the 3.19 ms consult
+  explicitly.
 - `memoryReport`'s saving is recorded as 2.93 ms and 25 syscalls. Re-measured
   the same day: **5.00 min / 5.23 p50 ms and 35 syscalls** (17 `readFileSync` +
   16 `existsSync` + 2 `readdirSync`). The corpus grew, so this *understates*.
   The number is corpus-dependent and will keep drifting — it should be described
-  as a range, not a constant.
+  as a range, not a constant. **Done at both sites** in the extension: each now
+  reads "roughly 3-5 ms and 25-35 fs syscalls", says the cost scales with the
+  corpus, and says to re-measure before citing a figure.
 
 A pattern worth stating plainly: **every performance figure in this project that
 was not re-measured cold, in fresh interleaved processes, against a
@@ -1373,7 +1455,7 @@ suite silently.
 
 Recorded because it is easy to get wrong and the failure is a data loss, not a
 slowdown. `writeAllow` replays a **delta computed against the caller's
-snapshot**, and its own note at `src/settings-write.js:145-152` names this
+snapshot**, and its own note at `src/settings-write.js:166-172` names this
 caller: *"WRONG for one whose whole output is a function of the list it read …
 Such a caller must re-read and recompute first."*
 
@@ -1600,12 +1682,81 @@ Method note that changed three verdicts: **comment mentions are not references.*
   `writeFileAtomicSync`, and `err.result`/`err.latest` on both CONTENDED throws.
   Four unused imports: `isCoveredBy` in two modules, `SETTINGS_ABSENT`/
   `SETTINGS_PRESENT` in the extension.
-- **~60 stale `file:line` refs in this file, and 7 stale cross-file refs in code
-  comments.** A corrected list was produced; applying it is mechanical and worth
-  doing before the next audit wastes time on it. Everything below `runWildcarding`
-  in `extension.js` shifted by ~41 lines this pass alone.
+- ~~**~60 stale `file:line` refs in this file, and 7 stale cross-file refs in code
+  comments.**~~ **PARTLY DONE 2026-09-14, and it is no longer a hand count.**
+  `scripts/check-line-refs.js` extracts every `file:line` reference from tracked
+  `.md` files and from comments in tracked source, resolves each against the
+  current tree, and grades it against an ANCHOR recovered from the surrounding
+  prose — a backticked span, a quoted phrase, or a distinctive identifier. Run it
+  with `--detail` to see the cited line beside the candidate, or `--json` to
+  consume it. It counts **147** references (92 in BACKLOG.md, 41 in code comments,
+  the rest in other docs), which is where the "~60" estimate came from and is
+  more than twice it. 30 were corrected in this pass: 13 in code comments and 17
+  here, each verified by reading the target rather than trusting the report.
+  Everything below `runWildcarding` in `extension.js` shifted by ~41 lines in the
+  pass that produced the original note, and editing `src/permissions.js`'s header
+  by three lines during THIS pass invalidated four more references several hundred
+  lines below it. That is the shape of the problem, and it is why the checker
+  exists.
+  - **Read the checker's STALE verdict as a candidate, not a proof.** Measured
+    against hand verification on the code-comment set, a good fraction of STALE
+    rows are the checker picking a neighbouring symbol as the anchor while the
+    reference itself is fine. `bin/wildcard-perms:11-26` is the clean example:
+    correct, and reported STALE because the sentence around it also names
+    `createHash`. Verify before rewriting. It has no false NEGATIVES that were
+    found by hand, so the honest summary is high recall, moderate precision.
+  - **The residue is deliberate.** What is left is mostly UNVERIFIABLE — a
+    reference whose surrounding prose makes a descriptive claim ("the refusal
+    this documents") with no literal string to match. There is nothing to check
+    those against short of reading both ends, and a guess would be worse than the
+    stale number.
+  - **Bare `:NNN` continuation references are NOT covered** (`(`:489`)`,
+    `(`:3206`)`). They carry no filename, so the checker cannot resolve them; the
+    ones fixed in this pass were fixed by hand alongside their named sibling.
+    Anyone extending the checker should start there.
 
-### README.md — five concrete falsehoods, one safety-relevant
+### ~~README.md — five concrete falsehoods, one safety-relevant~~ — DONE 2026-09-14
+
+**Four of the five were real. Two of the listed claims did not survive checking,
+and the corrections below say which.** Every fix was verified against the code
+path before it was written, not taken from this list on trust.
+
+- **1 (safety) — confirmed and fixed.** `install.sh:88` and `install.ps1:147`
+  both prompt, then run `--seed` at `:92` / `:149`; the pack is 395 entries and
+  carries `Bash(rm *)`, `PowerShell(Remove-Item *)` and `PowerShell(Stop-Process *)`.
+  The uninstallers touch nothing: neither mentions seeding. The heads-up now sits
+  **above** the install commands, names the 395 count, and says to edit the pack
+  *before* running the installer. The sentence is narrowed to the uninstallers and
+  now also says removing the hook does not un-seed.
+- **2 — WRONG as written.** "Apply safe candidates" DOES exist. It is registered
+  at `vscode-extension/extension.js:1938` and declared in the extension's
+  `package.json`, so it is Command Palette reachable. What is missing is only the
+  *dashboard* route: the webview's `autoLearnApply` arm has no sender, confirmed
+  by enumerating every `vscode.postMessage` in the file. The README now says the
+  verb is palette-only and names the orphaned arm.
+- **3 — confirmed and fixed.** The present-tense "quadratic" claim contradicted
+  `src/permissions.js:210-224`, which says in capitals that those are the BEFORE
+  numbers. Both the README and the duplicate of the same sentence in
+  `src/permission-match.js` are now past tense. `drainFromHook` is gone; the
+  README names `finish()` instead, and the behaviour it described still holds —
+  the `existsSync` gate is at `bin/wildcard-perms:333`, before the lock at `:336`.
+  The timing block is kept but labelled as one A/B on one machine, with the
+  launcher spread that explains why other figures disagree.
+- **4 — WRONG as written, already fixed in code.** `scripts/package.mjs` calls
+  `syncVersion`, whose `MANIFESTS` list covers the extension manifest **and** the
+  root one. The README claim is true today; it now names the mechanism so the
+  next reader can check it rather than believe it.
+- **5 — confirmed and fixed.** `updateStatusBar` ends in an unconditional
+  `statusBar.show()` and the file contains no `hide()`, so the indicator is
+  permanent. The README now describes what it shows when MAX is off.
+- **The rest, all confirmed and fixed.** The CLI summary listed 7 of 10; `VERBS`
+  in `bin/wildcard-perms` holds 8, plus `--help`/`--version` handled above them.
+  The `auto-learn-manager`/`auto-learn-worker` descriptions were indeed swapped —
+  the manager is the stateful orchestrator, the worker is the `worker_threads`
+  host. All 8 missing `src/` modules are documented, including
+  `fixed-point-cache.js` and its user-visible artefact.
+
+Original text follows.
 
 1. **"Neither touches your allow list" is false.** Both installers interactively
    prompt to seed, then run `--seed`, merging a **395-entry** pack that includes

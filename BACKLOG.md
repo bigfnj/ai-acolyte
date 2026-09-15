@@ -1254,6 +1254,19 @@ is a direct tax on the "focus on features" goal. Worth a dedicated pass, and wor
 checker's anchor to the sentence holding the citation rather than the paragraph before trusting
 any future count.
 
+### CI is running on borrowed time: the pinned actions target a deprecated Node
+
+Every job on the 1.4.10 run (34928599078, all five green) carried the same annotation:
+
+> Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run
+> on Node.js 24: `actions/checkout@v4`, `actions/setup-node@v4`.
+
+"Forced to run on" is GitHub bridging it for now, not a stable arrangement. When the bridge is
+withdrawn both actions stop, and they are the first two steps of all five jobs, so the failure
+mode is the whole matrix at once rather than one test. Bump both to `@v5`. Unrelated to the
+`engines` floor moving 18 to 20 in `package.json`, which is about the runtime the package
+supports and is already satisfied by every matrix leg.
+
 ### Optimization proposals, each with the measurement that would settle it
 
 No numbers asserted. This repo's rule is that a figure is real only when measured cold, in fresh

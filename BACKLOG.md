@@ -1066,3 +1066,110 @@ because a positive check runs first, and that ordering is load-bearing and undoc
 **Two in-tree figures for the same ONNX session construction disagree by 3x.** `recall.py` says
 "~620 ms (measured on this box)" and `test/recall-index.test.js` says "~210 ms each". Neither names
 its method. One is stale.
+
+## From the 2026-09-14 post-merge audit of `d5d3b85..8cc7fbe`
+
+One agent read the whole seven-branch diff, ran the suite, and built a 37-mutation harness over a
+copy of the tree. 32 of 37 fired. Everything below was measured on this box that day.
+
+### Re-filed: three records the BACKLOG split dropped
+
+The split removed `### Interesting, off-axis` as closed. Four of its seven bullets were fixed that
+day; three were not, are in neither new file, and their code is unchanged. They were deliberate
+"known and accepted" records, and deleting a record is how a known issue becomes a rediscovery.
+Re-verified against current code before re-filing.
+
+**A bare `~` in `backupMirrorPath` resolves to the home directory itself.** `mirrorBackupPath()` at
+`vscode-extension/extension.js:204-206` does `path.join(os.homedir(), raw.slice(1).replace(/^[\\/]+/, ''))`.
+For `~` alone that is `path.join(home, '')`, so the mirror write targets a directory, fails EISDIR,
+and the failure is swallowed. Every other `~`-prefixed value is handled correctly; only the bare
+one degenerates.
+
+**`auto-mode-audit.js` claims it runs with no credentials, and does not.** `scripts/auto-mode-audit.js:77`
+passes `env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }`. That redirects the config directory,
+not credentials, so with `ANTHROPIC_API_KEY` set in the environment the probe authenticates and makes
+a real API call. The header at `scripts/auto-mode-audit.js:14` promises the opposite: "with no
+credentials the run stops at Not logged in". The BOM half of this bullet was fixed at
+`scripts/auto-mode-audit.js:52`; the credentials half, an unguarded `JSON.parse`, and a module-level
+`args` read were all dropped with the heading.
+
+**Two stat-keyed caches can still return a stale verdict.** `policyFingerprint` at
+`src/auto-learn-manager.js:916` and `autoLearnStateStamp` at `vscode-extension/extension.js:1047`
+both key on `${stat.mtimeMs}:${stat.size}`. A same-size in-place rewrite inside timestamp
+granularity is invisible to both. Accepted when written; still true.
+
+### Small, confirmed, not worth acting on alone
+
+**`managedClaude` keys are permissions now, but the normaliser caps keys at 512.**
+`src/auto-learn-manager.js:1568` re-keyed `nextManagedClaude` by permission. The normaliser at
+`:268-276` applies `clean(key, 512)` to keys and `clean(permission, 768)` to values, so a permission
+between 513 and 768 characters, legal everywhere else in that file, has its key truncated on the
+round trip, and two sharing a 512-character prefix collide onto one key and lose a value. No
+realistic input reaches it: a 512-character `WebFetch(domain:...)` is the only shape that gets there,
+and both consumers take `Object.values` (`:1918-1919` are the only readers), so nothing else breaks.
+Note it if the cap is ever touched.
+
+**`state.codexTargets` has no eviction, and the new prune made it marginally worse.** One 16-hex-keyed
+record is added per Codex target at `src/auto-learn-manager.js:968` and `:1622`, and nothing deletes
+one. `pruneGrantKeys` at `:788-791` now empties the `applied` and `reviewed` lists inside an obsolete
+record but leaves the record, so an abandoned target becomes a permanently retained
+`{applied: [], reviewed: []}` of roughly 50 bytes. Every other axis is capped (candidates 1000,
+pruned 2000, cursors 5000, observation hashes 20000, managed hits 200). Two lines if anyone is
+already in `pruneGrantKeys`: delete a record whose two lists both emptied.
+
+**`src/permissions.js:68`'s `if (lastErr)` cannot be false.** The only ways out of the retry loop
+without returning are exhausting `MAX_ATTEMPTS` or breaking on a non-retryable code, and both assign
+`lastErr` at `:50`. So the guard is dead and the `process.emitWarning` always fires when the fallback
+is reached. Behaviour is right and preserving the cause is a genuine improvement over discarding it,
+but mutating the guard to `if (false)` survived the whole of `test/settings-write.test.js`: nothing
+anywhere asserts the warning exists. Either assert it or drop the guard, so the code stops implying a
+false branch exists.
+
+**`MIN_SUPPORTED_VERSION` cannot change an outcome.** Mutating the check at
+`src/auto-learn-manager.js:62` to `if (false) return null` left the suite green, because any
+`from < VERSION` also falls out of the `while` loop at `:66-70` on a missing migration step and
+returns null anyway. Two paths, one reachable. The test named for it at
+`test/auto-learn-state-hygiene.test.js:76` passes for the other reason. The adjacent
+`STATE_MIGRATIONS = new Map()` at `:47` is honestly documented as empty and unreachable today; this
+one is not documented at all.
+
+### New behaviour with no coverage
+
+**`candidateFingerprint` records `permissions` and nothing asserts it.**
+`src/auto-learn-manager.js:1553` added `permissions: item.permissions`, with a comment explaining
+that a family which gained a second spelling is a different grant from the one a human approved.
+Deleting the line left the suite green.
+
+**`src/auto-learn.js:912-915`'s `candidate.claudePermission` ternary is belt and braces.** Mutating
+it to always-true left the suite green: `normalizePermissionSpelling(null)` returns `''` and the
+filter below drops everything regardless. Not a bug. `test/auto-learn-spellings.test.js:82-95` does
+not discriminate it, so the guard could be deleted tomorrow with no signal.
+
+### A pre-existing frontmatter hazard, now written down
+
+**`_fm` matches an indented `scope:` under any other frontmatter key.** The regex is `^\s*scope:`, so
+`scope: global` nested under `metadata:` compiles a gate nobody declared at the top level. The new
+Python fixture at `test/recall-py.sh:243-251` writes exactly that shape and passes for the right
+reason, but it documents an accident rather than a decision. Pre-existing, not from this work, and
+that fixture is currently the only place it is recorded.
+
+### Optimization proposals, each with the measurement that would settle it
+
+No numbers asserted. This repo's rule is that a figure is real only when measured cold, in fresh
+interleaved processes, against a purpose-built variant with the change removed.
+
+**The `numpy` matmul at `memory/recall.py:610-616`** replaced a Python dot product per document. Its
+own comment says "immaterial for one CLI query, real across a bench run", which is the honest
+framing. To settle: run `memory/bench/gate_recall.py` cold in fresh interleaved processes against a
+variant with the matmul reverted, over the 24-question set, and report the per-query MEDIAN. The
+~620 ms ONNX session dominates the total and would swamp the signal.
+
+**`Counter` at `memory/recall.py:468-470`** is almost certainly unmeasurable end to end on a 123-file
+corpus. What would prove otherwise: `_lex_index` alone, timed in fresh processes over a synthetic
+corpus ten times the size, with the hand-rolled loop restored in the comparison variant. Low value.
+
+**`src/permissions.js:52`'s "no sleep after the last attempt"** removes up to 200 ms from a 1.1 s
+worst case. The saving is real by construction; the open question is whether the path is ever
+reached. Fault-injection measurement: stub `fs.renameSync` to throw `EBUSY` unconditionally and time
+`writeFileAtomicSync` to completion, both variants, cold. The answer belongs in
+`docs/engineering-record.md`.

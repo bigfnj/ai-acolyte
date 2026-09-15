@@ -687,10 +687,10 @@ function downloadRecallModel() {
       let received = 0, total = 0, reported = 0, transfer = null;   // the redirect-following handle, not one request
 
       const fail = (err) => {
-        out.close();
-        try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+        // Unlink INSIDE close()'s callback and resolve only after it: close() is async, so
+        // unlinking beside it raced the open handle, which on Windows is a swallowed EPERM.
         vscode.window.showErrorMessage(`permission-wildcarding: recall model download failed — ${err.message || err}`);
-        resolve(false);
+        out.close(() => { try { fs.unlinkSync(tmp); } catch { /* already gone */ } resolve(false); });
       };
 
       token.onCancellationRequested(() => transfer?.destroy(new Error('cancelled')));

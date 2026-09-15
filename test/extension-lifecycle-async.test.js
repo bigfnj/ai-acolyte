@@ -480,9 +480,37 @@ let recallModelHidden = null;
 // the vocab still resolves (fakeRecallEnvironment always writes one, and RECALL_MODEL_DIR
 // is probed first), so recallVocabSource() keeps working and only the "is there a usable
 // model" answer changes.
+// Set by the stub below when the extension unlinks the download's `.tmp`, recording
+// whether the write stream's close() had COMPLETED at that moment.
+//
+// This is the observable, rather than "is the file gone afterwards". The defect is a race:
+// unlinking beside an async close() while the handle is open. On Windows that is EPERM into
+// a swallowing catch and the partial file survives; on Linux, and on Windows under some node
+// versions, the unlink happens to succeed and the bug is invisible. Asserting the leftover
+// file therefore passes on the machine you are developing on and fails only on one CI leg,
+// which is how this shipped in the first place. Asserting the ORDER fails everywhere.
+let tmpUnlinkObserved = null;
+
 function fsHidingRecallModel(realFs) {
+  let tmpStreamClosed = false;
   return {
     ...realFs,
+    createWriteStream(target, ...rest) {
+      const stream = realFs.createWriteStream(target, ...rest);
+      if (String(target).endsWith('.tmp')) {
+        tmpStreamClosed = false;
+        tmpUnlinkObserved = null;
+        const realClose = stream.close.bind(stream);
+        // Always pass a callback, even when the caller gave none, so the flag flips on the
+        // same tick node would have called the caller's own callback on.
+        stream.close = (cb) => realClose(() => { tmpStreamClosed = true; if (cb) cb(); });
+      }
+      return stream;
+    },
+    unlinkSync(target) {
+      if (String(target).endsWith('.tmp')) tmpUnlinkObserved = { closedFirst: tmpStreamClosed };
+      return realFs.unlinkSync(target);
+    },
     existsSync(target) {
       if (recallModelHidden) {
         const resolved = path.resolve(String(target));
@@ -1180,11 +1208,11 @@ async function startModelDownload(t) {
   const run = app.progressRuns.at(-1);
   assert.equal(run.options.cancellable, true, 'precondition: the progress offers Cancel');
   assert.equal(run.cancels.length, 1, 'precondition: the task registered a cancel handler');
-  return { app, rebuild, cancel: () => { for (const cb of run.cancels) cb(); } };
+  return { app, home, rebuild, cancel: () => { for (const cb of run.cancels) cb(); } };
 }
 
 test('cancelling the model download destroys the request that is actually transferring', TEST_TIMEOUT, async (t) => {
-  const { app, rebuild, cancel } = await startModelDownload(t);
+  const { app, home, rebuild, cancel } = await startModelDownload(t);
   try {
     app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
     assert.equal(app.httpsRequests.length, 2, 'the 302 was followed onto a second request');
@@ -1200,6 +1228,19 @@ test('cancelling the model download destroys the request that is actually transf
     await rebuild;
     assert.ok(app.errors.some((m) => m.includes('cancelled')),
       'the cancellation was reported as a failed download, not swallowed');
+
+    // The temp file is the whole point of downloading to `.tmp` and renaming on success,
+    // and a cancelled download used to leave it behind forever. CI caught that as a
+    // CLEANUP failure — rimraf could not remove the directory — rather than as a failed
+    // assertion, because the test body had already passed.
+    assert.ok(tmpUnlinkObserved, 'precondition: the cancelled download tried to unlink its .tmp');
+    assert.equal(tmpUnlinkObserved.closedFirst, true,
+      'the .tmp was unlinked while its write handle was still open. On Windows that is an '
+      + 'EPERM the catch swallows, so the partial file survives every cancel; elsewhere it '
+      + 'happens to succeed, which is why only one CI leg ever saw it');
+    const leftovers = fs.readdirSync(path.join(home, '.claude', 'wildcarding', 'models'));
+    assert.deepEqual(leftovers.filter((f) => f.endsWith('.tmp')), [],
+      `a cancelled download left its partial file behind: ${leftovers.join(', ')}`);
   } finally {
     await app.dispose();
   }

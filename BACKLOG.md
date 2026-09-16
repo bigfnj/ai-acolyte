@@ -115,6 +115,31 @@ exactly one `settings.local.json` exists anywhere under the working root, it is 
 and its mtime is 12 days old, so the zeros were never evidence about promotability in
 the first place.
 
+### The public-repo privacy gate is text-only, and images bypass it
+
+Recorded 2026-09-16, not as a defect to fix but so nobody assumes coverage that is not
+there. The owner has reviewed and accepted the current instance.
+
+Everything that keeps private content out of this repo greps. The seed-pack filter, the
+scans over tracked files and commits, and `test/source-encoding.test.js` all operate on
+text. On 2026-09-16 commit `7f5cbf9` excluded 78 allow entries from the starter pack for
+being machine-specific, naming absolute paths with drive letters, quoted executable
+paths, and other projects as the disqualifying classes. Forty-four minutes later
+`b8203a9` committed a screenshot that renders all three of those classes as pixels, on
+the README front page. The text gate held exactly as designed; the image walked past it.
+
+What is actually new in that image, as opposed to already public in tracked text: an
+internal tool name and its build-directory layout. The project name it also shows has
+been in `memory/README.md` since v1.0.0, and the username is out of scope by the owner's
+decision.
+
+No automated fix is proposed. An OCR gate on PNGs is more machinery than this earns, and
+a rule saying "look at screenshots before committing them" is the kind of check nobody
+runs. The useful thing is knowing the boundary: **a scan reporting a repo clean has
+scanned its text.** If a future pass adds images, someone has to look at them. Structural
+checks that ARE cheap and were run here: no bytes after `IEND`, so no embedded original,
+and the only metadata chunk is the capture tool's name, with no EXIF, author or GPS.
+
 ### Small, off-axis, confirmed
 
 - The `fs.rmSync(sandbox, ...)` at `scripts/auto-mode-audit.js:94` deletes the sandbox

@@ -798,10 +798,12 @@ The pass is done and most of this is closed. Measured rates, the checker bug it 
 the rule about what a STALE verdict is worth are in `docs/engineering-record.md`; only the
 residue belongs here.
 
-`node scripts/check-line-refs.js` reports **170 references: OK 125, NEAR 15, STALE 17,
-UNVERIFIABLE 13, 0 BROKEN** as of 2026-09-15, against OK 39 / STALE 60 / UNVERIFIABLE 47 before
-the pass. The count grew because the README audit ADDED 21 verified citations; the OK share is
-what moved, not the total. Re-measure before quoting this rather than trusting the number: an
+`node scripts/check-line-refs.js` reports **165 references: OK 119, NEAR 16, STALE 17,
+UNVERIFIABLE 13, 0 BROKEN** as of 2026-09-16, against OK 39 / STALE 60 / UNVERIFIABLE 47 before
+the pass. The total moves in both directions as documentation is rewritten: the README audit
+added 21 verified citations, then the README rewrite removed 671 lines of prose and some
+citations with them. The OK share is the number worth reading, not the total. Re-measure before
+quoting this rather than trusting it: an
 earlier version of this paragraph went stale within a day.
 
 **Not all 45 remaining non-OK rows are defects, and a future pass should not treat them as a

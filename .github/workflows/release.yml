@@ -45,3 +45,48 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: "*.vsix"
+
+      # Keep the Releases page to the three most recent, matching IdleLauncherTray,
+      # desktop-ai-companion and runas-helper. The git TAGS are retained (no --cleanup-tag),
+      # which is the whole point: a pruned release is still buildable from its tag, and
+      # deleting the tag would make this irreversible.
+      #
+      # Runs AFTER the attach above, so the release being published is one of the three kept.
+      #
+      # The `if:` differs from the other repos ON PURPOSE. Theirs trigger only on
+      # `push: tags`, so reaching the step already proves a version tag was pushed and they
+      # correctly carry no condition. This workflow also answers `workflow_dispatch`, which
+      # builds a VSIX without publishing anything, and pruning the Releases page from a run
+      # that created no release is a surprise rather than a policy. `github.event_name` is
+      # the same live condition the attach step above uses, and that step is demonstrably
+      # working (every published release carries its .vsix).
+      #
+      # A guard that can never be true is worse than no guard: IdleLauncherTray carried
+      # `if: steps.version.outputs.is_tag == 'true'` against an output that was never set,
+      # so the step silently never ran for its whole existence while looking like a control.
+      #
+      # Best-effort: a prune failure never fails a release that already published.
+      - name: Prune old releases (keep the 3 most recent; tags retained)
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $keep = 3
+          try {
+            $releases = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName,createdAt |
+                        ConvertFrom-Json
+          } catch { Write-Host "prune: could not list releases: $_"; exit 0 }
+          Write-Host "prune: $($releases.Count) release(s) found; keeping the $keep most recent."
+          $old = @($releases | Sort-Object { [datetime]$_.createdAt } -Descending | Select-Object -Skip $keep)
+          if ($old.Count -eq 0) {
+            # Say so out loud. A prune that quietly deletes nothing is indistinguishable from
+            # a prune that never ran, which is exactly the bug the comment above describes.
+            Write-Host "prune: nothing to delete (at most $keep releases exist)."
+          }
+          foreach ($r in $old) {
+            Write-Host "Deleting old release $($r.tagName) (git tag kept)"
+            gh release delete $r.tagName --repo $env:GITHUB_REPOSITORY --yes
+          }
+          Write-Host "prune: deleted $($old.Count) release(s); kept the $keep most recent."

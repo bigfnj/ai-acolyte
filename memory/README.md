@@ -44,10 +44,11 @@ score column and reproduces the pre-hybrid output exactly.
 
 ## How it works
 
-- **CPU embeddings.** `bge-small-en-v1.5` ONNX (the same asset desktopPet ships): BERT-uncased
+- **CPU embeddings.** `bge-small-en-v1.5` ONNX (a stock upstream asset, nothing built here): BERT-uncased
   WordPiece, CLS-pool, L2-norm, 384-dim. Runs on the CPU via `onnxruntime` — always available,
   no GPU, no Ollama, no MCP, no Claude Code hook, so it runs untouched under the corporate
-  managed policy. Verified to reproduce desktopPet's self-test cosines (0.72 / 0.44).
+  managed policy. Verified against a known-good reference implementation of the same model,
+  reproducing its self-test cosines (0.72 / 0.44).
 - **Hybrid ranking.** The cosine above, fused with Okapi BM25 over the whole file, each min-max
   normalized per query and averaged. The two legs see different text: `Bge._encode` truncates
   at 256 tokens, so on the live corpus 117 of 119 files are cut and the median file contributes
@@ -106,9 +107,9 @@ Easiest restore on a fresh clone: click **Rebuild recall index** in the VS Code 
 Memory card, which downloads it (with a confirmation prompt) into
 `~/.claude/wildcarding/models/` and copies the vocab beside it — a stable home that survives
 extension upgrades and clone deletion. Point `RECALL_MODEL_DIR` there to share the one copy,
-or copy `bge-small.onnx` from `desktopPet/src/Models/` / export `BAAI/bge-small-en-v1.5` to
-ONNX yourself. The tool degrades with a clear message if the model is absent (`--lint` still
-works without it).
+aim it at any `bge-small-en-v1.5` ONNX file you already have, or export
+`BAAI/bge-small-en-v1.5` to ONNX yourself. The tool degrades with a clear message if the
+model is absent (`--lint` still works without it).
 
 Whichever dir wins, the vocab must sit beside the model: `Bge` loads
 `bge-small.vocab.txt` from the same dir it resolved `bge-small.onnx` in.

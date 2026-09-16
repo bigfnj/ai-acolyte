@@ -5,7 +5,7 @@ Answers one question: on OUR own memory files, how much retrieval quality do we 
 up the size curve from today's bge-small, and what does each step cost to adopt?
 
 The default run is pure ONNX on CPU with no server -- the same "model file beside the exe"
-shape recall.py and desktopPet already ship. That keeps the comparison honest: every number
+shape recall.py already ships. That keeps the comparison honest: every number
 here is reproducible with just onnxruntime, no Ollama, no torch, no transformers.
 
 Models on the default curve (all CPU ONNX int8):

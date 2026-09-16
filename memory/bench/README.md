@@ -1,7 +1,7 @@
 # Embedding model benchmark
 
 Compares CPU embedding models on **our own memory corpus** (the 40-odd `*.md` files in this
-directory), to decide whether it is worth moving recall.py / desktopPet off today's
+directory), to decide whether it is worth moving recall.py off today's
 `bge-small-en-v1.5`. Everything on the default curve runs as a plain ONNX file on CPU with no
 server, matching the "model beside the exe" shape we actually ship.
 

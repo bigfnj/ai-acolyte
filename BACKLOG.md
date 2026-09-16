@@ -88,6 +88,33 @@ sanitizeState truncates claudePermission to 768 chars, which can cut the closing
 paren and fail RULE_SHAPE.
 
 
+### The two drain paths disagree about what "the project" is
+
+Found 2026-09-16 while answering why the Project-local card reads zero. Not a bug: the
+hook covers what the card misses. It is a UI blind spot, which is the class where a
+control reports on something other than what is actually running.
+
+The extension drains exactly one file. `const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath`
+at `vscode-extension/extension.js:908` takes the FIRST workspace folder, and
+`return path.join(workspaceRoot, LOCAL_RELATIVE);` at `src/local-settings.js:44` is a
+single join with no recursion.
+
+The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:331`
+takes the Claude Code session's own directory, and `:332-333` tests
+`<cwd>/.claude/settings.local.json` on every tool call.
+
+So with the editor open at a parent directory and sessions running inside
+`projects/<name>`, a project-local file is drained by the hook and is invisible to the
+card. The card can read "drained" while a subproject has an undrained file. Nothing is
+lost, but the number on screen is not answering the question a reader thinks it is.
+
+Worth knowing before trusting that card as a diagnostic. The honest fixes are either to
+make the card name the path it actually watched, or to have it discover local files
+beneath the workspace root rather than only at it. Measured on this box the same day:
+exactly one `settings.local.json` exists anywhere under the working root, it is empty,
+and its mtime is 12 days old, so the zeros were never evidence about promotability in
+the first place.
+
 ### Small, off-axis, confirmed
 
 - The `fs.rmSync(sandbox, ...)` at `scripts/auto-mode-audit.js:94` deletes the sandbox

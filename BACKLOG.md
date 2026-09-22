@@ -535,9 +535,6 @@ No false reject exists — all 19 path shapes tried are accepted (spaces, `$`,
 backtick, `powershell`/`cmd`/`node_modules` in a directory name, CJK + emoji,
 UNC, mapped drive, 8.3, `\\?\`, >260 chars, trailing dot/space, relative). But:
 
-- **`verify-installers.ps1` has no zero-case floor.** With an empty results
-  array it prints "0 pass, 0 fail" and exits 0. PASS means "nothing that ran
-  failed", never "16 cases ran". `verify-release.ps1` already has the fix pattern.
 - **The static guard is blind to suffix wrappers and to reassignment.**
   `'node "' + $p + '" & powershell -c evil'`, `'… | cmd /c more'`, and a later
   `$hookCommand = 'cmd /c ' + $hookCommand` all pass it. This matters because it

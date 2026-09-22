@@ -402,5 +402,17 @@ $failed = @($script:results | Where-Object { -not $_.pass }).Count
 $total = @($script:results).Count
 Write-Host ''
 Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
+# A floor, because without one this harness passes by doing nothing. An empty
+# results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
+# this would go green having verified nothing at all -- which is the failure
+# this whole script exists to prevent, turned on itself. It records 16 cases
+# today; the floor sits below that so adding or reordering a case does not
+# break it, but no plausible breakage leaves more than a handful behind.
+$MinimumCases = 12
+if ($total -lt $MinimumCases) {
+    Write-Host ("FAIL  harness floor: recorded $total cases, expected at least $MinimumCases")
+    Write-Host '      A run this short means cases stopped registering, not that they passed.'
+    exit 1
+}
 if ($failed -gt 0) { exit 1 }
 exit 0

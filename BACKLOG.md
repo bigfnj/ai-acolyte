@@ -13,7 +13,94 @@ Anything measured says so and names the date. Anything unverified says that too.
 
 ## Open
 
-### NEXT SESSION (queued 2026-09-21): do desktop-ai-companion's optimisation learnings transfer here?
+### One oversized Codex transcript costs 70% of every Auto Learn scan, forever
+
+Found 2026-09-22 by running the AgentFlow transfer review below. It is the answer to that
+item's question: the technique did not transfer, the QUESTION did.
+
+**MEASURED 2026-09-22, one call per fresh process, through the real exported
+`scanHistoryFiles` against the live corpus** (955 transcripts: 708 Claude / 819 MB,
+247 Codex / 5.98 GB). Not a proxy, for the reason `desktop-ai-companion`'s BACKLOG records
+after its Python `os.walk` proxy came out 45% over on one root and 30% under on the other.
+
+| what | ms |
+|---|---|
+| whole steady-state scan (5 runs) | 755 / 783 / 790 / 803 / 849 |
+| Claude root alone, 708 files | 271, fully attributed |
+| Codex root alone, 247 files | 688 |
+| **one file inside that root** | **570 to 629** |
+
+The file is a **2,266,973,030-byte** Codex rollout dated 2026-09-14. Its cursor records
+2,143,573,355 bytes. Every scan:
+
+1. takes the append branch and reads **123,661,819 bytes (118 MB)** from `prior.size - 256 KB`;
+2. parses that slice — 265 ms in `parseJsonlRecords`, 75 ms `utf8Slice`, 66 ms across the
+   `Exit code:` and `Script (completed|failed)` regexes, plus GC;
+3. reaches the reconcile path, where `buffer = readRange(file, 0, stat.size)` at
+   `src/history-adapters.js:1216` re-reads the whole file because a result crossed the cursor;
+4. throws, because `readSync`'s length argument is int32 and 2,266,973,030 wraps to
+   **-2,027,994,266**;
+5. writes no cursor, correctly: `if (safe && prior) cursors[cursorKey] = prior;` at
+   `src/history-adapters.js:1248` is guarded by a `safe` that is now false, and the comment
+   above it refuses to claim progress a failed read did not make.
+
+So the next scan does exactly the same thing. At the default 20-second debounce that is 118 MB
+of reads and half a second of CPU every 20 seconds, permanently, and **the file's observations
+never reach the learner**. The live state has said `errors: 1` since 2026-09-14.
+
+**Measured and NOT the cause, recorded because it is the obvious first guess.**
+`Buffer.allocUnsafe(2.27 GB)` followed by the throwing `readSync` costs **1.7 / 2.1 / 2.4 / 2.4 ms**
+over four attempts in one process; RSS never moves, because nothing touches the pages. The cost
+is the 118 MB read and parse in step 2, not the allocation in step 3.
+
+**Three defects, and they want separating before anyone fixes one:**
+
+- `function readRange(file, start, length)` (`src/history-adapters.js:951`) already loops, but
+  passes the whole remaining length to each read, so any file over 2 GiB fails with a nonsense
+  negative-length error rather than reading. Capping each call would fix the error — and on its
+  own makes things WORSE, because then the reconcile genuinely reads 2.27 GB on every tick.
+- The error path records no `bytesRead`, so a scan that read 118 MB and threw reports
+  `kbRead: 0`. That is why this never showed up in any scan statistic.
+- `scan()`'s return value carries `files`, `observations` and `blindScan` but **not `errors`**,
+  though `lastScanStats` has held the count all along (`src/auto-learn-manager.js:1873-1876`).
+  A file that fails every scan for eight days is invisible to every UI surface.
+
+The shape of the fix is a size ceiling with an HONEST cursor: consume what can be read, advance
+the cursor to what was actually consumed, and mark the file partially-ingested rather than
+errored — so the 118 MB is read once instead of every twenty seconds. That is a design decision
+about what the learner is allowed to skip, not a patch, which is why this is filed rather than
+done.
+
+### ANSWERED 2026-09-22: desktop-ai-companion's optimisation learnings, and which ones transfer
+
+The item below was the question. This is the answer, kept short because the finding it produced
+is the entry above.
+
+**The technique does NOT transfer, exactly as the item predicted, and now it is measured.**
+AgentFlow's 1.7x came from `DirectoryInfo.EnumerateFiles` returning `FileInfo` with the write
+time already filled in by the directory scan. **Node's `Dirent` exposes `name` and `parentPath`
+and nothing else** (checked directly on Node 24.16.0: no `mtime`, no `size`). `findJsonlFiles`
+already uses `withFileTypes` and never stats a discovered file; the one stat per file exists
+because the cursor needs `size`, which `Dirent` cannot supply. That stat costs **47 ms across
+955 files** and there is nothing to win.
+
+**Two more of their findings are already solved here**, worth recording so nobody re-proposes
+them: scans run off the extension host in a worker thread, via
+`runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
+`vscode-extension/extension.js:1121`, which is the fix their pane still needs. And the
+watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
+already runs.
+
+**Measured and not worth doing**, so the numbers exist before someone guesses: the locale-aware
+sort of 955 paths is **12 ms**; the two path hashes per file are **22 ms**. The only remaining
+lever of any size is the head/tail re-hash over every unchanged file, **140 to 160 ms**, and it
+needs a correctness argument rather than a performance one, because it is what proves a file was
+not rewritten in place between scans.
+
+**What DID transfer was a question, not a technique:** what does the five-hundredth tick cost?
+Asking it of the scan is what surfaced the entry above.
+
+### SUPERSEDED by the two entries above (queued 2026-09-21): do desktop-ai-companion's optimisation learnings transfer here?
 
 Asked directly by the owner after an optimisation pass on `desktop-ai-companion`'s AgentFlow
 module. A first measurement was taken the same evening so tomorrow starts from numbers instead of
@@ -63,6 +150,85 @@ the same failure modes on record:
 - **A guard that looks like ceremony.** A 250 ms socket timeout looked pointless because a closed
   loopback port "obviously" refuses instantly. It takes **2,063 ms**. Measure what a guard guards
   before deleting it. See `docs/engineering-record.md` for the local equivalents.
+
+### Codex MAX is disabled by a policy cache that is expired AND signed for another account
+
+Reported by the owner 2026-09-21: Codex is not currently restricted from `never`, but the
+extension has gone on reporting that it is, across many sessions and a fresh Codex sign-in.
+Confirmed the same day, and the cause is two missing checks rather than a parse bug.
+
+`src/codex-max.js:153` reads `~/.codex/cloud-config-bundle-cache.json` and pulls
+`signed_payload.bundle.requirements_toml` out of it. It never looks at the three fields sitting
+one level up in the same object: `cached_at`, `expires_at`, `account_id`. Grep for any of those
+names across `src/`, `bin/` and `vscode-extension/` returns **nothing** (2026-09-21). The cache
+is treated as permanent truth about the current account.
+
+On this machine, measured 2026-09-21:
+
+- The cache carries `cached_at 2026-09-03T16:20:47Z` / `expires_at 2026-09-03T17:20:47Z`. That is
+  a **one-hour TTL, 18 days past**, and Codex has not rewritten the file since, not on any session
+  and not on a new sign-in (`auth.json.last_refresh` = `2026-09-21T05:14:59Z`).
+- The cached payload's `account_id` is **not** the signed-in account (`auth.json` →
+  `tokens.account_id`, which matches the `accountId` in Codex's live global state). The bundle
+  belongs to a previous login, so those requirements were never this account's.
+- It asserts `allowed_approval_policies = ["on-request", "untrusted"]`, i.e. `never` absent. Codex
+  itself disagrees: `~/.codex/.codex-global-state.json` →
+  `electron-persisted-atom-state.heartbeat-thread-permissions-by-id` shows
+  `approvalPolicy: "never"` with `sandboxPolicy: { type: "dangerFullAccess" }` on the threads
+  dated 2026-09-14 14:20, 2026-09-14 15:01 and 2026-09-16 15:46, against `on-request` on the
+  2026-09-11 and 2026-09-12 threads. Codex started accepting `never` after the cache went stale.
+
+The live verdict, taken by requiring the real module against the real files rather than read off
+the source:
+
+```
+allowedApprovalPolicies: ["on-request","untrusted"]
+targetApproval:          {"value":"on-request","restricted":true,"allowed":[...]}
+readApproval(config.toml): null
+applyCodexMax(on):       {"changed":false,"blockedBy":"enterprise-policy","restricted":true}
+```
+
+So `vscode-extension/extension.js:3866` disables the Codex MAX button, `:3775` renders
+`off · Codex capped`, `:3853` says "unavailable — org policy caps approval", and
+`bin/wildcard-perms:837` refuses the same way from the CLI — all enforcing a restriction that is
+not in force. `~/.codex/config.toml` still has no `approval_policy` line at all, so the feature
+has been unreachable on this box for 18 days while the toggle looked like it was working.
+
+**Not a watcher bug; do not "fix" it there.** `readEnterpriseBundle()` re-reads from disk on
+every call and nothing is memoised, and the bundle watcher at `extension.js:1889` is correctly
+wired for change/create/delete — its comment even names this exact failure. The staleness is in
+the FILE: no write means no event, and forcing a re-render recomputes the same wrong answer. That
+is the whole reason it survives session restarts.
+
+**Why this is not a one-line change.** `src/codex-max.js:167-169` fails closed on purpose: "treating
+an unreadable restriction as 'no restriction' is how a policy control silently stops
+controlling". Expiry pulls the other way, and both failure modes are real — an expired cache that
+keeps capping is the bug above, while an expired cache read as unrestricted lets a machine that
+has been offline past the TTL drop a live org control. A reading that serves both: keep the cap,
+stop presenting it as certain. An expired bundle should leave the toggle **enabled** behind a
+confirmation that names the cache date, not a disabled button and a flat refusal. The
+foreign-account case is weaker still and probably should not cap at all: a bundle signed for a
+different `account_id` is not evidence about this one.
+
+**What a fix must not break.** Every bundle in `test/codex-max.test.js` is built by `bundleWith`
+(`:16`), which emits only `signed_payload.bundle.requirements_toml` — no `cached_at`, no
+`expires_at`, no `account_id`. So "absent expiry means expired" inverts the entire suite, and
+"absent expiry means trust forever" is what a truncated cache already gets. Whichever rule lands
+needs its own cases, and the mutation to run is: put `expires_at` in the past on `RESTRICTED` and
+confirm exactly one new assertion fires, naming that file.
+
+**Unverified, and it comes first.** Whether Codex still writes this path at all. Eighteen days of
+no rewrite across a re-login is equally consistent with a renamed or relocated cache in a newer
+Codex build, in which case the file the extension reads is a fossil and no expiry logic is worth
+writing until the path is re-confirmed. Nothing else under `~/.codex` mentions
+`allowed_approval_policies` except the two `codex.exe` copies, `logs_2.sqlite` and session
+rollouts (checked 2026-09-21).
+
+Unblocking this box in the meantime needs no code: with the file absent, `readEnterpriseBundle`
+returns null, `targetApproval` goes back to `{ value: "never", restricted: false }` and the
+toggle is available — that is `src/codex-max.js:153-157` plus the "with no bundle, nothing is
+capped" test at `test/codex-max.test.js:191`. Move the cache aside rather than deleting it, since
+it is the only local copy of what that policy said.
 
 ### Test harnesses can silently assert against a frozen home
 

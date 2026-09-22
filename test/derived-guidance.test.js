@@ -348,3 +348,32 @@ test('a derived write does not land inside another writer of the same file', (t)
   assert.deepEqual(went.added, ['batch-file-edits']);
   assert.ok(fs.readFileSync(claude, 'utf8').startsWith(notes));
 });
+
+test('the rule length cap holds after escaping, not just before it', () => {
+  // Fifty `<!--` fit inside the 200-character slice and leave as 350, because
+  // each becomes `&lt;!--`. The cap is a promise about what is written into
+  // the user's CLAUDE.md, so it has to survive the expansion.
+  // Varied padding on purpose. An escaped `<!--` is seven characters, so the
+  // 200-character cut lands at a different point inside the entity for each
+  // offset; with only one offset the trailing-entity strip is never exercised
+  // and its mutation survives.
+  let sawSplitEntity = false;
+  for (let pad = 0; pad < 7; pad += 1) {
+    const raw = 'x'.repeat(pad) + '<!--'.repeat(100);
+    const rule = cleanRule(raw);
+    assert.ok(rule.length <= 200,
+      `an escaped rule must still fit the documented cap (pad ${pad}, got ${rule.length})`);
+    assert.ok(!/&[a-z]{1,3}$/i.test(rule),
+      `must not end in half an HTML entity (pad ${pad}, tail ${JSON.stringify(rule.slice(-6))})`);
+    assert.ok(rule.includes('&lt;!--'),
+      `precondition: the escaping really happened at pad ${pad}`);
+    // Would the naive cut have split an entity here? That is the case the
+    // strip exists for, and at least one offset must reach it.
+    const naive = raw.slice(0, 200).replace(/`/g, '')
+      .replace(/<!--/g, '&lt;!--').replace(/-->/g, '--&gt;').slice(0, 200);
+    if (/&[a-z]{1,3}$/i.test(naive)) sawSplitEntity = true;
+  }
+  assert.ok(sawSplitEntity,
+    'precondition: at least one offset really did split an entity, or this '
+    + 'test is not exercising the strip at all');
+});

@@ -50,7 +50,7 @@ const RULE_LIMIT = 200;
 // never cut one of the escapes in half.
 function cleanRule(value) {
   if (typeof value !== 'string') return '';
-  return value
+  const escaped = value
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -58,6 +58,14 @@ function cleanRule(value) {
     .replace(/`/g, '')
     .replace(/<!--/g, '&lt;!--')
     .replace(/-->/g, '--&gt;');
+  // Escaping EXPANDS, so slicing first does not hold the limit: fifty `<!--`
+  // fit inside 200 characters and leave as 350. RULE_LIMIT is a promise about
+  // what lands in the user's instruction file, so it is enforced after the
+  // expansion as well as before it. The trailing strip is there because the
+  // second cut can land inside `&lt;`, and half an entity is exactly the kind
+  // of thing the escaping exists to prevent.
+  if (escaped.length <= RULE_LIMIT) return escaped;
+  return escaped.slice(0, RULE_LIMIT).replace(/&[a-z]{0,3}$/i, '');
 }
 
 // Fetch tools, which the docs recommend gating rather than allow-listing. Kept

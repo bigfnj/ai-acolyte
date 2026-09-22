@@ -122,7 +122,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 those are also the only four message arms the webview host handles (`autoLearnScan`,
-`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:3237-3240`).
+`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:3263-3266`).
 **Apply safe candidates** and **Cycle mode** are Command Palette only — see the command
 list at the end of this file. Apply keeps a recoverable snapshot; Undo restores the most
 recent Auto Learn application. The repository CLI uses the same service:
@@ -268,10 +268,19 @@ removing it too would leave nothing able to refuse a command. You still get
 stopped for out-of-workspace writes and network access, which are the cases worth
 being asked about. On a console-managed org an `allowed_approval_policies` cap
 may forbid `never`. The switch then reports itself **unavailable** and writes nothing
-(`blockedBy: 'enterprise-policy'` at `src/codex-max.js:267-272`): every other value it could
+(`blockedBy: 'enterprise-policy'` at `src/codex-max.js:335-340`): every other value it could
 write still prompts *and* equals the org's own default, so setting it and calling that "MAX
 on" would claim prompts are skipped when they are not. Restart Codex to apply; it reads
 config at startup.
+
+That cap is read from a cache with its own stated lifetime, and an **expired** one is
+handled differently: still honoured, because a machine offline past the TTL would otherwise
+drop a control that is genuinely in force, but no longer presented as current. The button
+stays clickable, the card names the date the cache was written, and clicking asks before
+anything is written (`blockedBy: 'enterprise-policy-stale'` at `src/codex-max.js:349-354`).
+From the CLI the same override is `wildcard-perms --codex-max on --override-stale-policy`.
+Absence of an expiry is not expiry: a cache that never stated a lifetime is treated as
+current.
 
 `config.toml` is edited surgically, line by line, so literal-string paths, inline
 arrays and nested `[plugins."x@y"]` tables survive. Turning it off restores the

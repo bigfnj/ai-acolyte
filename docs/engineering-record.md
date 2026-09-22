@@ -352,6 +352,40 @@ MAX switches to.
 Turning the same measurement on a real ~300-entry list to report which entries
 are broader than the evidence supports. Offered and deferred.
 
+### Codex's policy cache is checked for EXPIRY only, never for account identity
+
+The cap Codex MAX obeys is read from `~/.codex/cloud-config-bundle-cache.json`, and that
+object carries three fields beside the payload the parser reads: `cached_at`, `expires_at`
+and `account_id`. Measured 2026-09-21, none of the three appeared anywhere in `src/`,
+`bin/` or `vscode-extension/`; the cache on this box had a **one-hour TTL that lapsed
+2026-09-03T17:20:47Z**, declared `allowed_approval_policies = ["on-request", "untrusted"]`,
+and had kept the toggle disabled for eighteen days while Codex itself accepted
+`approval_policy = "never"` on threads dated 2026-09-14 and later. The account the bundle
+was signed for was also not the signed-in one.
+
+**Expiry shipped 2026-09-22. Account identity will not.** Two of the three fields are read;
+`account_id` is deliberately left alone, and this is a decision rather than an omission.
+Learning which account is signed in means reading `~/.codex/auth.json`, which holds live
+OAuth tokens and an API key, and no feature in this repo is worth teaching it to open that
+file. Expiry alone already unblocks the case that was reported — a bundle from a previous
+login is also, always, a bundle that has aged out.
+
+Two shapes settled at the same time, both load-bearing for anything that touches this later:
+
+- **The cap stands.** An expired bundle is not silently promoted to "no restriction": a
+  machine offline past the TTL would then drop a control that is genuinely in force. What
+  changed is that the refusal stopped being final — `blockedBy: 'enterprise-policy-stale'`
+  carries the dates, the dashboard button stays clickable behind a modal naming them, and
+  the CLI needs `--override-stale-policy`.
+- **Absence of an expiry is not expiry.** Every bundle fixture in the suite omits the field,
+  and a truncated cache would read as expired under the opposite rule — the same
+  fail-open the `allowedApprovalPolicies` comment warns about, arriving through another
+  door. Only an `expires_at` that parses and sits strictly in the past counts.
+
+Not re-derivable from the code: whether the cache path is still the one Codex writes. It
+was re-confirmed against the shipping Codex binary on 2026-09-22, which is what made the
+expiry work worth doing at all.
+
 
 ---
 
@@ -419,7 +453,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   untested.** Its message calls it a correctness fix — "both halves now come from
   ONE read" — but the old code was `applyMax(settings, turningOn)`, whose
   `res.settings` was computed **in memory from `settings`**. There was one read
-  then and one now. Two mutants on `wroteOntoAllow` at `extension.js:2402` — it
+  then and one now. Two mutants on `wroteOntoAllow` at `extension.js:2428` — it
   was named `preMax` when this was written — the post-MAX list, and `[]`, both
   **SURVIVED** the full 400-test suite. The four purge assertions in
   `test/policy-backup.test.js` guard the filter and the `MAX_ALLOW_CORE`
@@ -433,7 +467,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   backwards: deriving `turningOn = !isMaxOn(latest)` from the same `latest` is
   exactly what makes it un-reachable. 65 shapes of `latest` enumerated (5 allow
   sets x 3 hook states x 4 modes, plus `{}`, `null`, non-array allow, bare
-  `hooks`): **0 yielded `changed: false`**. `extension.js:2367`'s wording also
+  `hooks`): **0 yielded `changed: false`**. `extension.js:2393`'s wording also
   reads backwards: "MAX is already ${turningOn ? 'OFF' : 'ON'}" answers a click
   asking for ON with "already OFF".
 - **The version badge's degradation claim is false for the case it names.** For a
@@ -454,7 +488,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   inert. **A future transform whose side effects are not idempotent must not use
   this writer** — now stated in the code as well.
 - **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
-  but not `settings?.permissions?.allow` at `bin/wildcard-perms:284`,** where the
+  but not `settings?.permissions?.allow` at `bin/wildcard-perms:290`,** where the
   allow array the pass runs on is extracted. Changing *which* field feeds the
   pass would not invalidate existing keys.
 - **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
@@ -603,11 +637,11 @@ Today `runWildcarding` satisfies that **by accident of structure** — its
 `readSettings()` happens to sit inside the lock, so the snapshot is nearly
 `latest`. **Moving the read out of the lock without an authoritative in-lock
 re-read and recompute reintroduces the MAX / `Bash(npm test)` deletion bug**
-documented at `bin/wildcard-perms:354-368`.
+documented at `bin/wildcard-perms:360-374`.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`extension.js:2495-2497`);
+  "a deny rule added by hand first reaches the backup" (`extension.js:2521-2523`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -630,13 +664,13 @@ rebuilt, deny-only edits lost, poisoning the memo on a busy-lock-deferred pass
 
 Also worth folding in eventually: activation takes **two** lock acquisitions
 back to back — `runWildcarding()` then `drainLocal()` — which is the shape
-`bin/wildcard-perms:311-329` ("ONE lock acquisition covering both jobs") was
+`bin/wildcard-perms:317-335` ("ONE lock acquisition covering both jobs") was
 deliberately fixed away from for the hook.
 
 ## `preMax` is misnamed, and the audit's read of it was wrong too
 
 The purge argument: `const wroteOntoAllow = wroteOnto?.permissions?.allow ?? []`
-at `vscode-extension/extension.js:2402`, named `preMax` when this was written.
+at `vscode-extension/extension.js:2428`, named `preMax` when this was written.
 Two corrections:
 
 - **It cannot be reverted.** `f041031` deleted the `readSettings()` call

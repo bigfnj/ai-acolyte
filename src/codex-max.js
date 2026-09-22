@@ -18,6 +18,14 @@
 // `blockedBy: 'enterprise-policy'` with `sandboxUntouched`, because a silent
 // downgrade is not the toggle the user asked for. See targetApproval below.
 //
+// That bundle is a CACHE with a stated lifetime, and an expired one is not
+// evidence about today. It still caps — an expired cache read as "no
+// restriction" would drop a live org control on any machine that went offline
+// past the TTL — but it stops being presented as certain: applyCodexMax
+// returns `blockedBy: 'enterprise-policy-stale'` with the dates, and writes
+// "never" only when the caller passes `overrideStale` after asking. See
+// bundleFreshness below.
+//
 // The file is edited surgically, line by line, never parsed and re-serialised.
 // A real config.toml carries literal-string Windows paths ('\\?\C:\...'),
 // inline arrays, and nested [marketplaces.x] / [plugins."x@y"] tables; a
@@ -155,6 +163,40 @@ function readEnterpriseBundle(bundlePath = CODEX_BUNDLE_CACHE) {
   catch { return null; }
 }
 
+// The cache states its own lifetime beside the payload — `cached_at` when Codex
+// wrote it, `expires_at` when Codex stops trusting it — and nothing here read
+// either. Measured on the owner's box 2026-09-21: cached_at 2026-09-03T16:20:47Z
+// against expires_at 2026-09-03T17:20:47Z, a ONE-HOUR TTL eighteen days past,
+// still capping approval on a machine whose Codex had been accepting "never"
+// since 2026-09-14. The toggle was unreachable for those eighteen days while
+// looking like it worked.
+//
+// ABSENCE IS NOT EXPIRY, and that asymmetry is the whole rule. A truncated
+// cache, or one written by a build that did not carry the field, has said
+// nothing about its own lifetime; reading silence as "expired" is the same
+// mistake in the other direction as reading an unparseable restriction as "no
+// restriction", which allowedApprovalPolicies below fails closed against. Only
+// an `expires_at` that PARSES and sits strictly in the past counts, so an
+// unreadable date and an unreadable clock both leave the cap where it was.
+//
+// `now` takes a Date, epoch millis, or an ISO string, because applyCodexMax
+// already carries an injected clock returning ISO and one clock per call beats
+// two that can disagree.
+function bundleFreshness(bundle, now = Date.now()) {
+  const payload = bundle?.signed_payload;
+  const cachedAt = typeof payload?.cached_at === 'string' ? payload.cached_at : null;
+  const expiresAt = typeof payload?.expires_at === 'string' ? payload.expires_at : null;
+  const deadline = expiresAt === null ? NaN : Date.parse(expiresAt);
+  const at = now instanceof Date ? now.getTime()
+    : typeof now === 'string' ? Date.parse(now)
+      : Number(now);
+  return {
+    cachedAt,
+    expiresAt,
+    expired: Number.isFinite(deadline) && Number.isFinite(at) && deadline < at,
+  };
+}
+
 function enterpriseRequirements(bundle) {
   const managed = bundle?.signed_payload?.bundle?.requirements_toml?.enterprise_managed;
   if (!Array.isArray(managed)) return '';
@@ -230,21 +272,35 @@ function targetApproval(bundle) {
   return { value, restricted: !allowed.includes(APPROVAL_NEVER), allowed };
 }
 
-function isCodexMaxOn(text, bundle) {
+// The one condition both the reader and the writer refuse on, as a single
+// expression so they cannot drift apart about what "capped" means: no value this
+// toggle could write actually skips prompts. `value === null` is the
+// org-restricted-the-set-to-nothing-we-recognise case, which is `restricted` too.
+function capsApproval(target) {
+  return target.value === null || target.restricted;
+}
+
+function isCodexMaxOn(text, bundle, options = {}) {
   // `undefined` means "look it up"; an explicit `null` means "there is no
   // bundle". Collapsing the two with ?? would make it impossible to ask about a
   // machine with no enterprise policy — including from a test.
   const resolved = bundle === undefined ? readEnterpriseBundle() : bundle;
   const target = targetApproval(resolved);
+  const capped = capsApproval(target);
   // MAX means "skip every prompt", and only approval_policy = "never" does that.
   // Where the org caps approval below "never" (target.restricted), the best value
   // MAX could write still prompts *and* equals the org's own enforced default, so
   // a config carrying it is not a MAX the user enabled — it is just the default.
   // Reporting it as "on" is the "MAX turned itself on again" bug: the org default
   // reads as a user action, and the card claims prompts are skipped when they are
-  // not. So under a restriction, MAX is never on.
-  if (target.value === null || target.restricted) return false;
-  return readApproval(text) === target.value;
+  // not. So under a LIVE restriction, MAX is never on.
+  if (capped && !bundleFreshness(resolved, options.now).expired) return false;
+  // Past the cache's own expiry the cap stops deciding what the CURRENT state is.
+  // applyCodexMax will write "never" there behind a confirmation, and if reading
+  // disagreed the override would land while the card still said OFF — the same
+  // bug inverted, with the user re-clicking a toggle that already fired. So a
+  // stale cap asks the only question left: does the config carry "never"?
+  return readApproval(text) === (capped ? APPROVAL_NEVER : target.value);
 }
 
 // Turning on records the prior value — including its *absence*, which is why
@@ -257,6 +313,18 @@ function applyCodexMax(text, on, options = {}) {
   const bundle = options.bundle !== undefined ? options.bundle : readEnterpriseBundle();
   const target = targetApproval(bundle);
   const source = text == null ? '' : String(text);
+  // One clock reading for the whole call: the snapshot's savedAt and the expiry
+  // comparison must not be able to straddle a TTL boundary and disagree.
+  const stamp = now();
+  const freshness = bundleFreshness(bundle, stamp);
+  const capped = capsApproval(target);
+  // Under a live cap nothing gets written at all. Past the expiry the value the
+  // user actually asked for is back on the table, so an override writes "never"
+  // rather than the least-friction policy a lapsed cache happened to permit.
+  const value = capped ? APPROVAL_NEVER : target.value;
+  // Every return from the `on` branch carries these, so a caller can name the
+  // cache's dates without re-reading the bundle itself.
+  const dated = { stale: freshness.expired, cachedAt: freshness.cachedAt, expiresAt: freshness.expiresAt };
   if (on) {
     // Nothing this toggle can write that actually skips prompts. "never" is the
     // only value that does; where the org forbids it (target.restricted) or
@@ -264,36 +332,50 @@ function applyCodexMax(text, on, options = {}) {
     // MAX could set still prompts and equals the org's own default. Writing it
     // and calling it "MAX on" is the false-positive the user reports, so say the
     // switch is unavailable instead of producing a no-op the card misreads.
-    if (target.value === null || target.restricted) {
+    if (capped && !freshness.expired) {
       return {
         changed: false, text: source, sandboxUntouched: true,
         blockedBy: 'enterprise-policy', allowed: target.allowed,
-        target: target.value, restricted: target.restricted,
+        target: target.value, restricted: target.restricted, ...dated,
       };
     }
-    if (isCodexMaxOn(source, bundle)) {
+    // Expired, and nobody said to override. It STILL writes nothing: an expired
+    // bundle does not silently become "no restriction", because a machine that
+    // has been offline past the TTL would drop a control that is genuinely in
+    // force. What changes is that the refusal is no longer final — it hands back
+    // the dates so the caller can ask, naming them, and come back with
+    // overrideStale. A distinct blockedBy, because a caller that treats this as
+    // 'enterprise-policy' would disable the switch and never ask.
+    if (capped && options.overrideStale !== true) {
       return {
         changed: false, text: source, sandboxUntouched: true,
-        target: target.value, restricted: target.restricted, allowed: target.allowed,
+        blockedBy: 'enterprise-policy-stale', allowed: target.allowed,
+        target: target.value, restricted: target.restricted, ...dated,
+      };
+    }
+    if (isCodexMaxOn(source, bundle, { now: stamp })) {
+      return {
+        changed: false, text: source, sandboxUntouched: true,
+        target: value, restricted: target.restricted, allowed: target.allowed, ...dated,
       };
     }
     // Refuse rather than proceed, for the same reason enableMaxAllow does: this
     // snapshot is the ONLY record of the user's prior approval_policy, and
     // without it turning MAX off calls clearApproval and deletes the key instead
     // of restoring the value. Better to leave Codex MAX off and say why.
-    if (!writeCodexMaxState({ priorApproval: readApproval(source), savedAt: now() }, statePath)) {
+    if (!writeCodexMaxState({ priorApproval: readApproval(source), savedAt: stamp }, statePath)) {
       return {
         changed: false, text: source, sandboxUntouched: true, error: 'codex-max-snapshot-failed',
-        target: target.value, restricted: target.restricted, allowed: target.allowed,
+        target: value, restricted: target.restricted, allowed: target.allowed, ...dated,
       };
     }
-    const result = setApproval(source, target.value);
+    const result = setApproval(source, value);
     return {
       ...result, sandboxUntouched: true,
-      target: target.value, restricted: target.restricted, allowed: target.allowed,
+      target: value, restricted: target.restricted, allowed: target.allowed, ...dated,
     };
   }
-  if (!isCodexMaxOn(source, bundle)) return { changed: false, text: source, sandboxUntouched: true };
+  if (!isCodexMaxOn(source, bundle, { now: stamp })) return { changed: false, text: source, sandboxUntouched: true };
   const prior = readCodexMaxState(statePath).priorApproval;
   const result = prior && APPROVAL_VALUES.has(prior)
     ? setApproval(source, prior)
@@ -330,6 +412,7 @@ module.exports = {
   writeCodexMaxState,
   CODEX_BUNDLE_CACHE,
   readEnterpriseBundle,
+  bundleFreshness,
   allowedApprovalPolicies,
   allowedSandboxModes,
   enterprisePrefixRules,

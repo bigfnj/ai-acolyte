@@ -1460,3 +1460,73 @@ test('a junction to a directory inside the walked tree is not counted twice, eve
     assert.equal(result.files.filter((entry) => entry.mode !== 'error').length, 1,
       'and it is enumerated once, so the double count cannot come back as double I/O');
   });
+
+// `unmatchedResults` is meant to say "a result arrived whose call we have never
+// read". It was saying "a result arrived whose call did not become an
+// observation", which is a different and much larger set: createObservation
+// returns null for every tool the learner does not track. Live on this box that
+// was 96 phantom misses in one tick, each one also sending the reconcile
+// widening backwards after a call that could never produce an observation.
+test('a result whose call was seen but deliberately not observed is not "unmatched"', (t) => {
+  const root = tempRoot(t, 'unobserved');
+  const file = path.join(root, 'bulk.jsonl');
+  const filler = [];
+  for (let index = 0; index < 40; index += 1) {
+    filler.push({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'f'.repeat(200) }] },
+    });
+  }
+  fs.writeFileSync(file, jsonl({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'todo-1', name: 'TodoWrite', input: { todos: [] } }],
+    },
+  }, ...filler));
+
+  const first = scanHistoryFiles({ cursors: {}, claudeRoots: [root] });
+  assert.equal(first.observations.length, 0,
+    'precondition: TodoWrite is a tool the learner deliberately does not observe');
+  const cursors = JSON.parse(JSON.stringify(first.cursors));
+
+  fs.appendFileSync(file, jsonl({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'todo-1', is_error: false, content: 'ok' }],
+    },
+  }));
+
+  const entry = scanHistoryFiles({ cursors, claudeRoots: [root], overlapBytes: 48 }).files[0];
+  assert.ok(!entry.unmatchedResults,
+    `a call we READ but chose not to track is not a call we missed (got ${entry.unmatchedResults})`);
+});
+
+test('a result whose call is genuinely absent is still reported', (t) => {
+  const root = tempRoot(t, 'ghost');
+  const file = path.join(root, 'bulk.jsonl');
+  const filler = [];
+  for (let index = 0; index < 40; index += 1) {
+    filler.push({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'f'.repeat(200) }] },
+    });
+  }
+  fs.writeFileSync(file, jsonl(...filler));
+  const cursors = JSON.parse(JSON.stringify(
+    scanHistoryFiles({ cursors: {}, claudeRoots: [root] }).cursors));
+
+  // No call for this id exists anywhere in the file.
+  fs.appendFileSync(file, jsonl({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'ghost-9', is_error: false, content: 'ok' }],
+    },
+  }));
+
+  const entry = scanHistoryFiles({ cursors, claudeRoots: [root], overlapBytes: 48 }).files[0];
+  assert.equal(entry.unmatchedResults, 1,
+    'narrowing the definition must not silence the case the counter exists for');
+});

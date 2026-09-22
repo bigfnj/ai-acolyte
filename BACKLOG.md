@@ -306,13 +306,16 @@ and the only metadata chunk is the capture tool's name, with no EXIF, author or 
   and the launcher cannot know which it got. Escaping for one would break the other
   two, so nothing was changed. Needs a runtime probe, or a hook body that does not
   interpolate a path at all.
-- A work-domain email address appears as the author of 3 of 48 commits (all
-  2026-08-21) in this **public** repo's history. Future commits are already safe:
-  the global git identity is a personal address. Rewriting history was declined —
-  it breaks the v1.4.1 tag and the published release SHA, and cannot un-publish
-  what is already cloned, cached and forked. Recorded as the owner's decision to
-  make, deliberately without restating the address here, since this file is
-  public.
+- **RESOLVED, and the entry that claimed otherwise was wrong.** This file used to
+  state that a work-domain address authored 3 of 48 commits in this public repo.
+  Re-verified 2026-09-22 three independent ways: the three commits it named are
+  authored AND committed by the personal address, this history holds 259 commits
+  rather than 48, and the root commit is the 2026-08-19 `v1.0.0` republish, so the
+  entire tracked history is post-republish. The entry was written 2026-09-09 and
+  was describing the PRE-republish repository, which is not this one. Every author,
+  committer and tagger across all refs, all tag objects and the reflog is a personal
+  address. Kept as a correction rather than deleted, because the old text also
+  handed any reader of a PUBLIC file a date range to go looking in.
 
 ### Nothing at all protects the transcript or memory corpora
 

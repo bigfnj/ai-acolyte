@@ -62,6 +62,19 @@ recall = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(recall)                 # runs its runtime shim; a no-op inside the venv
 
 
+# The corpus is the owner's PRIVATE memory store, and a filename in it can carry
+# personal or employer material. This project's convention puts bench numbers in
+# the commit message, and a public commit message cannot be un-published, so the
+# raw filename never leaves this process. A stable short hash still answers the
+# question these reports are for -- is the SAME wrong file winning every time --
+# without naming it.
+def _opaque(name):
+    import hashlib
+    if not name:
+        return "(none)"
+    return "file:" + hashlib.sha256(str(name).encode("utf-8")).hexdigest()[:10]
+
+
 def load_queries():
     if not os.path.exists(QUERIES):
         sys.exit(f"[gate] no question set at {QUERIES}\n"
@@ -181,7 +194,7 @@ def main():
         if got[mode]["misses"]:
             print(f"\n  {mode} did not rank first ({len(got[mode]['misses'])}):")
             for q, first, r in got[mode]["misses"]:
-                print(f"    rank {r if r else 'miss':>4}  {q}\n            got: {first}")
+                print(f"    rank {r if r else 'miss':>4}  {q}\n            got: {_opaque(first)}")
 
     if not gated:
         print("  NO GATE RAN. Both gates need 'hybrid' in --modes; this run only measured.")

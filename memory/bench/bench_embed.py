@@ -221,6 +221,19 @@ class OllamaEmb:
 # ======================================================================================
 # Corpus, queries, metrics
 # ======================================================================================
+# The corpus is the owner's PRIVATE memory store, and a filename in it can carry
+# personal or employer material. This project's convention puts bench numbers in
+# the commit message, and a public commit message cannot be un-published, so the
+# raw filename never leaves this process. A stable short hash still answers the
+# question these reports are for -- is the SAME wrong file winning every time --
+# without naming it.
+def _opaque(name):
+    import hashlib
+    if not name:
+        return "(none)"
+    return "file:" + hashlib.sha256(str(name).encode("utf-8")).hexdigest()[:10]
+
+
 def load_corpus():
     texts = {}
     for n in sorted(os.listdir(MEM_DIR)):
@@ -383,7 +396,7 @@ def run_full(with_ollama):
     if base and base["misses"]:
         lines += ["", "## Queries today's bge-small gets wrong at rank 1", ""]
         for q, got, rank in base["misses"]:
-            lines.append(f"- \"{q}...\"  ->  returned `{got}` (correct file at rank {rank or 'NR'})")
+            lines.append(f"- \"{q}...\"  ->  returned `{_opaque(got)}` (correct file at rank {rank or 'NR'})")
     open(os.path.join(HERE, "bench_report.md"), "w", encoding="utf-8").write("\n".join(lines))
 
     # csv

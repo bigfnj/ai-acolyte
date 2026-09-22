@@ -1,5 +1,17 @@
 node_modules/
 *.wc.tmp
+# Patch, merge and backup debris. `src/auto-learn-manager.js` writes uniquely
+# named .bak policy backups that nothing prunes, and a conflicted merge leaves
+# .orig/.rej behind; none of it should ever be stageable.
+*.bak
+*.tmp
+*.orig
+*.rej
+# The atomic writers stage through a sibling .tmp before os.replace. The
+# finished artefacts are ignored above; their in-flight halves were not, and
+# a cancelled write has left one behind before.
+*.onnx.tmp
+recall_index.json
 
 # build artifacts
 *.vsix

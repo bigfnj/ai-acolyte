@@ -29,6 +29,38 @@ is unmeasurable at the process level.
 
 ---
 
+## Which of desktop-ai-companion's optimisation learnings transfer here (2026-09-22)
+
+Moved out of BACKLOG.md on 2026-09-22. The question was asked by the owner; this is the
+measured answer, and it belongs here rather than in a queue where an unticked box invites
+somebody to re-derive it.
+
+**The technique does NOT transfer, exactly as the item predicted, and now it is measured.**
+AgentFlow's 1.7x came from `DirectoryInfo.EnumerateFiles` returning `FileInfo` with the write
+time already filled in by the directory scan. **Node's `Dirent` exposes `name` and `parentPath`
+and nothing else** (checked directly on Node 24.16.0: no `mtime`, no `size`). `findJsonlFiles`
+already uses `withFileTypes` and never stats a discovered file; the one stat per file exists
+because the cursor needs `size`, which `Dirent` cannot supply. That stat costs **47 ms across
+955 files** and there is nothing to win.
+
+**Two more of their findings are already solved here**, worth recording so nobody re-proposes
+them: scans run off the extension host in a worker thread, via
+`runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
+`vscode-extension/extension.js:1121`, which is the fix their pane still needs. And the
+watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
+already runs.
+
+**Measured and not worth doing**, so the numbers exist before someone guesses: the locale-aware
+sort of 955 paths is **12 ms**; the two path hashes per file are **22 ms**. The only remaining
+lever of any size is the head/tail re-hash over every unchanged file, **140 to 160 ms**, and it
+needs a correctness argument rather than a performance one, because it is what proves a file was
+not rewritten in place between scans.
+
+**What DID transfer was a question, not a technique:** what does the five-hundredth tick cost?
+Asking it of the scan is what surfaced the entry above.
+
+---
+
 ## What a transcript cursor means, and why catch-up beats skipping
 
 Settled 2026-09-22 while fixing the oversized-transcript defect. Read this before changing

@@ -123,85 +123,29 @@ guards a door that no longer exists, while the real axis -- total observations
 per scan across 969 files, not per transcript -- has no trigger written against
 it at all.
 
-### ANSWERED 2026-09-22: desktop-ai-companion's optimisation learnings, and which ones transfer
+### recall.py: ~0.7 s of its 1.0 s fixed cost is unaccounted for
 
-The item below was the question. This is the answer, kept short because the finding it produced
-is the entry above.
+The only still-open item from the 2026-09-21 AgentFlow question, kept when that entry was
+retired. The question itself is answered two entries above.
 
-**The technique does NOT transfer, exactly as the item predicted, and now it is measured.**
-AgentFlow's 1.7x came from `DirectoryInfo.EnumerateFiles` returning `FileInfo` with the write
-time already filled in by the directory scan. **Node's `Dirent` exposes `name` and `parentPath`
-and nothing else** (checked directly on Node 24.16.0: no `mtime`, no `size`). `findJsonlFiles`
-already uses `withFileTypes` and never stats a discovered file; the one stat per file exists
-because the cursor needs `size`, which `Dirent` cannot supply. That stat costs **47 ms across
-955 files** and there is nothing to win.
-
-**Two more of their findings are already solved here**, worth recording so nobody re-proposes
-them: scans run off the extension host in a worker thread, via
-`runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1121`, which is the fix their pane still needs. And the
-watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
-already runs.
-
-**Measured and not worth doing**, so the numbers exist before someone guesses: the locale-aware
-sort of 955 paths is **12 ms**; the two path hashes per file are **22 ms**. The only remaining
-lever of any size is the head/tail re-hash over every unchanged file, **140 to 160 ms**, and it
-needs a correctness argument rather than a performance one, because it is what proves a file was
-not rewritten in place between scans.
-
-**What DID transfer was a question, not a technique:** what does the five-hundredth tick cost?
-Asking it of the scan is what surfaced the entry above.
-
-### SUPERSEDED by the two entries above (queued 2026-09-21): do desktop-ai-companion's optimisation learnings transfer here?
-
-Asked directly by the owner after an optimisation pass on `desktop-ai-companion`'s AgentFlow
-module. A first measurement was taken the same evening so tomorrow starts from numbers instead of
-from a hypothesis.
-
-**Baseline, MEASURED 2026-09-21, one run per fresh process, on the toolbox interpreter:**
+**MEASURED 2026-09-21, one run per fresh process, on the toolbox interpreter:**
 
 | What | Time |
 |---|---|
 | `recall.py "<query>" -k 3`, end to end | **1.27 / 1.10 / 1.07 s** |
 | Bare interpreter start (`python -c pass`) | 0.08 / 0.06 / 0.06 s |
 | `import numpy, onnxruntime` | 0.37 / 0.35 / 0.36 s |
-| Live memory corpus | **133** `.md` files at `~/.claude/projects/d---ai-work/memory` |
+| Live memory corpus | **133** `.md` files (now 16 resident index entries, corpus larger) |
 
-So roughly **1.0 s of fixed cost per invocation**, of which the interpreter is 0.06 s and
-numpy+onnxruntime is about 0.30 s. **That leaves ~0.7 s unaccounted for and it is the whole
+Roughly **1.0 s of fixed cost per invocation**, of which the interpreter is 0.06 s and
+numpy+onnxruntime about 0.30 s. **That leaves ~0.7 s unaccounted for and it is the whole
 target**: candidates are the ONNX model load, the vocab read at `memory/recall.py:241`, embedding
-the query, and BM25 over 133 files. Break that down FIRST; do not optimise any of it on a hunch.
+the query, and BM25 over the corpus. Break it down FIRST; do not optimise any of it on a hunch.
 
-**The learning that transfers is a rule about which measurement to take, not a technique.** Match
-the measurement to the process lifecycle:
-
-- AgentFlow polls forever in one process, so **warm** is its steady state. Cold figures overstated
-  it by 55% (31 ms cold against 19 ms warm for identical code), and per-item work was worth fixing:
-  one syscall per file instead of two took the directory sweep from 18.3-20.9 ms to 11.0-12.6 ms.
-- `recall.py` is a **fresh process every invocation**, so **cold IS its steady state**. A warm loop
-  would flatter it and measure something that never happens in production.
-
-**The technique does NOT transfer, and that is the point of writing this down.** `recall.py:393`
-does `os.listdir` then `os.stat` per file, which is the exact two-syscalls-to-one pattern that just
-paid 1.7x in AgentFlow, and `os.scandir` caches stat data the same way .NET's `FileInfo` does. **Do
-not do it.** 133 stats against a 1.0 s fixed cost is invisible. A technique that has just worked
-somewhere else is the most seductive wrong answer available, and this one has a name and a measured
-refutation attached before anyone spends an afternoon on it.
-
-**Non-performance shapes from the same session that are worth an hour here**, because this repo has
-the same failure modes on record:
-
-- **Unreachable code behind a shipped claim.** AgentFlow's Notify-mode screen watch could not run
-  from the day it shipped, because a value the caller computed was only ever non-default in the
-  other mode. Neither a green suite nor a live smoke test found it. Ask of the gate compiler and the
-  extension watcher: *what input reaches this branch?* `MEMORY.md`'s own gate-count line has been
-  wrong three times, which is the same shape.
-- **An assertion made vacuous by a refactor.** Making a predicate pure meant its test injected the
-  value that used to be read, so the test would have passed even if no real mode ever supplied
-  `true`. Worth grepping this repo's tests for arguments that only ever arrive as literals.
-- **A guard that looks like ceremony.** A 250 ms socket timeout looked pointless because a closed
-  loopback port "obviously" refuses instantly. It takes **2,063 ms**. Measure what a guard guards
-  before deleting it. See `docs/engineering-record.md` for the local equivalents.
+`recall.py` is a fresh process every invocation, so **cold IS its steady state** — a warm loop
+would flatter it and measure something that never happens. And do NOT apply the `os.scandir`
+two-syscalls-to-one trick here: 133 stats against a 1.0 s fixed cost is invisible, and it is
+recorded as declined for that reason.
 
 ### Test harnesses can silently assert against a frozen home
 

@@ -1000,3 +1000,197 @@ test('a fetch target that is not an http origin produces no observation at all',
   })));
   assert.deepEqual(parseClaudeJsonl(transcript, { file: 'D:\history\claude.jsonl' }), []);
 });
+
+// ---------------------------------------------------------------------------
+// Oversized transcripts. MEASURED 2026-09-22: a 2,266,973,030-byte Codex
+// rollout cost 570-629 ms of every 755-849 ms scan and never finished, because
+// the reconcile asked readRange for the whole file and readSync's int32 length
+// wrapped to -2,027,994,266. These pin the three pieces of that fix.
+// ---------------------------------------------------------------------------
+
+function tempRoot(t, label) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `wildcard-history-${label}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+// A Claude transcript of roughly `bytes`, every record a distinct shell call so
+// observation loss is detectable rather than merely plausible.
+function bulkClaude(file, calls, padding) {
+  const records = [];
+  for (let index = 0; index < calls; index += 1) {
+    records.push({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'tool_use', id: `call-${index}`, name: 'Bash',
+          input: { command: `echo ${index} ${'p'.repeat(padding)}` },
+        }],
+      },
+    });
+    records.push({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: `call-${index}`, is_error: false, content: 'ok' }],
+      },
+    });
+  }
+  fs.writeFileSync(file, jsonl(...records));
+}
+
+test('READ_CHUNK_BYTES stays under the int32 ceiling readSync enforces', () => {
+  const { READ_CHUNK_BYTES } = require('../src/history-adapters');
+  assert.ok(Number.isFinite(READ_CHUNK_BYTES) && READ_CHUNK_BYTES > 0,
+    'the chunk cap must be a real positive number');
+  assert.ok(READ_CHUNK_BYTES <= 2147483647,
+    'a chunk over 2^31-1 is the defect itself: readSync wraps the length '
+    + 'negative and throws before reading a byte');
+});
+
+test('no single read asks for more than one chunk, however long the range', (t) => {
+  const root = tempRoot(t, 'chunk');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 40, 400);
+  const size = fs.statSync(file).size;
+  assert.ok(size > 20000, `precondition: the fixture is worth chunking (${size} bytes)`);
+
+  const lengths = [];
+  const realReadSync = fs.readSync;
+  t.after(() => { fs.readSync = realReadSync; });
+  fs.readSync = (fd, buffer, offset, length, position) => {
+    lengths.push(length);
+    return realReadSync(fd, buffer, offset, length, position);
+  };
+
+  const result = scanHistoryFiles({ cursors: {}, claudeRoots: [root], readChunkBytes: 4096 });
+  fs.readSync = realReadSync;
+
+  assert.equal(result.files.length, 1, 'precondition: the fixture was scanned');
+  assert.equal(result.files[0].mode, 'full');
+  assert.ok(lengths.length > 0, 'precondition: reads were observed at all');
+  const oversized = lengths.filter((length) => length > 4096);
+  assert.deepEqual(oversized, [],
+    'every readSync must be capped at the chunk size; an uncapped call is what '
+    + 'wraps the int32 length on a file over 2 GiB');
+  assert.ok(lengths.some((length) => length === 4096),
+    'and the cap must actually bite, or this test is measuring a small file');
+  assert.equal(result.observations.length, 40,
+    'chunking must not lose a record: all 40 calls still parse');
+});
+
+test('a capped scan consumes a bounded slice, and the cursor records only that', (t) => {
+  const root = tempRoot(t, 'cap');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 60, 300);
+  const size = fs.statSync(file).size;
+
+  const first = scanHistoryFiles({ cursors: {}, claudeRoots: [root], ingestBytes: 4096 });
+  const entry = first.files[0];
+  assert.equal(entry.mode, 'partial',
+    'a scan that stopped short of EOF must say so, not report a clean full read');
+  assert.ok(entry.consumedEnd < size,
+    `precondition: the cap bit (${entry.consumedEnd} of ${size})`);
+
+  const cursor = Object.values(first.cursors)[0];
+  assert.equal(cursor.size, entry.consumedEnd,
+    'the cursor records what was consumed; recording stat.size would silently '
+    + 'skip everything between here and EOF');
+  const bytes = fs.readFileSync(file);
+  assert.equal(bytes[cursor.size - 1], 10,
+    'and it lands on a newline, so the next scan resumes on a record boundary');
+});
+
+test('successive capped scans lose nothing against one uncapped scan', (t) => {
+  const root = tempRoot(t, 'catchup');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 60, 300);
+
+  const whole = scanHistoryFiles({ cursors: {}, claudeRoots: [root] });
+  assert.equal(whole.files[0].mode, 'full', 'precondition: the uncapped scan read it all');
+
+  const seen = new Set();
+  let cursors = {};
+  let ticks = 0;
+  for (; ticks < 40; ticks += 1) {
+    const pass = scanHistoryFiles({ cursors, claudeRoots: [root], ingestBytes: 4096 });
+    for (const observation of pass.observations) seen.add(observation.id);
+    cursors = JSON.parse(JSON.stringify(pass.cursors));
+    if (pass.files[0].mode !== 'partial') break;
+  }
+  assert.ok(ticks > 1, `precondition: catch-up really took several ticks (${ticks + 1})`);
+  assert.ok(ticks < 39, 'and it converged rather than running out of attempts');
+  assert.deepEqual(
+    [...seen].sort(),
+    whole.observations.map((observation) => observation.id).sort(),
+    'the union of the capped ticks must equal the single uncapped read, or the '
+    + 'cap is losing evidence rather than spreading it',
+  );
+});
+
+test('a read that throws still reports the bytes it had already taken', (t) => {
+  const root = tempRoot(t, 'errbytes');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 40, 400);
+
+  let calls = 0;
+  const realOpenSync = fs.openSync;
+  t.after(() => { fs.openSync = realOpenSync; });
+  fs.openSync = (target, ...rest) => {
+    if (String(target) === file) {
+      calls += 1;
+      if (calls > 1) throw Object.assign(new Error('EBUSY: simulated'), { code: 'EBUSY' });
+    }
+    return realOpenSync(target, ...rest);
+  };
+
+  const result = scanHistoryFiles({ cursors: {}, claudeRoots: [root], ingestBytes: 4096 });
+  fs.openSync = realOpenSync;
+
+  const entry = result.files[0];
+  assert.equal(entry.mode, 'error', 'precondition: the second read really failed');
+  assert.ok(entry.bytesRead > 0,
+    'an error entry must carry what it read before throwing; reporting 0 is how '
+    + 'a scan that pulled 118 MB off disk looked free for eight days');
+});
+
+test('a reconcile that cannot reach its call reports it instead of re-reading the file', (t) => {
+  const root = tempRoot(t, 'reconcile');
+  const file = path.join(root, 'rollout.jsonl');
+  // The call, then enough filler that a bounded lookback cannot reach back to
+  // it, then the matching result. This is the shape that used to trigger an
+  // unbounded whole-file re-read.
+  const filler = [];
+  for (let index = 0; index < 200; index += 1) {
+    filler.push(responseItem({ type: 'message', role: 'assistant', content: `${'f'.repeat(300)}` }));
+  }
+  fs.writeFileSync(file, jsonl(
+    responseItem({
+      type: 'function_call', name: 'shell_command', call_id: 'far-call',
+      arguments: JSON.stringify({ command: 'echo far' }),
+    }),
+    ...filler,
+  ));
+
+  const first = scanHistoryFiles({ roots: { codex: root }, platform: 'win32', overlapBytes: 48 });
+  assert.equal(first.files[0].mode, 'full', 'precondition: the call was consumed first');
+  const cursors = JSON.parse(JSON.stringify(first.cursors));
+  const sizeAfterCall = fs.statSync(file).size;
+
+  fs.appendFileSync(file, jsonl(
+    responseItem({ type: 'function_call_output', call_id: 'far-call', output: { exit_code: 0 } }),
+  ));
+
+  const second = scanHistoryFiles({
+    roots: { codex: root }, cursors, platform: 'win32',
+    overlapBytes: 48, reconcileBytes: 64,
+  });
+  const entry = second.files[0];
+  assert.equal(entry.unmatchedResults, 1,
+    'a result whose call is beyond the lookback must be COUNTED, not dropped in '
+    + 'silence; silence is how a missed failure looks like a clean family');
+  assert.ok(entry.bytesRead < sizeAfterCall,
+    `the bounded reconcile must not re-read the whole file (${entry.bytesRead} `
+    + `bytes read against ${sizeAfterCall} before the append)`);
+});

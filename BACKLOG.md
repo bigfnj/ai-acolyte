@@ -13,64 +13,6 @@ Anything measured says so and names the date. Anything unverified says that too.
 
 ## Open
 
-### One oversized Codex transcript costs 70% of every Auto Learn scan, forever
-
-Found 2026-09-22 by running the AgentFlow transfer review below. It is the answer to that
-item's question: the technique did not transfer, the QUESTION did.
-
-**MEASURED 2026-09-22, one call per fresh process, through the real exported
-`scanHistoryFiles` against the live corpus** (955 transcripts: 708 Claude / 819 MB,
-247 Codex / 5.98 GB). Not a proxy, for the reason `desktop-ai-companion`'s BACKLOG records
-after its Python `os.walk` proxy came out 45% over on one root and 30% under on the other.
-
-| what | ms |
-|---|---|
-| whole steady-state scan (5 runs) | 755 / 783 / 790 / 803 / 849 |
-| Claude root alone, 708 files | 271, fully attributed |
-| Codex root alone, 247 files | 688 |
-| **one file inside that root** | **570 to 629** |
-
-The file is a **2,266,973,030-byte** Codex rollout dated 2026-09-14. Its cursor records
-2,143,573,355 bytes. Every scan:
-
-1. takes the append branch and reads **123,661,819 bytes (118 MB)** from `prior.size - 256 KB`;
-2. parses that slice — 265 ms in `parseJsonlRecords`, 75 ms `utf8Slice`, 66 ms across the
-   `Exit code:` and `Script (completed|failed)` regexes, plus GC;
-3. reaches the reconcile path, where `buffer = readRange(file, 0, stat.size)` at
-   `src/history-adapters.js:1216` re-reads the whole file because a result crossed the cursor;
-4. throws, because `readSync`'s length argument is int32 and 2,266,973,030 wraps to
-   **-2,027,994,266**;
-5. writes no cursor, correctly: `if (safe && prior) cursors[cursorKey] = prior;` at
-   `src/history-adapters.js:1248` is guarded by a `safe` that is now false, and the comment
-   above it refuses to claim progress a failed read did not make.
-
-So the next scan does exactly the same thing. At the default 20-second debounce that is 118 MB
-of reads and half a second of CPU every 20 seconds, permanently, and **the file's observations
-never reach the learner**. The live state has said `errors: 1` since 2026-09-14.
-
-**Measured and NOT the cause, recorded because it is the obvious first guess.**
-`Buffer.allocUnsafe(2.27 GB)` followed by the throwing `readSync` costs **1.7 / 2.1 / 2.4 / 2.4 ms**
-over four attempts in one process; RSS never moves, because nothing touches the pages. The cost
-is the 118 MB read and parse in step 2, not the allocation in step 3.
-
-**Three defects, and they want separating before anyone fixes one:**
-
-- `function readRange(file, start, length)` (`src/history-adapters.js:951`) already loops, but
-  passes the whole remaining length to each read, so any file over 2 GiB fails with a nonsense
-  negative-length error rather than reading. Capping each call would fix the error — and on its
-  own makes things WORSE, because then the reconcile genuinely reads 2.27 GB on every tick.
-- The error path records no `bytesRead`, so a scan that read 118 MB and threw reports
-  `kbRead: 0`. That is why this never showed up in any scan statistic.
-- `scan()`'s return value carries `files`, `observations` and `blindScan` but **not `errors`**,
-  though `lastScanStats` has held the count all along (`src/auto-learn-manager.js:1873-1876`).
-  A file that fails every scan for eight days is invisible to every UI surface.
-
-The shape of the fix is a size ceiling with an HONEST cursor: consume what can be read, advance
-the cursor to what was actually consumed, and mark the file partially-ingested rather than
-errored — so the 118 MB is read once instead of every twenty seconds. That is a design decision
-about what the learner is allowed to skip, not a patch, which is why this is filed rather than
-done.
-
 ### ANSWERED 2026-09-22: desktop-ai-companion's optimisation learnings, and which ones transfer
 
 The item below was the question. This is the answer, kept short because the finding it produced
@@ -296,7 +238,7 @@ nobody calls with an object third argument) and `:691-694` (that third parameter
 is vestigial in production; only a test passes a function).
 
 Two corrections to this file's own claims:
-`list: listCandidates` at `auto-learn-manager.js:2009` has **zero** consumers
+`list: listCandidates` at `auto-learn-manager.js:2024` has **zero** consumers
 anywhere, so it is dead on
 both sides rather than merely an unreachable fallback; and "verdicts.unknown can
 no longer be non-zero" is **half wrong** — the `!policy.present` path is provably
@@ -440,10 +382,10 @@ what was deliberately left.
 - Two fallback branches can never run, because each is an alias of the function
   checked immediately before it and no test injects a partial mock.
   `return manager.getStatus();` at `vscode-extension/extension.js:1019` follows a
-  `manager.status` check, and `src/auto-learn-manager.js:2007` exports
+  `manager.status` check, and `src/auto-learn-manager.js:2022` exports
   `getStatus: status`. `manager.getCandidates(options)` at
   `vscode-extension/extension.js:1026` follows a `manager.listCandidates` check, and
-  `src/auto-learn-manager.js:2009` exports `getCandidates: listCandidates`.
+  `src/auto-learn-manager.js:2024` exports `getCandidates: listCandidates`.
   Re-verified 2026-09-14. A correction pass read this entry as closed because it also
   named `list()`: that alias IS still exported on the same line as `getCandidates`, but
   it is not part of either fallback chain, so naming it here was the imprecision that
@@ -454,7 +396,7 @@ what was deliberately left.
   scripts never touch instruction files, so an accepted derived block is orphaned
   after an uninstall with no command that removes it.
 - The Codex validator's temp file is created before the `try` whose `finally` unlinks it:
-  `.permission-wildcarding-validate` at `src/auto-learn-manager.js:807-809`, so a failed
+  `.permission-wildcarding-validate` at `src/auto-learn-manager.js:813`, so a failed
   write orphans it.
 - `policyCache` has no invalidation path from the managed-policy watcher, so
   `status()` reports a stale verdict between a policy change and the next scan.
@@ -541,9 +483,9 @@ references:
 - `renderCodexRules`'s `options.version` and `options.header`
   (`src/policy-exporters.js:392-397`) — two dead keys and three dead arms across
   7 call sites.
-- `options.claudeSettingsPath` (`src/auto-learn-manager.js:875`) — a fourth member
+- `options.claudeSettingsPath` (`src/auto-learn-manager.js:880`) — a fourth member
   of the already-recorded alias family; only the alias spelling is supplied.
-- `applyClaude` / `applyCodex` (`src/auto-learn-manager.js:1654,1659`) are test-only;
+- `applyClaude` / `applyCodex` (`src/auto-learn-manager.js:1659,1664`) are test-only;
   production uses `apply`, and the worker's allow-list does not include them.
 - `createCoverIndex(...).stats()` is test-only — a measurement hook, not API.
 
@@ -650,7 +592,7 @@ Both found while scoping items that were then dropped:
 - **`bin/wildcard-perms:57-73`** — `--help`, `-h`, `--version`, `-V` and the
   unrecognized-option guard have **no test anywhere**. That guard exists because
   its absence once "silently rewrote the user's permission policy and exited 0".
-- **`src/auto-learn-manager.js:1600` (`Policy changed while Auto Learn was preparing it`)
+- **`src/auto-learn-manager.js:1605` (`Policy changed while Auto Learn was preparing it`)
   and `:1609` (`Policy changed before Auto Learn could write it`)** — see the
   whole-object writer section above.
 
@@ -950,7 +892,7 @@ highest-consequence item in this section.
 
 The sibling bullet under that heading IS closed and should not be re-raised: managed rule text now
 gets `clean()` at the table (`src/auto-learn-manager.js:1129`) and `cleanRule()` at the
-interpolation (`src/derived-guidance.js:51`, exported at `:357`).
+interpolation (`src/derived-guidance.js:43`, exported at `:357`).
 
 The three from `Interesting, off-axis`:
 
@@ -969,7 +911,7 @@ credentials the run stops at Not logged in". The BOM half of this bullet was fix
 `args` read were all dropped with the heading.
 
 **Two stat-keyed caches can still return a stale verdict.** `policyFingerprint` at
-`src/auto-learn-manager.js:916` and `autoLearnStateStamp` at `vscode-extension/extension.js:1047`
+`src/auto-learn-manager.js:924` and `autoLearnStateStamp` at `vscode-extension/extension.js:1047`
 both key on `${stat.mtimeMs}:${stat.size}`. A same-size in-place rewrite inside timestamp
 granularity is invisible to both. Accepted when written; still true.
 
@@ -993,7 +935,7 @@ pruned 2000, cursors 5000, observation hashes 20000, managed hits 200).
 
 **The obvious two-line fix is NOT safe, checked 2026-09-14.** Deleting a record whose two lists
 both emptied looks free, and is not, because the empty-map state is load-bearing elsewhere. The
-seeding branch `Object.keys(state.codexTargets).length === 0` at `src/auto-learn-manager.js:969`
+seeding branch `Object.keys(state.codexTargets).length === 0` at `src/auto-learn-manager.js:974`
 adopts the legacy flat `state.applied.codex` into the FIRST target ever seen, and that is a
 one-time migration. Evicting the last surviving record puts the map back to empty and re-arms it,
 so the next target seen takes the migration path instead of starting clean. The traced outcome is
@@ -1029,7 +971,7 @@ tomorrow with no signal.
 
 All four survived mutations in this section were re-run independently in a detached worktree after
 the audit reported them, because the audit's citation for the first one pointed at
-`src/auto-learn-manager.js:1553`, which is `const parent = current.find(...)` in an unrelated
+`src/auto-learn-manager.js:1558`, which is `const parent = current.find(...)` in an unrelated
 function. The FINDINGS were all correct; one line number was not. Deleting that line would have
 been a syntax error rather than a green run, so the number was mis-transcribed into the report
 rather than mis-measured.

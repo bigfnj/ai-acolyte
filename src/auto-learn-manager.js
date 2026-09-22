@@ -584,6 +584,11 @@ function scanStats(value) {
   const count = (name) => Math.max(0, Number(value[name]) || 0);
   return {
     files: count('files'), observations: count('observations'), errors: count('errors'),
+    // Files the scan deliberately stopped short on, and results whose call it
+    // could not reach. Both are normal in small numbers and both are evidence
+    // of a problem when they persist, which is why they are counted rather
+    // than inferred from the absence of something else.
+    partial: count('partial'), unmatchedResults: count('unmatchedResults'),
     prunedObservations: count('prunedObservations'),
     prunedCursors: count('prunedCursors'),
     prunedCandidates: count('prunedCandidates'),
@@ -1874,6 +1879,10 @@ function createAutoLearnManager(options = {}) {
         files: Array.isArray(result.files) ? result.files.length : Object.keys(state.cursors).length,
         observations: acceptedObservations,
         errors: Array.isArray(result.files) ? result.files.filter((item) => item.mode === 'error').length : 0,
+        partial: Array.isArray(result.files)
+          ? result.files.filter((item) => item.mode === 'partial').length : 0,
+        unmatchedResults: Array.isArray(result.files)
+          ? result.files.reduce((total, item) => total + (Number(item.unmatchedResults) || 0), 0) : 0,
         prunedObservations,
         prunedCursors: prunedCursorCount,
         prunedCandidates: prunedCandidateCount,
@@ -1892,6 +1901,12 @@ function createAutoLearnManager(options = {}) {
       return {
         scannedAt: state.lastScanAt, files: state.lastScanStats.files,
         observations: acceptedObservations, newObservations, updatedObservations,
+        // `errors` was computed here all along and then not returned, so a file
+        // that failed every scan for eight days was invisible to the CLI, the
+        // dashboard and anything else that only ever sees this object.
+        errors: state.lastScanStats.errors,
+        partial: state.lastScanStats.partial,
+        unmatchedResults: state.lastScanStats.unmatchedResults,
         prunedObservations,
         prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidateCount, prunedGrants,
         blindScan,

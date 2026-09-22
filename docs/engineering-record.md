@@ -29,6 +29,54 @@ is unmeasurable at the process level.
 
 ---
 
+## What a transcript cursor means, and why catch-up beats skipping
+
+Settled 2026-09-22 while fixing the oversized-transcript defect. Read this before changing
+anything about `scanHistoryFiles`' read path.
+
+**A cursor asserts exactly one thing: bytes `[0, size)` of this file are accounted for.**
+Nothing requires `size` to equal the file's CURRENT size, and that gap is the whole fix. A scan
+that consumes a bounded slice records what it consumed; the next scan resumes there. Nothing is
+skipped, so no failure can be silently lost, and the cursor never has to express a hole.
+
+**Three designs were considered and two rejected.**
+
+- A `partial: true` marker on the cursor. **Impossible without a schema change.** `cursor()` at
+  `src/auto-learn-manager.js:443-454` is a strict whitelist with no boolean leg, applied both on
+  read and on scan-replace, and it drops unknown fields SILENTLY — the marker would vanish in
+  the same tick it was created. Bumping `VERSION` to carry it resets every existing state file,
+  because `STATE_MIGRATIONS` is empty and `migrateState` returns null for an unregistered step.
+- A size ceiling that skips the remainder. **Rejected on safety.** `isAutoSafeCandidate`
+  (`src/auto-learn.js:841`) requires `counts.failed === 0`, so a skipped byte range containing
+  the one failure for a family would let that family become auto-safe. Skipping is not a
+  performance trade here, it is a permissions trade.
+- Progressive catch-up. **Taken.** Bounded work per tick, honest cursor, nothing lost.
+
+**The budget is measured from the CURSOR, not from the slice start, and the difference is not
+cosmetic.** The append path reaches back up to `overlapBytes` (256 KB) to find a record
+boundary. Budgeting from the slice start meant that on any cap smaller than the overlap the
+entire budget went on re-reading bytes already accounted for: the cursor never advanced and
+catch-up looped forever. Caught by the differential test, not by inspection.
+
+**MEASURED 2026-09-22, live corpus, one call per fresh process.** 955 transcripts before, 962
+after (this session's own files landed in between), 819 MB Claude plus 5.98 GB Codex.
+
+| | steady-state tick | bytes read | errors |
+|---|---|---|---|
+| before | 755 / 783 / 790 / 803 / 849 ms | 118 MB every tick, forever | 1, permanent |
+| after, catching up | 1088 then 942 ms | 190 MB then 176 MB, twice only | 0 |
+| after, steady | **303 / 316 / 341 ms** | **0** | **0** |
+
+The 2,266,973,030-byte transcript that caused it had never been ingested at all; it is now.
+
+**Do not "simplify" the chunk cap away.** `READ_CHUNK_BYTES` exists because `fs.readSync`'s
+length argument is an int32: one call asking for 2,266,973,030 bytes wraps to -2,027,994,266 and
+throws before reading anything. It is a parameter of `readRange` rather than a bare constant
+specifically so a test can drive it with a small file; a 2 GiB fixture is not writable in a test
+suite, and a cap only its own default can reach is a guard nothing can prove.
+
+---
+
 ## Verified working, nothing to do
 
 Auto Learn applies. Both symptoms that opened the 2026-09-02/03 work are gone,
@@ -562,8 +610,8 @@ Unrebased whole-object writers still outstanding:
 |---|---|
 | `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
 | `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1922-1924`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:1365` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1361`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:1987` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
+| `change.before.content` at `src/auto-learn-manager.js:1370` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1361`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2002` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:245` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:201` read → `:245` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`

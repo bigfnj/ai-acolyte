@@ -345,10 +345,10 @@ is wider than the check:
 - `test/extension-lifecycle-async.test.js:442` uses `/(?<![\w.])execFile\(/g`,
   which excludes `.execFile(` — a fifth spawn written `cp.execFile(` passes
   silently.
-- `'the hook fires once, after a successful write'` at `test/settings-write.test.js:129`
-  asserts `onWrite` fires once on success; nothing asserts it does NOT fire when
-  `writeAllow` throws, and nothing asserts the CLI writer has no `onWrite` — that
-  "deliberate rather than dropped" question rests entirely on a comment.
+- Half of the `onWrite` gap is closed: a write that throws is now asserted NOT
+  to fire the high-water hook, and the ordering mutation kills it. What remains
+  is that nothing asserts the CLI writer has no `onWrite` at all, so the
+  "deliberate rather than dropped" half still rests on a comment.
 - `test/extension-lifecycle-async.test.js`'s `trackChild` check is a source-text
   scan for `trackChild(execFile(`, so a correct `const c = execFile(...);
   trackChild(c);` would fail it and a `spawn()` would slip past.

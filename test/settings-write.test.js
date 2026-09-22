@@ -634,3 +634,36 @@ test('the in-place fallback names the cause it gave the atomic guarantee up for'
   // And it does not leave its temp file behind on the way.
   assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
 });
+
+test('a write that throws does not fire the high-water hook', (t) => {
+  // onWrite is the allow-list high-water backup. Firing it for a write that
+  // did not land would record a watermark the file never reached, and the next
+  // "N entries went missing" comparison would be against fiction. The ordering
+  // in the writer makes that impossible; nothing asserted it, so a reordering
+  // would have been silent.
+  const snapshot = { permissions: { allow: ['Bash(git status)'] } };
+  const env = tempSettings(t, snapshot);
+
+  const realWriteFileSync = fs.writeFileSync;
+  t.after(() => { fs.writeFileSync = realWriteFileSync; });
+  fs.writeFileSync = (target, ...rest) => {
+    if (String(target).includes('settings.json')) {
+      throw Object.assign(new Error('ENOSPC: simulated'), { code: 'ENOSPC' });
+    }
+    return realWriteFileSync(target, ...rest);
+  };
+
+  const seen = [];
+  let threw = false;
+  try {
+    env.writer({ onWrite: (allow, deny) => seen.push({ allow, deny }) })
+      .writeAllow(snapshot, ['Bash(rg *)']);
+  } catch {
+    threw = true;
+  }
+  fs.writeFileSync = realWriteFileSync;
+
+  assert.ok(threw, 'precondition: the write really failed rather than being swallowed');
+  assert.deepEqual(seen, [],
+    'the high-water hook must not fire for a write that did not land');
+});

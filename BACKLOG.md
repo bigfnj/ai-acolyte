@@ -412,12 +412,6 @@ reads `if (!settings || typeof settings !== 'object') return finish(input, false
   runner without draining it. A second consequence of the recorded "no deadline"
   item. SUSPECTED — depends on VS Code await semantics not verifiable from here.
 
-## From the 2026-09-10 optimization and correctness pass
-
-Four phases landed (`1b41205..cd1f50c`): `managed-policy` off the hook path, the
-dashboard's doubled memory report, the last three whole-object writers, and the
-hook fixed-point cache. What follows is what was found and deliberately left.
-
 ## Audit of 2026-09-10, second pass
 
 Five read-only agents over the day's work, plus my own verification of each
@@ -581,10 +575,6 @@ is the stdin round-trip at 3.78 min / 5.48 p50 ms, of which only ~1.2 ms is
 stream overhead the hook controls.
 
 ---
-
-## From the 2026-09-14 hybrid-recall work
-
-The retrieval change itself landed. These are what it surfaced and deliberately did not do.
 
 ## From the 2026-09-14 three-agent audit of c369e58
 

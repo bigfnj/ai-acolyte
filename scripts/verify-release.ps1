@@ -194,7 +194,16 @@ if (-not (Test-Path $genFile)) {
     # throws -- so the harness CRASHED on exactly the state it exists to report:
     # a machine with no gates, where `--gates refresh` writes 0 bytes by design.
     # Coerce before trimming, and let the non-empty check below do the judging.
-    $raw = Get-Content $genFile -Raw
+    # -Encoding UTF8 is load-bearing, not decoration. Windows PowerShell 5.1
+    # picks the ANSI codepage for a file with no BOM, and recall.py writes this
+    # one WITHOUT a BOM while the installer writes CLAUDE.md WITH one. So the
+    # two sides of the comparison below were decoded differently: the gates text
+    # holds 4 non-ASCII characters, each three bytes, and the mojibake read them
+    # as 7258 characters against the correctly-decoded 7250. The check could
+    # therefore never pass while a single non-ASCII character was present, which
+    # is always. It reported a byte drift that did not exist; the contents were
+    # identical the whole time.
+    $raw = Get-Content $genFile -Raw -Encoding UTF8
     if ($null -eq $raw) { $raw = '' }
     $gen = $raw.Trim()
     # Read the count out of the generated header rather than inferring it from
@@ -213,7 +222,7 @@ if (-not (Test-Path $genFile)) {
     if ($sha.Success) { Note 'compiled sha' $sha.Groups[1].Value }
 
     if (Test-Path $claudeMd) {
-        $text = Get-Content $claudeMd -Raw
+        $text = Get-Content $claudeMd -Raw -Encoding UTF8
         $m = [regex]::Match($text, '(?s)' + [regex]::Escape($GATES_BEGIN) + '(.*?)' + [regex]::Escape($GATES_END))
         if ($m.Success) {
             $installed = $m.Groups[1].Value.Trim()

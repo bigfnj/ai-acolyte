@@ -959,6 +959,51 @@ The measurement bar these were held to: cold, in fresh interleaved processes, ag
 purpose-built variant with the change REMOVED. A warm loop or a sandboxed temp HOME has
 been wrong every time, twice with the conclusion inverted.
 
+### The JSONL byte-level prefilter: identical, and slower on every workload
+
+Measured 2026-09-22. The idea was to skip `toString` and `JSON.parse` for lines
+that cannot contain a tool call, testing the raw bytes for a marker first.
+
+**Correctness was the gate and it passed completely.** Full-corpus differential
+in 32 MiB boundary-aligned windows: 6,817.2 MiB of 6,817.2 MiB, 969 files,
+1,141 windows, 97,469 observations per side, comparing every field plus the
+non-enumerable parser offsets. **Zero mismatches.** Repeated at a 7 MiB window
+so the slice boundaries fall elsewhere: zero again. The differential harness
+was mutation-proven: dropping the Codex `function_call` marker produced 45
+mismatches and lost 3,764 observations.
+
+**It is slower everywhere.** Cold, interleaved, fresh processes, min / p50, the
+delta being baseline minus prefilter so negative is worse:
+
+| workload | delta |
+|---|---|
+| claude-append 0.53 MiB | -1.10 / -1.93 |
+| claude-ingest 58.1 MiB | -27.48 / -30.68 |
+| codex-ingest 59.1 MiB | -15.62 / -10.91 |
+| whole corpus 2,185.9 MiB | -1035.2 / -1210.5 |
+
+The skip test costs O(line bytes x markers) and the saving only lands on
+skipped bytes. Measured skip rates: Claude 0.8% of lines and 1.4% of bytes;
+Codex 73.5% of lines but only 34.5% of bytes corpus-wide, and 6.0% in an
+ingest-sized slice. Codex lines are huge, p50 866 bytes and max 10.8 MB, so the
+lines that do NOT skip get scanned an extra time for nothing.
+
+**The prefix-bounded repair is unsafe and was not timed.** First-marker byte
+offset over the corpus reaches 592,928 for Claude and 1,316,527 for Codex, so
+even a 4 KB prefix window would silently drop 7,430 Claude and 1,192 Codex
+lines. Silently losing evidence to save time is the trade this project does not
+make.
+
+**A figure of mine that does not reproduce, corrected here rather than left to
+be cited.** A CPU profile taken earlier that day attributed 243 ms to
+`parseJsonlRecords` over a 550 KB appended slice, and that number appears in
+this session's reasoning about where scan time goes. A real 550 KiB-capped tail
+parses cold in **9.9 to 13.5 ms**, and the whole 969-file, 356 MiB sweep of
+550 KiB tails is 2,087 ms in one process. The 243 ms is roughly 20x anything
+reproducible. Most likely it was the profiler's own attribution over a slice
+that also carried GC and first-call compilation, read as steady-state cost.
+Do not cite it.
+
 ### The four refuted rows from the 2026-09-10 ranked table
 
 Moved out of `BACKLOG.md` on 2026-09-22, where they had sat struck through inside a

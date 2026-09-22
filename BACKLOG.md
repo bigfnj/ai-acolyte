@@ -189,10 +189,6 @@ is worse than one that does.
 
 ### Smaller measured perf items, none urgent
 
-- `src/policy-guard.js:117` — `missingFromLive`'s cover fallback is quadratic
-  when backup entries are not present verbatim in live, which its own comment
-  calls "the normal state". 0.13 ms today because the Set fast path hits;
-  **15.5 ms** measured with no verbatim hits. Same prefix-index fix.
 - The drain path in `bin/wildcard-perms` reads settings.json 4 times and runs
   processAllowList twice per drain.
 - `src/policy-exporters.js:537` (also 476, 677) — `new RegExp` inside a nested
@@ -307,27 +303,6 @@ and the only metadata chunk is the capture tool's name, with no EXIF, author or 
 - `src/policy-lock.js:92-96`: if openSync succeeds but writeFileSync/fsyncSync
   throws, removeOwnedLock cannot JSON.parse the empty file and returns false,
   orphaning the lock until the staleness path reclaims it.
-- ~~`package.json` declares `engines: node >=18`, but CI now tests 20 and 22 and
-  node 18 is past end of life. Either raise the floor or test it.~~
-  **RAISED TO `>=20` 2026-09-14, not tested at 18.** Reasoning, because the
-  alternative was defensible: node 18 is past end of life and takes no security
-  patches, and this project writes the user's permission policy, so advertising
-  support for an unpatched runtime is a promise it cannot keep. Nothing exercises
-  18 — `test.yml` runs 20 and 22 on ubuntu and windows, `release.yml` builds on
-  20 — so `>=18` was an untested claim, which is the same class of unverified doc
-  claim as everything else in this cluster. Adding an 18 job would have added two
-  jobs to defend an EOL runtime and committed the project to keeping them green.
-  **The floor was raised, not the matrix.**
-  - **This is a support-policy decision, not a technical necessity, and saying so
-    matters.** A search of `src/`, `bin/`, `test/`, `scripts/` and the extension
-    found no API that requires node 20: the `node:` builtins in use are assert,
-    child_process, crypto, events, fs, module, os, path, test, url and
-    worker_threads, with no `mock.timers`, no `structuredClone`, no `fs.glob`, no
-    `util.styleText`, and no `--test-reporter` flags. The code would very likely
-    still run on 18. The claim being fixed is that the project *promises* a floor
-    it never tests, not that 18 is broken.
-  - The two `Node >= 18` statements in README.md moved with it. Nothing asserts
-    the `engines` value, so there was no test to update.
 - A work-domain email address appears as the author of 3 of 48 commits (all
   2026-08-21) in this **public** repo's history. Future commits are already safe:
   the global git identity is a personal address. Rewriting history was declined —
@@ -400,8 +375,6 @@ what was deliberately left.
   write orphans it.
 - `policyCache` has no invalidation path from the managed-policy watcher, so
   `status()` reports a stale verdict between a policy change and the next scan.
-- `rebuildManagedHits` is not in `auto-learn-worker.js`'s allowed operations, so
-  a UI-triggered rebuild would block the extension host.
 
 ## From the 2026-09-10 five-agent audit
 
@@ -589,9 +562,6 @@ launcher is most of the gap.
 
 Both found while scoping items that were then dropped:
 
-- **`bin/wildcard-perms:57-73`** — `--help`, `-h`, `--version`, `-V` and the
-  unrecognized-option guard have **no test anywhere**. That guard exists because
-  its absence once "silently rewrote the user's permission policy and exited 0".
 - **`src/auto-learn-manager.js:1605` (`Policy changed while Auto Learn was preparing it`)
   and `:1609` (`Policy changed before Auto Learn could write it`)** — see the
   whole-object writer section above.
@@ -705,12 +675,6 @@ measured on the live 119-file corpus rather than estimated.
 
 ### Three measured optimizations, none urgent
 
-- `collections.Counter(terms)` for the term-count loop in `_lex_index`: **20.5 ms to 7.3 ms**,
-  about 16% of `_lex_index`'s 80 ms. `Counter` is a `dict` subclass so every downstream use is
-  unchanged. One line.
-- `np.array(vecs) @ q` for the cosine loop: **3.82 ms to 0.070 ms**, 55x. numpy is already
-  imported and the vectors are already lists. Immaterial for one CLI query, worth ~180 ms across
-  a 48-evaluation bench run.
 - `best_line` calls `_display_keys(MEMORY_DIRS)` once per printed result in `--vector-only`,
   where `lex` is None so the fallback fires for every row: 1 + k directory scans, ~5 ms. Hoist
   the map into `_retriever`'s return value if this code is touched anyway.
@@ -751,20 +715,7 @@ protocol this file already mandates.
 `pickPrimaryDir` into `fullReport` removes one. Measure on `_push()` end to end, not on
 `memoryReport()` alone, because `_push` is what a user waits on.
 
-**~~`updateStatusBar`'s guard cannot be false.~~ FIXED.** It read `if (!statusBar) return;`, and
-`statusBar` is assigned once at activation and set to `null` nowhere, including in
-`deactivate()` where four other retainers are nulled. So after the first activation the
-condition is false forever, including after VS Code has disposed the item. Every other
-teardown-reachable path in that file checks `deactivated`; this one does not. Reachable only by
-a watcher callback already dispatched when teardown lands. One word fixes it:
-`if (deactivated || !statusBar) return;`.
 
-**~~`showReport()` dereferences a value its sibling null-checks.~~ FIXED.** It called `fullReport(dir, conf)`
-and immediately reads `r.memPath`. `fullReport` returns `null` whenever `fastLint` does, which is
-any `readFileSync` failure. `refresh()` guards this correctly; `showReport()` does not. Nameable
-input: `MEMORY.md` exists as a *directory*, so `discoverDirs`'s `existsSync` passes and the read
-throws `EISDIR`. Also reachable via a permissions error or a Windows sharing violation. Surfaces
-as an error notification from a palette command, not a crash.
 
 **`MTIME_TOLERANCE_MS` is a cross-language constant that nothing pins.** `src/recall-index.js`
 says "a drift test pins the two shared constants", and that is true of `MEMORY_INDEX_NAME` and
@@ -782,32 +733,12 @@ changed. Its own comment records why the pre-existing round-trip test did not co
 one asserts `stale === false`, which passes for any tolerance at or above the real drift, so it
 pins the behaviour and says nothing about the value or the unit.
 
-**~~Dead exports, re-measured.~~ THREE OF FOUR REMOVED 2026-09-14.** `fullReport` was genuinely
-dead: its only two references outside its own file are comments. `pickPrimaryDir` and `fastLint`
-are **test-only, not dead** (the earlier "no external consumer" note is partly refuted:
-`pickPrimaryDir` gained six real test references and they are the mutation-killing assertions).
-In `src/recall-index.js`, `readRecallIndex` and `MTIME_TOLERANCE_MS` had no importer at all.
-`src/tool-learn.js` exported `MCP_TOOL`, which nothing imports, though the constant is live
-inside the file. Removing export entries is free; removing the functions is not.
-
-Removed: `fullReport`, `readRecallIndex`, `MCP_TOOL` and, on a second pass once its held reason
-expired, `MTIME_TOLERANCE_MS` — export entry only, every function and constant kept.
-`test/dead-exports.test.js` now enforces the whole distinction: a name is either
-destructured from a require of its module somewhere, or listed in `HELD` with the reason in
-writing. The test-only names carry that reason too, so they stop reading as oversights. It fires
-on a re-added dead export and on a `HELD` entry that gained a real importer, both mutated.
 
 **`discoverDirs` reads only `conf.dir`.** `enabled`, `lineBudget`, `totalBudget` and `maxLines`
 are inert in every call. That means `memory.enabled: false` does not stop the two watcher sets
 being built, which is a live inconsistency with `memoryCardData`, which does honour it.
 Pre-existing, and teaching `discoverDirs` about `enabled` would be a behaviour change.
 
-**~~`autoSyncRecallIfStale`'s outer catch discards everything.~~ FIXED.** Two corrections to the
-original claim. `recallIndexStatus` is NOT a reachable thrower: src/recall-index.js is internally
-try/caught at :33, :41 and :81. The reachable ones inside the same try are `memoryReport()`,
-`recallStatus()` and `cfg()`. And it was not a one-shot: :1981 is a single timer, but `memBounce`
-re-enters on every MEMORY.md write, so a deterministic throw recurred silently on every trigger
-and a broken run logged identically to a working one. Now `console.error`s, the house style here.
 
 ### Three assertions in the memory suites still cannot fail for the mutation they name
 

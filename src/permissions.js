@@ -605,7 +605,38 @@ const MAX_STATE_FILE = path.join(os.homedir(), '.claude', 'backups', 'wildcardin
 // scripts have no Windows association, so the command is `node "<path>"`.
 const APPROVE_DIR     = path.join(os.homedir(), '.claude', 'wildcarding');
 const APPROVE_SCRIPT  = path.join(APPROVE_DIR, 'approve-all.js');
-const APPROVE_COMMAND = `node "${APPROVE_SCRIPT.replace(/\\/g, '/')}"`;
+
+// Claude Code hands a hook's `command` to a SHELL — `/bin/sh -c <command>` on macOS
+// and Linux — so the path between those double quotes is shell source, not an
+// argument, and a home directory is user-controlled text. `/home/a"b` closes the
+// quote early and emits a string that does not parse; `/home/$USER.old` and a
+// directory holding a backtick are worse, because they parse fine and run something
+// else. This is the string written into the user's own settings.json as a
+// PreToolUse hook, so it fires before every tool call for as long as MAX is on.
+//
+// Inside sh's double quotes exactly four characters keep a meaning — \ " $ ` — and
+// a backslash in front is the escape for all four. Nothing else is touched, which
+// is why this is not a general-purpose shell quoter.
+//
+// Windows keeps the plain form deliberately. `"` is not a legal character in a
+// Windows path, so the defect being escaped here cannot arise; and Claude Code
+// chooses between Git Bash, pwsh and cmd.exe at run time, which want three
+// different escapes, so any choice made here would be wrong under two of them. The
+// backslash-to-slash rewrite is Windows-only for the same reason it was written:
+// `\` is the separator there, while on POSIX it is an ordinary filename character
+// that this used to rewrite into a directory boundary, aiming the hook at a path
+// that does not exist.
+//
+// Unregistration is unaffected: isApproveHookOn and unregisterApproveHook both match
+// on APPROVE_MARKER, a substring of the filename, never on this full string.
+function approveCommandFor(scriptPath, platform = process.platform) {
+  const inner = platform === 'win32'
+    ? String(scriptPath).replace(/\\/g, '/')
+    : String(scriptPath).replace(/[\\"$`]/g, (character) => `\\${character}`);
+  return `node "${inner}"`;
+}
+
+const APPROVE_COMMAND = approveCommandFor(APPROVE_SCRIPT);
 const APPROVE_MARKER  = 'approve-all'; // substring identifying our hook command
 
 const APPROVE_SCRIPT_SOURCE = `'use strict';
@@ -871,7 +902,7 @@ module.exports = {
   coverKeyCacheStats, coverIndexKeyCacheStats,
   BYPASS_MODE, BYPASS_STATE_FILE, currentMode, isBypassOn, applyBypass, readBypassState,
   CLASSIFIER_MODE, MAX_MODE, classifierModeOn,
-  MAX_ALLOW_CORE, MAX_MARKERS, MAX_STATE_FILE, APPROVE_SCRIPT, APPROVE_COMMAND,
+  MAX_ALLOW_CORE, MAX_MARKERS, MAX_STATE_FILE, APPROVE_SCRIPT, APPROVE_COMMAND, approveCommandFor,
   detectMcpServers, buildMaxAllowSet, isMaxAllowOn, enableMaxAllow, disableMaxAllow,
   ensureApproveScript, isApproveHookOn, registerApproveHook, unregisterApproveHook,
   isMaxOn, maxLayers, applyMax,

@@ -55,6 +55,39 @@ function createPolicyLock(options = {}) {
     }
   }
 
+  // Release a lock this process created but never managed to fill in.
+  //
+  // `openSync(..., 'wx')` creates the file and the metadata is written as a SECOND
+  // step, so a throw in between — ENOSPC, EIO, a full quota — leaves a lock with no
+  // owner in it. `removeOwnedLock` proves ownership by parsing that metadata, so it
+  // returns false for the one file this process is unambiguously responsible for,
+  // and the orphan is left for the staleness path to clean up: five seconds while it
+  // is zero bytes (`honourFor` below), and the FULL stale window — ten minutes by
+  // default — if the write got far enough to put bytes in it, because a non-empty
+  // ownerless lock is indistinguishable from a foreign one by content alone.
+  //
+  // Identified by the inode read from our own descriptor rather than by content there
+  // may be none of. `wx` means no other writer can have created this file, and the
+  // inode comparison means a lock that some other process reclaimed and replaced
+  // while this one was unwinding is left to its new owner.
+  //
+  // That comparison is also what fails closed when the inode is unknown: `createdIno`
+  // is undefined only if `fstatSync` on an open descriptor failed, and no real inode
+  // is ever equal to undefined, so the unlink is skipped without a separate branch.
+  // An explicit `if (createdIno === undefined) return false` was written here first
+  // and removed — no reachable input distinguished it, so it was a line that could
+  // not be tested rather than a guard.
+  function removeCreatedLock(owner, createdIno) {
+    if (removeOwnedLock(owner)) return true;
+    try {
+      if (fs.statSync(lockPath).ino !== createdIno) return false;
+      fs.unlinkSync(lockPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // Only reclaim a lock whose owner is provably gone, and only after confirming
   // the file did not change while that was being decided.
   function recoverLock() {
@@ -94,10 +127,14 @@ function createPolicyLock(options = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let fd;
       let created = false;
+      let createdIno;
       let failure;
       try {
         fd = fs.openSync(lockPath, 'wx', 0o600);
         created = true;
+        // Taken before the write, because after it throws there is no descriptor
+        // left to ask and the file on disk can no longer prove whose it is.
+        try { createdIno = fs.fstatSync(fd).ino; } catch {}
         fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, owner, at: clock() }) + '\n', 'utf8');
         fs.fsyncSync(fd);
       } catch (error) {
@@ -106,7 +143,7 @@ function createPolicyLock(options = {}) {
         if (fd !== undefined) try { fs.closeSync(fd); } catch {}
       }
       if (!failure) break;
-      if (created) removeOwnedLock(owner);
+      if (created) removeCreatedLock(owner, createdIno);
       if (failure.code === 'EEXIST' && attempt === 0 && recoverLock()) continue;
       if (failure.code === 'EEXIST') {
         const conflict = new Error(busy(lockPath));

@@ -931,17 +931,38 @@ function findJsonlFiles(root, source, output, failures) {
     failures.push({ path: path.resolve(target), source, mode: 'error', scope: 'root', error: message });
   };
   while (pending.length) {
-    const current = pending.pop();
+    // A queued entry is either a bare path, which still needs identifying, or
+    // { path, dir: true } for one `readdirSync` already told us is a real
+    // directory. MEASURED 2026-09-22, cold, fresh interleaved processes
+    // against a byte-identical control arm: skipping the stat and the
+    // realpath for those is +20.76 min / +22.10 p50 of a 241 ms tick.
+    const queued = pending.pop();
+    const current = typeof queued === 'string' ? queued : queued.path;
+    const knownDirectory = typeof queued !== 'string' && queued.dir === true;
     let stat;
-    try { stat = fs.statSync(current); } catch (error) { note(current, error); continue; }
-    if (stat.isFile()) {
+    if (!knownDirectory) {
+      try { stat = fs.statSync(current); } catch (error) { note(current, error); continue; }
+    }
+    if (stat && stat.isFile()) {
       if (current.toLowerCase().endsWith('.jsonl')) output.push({ source, path: path.resolve(current) });
       continue;
     }
-    if (!stat.isDirectory()) continue;
+    if (stat && !stat.isDirectory()) continue;
     let canonical;
-    try { canonical = fs.realpathSync.native(current); } catch (error) { note(current, error); continue; }
-    canonical = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+    if (knownDirectory) {
+      // `path.resolve` is load-bearing, not tidiness. Without it a RELATIVE
+      // root yields a visited key that never matches the absolute one
+      // `realpathSync` produces for the same directory reached through a
+      // junction, and the transcript is enumerated TWICE -- two observation
+      // sets for one file, inflating the success count that gates auto-safe.
+      // The audit's first draft of this change had exactly that defect and it
+      // passed all 551 tests.
+      const resolved = path.resolve(current);
+      canonical = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    } else {
+      try { canonical = fs.realpathSync.native(current); } catch (error) { note(current, error); continue; }
+      canonical = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+    }
     if (visitedDirectories.has(canonical)) continue;
     visitedDirectories.add(canonical);
     let entries;
@@ -956,7 +977,12 @@ function findJsonlFiles(root, source, output, failures) {
       // the `statSync` above, which follows links, decide what it is; the
       // realpath set is already there to stop a cycle, which is what it was
       // written for.
-      if (entry.isDirectory() || entry.isSymbolicLink()) pending.push(child);
+      // Only a genuine directory skips the stat below. A link of any kind,
+      // including a Windows junction, is queued bare so `statSync` and
+      // `realpathSync` still decide what it is and the cycle set still sees
+      // its true identity.
+      if (entry.isDirectory()) pending.push({ path: child, dir: true });
+      else if (entry.isSymbolicLink()) pending.push(child);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl')) {
         output.push({ source, path: path.resolve(child) });
       }
@@ -1077,8 +1103,10 @@ function cursorKeyForFile(file) {
   return `path-sha256:${digest}`;
 }
 
-function priorCursorFor(cursors, absolutePath, originalPath) {
-  const hashedKey = cursorKeyForFile(absolutePath);
+function priorCursorFor(cursors, absolutePath, originalPath, precomputedKey) {
+  // The caller has usually just computed this exact hash for the same path.
+  // It is a pure function, so reusing it is identity, and it is +5.09 min.
+  const hashedKey = precomputedKey || cursorKeyForFile(absolutePath);
   if (cursors instanceof Map) {
     return cursors.get(hashedKey) || cursors.get(absolutePath) || cursors.get(originalPath);
   }
@@ -1219,8 +1247,8 @@ function scanHistoryFiles(options = {}) {
       files.push({ path: file, source: entry.source, mode: 'error', error: error.message });
       continue;
     }
-    const prior = priorCursorFor(priorCursors, file, entry.path);
     const cursorKey = cursorKeyForFile(file);
+    const prior = priorCursorFor(priorCursors, file, entry.path, cursorKey);
     // Everything from here is inside the per-file try. It used not to be: the
     // three `readRange` calls below, and `cursorForFile` on the `unchanged`
     // fast path, all sat outside it. `readRange` throws on ENOENT for a

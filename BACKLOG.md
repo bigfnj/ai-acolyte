@@ -13,6 +13,57 @@ Anything measured says so and names the date. Anything unverified says that too.
 
 ## Open
 
+### NEXT SESSION (queued 2026-09-21): do desktop-ai-companion's optimisation learnings transfer here?
+
+Asked directly by the owner after an optimisation pass on `desktop-ai-companion`'s AgentFlow
+module. A first measurement was taken the same evening so tomorrow starts from numbers instead of
+from a hypothesis.
+
+**Baseline, MEASURED 2026-09-21, one run per fresh process, on the toolbox interpreter:**
+
+| What | Time |
+|---|---|
+| `recall.py "<query>" -k 3`, end to end | **1.27 / 1.10 / 1.07 s** |
+| Bare interpreter start (`python -c pass`) | 0.08 / 0.06 / 0.06 s |
+| `import numpy, onnxruntime` | 0.37 / 0.35 / 0.36 s |
+| Live memory corpus | **133** `.md` files at `~/.claude/projects/d---ai-work/memory` |
+
+So roughly **1.0 s of fixed cost per invocation**, of which the interpreter is 0.06 s and
+numpy+onnxruntime is about 0.30 s. **That leaves ~0.7 s unaccounted for and it is the whole
+target**: candidates are the ONNX model load, the vocab read at `memory/recall.py:241`, embedding
+the query, and BM25 over 133 files. Break that down FIRST; do not optimise any of it on a hunch.
+
+**The learning that transfers is a rule about which measurement to take, not a technique.** Match
+the measurement to the process lifecycle:
+
+- AgentFlow polls forever in one process, so **warm** is its steady state. Cold figures overstated
+  it by 55% (31 ms cold against 19 ms warm for identical code), and per-item work was worth fixing:
+  one syscall per file instead of two took the directory sweep from 18.3-20.9 ms to 11.0-12.6 ms.
+- `recall.py` is a **fresh process every invocation**, so **cold IS its steady state**. A warm loop
+  would flatter it and measure something that never happens in production.
+
+**The technique does NOT transfer, and that is the point of writing this down.** `recall.py:393`
+does `os.listdir` then `os.stat` per file, which is the exact two-syscalls-to-one pattern that just
+paid 1.7x in AgentFlow, and `os.scandir` caches stat data the same way .NET's `FileInfo` does. **Do
+not do it.** 133 stats against a 1.0 s fixed cost is invisible. A technique that has just worked
+somewhere else is the most seductive wrong answer available, and this one has a name and a measured
+refutation attached before anyone spends an afternoon on it.
+
+**Non-performance shapes from the same session that are worth an hour here**, because this repo has
+the same failure modes on record:
+
+- **Unreachable code behind a shipped claim.** AgentFlow's Notify-mode screen watch could not run
+  from the day it shipped, because a value the caller computed was only ever non-default in the
+  other mode. Neither a green suite nor a live smoke test found it. Ask of the gate compiler and the
+  extension watcher: *what input reaches this branch?* `MEMORY.md`'s own gate-count line has been
+  wrong three times, which is the same shape.
+- **An assertion made vacuous by a refactor.** Making a predicate pure meant its test injected the
+  value that used to be read, so the test would have passed even if no real mode ever supplied
+  `true`. Worth grepping this repo's tests for arguments that only ever arrive as literals.
+- **A guard that looks like ceremony.** A 250 ms socket timeout looked pointless because a closed
+  loopback port "obviously" refuses instantly. It takes **2,063 ms**. Measure what a guard guards
+  before deleting it. See `docs/engineering-record.md` for the local equivalents.
+
 ### Test harnesses can silently assert against a frozen home
 
 `src/*` modules capture `os` at require time and their exported helpers default

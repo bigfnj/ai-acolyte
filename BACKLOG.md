@@ -263,8 +263,9 @@ below rather than left to be re-derived:
   dead EXPORTS, not "one live, two test-only": every hit outside
   `src/permissions.js` is prose.
 - "Zero orphaned functions across 578 declarations" is wrong twice over. There
-  are 662 declarations, and one orphan: `src/codex-max.js:120` `readConfig` has
-  exactly two references, its own declaration and its export entry.
+  are 662 declarations, and one orphan was found: `readConfig` in
+  `src/codex-max.js`, whose only two references were its own declaration and
+  its export entry. REMOVED 2026-09-22, so there is no line left to cite.
 
 The functions themselves are live inside their own modules; only the
 module.exports entry is dead, so removing the name is safe and free. Largest
@@ -405,7 +406,7 @@ what was deliberately left.
 ### Small, confirmed, no urgency
 
 - Dead: `mineWildcard` (`src/permissions.js:190`),
-  `readConfig` (`src/codex-max.js:120`), `readAllow` (`vscode-extension/extension.js:120`),
+  `readConfig` (removed 2026-09-22), `readAllow` (`vscode-extension/extension.js:120`),
   the exported alias `DEFAULT_POLICY_LOCK_STALE_MS`, and the option keys
   `claudeHistoryPath` / `codexHistoryPath` / `validateCodexRules` (one occurrence
   repo-wide each).

@@ -117,10 +117,6 @@ function clearApproval(text) {
   return { text: lines.join(eol), changed: true };
 }
 
-function readConfig(configPath = CODEX_CONFIG) {
-  try { return fs.readFileSync(configPath, 'utf8'); }
-  catch { return null; }
-}
 
 function readCodexMaxState(statePath = CODEX_MAX_STATE_FILE) {
   try {
@@ -401,7 +397,6 @@ module.exports = {
   CODEX_MAX_STATE_FILE,
   APPROVAL_NEVER,
   APPROVAL_VALUES,
-  readConfig,
   readApproval,
   setApproval,
   clearApproval,

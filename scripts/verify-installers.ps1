@@ -307,7 +307,7 @@ if (-not $uninstall) {
     $bare = {
         param($real)
         '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": ' `
-            + (ConvertTo-Json (($real -replace '^node\s+"?', '') -replace '"$', '')) + ' } ] } ] } }'
+            + (ConvertTo-Json (& $bareOf $real)) + ' } ] } ] } }'
     }
     $box = New-UninstallBox -Content $bare
     if (-not $box) {

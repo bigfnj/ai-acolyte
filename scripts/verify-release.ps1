@@ -180,7 +180,13 @@ foreach ($pair in @(@{ n = 'claude'; p = $claudeMd }, @{ n = 'codex'; p = $agent
     $iGates = $text.IndexOf($GATES_BEGIN)
     if ($iShell -ge 0 -and $iGates -ge 0) {
         $shellEnd = $text.IndexOf('<!-- END permission-wildcarding: shell style -->')
-        Check "$($pair.n): blocks are disjoint, not nested" ($shellEnd -lt $iGates) `
+        # `-ge 0` first, and it is the whole point. IndexOf returns -1 when the
+        # marker is ABSENT, and -1 is less than any index, so the bare
+        # comparison printed PASS for exactly the state this check exists to
+        # catch: a missing shell END, which is what "the two blocks merged"
+        # looks like on disk.
+        Check "$($pair.n): blocks are disjoint, not nested" `
+            ($shellEnd -ge 0 -and $shellEnd -lt $iGates) `
             "shell ends at $shellEnd, gates begin at $iGates"
     }
 }
@@ -345,8 +351,20 @@ foreach ($repoPair in ($ProbeRepos | ForEach-Object { @{ n = $_.k; p = $_.v } })
         $has = (Get-Content $local -Raw) -match [regex]::Escape($GATES_BEGIN)
         Check "$($repoPair.n): repo-scoped gates present" $has $local
         # Gitignored is the point: a personal standing order must not reach shared history.
-        $tracked = & git -C $repoPair.p status --short --untracked-files=all -- CLAUDE.local.md
-        Check "$($repoPair.n): CLAUDE.local.md is ignored by git" ([string]::IsNullOrWhiteSpace(($tracked -join ''))) ''
+        #
+        # `git status --short` was the wrong question and could not fail on the
+        # answer that matters. It prints nothing for an ignored file, and it
+        # ALSO prints nothing for a file that is tracked, committed and
+        # unmodified -- which is precisely the state this check exists to
+        # forbid. Empty output, PASS, personal standing orders in shared
+        # history. `check-ignore -q` asks the question directly: exit 0 means
+        # git is ignoring the path.
+        & git -C $repoPair.p check-ignore -q -- CLAUDE.local.md 2>$null
+        $ignored = ($LASTEXITCODE -eq 0)
+        $listed = & git -C $repoPair.p ls-files -- CLAUDE.local.md
+        Check "$($repoPair.n): CLAUDE.local.md is ignored by git" `
+            ($ignored -and [string]::IsNullOrWhiteSpace(($listed -join ''))) `
+            "ignored=$ignored tracked=$(-not [string]::IsNullOrWhiteSpace(($listed -join '')))"
     } else {
         Check "$($repoPair.n): CLAUDE.local.md exists" $false $local
     }

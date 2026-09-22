@@ -1187,6 +1187,12 @@ function scanHistoryFiles(options = {}) {
   const reconcileBytes = Number.isFinite(options.reconcileBytes)
     ? Math.max(0, Math.floor(options.reconcileBytes))
     : RECONCILE_MAX_BYTES;
+  // Injectable for the same reason the chunk cap is: the branch it guards is
+  // only reachable past a quarter-gigabyte without a newline, and a guard no
+  // test can reach is a guard nobody has checked.
+  const ingestHardMax = Number.isFinite(options.ingestHardMaxBytes)
+    ? Math.max(1, Math.floor(options.ingestHardMaxBytes))
+    : INGEST_HARD_MAX_BYTES;
   const found = [];
   // Reported through the same per-file error channel as a failed read, so a
   // root we could not enumerate raises the error count instead of looking like
@@ -1256,6 +1262,10 @@ function scanHistoryFiles(options = {}) {
       // early. Only the REPORTED mode says 'partial'.
       let partial = false;
       let unmatched = 0;
+      // Set only where a stretch of the file holds no record boundary at all
+      // and had to be stepped over. Reported, never silent.
+      let unreadableFrom = -1;
+      let unreadableBytes = 0;
       // Where this scan stops. The cap is what keeps one huge transcript from
       // owning a tick: the cursor records exactly what was consumed and the
       // next scan resumes there, so the file catches up over several ticks
@@ -1292,25 +1302,55 @@ function scanHistoryFiles(options = {}) {
         consumedEnd = capFrom();
         buffer = readSlice(0, consumedEnd);
       }
+      // The cut has to land in ground this scan has NOT already accounted for,
+      // or it makes no progress. Taking the last newline anywhere in the buffer
+      // looked equivalent and was not: the overlap reaches back before the
+      // cursor and is full of old newlines, so a capped window holding one
+      // oversized record cut back to `prior.size` every tick, forever, and
+      // could even cut BEFORE it when the previous scan had ended mid-record.
+      // That is the original defect in a rarer shape, one layer down from the
+      // budget base that was fixed with it.
+      const newGroundFloor = Math.max(0, capBase - start);
+      const lastBoundary = (buf) => {
+        const at = buf.lastIndexOf(10);
+        return at >= newGroundFloor ? at : -1;
+      };
       if (consumedEnd < stat.size) {
         // A slice cut at the cap almost certainly ends mid-record. Widen until
         // a boundary appears, because a half-record can neither be parsed nor
         // resumed from, and stop at the hard maximum rather than sliding back
         // into the unbounded read this whole change exists to remove.
-        while (buffer.lastIndexOf(10) === -1
+        while (lastBoundary(buffer) === -1
           && consumedEnd < stat.size
-          && consumedEnd - start < INGEST_HARD_MAX_BYTES) {
-          consumedEnd = Math.min(stat.size, start + Math.max((consumedEnd - start) * 4, 4096));
+          && consumedEnd - start < ingestHardMax) {
+          // Clamped to the hard maximum, not merely stopped by it. Widening by
+          // four from a 64 MiB slice asks for 256 MiB in one allocation, and
+          // the guard above only decides whether to widen AGAIN, so without
+          // this the peak is the old slice plus a quarter-gigabyte.
+          consumedEnd = Math.min(
+            stat.size,
+            start + ingestHardMax,
+            start + Math.max((consumedEnd - start) * 4, 4096));
           buffer = readSlice(start, consumedEnd);
         }
         if (consumedEnd < stat.size) {
-          const boundary = buffer.lastIndexOf(10);
+          const boundary = lastBoundary(buffer);
           if (boundary === -1) {
-            throw new Error(
-              `no record boundary within ${buffer.length} bytes of offset ${start}`);
+            // No record boundary anywhere in the hard maximum. This is not a
+            // transient failure, so throwing would re-read the same bytes on
+            // every tick forever -- which is the exact pathology the ingest cap
+            // exists to remove, reached through the widening path instead of
+            // the int32 one. Advance past what was examined and SAY SO: the
+            // file is reported unreadable with the byte count skipped, rather
+            // than dropped in silence or retried without end.
+            unreadableFrom = start;
+            unreadableBytes = buffer.length;
+            consumedEnd = start + buffer.length;
+            buffer = buffer.subarray(0, 0);
+          } else {
+            buffer = buffer.subarray(0, boundary + 1);
+            consumedEnd = start + buffer.length;
           }
-          buffer = buffer.subarray(0, boundary + 1);
-          consumedEnd = start + buffer.length;
           partial = true;
         }
       }
@@ -1319,9 +1359,12 @@ function scanHistoryFiles(options = {}) {
         // for Codex, which is the only source that states the session and cwd
         // once at the top of the file. Claude repeats both on every record, so
         // Claude transcripts -- the volume -- pay nothing for this.
-        // `start > 0` is the real condition, not the mode: a capped read that
-        // begins past the top of the file has the same missing head whether it
-        // is reported as append or partial.
+        // `start > 0` is the whole condition, and it already implies append:
+        // `start` is only ever assigned non-zero inside the append branch, and
+        // the append-to-full fallback resets it. The previous spelling paired
+        // it with a mode test that no input could distinguish, under a comment
+        // claiming it covered capped reads -- which begin at 0 and so were
+        // never the case. Dropped rather than kept as decoration.
         const seed = entry.source === 'codex' && start > 0
           ? codexHeadSeed(file) : null;
         let parsed = parseHistorySlice(entry.source, buffer, {
@@ -1349,9 +1392,18 @@ function scanHistoryFiles(options = {}) {
               if (wideStart === 0 || newline !== -1) {
                 start = wideStart === 0 ? 0 : wideStart + newline + 1;
                 buffer = wideStart === 0 ? wide : wide.subarray(newline + 1);
+                // The seed goes to the WIDENED parse too. The unbounded version
+                // of this re-read started at byte 0, where the session_meta
+                // line lives, so it never needed one. A bounded widen still
+                // begins mid-file, and without the seed every observation this
+                // reconcile exists to rescue comes back with session and cwd
+                // undefined -- which a configured workspace root then drops
+                // outright, and which otherwise files the call under a SECOND
+                // identity, because session is part of identityParts.
                 parsed = parseHistorySlice(entry.source, buffer, {
                   file, baseOffset: start, platform: options.platform,
                   defaultTool: options.defaultTool, probeMatcher: options.probeMatcher,
+                  ...(start > 0 ? { session: seed && seed.session, cwd: seed && seed.cwd } : {}),
                 });
                 parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
                 missing = [...resultIds].filter((id) => !parsedCalls.has(id));
@@ -1375,10 +1427,13 @@ function scanHistoryFiles(options = {}) {
         // would turn a bounded catch-up into a silent skip.
         cursors[cursorKey] = cursorForFile(file, entry.source, stat, null, consumedEnd);
         files.push({
-          path: file, source: entry.source, mode: partial ? 'partial' : mode, size: stat.size,
+          path: file, source: entry.source,
+          mode: unreadableBytes ? 'unreadable' : (partial ? 'partial' : mode),
+          size: stat.size,
           bytesRead: readBytes, observations: selected.length,
           ...(partial ? { consumedEnd } : {}),
           ...(unmatched ? { unmatchedResults: unmatched } : {}),
+          ...(unreadableBytes ? { unreadableFrom, unreadableBytes } : {}),
         });
     } catch (error) {
       // Carry the prior cursor forward ONLY when it still describes the file.

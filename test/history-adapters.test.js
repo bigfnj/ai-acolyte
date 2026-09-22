@@ -1294,3 +1294,135 @@ test('a replaced file with the same size and mtime is caught by the inode', (t) 
     'a replaced file must not read as unchanged just because its size and '
     + 'timestamp were preserved; the file id is the only thing that differs');
 });
+
+test('a record larger than the cap still advances the cursor, and never rewinds it', (t) => {
+  const root = tempRoot(t, 'bigrecord');
+  const file = path.join(root, 'bulk.jsonl');
+  // Small records first, then ONE record far larger than the ingest cap. The
+  // capped window over that record holds no newline of its own, while the
+  // overlap behind it is full of old ones. Taking the last newline anywhere in
+  // the buffer therefore cut back to the cursor and the scan stalled forever.
+  bulkClaude(file, 4, 20);
+  const huge = {
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{
+        type: 'tool_use', id: 'huge-call', name: 'Bash',
+        input: { command: 'echo ' + 'H'.repeat(50000) },
+      }],
+    },
+  };
+  fs.appendFileSync(file, jsonl(huge));
+  const size = fs.statSync(file).size;
+
+  let cursors = {};
+  const sizes = [];
+  let ticks = 0;
+  for (; ticks < 40; ticks += 1) {
+    const pass = scanHistoryFiles({
+      cursors, claudeRoots: [root], ingestBytes: 1000, overlapBytes: 500,
+    });
+    const cursor = Object.values(pass.cursors)[0];
+    sizes.push(cursor ? cursor.size : -1);
+    cursors = JSON.parse(JSON.stringify(pass.cursors));
+    if (pass.files[0].mode !== 'partial') break;
+  }
+
+  assert.ok(ticks >= 2, `precondition: catch-up really took several ticks (${ticks + 1})`);
+  assert.ok(ticks < 39,
+    `the scan must finish; it stalled at ${JSON.stringify(sizes.slice(-4))} of ${size} bytes`);
+  for (let i = 1; i < sizes.length; i += 1) {
+    assert.ok(sizes[i] > sizes[i - 1],
+      `every tick must advance the cursor, never stall or rewind: ${sizes[i - 1]} then ${sizes[i]}`);
+  }
+  assert.equal(sizes[sizes.length - 1], size, 'and it ends having accounted for the whole file');
+});
+
+test('a stretch with no record boundary at all is reported and stepped over', (t) => {
+  const root = tempRoot(t, 'noboundary');
+  const file = path.join(root, 'bulk.jsonl');
+  // No newline anywhere in the first slice, and the hard maximum is set below
+  // the file size so the widening cannot rescue it. Throwing here would write
+  // no cursor and re-read the same bytes on every tick, forever.
+  fs.writeFileSync(file, 'Z'.repeat(9000) + '\n' + jsonl({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'after', name: 'Bash', input: { command: 'echo after' } }],
+    },
+  }));
+
+  const first = scanHistoryFiles({
+    cursors: {}, claudeRoots: [root], ingestBytes: 500, ingestHardMaxBytes: 2000,
+  });
+  const entry = first.files[0];
+  assert.equal(entry.mode, 'unreadable',
+    'a stretch with no boundary must be named, not thrown away or silently skipped');
+  assert.ok(entry.unreadableBytes > 0, 'and it must say how much it stepped over');
+  const cursor = Object.values(first.cursors)[0];
+  assert.ok(cursor && cursor.size > 0,
+    'a cursor must be written, or the same bytes are re-read on every tick forever');
+
+  const second = scanHistoryFiles({
+    cursors: JSON.parse(JSON.stringify(first.cursors)), claudeRoots: [root],
+    ingestBytes: 500, ingestHardMaxBytes: 2000,
+  });
+  const secondCursor = Object.values(second.cursors)[0];
+  assert.ok(secondCursor.size > cursor.size,
+    'and the next scan resumes past it rather than repeating the same read');
+});
+
+test('a widened reconcile still seeds session and cwd from the file head', (t) => {
+  const root = tempRoot(t, 'seedwiden');
+  const file = path.join(root, 'rollout.jsonl');
+  // session_meta at the top, then enough filler that a BOUNDED widen reaches
+  // back past the call but NOT as far as the head. The unbounded re-read this
+  // replaced always started at byte 0, so it got the head for free.
+  const filler = [];
+  for (let index = 0; index < 6; index += 1) {
+    filler.push(responseItem({ type: 'message', role: 'assistant', content: 'f'.repeat(280) }));
+  }
+  fs.writeFileSync(file, jsonl(
+    { type: 'session_meta', payload: { id: 'codex-session', cwd: 'D:\repo' } },
+    ...filler,
+    responseItem({
+      type: 'function_call', name: 'shell_command', call_id: 'far-call',
+      arguments: JSON.stringify({ command: 'echo far' }),
+    }),
+  ));
+  const cursors = JSON.parse(JSON.stringify(
+    scanHistoryFiles({ roots: { codex: root }, platform: 'win32', overlapBytes: 48 }).cursors));
+
+  fs.appendFileSync(file, jsonl(
+    responseItem({ type: 'function_call_output', call_id: 'far-call', output: { exit_code: 0 } }),
+  ));
+
+  const second = scanHistoryFiles({
+    roots: { codex: root }, cursors, platform: 'win32',
+    overlapBytes: 48, reconcileBytes: 400,
+  });
+  const found = byCallId(second.observations, 'far-call');
+  assert.ok(found, 'precondition: the widened reconcile did reach the call');
+  assert.equal(found.session, 'codex-session',
+    'a widened reconcile begins mid-file, so it must be seeded; without the seed '
+    + 'a configured workspace root drops this observation outright');
+  assert.equal(found.cwd, 'D:\repo', 'and the cwd the workspace filter reads');
+});
+
+test('widening is clamped to the hard maximum, not merely stopped by it', (t) => {
+  const root = tempRoot(t, 'clamp');
+  const file = path.join(root, 'bulk.jsonl');
+  // No newline in the first slice, so the widening loop runs. Quadrupling from
+  // 1000 asks for 4000; the clamp holds it to 2000. Without the clamp the guard
+  // only decides whether to widen AGAIN, so the allocation overshoots first.
+  fs.writeFileSync(file, 'Z'.repeat(9000) + '\n');
+
+  const result = scanHistoryFiles({
+    cursors: {}, claudeRoots: [root], ingestBytes: 1000, ingestHardMaxBytes: 2000,
+  });
+  const entry = result.files[0];
+  assert.ok(entry.bytesRead <= 3000,
+    `the widened read must respect the hard maximum: read ${entry.bytesRead} bytes `
+    + 'against a 1000-byte cap and a 2000-byte ceiling');
+});

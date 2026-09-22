@@ -554,6 +554,52 @@ already a fixed point, which is the only state in which it must fire zero times.
 
 ---
 
+## HARNESS HAZARD: when a mutation run reports that nothing died
+
+Recorded 2026-09-22 after six false results in one session, across two
+independent harnesses written by two different authors. Every time, the
+harness was broken and the tests were fine.
+
+**The symptom is the tell, and it is the only reason any of these were
+caught.** A clean sweep of SURVIVED is not a result. Mutants die at a high
+rate in this repo because assertions are written to name the mutation that
+must break them, so when nothing dies, suspect the harness first.
+
+**Output decoding, twice.** A Python harness ran `node --test`, captured with
+`text=True`, and anchored `^. tests (d+)$` with `re.M`. Windows supplied CRLF,
+so `$` never matched; and the console codepage decoded node's summary glyph as
+three characters, so the single-character wildcard never matched either. The
+harness read "I could not find a test count" as "no assertion fired" and
+reported six survivors for six clean suites. Decode explicitly, normalise
+CRLF, and never anchor on a glyph you did not choose.
+
+**Exit codes through a pipe.** Checking a PowerShell harness with
+`... | tail -3; echo $?` reports the exit status of `tail`, which is always 0.
+A mutated run that had correctly exited 1 looked like a pass. Capture the exit
+code of the process under test, not of the last stage of the pipeline.
+
+**`pathlib.write_text` rewrites line endings.** On Windows it translates `\n`
+to `os.linesep`, so a harness that read a file, patched it and wrote it back
+converted `memory/recall.py` from LF to CRLF -- a file `.gitattributes`
+declares `text eol=lf`. The harness's own "restored byte-identical" assertion
+compared DECODED text, where universal newlines hide the difference, so it
+passed. Only `git status` noticed. Use `write_bytes`, and if you assert a
+restore, assert it on bytes.
+
+**`String.prototype.replace` interprets the replacement.** A `$` followed by a
+backtick in a REPLACEMENT string means "insert everything before the match".
+A JS patch harness whose replacement text contained that pair spliced the head
+of the file into a regex literal; the file stopped parsing and the harness
+reported 121 assertion failures while measuring nothing. Use split/join for
+literal replacement, and run `node --check` on every file a harness patches
+before trusting a single number from the run.
+
+**The rule that catches all of them.** Assert that the run HAPPENED before
+reading its verdict: a nonzero test count, a witness assertion label in the
+output, or a control mutation that must die. A harness that cannot distinguish
+"the suite ran and nothing fired" from "the suite never ran" is not reporting
+a result.
+
 ## MEASUREMENT HAZARD (mechanism CORRECTED below — read to the end)
 
 **Read this before benchmarking anything in this project, and before trusting any

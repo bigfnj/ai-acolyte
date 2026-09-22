@@ -11,6 +11,26 @@ const CODEX_ITEM_TYPES = new Set([
 ]);
 const DEFAULT_OVERLAP_BYTES = 256 * 1024;
 const FINGERPRINT_BYTES = 4096;
+// `fs.readSync`'s length argument is an int32, so ONE call asking for more than
+// 2 GiB wraps negative and throws with a message that names the wrapped value
+// rather than the problem. MEASURED 2026-09-22 against a 2,266,973,030-byte
+// Codex transcript on this box: `Received -2027994266`. The loop in `readRange`
+// was already there; this is the cap that lets it do its job.
+const READ_CHUNK_BYTES = 64 * 1024 * 1024;
+// The most one scan will ingest from ONE file. A transcript that has grown by
+// more than this catches up over consecutive scans rather than blocking a whole
+// tick on gigabytes, and the cursor advances to exactly what was consumed, so
+// nothing is skipped and the next scan resumes at a record boundary.
+const DEFAULT_INGEST_BYTES = 64 * 1024 * 1024;
+// A slice cut at the ingest cap has to end on a newline or a record would be
+// halved. Where the cap lands mid-record we widen looking for a boundary, and
+// this is where widening stops: past here the file has no usable boundary and
+// is reported rather than guessed at.
+const INGEST_HARD_MAX_BYTES = 256 * 1024 * 1024;
+// How far back the reconcile will widen looking for a tool call whose result
+// landed after the cursor. It used to re-read the whole file, which is what
+// made a 2 GiB transcript cost 570 ms of every tick without ever finishing.
+const RECONCILE_MAX_BYTES = 64 * 1024 * 1024;
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -948,14 +968,21 @@ function hashBuffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
-function readRange(file, start, length) {
+// `chunk` is a parameter rather than a bare constant so a test can drive the
+// chunking with a small file. A 2 GiB fixture is not writable in a test suite,
+// and a cap that only its own default can reach is a guard nothing can prove.
+function readRange(file, start, length, chunk = READ_CHUNK_BYTES) {
   if (length <= 0) return Buffer.alloc(0);
   const descriptor = fs.openSync(file, 'r');
   try {
     const buffer = Buffer.allocUnsafe(length);
     let total = 0;
     while (total < length) {
-      const count = fs.readSync(descriptor, buffer, total, length - total, start + total);
+      // Never hand readSync more than one chunk in a call. Passing the whole
+      // remainder is what made a file over 2 GiB unreadable: the int32 length
+      // wrapped negative and threw before a single byte was read.
+      const want = Math.min(length - total, Math.max(1, chunk));
+      const count = fs.readSync(descriptor, buffer, total, want, start + total);
       if (count === 0) break;
       total += count;
     }
@@ -1002,7 +1029,7 @@ function continuedFingerprint(prior, size) {
 // `session_meta` line. An append slice starts at `prior.size - overlapBytes`,
 // so the head is absent, both stay undefined, and the manager then drops the
 // observation outright when a workspace root is configured
-// (`src/auto-learn-manager.js:1769`, `within(root, undefined) === false`) --
+// (`src/auto-learn-manager.js:1774`, `within(root, undefined) === false`) --
 // or keeps it under a SECOND identity, because `session` is part of
 // `identityParts` (:75-77). Two ids for one call defeat the `observationHashes`
 // dedupe and inflate `counts.success`, which is what gates auto-safe apply.
@@ -1074,10 +1101,16 @@ function safeContinuation(file, stat, prior, source) {
   }
 }
 
-function cursorForFile(file, source, stat, fingerprint) {
+// `consumedSize` is what this scan actually accounted for, which is the file
+// size in every case except a capped read. A cursor has always meant "bytes
+// [0, size) are accounted for" and that is exactly what is being preserved:
+// recording stat.size after consuming less would convert a bounded catch-up
+// into a silent skip, which is the one thing the ingest cap must not do.
+function cursorForFile(file, source, stat, fingerprint, consumedSize) {
+  const size = Number.isFinite(consumedSize) ? consumedSize : stat.size;
   return {
-    source, size: stat.size, offset: stat.size, mtimeMs: stat.mtimeMs,
-    ino: stat.ino || undefined, ...(fingerprint || fingerprintFile(file, stat.size)),
+    source, size, offset: size, mtimeMs: stat.mtimeMs,
+    ino: stat.ino || undefined, ...(fingerprint || fingerprintFile(file, size)),
   };
 }
 
@@ -1121,6 +1154,17 @@ function scanHistoryFiles(options = {}) {
   const overlapBytes = Number.isFinite(options.overlapBytes)
     ? Math.max(0, Math.floor(options.overlapBytes))
     : DEFAULT_OVERLAP_BYTES;
+  // 0 disables the cap, matching what every other limit in this codebase does
+  // with 0. Tests set it small to exercise catch-up without a gigabyte fixture.
+  const ingestBytes = Number.isFinite(options.ingestBytes)
+    ? Math.max(0, Math.floor(options.ingestBytes))
+    : DEFAULT_INGEST_BYTES;
+  const readChunkBytes = Number.isFinite(options.readChunkBytes)
+    ? Math.max(1, Math.floor(options.readChunkBytes))
+    : READ_CHUNK_BYTES;
+  const reconcileBytes = Number.isFinite(options.reconcileBytes)
+    ? Math.max(0, Math.floor(options.reconcileBytes))
+    : RECONCILE_MAX_BYTES;
   const found = [];
   // Reported through the same per-file error channel as a failed read, so a
   // root we could not enumerate raises the error count instead of looking like
@@ -1162,6 +1206,16 @@ function scanHistoryFiles(options = {}) {
     // miss, because it looks read-only and is in fact two file reads deep.
     let safe = false;
     let mode = 'full';
+    // Tracked out here so the catch can report it. A read that threw had still
+    // read something, and reporting `bytesRead: 0` for a file that had just
+    // pulled 118 MB off disk is how the oversized-transcript defect stayed
+    // invisible in `lastScanStats` for eight days.
+    let readBytes = 0;
+    const readSlice = (from, to) => {
+      const slice = readRange(file, from, to - from, readChunkBytes);
+      readBytes += slice.length;
+      return slice;
+    };
     try {
       safe = safeContinuation(file, stat, prior, entry.source);
       if (safe && stat.size === prior.size) {
@@ -1174,31 +1228,79 @@ function scanHistoryFiles(options = {}) {
       mode = safe && stat.size > prior.size ? 'append' : 'full';
       let start = 0;
       let buffer;
+      // `partial` is deliberately NOT a third value of `mode`: the observation
+      // filter below and the Codex seed both branch on 'append' vs 'full', and
+      // a capped first-sight read is still a full read that happens to stop
+      // early. Only the REPORTED mode says 'partial'.
+      let partial = false;
+      let unmatched = 0;
+      // Where this scan stops. The cap is what keeps one huge transcript from
+      // owning a tick: the cursor records exactly what was consumed and the
+      // next scan resumes there, so the file catches up over several ticks
+      // instead of being re-read whole, forever, and never finishing.
+      // Budgeted from the CURSOR, not from the slice start. Measuring it from
+      // the slice start looked equivalent and was not: the overlap reaches back
+      // up to 256 KB, so on a cap smaller than the overlap the whole budget was
+      // spent re-reading bytes already accounted for, the cursor never moved,
+      // and catch-up looped forever. The read therefore spans at most
+      // overlap + ingestBytes, and always clears at least ingestBytes of new
+      // ground.
+      const capBase = safe && prior && Number.isFinite(prior.size) ? prior.size : 0;
+      const capFrom = () => (ingestBytes > 0 ? Math.min(stat.size, capBase + ingestBytes) : stat.size);
+      let consumedEnd = stat.size;
       if (mode === 'append') {
         const tentativeStart = Math.max(0, prior.size - overlapBytes);
-        buffer = readRange(file, tentativeStart, stat.size - tentativeStart);
+        consumedEnd = capFrom();
+        buffer = readSlice(tentativeStart, consumedEnd);
         start = tentativeStart;
         if (tentativeStart > 0) {
-          const oldPrefixLength = prior.size - tentativeStart;
+          const oldPrefixLength = Math.min(prior.size - tentativeStart, buffer.length);
           const newline = buffer.subarray(0, oldPrefixLength).indexOf(10);
           if (newline === -1) {
             mode = 'full';
             start = 0;
-            buffer = readRange(file, 0, stat.size);
+            consumedEnd = capFrom();
+            buffer = readSlice(0, consumedEnd);
           } else {
             start = tentativeStart + newline + 1;
             buffer = buffer.subarray(newline + 1);
           }
         }
       } else {
-        buffer = readRange(file, 0, stat.size);
+        consumedEnd = capFrom();
+        buffer = readSlice(0, consumedEnd);
+      }
+      if (consumedEnd < stat.size) {
+        // A slice cut at the cap almost certainly ends mid-record. Widen until
+        // a boundary appears, because a half-record can neither be parsed nor
+        // resumed from, and stop at the hard maximum rather than sliding back
+        // into the unbounded read this whole change exists to remove.
+        while (buffer.lastIndexOf(10) === -1
+          && consumedEnd < stat.size
+          && consumedEnd - start < INGEST_HARD_MAX_BYTES) {
+          consumedEnd = Math.min(stat.size, start + Math.max((consumedEnd - start) * 4, 4096));
+          buffer = readSlice(start, consumedEnd);
+        }
+        if (consumedEnd < stat.size) {
+          const boundary = buffer.lastIndexOf(10);
+          if (boundary === -1) {
+            throw new Error(
+              `no record boundary within ${buffer.length} bytes of offset ${start}`);
+          }
+          buffer = buffer.subarray(0, boundary + 1);
+          consumedEnd = start + buffer.length;
+          partial = true;
+        }
       }
 
         // Seeded only where the head is genuinely out of the slice, and only
         // for Codex, which is the only source that states the session and cwd
         // once at the top of the file. Claude repeats both on every record, so
         // Claude transcripts -- the volume -- pay nothing for this.
-        const seed = entry.source === 'codex' && mode === 'append' && start > 0
+        // `start > 0` is the real condition, not the mode: a capped read that
+        // begins past the top of the file has the same missing head whether it
+        // is reported as append or partial.
+        const seed = entry.source === 'codex' && start > 0
           ? codexHeadSeed(file) : null;
         let parsed = parseHistorySlice(entry.source, buffer, {
           file, baseOffset: start, platform: options.platform, defaultTool: options.defaultTool,
@@ -1208,16 +1310,36 @@ function scanHistoryFiles(options = {}) {
         if (mode === 'append') {
           const appendedStart = Math.max(0, prior.size - start);
           const resultIds = appendedResultIds(entry.source, buffer.subarray(appendedStart));
-          const parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
-          if ([...resultIds].some((id) => !parsedCalls.has(id))) {
-            // The bounded overlap did not reach the matching request. Reconcile
-            // this file once so a result crossing the cursor is never lost.
-            start = 0;
-            buffer = readRange(file, 0, stat.size);
-            parsed = parseHistorySlice(entry.source, buffer, {
-              file, baseOffset: 0, platform: options.platform, defaultTool: options.defaultTool,
-              probeMatcher: options.probeMatcher,
-            });
+          let parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
+          let missing = [...resultIds].filter((id) => !parsedCalls.has(id));
+          if (missing.length) {
+            // The bounded overlap did not reach the matching request. Widen
+            // BACKWARDS by a bounded amount rather than re-reading the whole
+            // file. The unbounded re-read that used to live here is what cost
+            // 570 ms of every tick on a 2,266,973,030-byte transcript and never
+            // completed, because the read it asked for could not be performed.
+            const wideStart = Math.max(0, start - reconcileBytes);
+            if (wideStart < start) {
+              const wide = readSlice(wideStart, consumedEnd);
+              // Align forward to a record boundary unless we reached the top of
+              // the file, where offset 0 already is one.
+              const newline = wideStart === 0 ? -1 : wide.indexOf(10);
+              if (wideStart === 0 || newline !== -1) {
+                start = wideStart === 0 ? 0 : wideStart + newline + 1;
+                buffer = wideStart === 0 ? wide : wide.subarray(newline + 1);
+                parsed = parseHistorySlice(entry.source, buffer, {
+                  file, baseOffset: start, platform: options.platform,
+                  defaultTool: options.defaultTool, probeMatcher: options.probeMatcher,
+                });
+                parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
+                missing = [...resultIds].filter((id) => !parsedCalls.has(id));
+              }
+            }
+            // Whatever is still unmatched is REPORTED rather than dropped in
+            // silence. It is not converted into evidence either way: an
+            // observation needs its call, so the family is neither credited
+            // with a success nor cleared of a failure it never saw.
+            unmatched = missing.length;
           }
         }
         const selected = mode === 'full'
@@ -1226,10 +1348,15 @@ function scanHistoryFiles(options = {}) {
             observation._callEnd > prior.size || observation._resultEnd > prior.size
           );
         observations.push(...selected);
-        cursors[cursorKey] = cursorForFile(file, entry.source, stat);
+        // The cursor records what was CONSUMED, not how big the file is. On a
+        // capped read those differ, and claiming the larger number is what
+        // would turn a bounded catch-up into a silent skip.
+        cursors[cursorKey] = cursorForFile(file, entry.source, stat, null, consumedEnd);
         files.push({
-          path: file, source: entry.source, mode, size: stat.size,
-          bytesRead: buffer.length, observations: selected.length,
+          path: file, source: entry.source, mode: partial ? 'partial' : mode, size: stat.size,
+          bytesRead: readBytes, observations: selected.length,
+          ...(partial ? { consumedEnd } : {}),
+          ...(unmatched ? { unmatchedResults: unmatched } : {}),
         });
     } catch (error) {
       // Carry the prior cursor forward ONLY when it still describes the file.
@@ -1246,7 +1373,10 @@ function scanHistoryFiles(options = {}) {
       // that is a design decision, not an omission. The reasoning above is the
       // whole of it; there is no backlog entry to go and read.
       if (safe && prior) cursors[cursorKey] = prior;
-      files.push({ path: file, source: entry.source, mode: 'error', size: stat.size, error: error.message });
+      files.push({
+        path: file, source: entry.source, mode: 'error', size: stat.size,
+        bytesRead: readBytes, error: error.message,
+      });
     }
   }
   return { observations, cursors, files };
@@ -1258,4 +1388,7 @@ module.exports = {
   extractNestedShellCommands,
   cursorKeyForFile,
   scanHistoryFiles,
+  // Exported for the guard that pins it below the int32 ceiling readSync
+  // enforces. Nothing in production reads it from here.
+  READ_CHUNK_BYTES,
 };

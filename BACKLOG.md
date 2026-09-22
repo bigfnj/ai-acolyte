@@ -646,13 +646,6 @@ is now fixed too — `test/recall-py.sh:120-122` recovers `SCOPE_AT` with `grep 
 fails unless the offset is `-gt 400`, so it pins the offset rather than the file size.
 What remains is three source-text or fixture weaknesses in the two memory suites.
 
-- **`test/recall-index.test.js:238-239`** — the `assert.match` whose message reads "the
-  index write is no longer atomic" matches a bare `os.replace(tmp, INDEX_PATH)` anywhere in
-  `recall.py`. It still passes with that statement wrapped in `if False:` or hoisted above
-  the `json.dump`, because nothing in the pattern says where it sits. The assertion
-  immediately above it at `test/recall-index.test.js:236` pins the `if todo or gone or
-  force:` condition and the `save_index` call that must follow it in one pattern, and is
-  the shape to copy. This is the exact pattern the standing gates forbid.
 - **`test/recall-py.sh:206-212`, compile stability.** The fixture writes one gate file
   (`g.md`), so removing `sorted()` from the corpus walk cannot change the order the two
   compiles see, and on NTFS directory entries come back name-ordered anyway. `[ "$ONE" =

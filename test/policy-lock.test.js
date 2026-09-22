@@ -112,6 +112,92 @@ test('a zero-byte lock is honoured for a short grace, not the full stale window'
   assert.equal(createPolicyLock({ lockPath, staleMs: 0 }).locked(() => 'now'), 'now');
 });
 
+// The other half of that orphan: not a crash, but a WRITE that fails. `openSync`
+// has already created the file by then, so the failure unwinds past a lock this
+// process is holding and cannot prove it owns — `removeOwnedLock` parses metadata
+// that was never written and returns false. The grace above caps the zero-byte case
+// at five seconds; the partial-write case is not zero bytes and waits out the whole
+// stale window. Either way the holder died before it existed, so nobody should wait.
+//
+// `fd` is a number only for the metadata write inside `locked`, which is what makes
+// this patch surgical: `tempLock`'s own writes and the test's go through untouched.
+function failingFdWrite(t, onWrite) {
+  const real = fs.writeFileSync;
+  t.after(() => { fs.writeFileSync = real; });
+  fs.writeFileSync = function (target, ...rest) {
+    if (typeof target !== 'number') return real.call(fs, target, ...rest);
+    if (onWrite) onWrite();
+    const error = new Error('no space left on device');
+    error.code = 'ENOSPC';
+    throw error;
+  };
+  return () => { fs.writeFileSync = real; };
+}
+
+test('a lock whose write failed is cleaned up by the process that created it', (t) => {
+  const lockPath = tempLock(t);
+  const restore = failingFdWrite(t);
+
+  assert.throws(() => createPolicyLock({ lockPath }).locked(() => 'never runs'),
+    (error) => error.code === 'ENOSPC',
+    'the write failure is reported, not swallowed into a busy error');
+  assert.ok(!fs.existsSync(lockPath),
+    'openSync created the lock file and the metadata write threw; the creating '
+    + 'process must remove it rather than leave an ownerless lock behind');
+
+  restore();
+  // The consequence, stated as the next writer sees it: no wait, no stale window.
+  assert.equal(createPolicyLock({ lockPath, staleMs: 10 * 60 * 1000 }).locked(() => 'ran'), 'ran',
+    'the next writer acquires at once instead of waiting out the stale window');
+});
+
+test('a PARTIALLY written lock is cleaned up too, not left for the stale window', (t) => {
+  const lockPath = tempLock(t);
+  // Bytes on disk, but not parseable metadata — ENOSPC halfway through the write.
+  // This is the case the zero-byte grace cannot help with: `honourFor` only shortens
+  // the window for an EMPTY file, so a truncated one is honoured for the full ten
+  // minutes, and it is exactly as ownerless as the empty one.
+  const restore = failingFdWrite(t, () => fs.writeFileSync(lockPath, '{"pid":1,"own'));
+
+  assert.throws(() => createPolicyLock({ lockPath }).locked(() => 'never runs'),
+    (error) => error.code === 'ENOSPC');
+  assert.ok(!fs.existsSync(lockPath),
+    'a half-written lock is still this process\'s to remove; leaving it strands '
+    + 'every later writer for the full stale window, which the grace never shortens');
+
+  restore();
+  assert.equal(createPolicyLock({ lockPath, staleMs: 10 * 60 * 1000 }).locked(() => 'ran'), 'ran');
+});
+
+test('the cleanup removes OUR lock, never a file that replaced it', (t) => {
+  const lockPath = tempLock(t);
+  // Someone else reclaims and re-creates the lock between our `openSync` and our
+  // cleanup. Deleting on sight would evict a live holder mid-write; the inode taken
+  // from our own descriptor is what tells the two apart.
+  //
+  // Driven at the COMPARISON, not through a real usurper. Simulating one means
+  // unlink-then-recreate at the same path, and that is not deterministic here: NTFS
+  // can hand the replacement the MFT record it just freed. Measured — the
+  // filesystem version of this test passed 30/30 runs on its own and then failed
+  // inside the parallel full suite, where the guard was fine and the simulation was
+  // not. Making `fstatSync` report an inode the file on disk does not have puts the
+  // cleanup in exactly the state a usurper would, with no race in it.
+  const realFstat = fs.fstatSync;
+  t.after(() => { fs.fstatSync = realFstat; });
+  fs.fstatSync = (fd, ...rest) => ({ ...realFstat.call(fs, fd, ...rest), ino: -1 });
+  const restore = failingFdWrite(t);
+
+  assert.throws(() => createPolicyLock({ lockPath }).locked(() => 'never runs'),
+    (error) => error.code === 'ENOSPC');
+  fs.fstatSync = realFstat;
+  restore();
+
+  assert.ok(fs.existsSync(lockPath),
+    'the cleanup must unlink only the file whose inode it recorded; a lock some '
+    + 'other process reclaimed and replaced belongs to its new owner, which is '
+    + 'alive and mid-write, and unlinking it would evict a live holder');
+});
+
 // The reclaim boundary, made deterministic. The test above reaches it only by
 // accident of timing: `stat.mtimeMs` carries sub-millisecond precision while
 // `Date.now()` is whole milliseconds, so a just-written file can read as being

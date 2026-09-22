@@ -6,7 +6,7 @@
 // That override used to write the tag into vscode-extension/package.json and nothing
 // else, leaving the root manifest behind. The root manifest is what
 // `bin/wildcard-perms --version` prints and the extension manifest is what the sidebar
-// badge shows, so one build reported two different versions. installers.test.js:455
+// badge shows, so one build reported two different versions. installers.test.js:567
 // already asserts the two agree, and was structurally blind to this: it ran before the
 // step that broke them.
 //

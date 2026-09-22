@@ -396,7 +396,7 @@ association. Neither uninstaller touches the allow list. Cutting a GitHub Releas
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:
 `syncVersion`'s `MANIFESTS` list (`scripts/sync-version.mjs:21`) covers both
 `vscode-extension/package.json`, which drives the sidebar badge, and the root `package.json`,
-which `wildcard-perms --version` prints. `test/installers.test.js:455` asserts they agree, and the
+which `wildcard-perms --version` prints. `test/installers.test.js:567` asserts they agree, and the
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash

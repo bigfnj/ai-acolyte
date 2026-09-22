@@ -297,12 +297,15 @@ and the only metadata chunk is the capture tool's name, with no EXIF, author or 
 
 ### Small, off-axis, confirmed
 
-- The `fs.rmSync(sandbox, ...)` at `scripts/auto-mode-audit.js:94` deletes the sandbox
-  before the `return {` at `scripts/auto-mode-audit.js:96-102` reports `sandbox`, so
-  `report.sandbox` names a deleted directory on every run without `--keep`.
-- `src/policy-lock.js:92-96`: if openSync succeeds but writeFileSync/fsyncSync
-  throws, removeOwnedLock cannot JSON.parse the empty file and returns false,
-  orphaning the lock until the staleness path reclaims it.
+- **The MAX hook command is escaped for POSIX sh only, and Windows is a coin flip.**
+  Found while fixing the POSIX half. `approveCommandFor` (`src/permissions.js:632`)
+  leaves the Windows form unescaped, which is right for `cmd.exe` and wrong for the
+  other two: Claude Code tries Git Bash first, then `pwsh`, then `cmd.exe`, and the
+  three want three incompatible escapes. A Windows home containing `$` or a backtick
+  — both legal in a filename, unlike `"` — therefore breaks under two of the three,
+  and the launcher cannot know which it got. Escaping for one would break the other
+  two, so nothing was changed. Needs a runtime probe, or a hook body that does not
+  interpolate a path at all.
 - A work-domain email address appears as the author of 3 of 48 commits (all
   2026-08-21) in this **public** repo's history. Future commits are already safe:
   the global git identity is a personal address. Rewriting history was declined —
@@ -633,9 +636,6 @@ UNC, mapped drive, 8.3, `\\?\`, >260 chars, trailing dot/space, relative). But:
 - **The two halves disagree on case.** PowerShell `-match` is case-insensitive so
   `NODE "…"` passes there, while the JS assertion has no `/i` and rejects it —
   even though both uninstallers, cited as the contract, ARE case-insensitive.
-- `APPROVE_COMMAND` does no quote escaping, so a POSIX `$HOME` containing `"`
-  emits a genuinely broken command that the test rejects with the wrong
-  diagnosis.
 
 ### Optimization: the new DO list, measured in the right place
 
@@ -825,21 +825,14 @@ The sibling bullet under that heading IS closed and should not be re-raised: man
 gets `clean()` at the table (`src/auto-learn-manager.js:1129`) and `cleanRule()` at the
 interpolation (`src/derived-guidance.js:43`, exported at `:357`).
 
-The three from `Interesting, off-axis`:
+The two still open from `Interesting, off-axis` (the third, `auto-mode-audit.js` authenticating
+against its own header's promise, is fixed and removed):
 
 **A bare `~` in `backupMirrorPath` resolves to the home directory itself.** `mirrorBackupPath()` at
 `vscode-extension/extension.js:204-206` does `path.join(os.homedir(), raw.slice(1).replace(/^[\\/]+/, ''))`.
 For `~` alone that is `path.join(home, '')`, so the mirror write targets a directory, fails EISDIR,
 and the failure is swallowed. Every other `~`-prefixed value is handled correctly; only the bare
 one degenerates.
-
-**`auto-mode-audit.js` claims it runs with no credentials, and does not.** `scripts/auto-mode-audit.js:77`
-passes `env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }`. That redirects the config directory,
-not credentials, so with `ANTHROPIC_API_KEY` set in the environment the probe authenticates and makes
-a real API call. The header at `scripts/auto-mode-audit.js:14` promises the opposite: "with no
-credentials the run stops at Not logged in". The BOM half of this bullet was fixed at
-`scripts/auto-mode-audit.js:52`; the credentials half, an unguarded `JSON.parse`, and a module-level
-`args` read were all dropped with the heading.
 
 **Two stat-keyed caches can still return a stale verdict.** `policyFingerprint` at
 `src/auto-learn-manager.js:924` and `autoLearnStateStamp` at `vscode-extension/extension.js:1047`

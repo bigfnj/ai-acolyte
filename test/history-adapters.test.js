@@ -1194,3 +1194,103 @@ test('a reconcile that cannot reach its call reports it instead of re-reading th
     `the bounded reconcile must not re-read the whole file (${entry.bytesRead} `
     + `bytes read against ${sizeAfterCall} before the append)`);
 });
+
+test('a same-size rewrite with a new mtime is still caught and re-read', (t) => {
+  const root = tempRoot(t, 'rewrite');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 8, 40);
+  const size = fs.statSync(file).size;
+
+  const first = scanHistoryFiles({ cursors: {}, claudeRoots: [root] });
+  const cursors = JSON.parse(JSON.stringify(first.cursors));
+  const before = first.observations.map((observation) => observation.command).sort();
+
+  // Rewrite in place at EXACTLY the same size, with different commands. This
+  // is what the head/tail hashes exist to catch, and the mtime fast path must
+  // not swallow it.
+  const rewritten = fs.readFileSync(file, 'utf8')
+    .replace(/echo (\d)/g, (whole, digit) => `ohce ${digit}`);
+  assert.equal(Buffer.byteLength(rewritten), size,
+    'precondition: the rewrite really is the same number of bytes');
+  fs.writeFileSync(file, rewritten);
+  const after = fs.statSync(file);
+  assert.notEqual(after.mtimeMs, Object.values(cursors)[0].mtimeMs,
+    'precondition: the rewrite moved the mtime, which is the ordinary case');
+
+  const second = scanHistoryFiles({ cursors, claudeRoots: [root] });
+  assert.equal(second.files[0].mode, 'full',
+    'a same-size rewrite must force a full re-read, not read as unchanged');
+  const commands = second.observations.map((observation) => observation.command).sort();
+  assert.notDeepEqual(commands, before,
+    'and the new content must actually be observed');
+  assert.ok(commands.every((command) => command.startsWith('ohce')),
+    'every observation comes from the rewritten file');
+});
+
+test('an untouched transcript is proved unchanged without reading its bytes', (t) => {
+  const root = tempRoot(t, 'quiet');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 8, 40);
+
+  const first = scanHistoryFiles({ cursors: {}, claudeRoots: [root] });
+  const cursors = JSON.parse(JSON.stringify(first.cursors));
+
+  let opens = 0;
+  const realOpenSync = fs.openSync;
+  t.after(() => { fs.openSync = realOpenSync; });
+  fs.openSync = (target, ...rest) => {
+    if (String(target) === file) opens += 1;
+    return realOpenSync(target, ...rest);
+  };
+  const second = scanHistoryFiles({ cursors, claudeRoots: [root] });
+  fs.openSync = realOpenSync;
+
+  assert.equal(second.files[0].mode, 'unchanged', 'precondition: it read as unchanged');
+  assert.equal(opens, 0,
+    'an untouched file must cost a stat and nothing else; re-hashing two 4 KB '
+    + 'ranges per transcript per tick was half the cost of a quiet scan');
+});
+
+test('a replaced file with the same size and mtime is caught by the inode', (t) => {
+  const root = tempRoot(t, 'inode');
+  const file = path.join(root, 'bulk.jsonl');
+  bulkClaude(file, 8, 40);
+
+  // Pin the timestamp to a whole millisecond BEFORE the first scan. utimesSync
+  // cannot reproduce NTFS sub-millisecond precision, so a cursor recorded from
+  // a natural write can never be matched exactly afterwards -- which is itself
+  // why an ordinary restore trips the mtime leg without needing the inode.
+  const pinned = new Date(Math.floor(Date.now() / 1000) * 1000);
+  fs.utimesSync(file, pinned, pinned);
+
+  const first = scanHistoryFiles({ cursors: {}, claudeRoots: [root] });
+  const cursors = JSON.parse(JSON.stringify(first.cursors));
+  const priorStat = fs.statSync(file);
+  if (!priorStat.ino) {
+    t.skip('this filesystem reports no inode, so the leg cannot be exercised here');
+    return;
+  }
+
+  // A DIFFERENT file, same byte length, moved over the original and given the
+  // original's timestamps. Size and mtime therefore agree with the cursor and
+  // only the file id disagrees, which is the restore-shaped case.
+  const replacement = path.join(root, 'replacement.jsonl');
+  const rewritten = fs.readFileSync(file, 'utf8')
+    .replace(/echo (\d)/g, (whole, digit) => `ohce ${digit}`);
+  fs.writeFileSync(replacement, rewritten);
+  fs.renameSync(replacement, file);
+  fs.utimesSync(file, pinned, pinned);
+
+  const after = fs.statSync(file);
+  assert.equal(after.size, priorStat.size, 'precondition: same size');
+  assert.equal(after.mtimeMs, priorStat.mtimeMs, 'precondition: same mtime');
+  if (String(after.ino) === String(priorStat.ino)) {
+    t.skip('this filesystem reused the file id, so the leg cannot be exercised here');
+    return;
+  }
+
+  const second = scanHistoryFiles({ cursors, claudeRoots: [root] });
+  assert.equal(second.files[0].mode, 'full',
+    'a replaced file must not read as unchanged just because its size and '
+    + 'timestamp were preserved; the file id is the only thing that differs');
+});

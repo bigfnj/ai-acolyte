@@ -1093,6 +1093,28 @@ function safeContinuation(file, stat, prior, source) {
   if (![prior.headLength, prior.tailStart, prior.tailLength].every(Number.isFinite)) return false;
   if (!prior.headHash || !prior.tailHash) return false;
   if (prior.headLength > stat.size || prior.tailStart + prior.tailLength > stat.size) return false;
+  // Size, mtime and inode all match what the cursor recorded, so the file has
+  // not been written since we looked. Re-hashing two 4 KB ranges can only
+  // confirm that, and doing it for every unchanged transcript on every tick is
+  // half the cost of a quiet scan: MEASURED 2026-09-22, cold, one call per
+  // fresh process, interleaved against a variant with this clause removed:
+  //
+  //   with the re-hash     330.2 / 294.4 / 298.4 ms
+  //   without              144.1 / 142.2 / 152.8 ms
+  //
+  // WHAT THIS STOPS DETECTING, stated plainly: a file rewritten in place at
+  // exactly the same size, keeping the same inode, with its mtime restored to
+  // what it was. Nothing that writes these transcripts does that -- agents
+  // append -- and a replaced file gets a new file id, which the inode check at
+  // the top of this function already rejects. A rewrite that changes the
+  // mtime, which is every ordinary one, still forces a full re-read. If a
+  // future source of transcripts rewrites in place with preserved timestamps,
+  // delete this clause.
+  //
+  // No inode leg here on purpose: the guard above has already returned false
+  // for a mismatch, so a second test could never change an outcome. It was
+  // written, its mutation SURVIVED, and that is how it was found.
+  if (prior.size === stat.size && prior.mtimeMs === stat.mtimeMs) return true;
   try {
     return hashBuffer(readRange(file, 0, prior.headLength)) === prior.headHash &&
       hashBuffer(readRange(file, prior.tailStart, prior.tailLength)) === prior.tailHash;

@@ -237,15 +237,39 @@ re-litigated by someone who sees an unticked box.
 ### 42 dead export names, and 6 option keys with no supplier
 
 Verified 2026-09-09 by loading every module and diffing declared exports against
-all references across `src/`, `bin/`, `vscode-extension/` and `test/`. Every
-internal import in this repo is destructured and there is no namespace-style
-require of an internal module in production code, so textual absence really does
-mean unused.
+all references across `src/`, `bin/`, `vscode-extension/` and `test/`.
+
+⚠ **THE METHOD'S PREMISE IS FALSE, and re-measuring on 2026-09-22 changed the
+answer.** This section used to say "every internal import in this repo is
+destructured and there is no namespace-style require of an internal module in
+production code, so textual absence really does mean unused". There is one:
+`bin/wildcard-perms:276` does `const cache = require('../src/fixed-point-cache')`
+and then `cache.isFixedPoint` and `cache.writeFixedPoint(cache.fixedPointKey(…))`
+on the hook's hot path. A destructure-only scan reports those three as test-only
+when they have a production consumer. Tests use member access too, in at least
+four files. Any future census must count exports, destructures, member access
+AND namespace aliases.
+
+**Re-measured with that method: 36 dead export entries, not 42**, and the
+composition moved. Four claims in this section are WRONG and are corrected
+below rather than left to be re-derived:
+
+- `readAllow` is not in `vscode-extension/extension.js` at all, and the only
+  `readAllow` in the tree (`scripts/auto-mode-audit.js:51`) is CALLED at `:107`.
+- `busyMessage` has two real suppliers (`src/agent-guidance.js:281` and
+  `test/policy-lock.test.js:48`, the latter asserting the custom message comes
+  back), so the "six option keys with no supplier" is five.
+- `enableMaxAllow`, `disableMaxAllow` and `registerApproveHook` are all three
+  dead EXPORTS, not "one live, two test-only": every hit outside
+  `src/permissions.js` is prose.
+- "Zero orphaned functions across 578 declarations" is wrong twice over. There
+  are 662 declarations, and one orphan: `src/codex-max.js:120` `readConfig` has
+  exactly two references, its own declaration and its export entry.
 
 The functions themselves are live inside their own modules; only the
 module.exports entry is dead, so removing the name is safe and free. Largest
-concentration is `src/permissions.js` (14 of 33 exports), then `codex-max.js`
-(4), `agent-guidance.js` (3), `memoryLint.js` (3), `autoLearnUi.js` (3), with
+concentration is `src/permissions.js` (15 of 36 exports, re-measured 2026-09-22),
+then `codex-max.js` (5), `agent-guidance.js` (3), `memoryLint.js` (3), `autoLearnUi.js` (3), with
 singles across agent-gates, local-settings, permission-match, recall-index,
 derived-guidance, exec-resolve, tool-learn and mirror-pack. A separate set is
 **test-only** — real consumers, just not public API — and should be labelled

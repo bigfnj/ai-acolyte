@@ -1426,3 +1426,37 @@ test('widening is clamped to the hard maximum, not merely stopped by it', (t) =>
     `the widened read must respect the hard maximum: read ${entry.bytesRead} bytes `
     + 'against a 1000-byte cap and a 2000-byte ceiling');
 });
+
+// The sibling of the junction test above, varying the two axes it pins to one
+// value: the link target is INSIDE the walked root, and the root is passed as a
+// RELATIVE path. Both matter. The visited-set key for a directory identified by
+// the enumeration is built with path.resolve, and without that resolve a
+// relative root produces a key that never matches the absolute one realpath
+// gives for the same directory reached through the link -- so the transcript is
+// enumerated twice and its observations counted twice, which inflates the
+// success count that gates auto-safe. A variant with exactly that defect passed
+// the whole suite.
+test('a junction to a directory inside the walked tree is not counted twice, even from a relative root',
+  { skip: !CAN_LINK_DIR }, (t) => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wildcard-history-relink-'));
+    const cwd = process.cwd();
+    // One hook, in this order. Windows refuses to remove a directory the
+    // process is sitting in, so restoring the cwd has to happen first.
+    t.after(() => { process.chdir(cwd); fs.rmSync(base, { recursive: true, force: true }); });
+    const root = path.join(base, 'root');
+    fs.mkdirSync(path.join(root, 'inside'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'inside', 'only.jsonl'), codexCall('only', 'rg once'));
+    // The link target is inside the tree, so the walk reaches the same real
+    // directory by two different paths in one pass.
+    fs.symlinkSync(path.join(root, 'inside'), path.join(root, 'alias'), DIR_LINK);
+
+    process.chdir(base);
+
+    const result = scanHistoryFiles({ roots: { codex: 'root' }, platform: 'win32' });
+    const seen = result.observations.filter((observation) => observation.callId === 'only');
+    assert.equal(seen.length, 1,
+      `one transcript reached by two paths must be observed once, not ${seen.length} times; `
+      + 'a double count inflates the success total that gates auto-safe');
+    assert.equal(result.files.filter((entry) => entry.mode !== 'error').length, 1,
+      'and it is enumerated once, so the double count cannot come back as double I/O');
+  });

@@ -1170,6 +1170,37 @@ function parseHistorySlice(source, buffer, options) {
   return source === 'codex' ? parseCodexJsonl(buffer, options) : parseClaudeJsonl(buffer, options);
 }
 
+// Every call id in a slice, whether or not it became an observation. The
+// mirror of appendedResultIds, and the difference matters: createObservation
+// returns null for a tool the learner does not track, so matching results
+// against OBSERVATIONS counted a TodoWrite or Read result as a call we had
+// never seen. That over-reported unmatchedResults and, worse, sent the
+// reconcile widening backwards after a call that could never produce an
+// observation -- up to the full reconcile bound, on every scan, forever.
+// MEASURED live 2026-09-22: 96 such results in one tick, all noise.
+function sliceCallIds(source, buffer) {
+  const ids = new Set();
+  parseJsonlRecords(buffer, {}, (record) => {
+    if (source === 'codex') {
+      for (const item of codexItems(record)) {
+        if (item.type !== 'function_call' && item.type !== 'custom_tool_call') continue;
+        const id = stringValue(firstDefined(item.call_id, item.callId, item.id));
+        if (id) ids.add(id);
+      }
+      return;
+    }
+    for (const message of claudeMessageCandidates(record)) {
+      if (!Array.isArray(message.content)) continue;
+      walkObjectBlocks(message.content, (block) => {
+        if (block.type !== 'tool_use') return;
+        const id = stringValue(firstDefined(block.id, block.tool_use_id, block.callId));
+        if (id) ids.add(id);
+      });
+    }
+  });
+  return ids;
+}
+
 function appendedResultIds(source, buffer) {
   const ids = new Set();
   parseJsonlRecords(buffer, {}, (record) => {
@@ -1403,8 +1434,12 @@ function scanHistoryFiles(options = {}) {
         if (mode === 'append') {
           const appendedStart = Math.max(0, prior.size - start);
           const resultIds = appendedResultIds(entry.source, buffer.subarray(appendedStart));
+          // Seen means seen, not observed. A call present in the slice but
+          // deliberately not tracked still answers "have we read this call".
           let parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
-          let missing = [...resultIds].filter((id) => !parsedCalls.has(id));
+          let seenCalls = sliceCallIds(entry.source, buffer);
+          let missing = [...resultIds]
+            .filter((id) => !parsedCalls.has(id) && !seenCalls.has(id));
           if (missing.length) {
             // The bounded overlap did not reach the matching request. Widen
             // BACKWARDS by a bounded amount rather than re-reading the whole
@@ -1434,7 +1469,9 @@ function scanHistoryFiles(options = {}) {
                   ...(start > 0 ? { session: seed && seed.session, cwd: seed && seed.cwd } : {}),
                 });
                 parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
-                missing = [...resultIds].filter((id) => !parsedCalls.has(id));
+                seenCalls = sliceCallIds(entry.source, buffer);
+                missing = [...resultIds]
+                  .filter((id) => !parsedCalls.has(id) && !seenCalls.has(id));
               }
             }
             // Whatever is still unmatched is REPORTED rather than dropped in

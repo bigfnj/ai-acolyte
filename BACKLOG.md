@@ -13,6 +13,116 @@ Anything measured says so and names the date. Anything unverified says that too.
 
 ## Open
 
+### From the 2026-09-22 post-merge audit: leaks, lifecycle and the Codex override
+
+Four read-only audits ran after the day's work was pushed. Everything the
+regression audit found in that work was FIXED the same session and is not
+listed here; what follows is what was found elsewhere and left. Each was
+verified against the tree or measured live, and the ones that correct an
+existing record say so.
+
+**`observationHashes` is AT its cap, which makes `pruneCursors`' written safety
+argument false.** Measured on the live state file 2026-09-22: `observationHashes`
+20,000 of 20,000 (2.5 MB, 62% of a 4.1 MB file), `cursors` 969 of 5,000,
+`candidates` 564 of 1,000, and `lastScanStats.prunedObservations` 131 on the
+last tick, so it is actively evicting every scan. `pruneCursors`
+(`src/auto-learn-manager.js:722`) justifies evicting a cursor with "the re-read
+is deduped by `observationHashes`, so it cannot inflate a count". That is false
+for exactly the files it evicts: it keeps the newest by `mtimeMs` and drops the
+oldest, whose hashes went first. Past 5,000 transcripts the map oscillates
+permanently, the evicted files take `mode: 'full'` at up to 64 MiB each, and a
+full re-read re-emits every observation, incrementing the `counts.success` that
+gates automatic allow-list writes. The corpus went 660 to 969 files in about
+two and a half months, so roughly a year of headroom. This is the shape of the
+defect fixed today, arriving through a different door.
+
+**A wedged Auto Learn worker is never terminated, and the observable for that
+is asserted nowhere.** `vscode-extension/autoLearnWorkerRunner.js` `execute()`
+has no deadline; it settles only on `message`, `error` or `exit`. `deactivate()`
+awaits those same promises BEFORE terminating lingerers, so a worker blocked in
+a `statSync` against a dead network mount makes `deactivate()` never resolve,
+`context.subscriptions` never drain, and the thread never die -- one extra live
+worker per reload. `test/extension-lifecycle-async.test.js` already defines
+`WedgedWorker.terminated` with a comment naming this exact leak; `grep -rn
+terminated test/` shows it is written twice and read by no assertion.
+
+**Overriding a stale Codex cap creates a state the tool cannot leave.** After
+an override writes `approval_policy = "never"`, if the bundle later refreshes,
+`isCodexMaxOn` returns false for a live cap regardless of file contents. So
+`--codex-max off` prints "already OFF", `on` returns `blockedBy:
+'enterprise-policy'`, the card reads "unavailable", and the `never` this tool
+wrote stays in `config.toml` in violation of a cap that is live again. The
+`priorApproval` snapshot is stranded and never consumed. Before the override
+existed this state was unreachable. Off-while-stale is tested; off-after-refresh
+is not.
+
+**The Codex confirmation modal opens a read-modify-write window.**
+`vscode-extension/extension.js` reads `config.toml` before the modal, which can
+sit open indefinitely, then writes the WHOLE file back from that snapshot. Any
+edit in between, by the user or by Codex, is silently reverted. `applyCodexMax`
+is a surgical line editor precisely so it does not clobber unrelated keys; the
+async gap defeats that at the caller. The toggle is also registered
+fire-and-forget, so nothing can await it, and it writes after the await with no
+`deactivated` re-check -- the class already recorded as fixed for three other
+writers.
+
+**The 32 MB model download is the one in-flight job `deactivate()` does not
+cancel.** The four `execFile` children are tracked and killed; the https
+transfer is not. An in-flight download survives teardown holding a socket, a
+write-stream fd and up to 32 MB of buffering, and completes with a
+`renameSync` INTO `~/.claude` from a torn-down host. `fail` is reachable from
+three handlers with no once-guard, so one socket error produces two toasts.
+
+**`writeFileAtomicSync` creates its temp file outside its only try/finally.**
+`src/permissions.js:41` writes the temp before the `try` whose `finally`
+unlinks it, so a throw there on ENOSPC or a quota stop orphans a
+`<name>.<pid>.<rand>.wc.tmp` that nothing ever removes. Eleven production call
+sites including both settings.json writers and the user's CLAUDE.md. The hook
+runs on every tool call, so a persistently full disk produces one orphan per
+Bash invocation. `atomicWrite` in `auto-learn-manager.js` gets this right and
+is the shape to copy.
+
+**Policy `.bak` backups accumulate forever.** `src/auto-learn-manager.js:1353`
+writes a uniquely-named `.bak` per policy write, and a repo-wide grep finds no
+reader, pruner or deleter for any but the most recent set. Measured
+`~/.claude/wildcarding/backups`: 41 files, 506 KB, oldest 2026-08-18, about
+1.2 files a day. Small, and notable only because it sits in the one directory
+where every sibling structure is explicitly capped.
+
+**Smaller, each confirmed:**
+
+- Path probes poison the rule-match cache. `src/auto-learn-manager.js:952`
+  feeds `coversPermission` a freshly synthesized `Tool(<path>)` per
+  observation, and `permission-match.js` caches each one. Memory is bounded by
+  a wholesale `clear()` at 5,000, so this is thrash rather than a leak: the
+  clear also discards the compiled rules the cache exists for. The module's own
+  comment says a caller synthesizing rules in a loop "is a bug rather than a
+  workload"; that caller is the scan path.
+- `vscode-extension/extension.js` registers two byte-identical watcher-drain
+  disposers; the second is a no-op.
+- `readRange`'s `fs.closeSync` in the `finally` can throw and mask the
+  in-flight error, which now includes the only diagnostic for an unreadable
+  stretch. `policy-lock.js` and `auto-learn-manager.js` both wrap theirs.
+- `src/codex-max.js` uses `now` as a function in one place and a value in
+  another. Passing the wrong one yields `NaN` and silently disables the expiry
+  check. It fails closed, but it is one identifier with two types.
+- `errors` is now returned by `scan()` and printed by the CLI, but the
+  dashboard still reads neither it nor `lastScanStats`. `files[].consumedEnd`
+  has no reader at all.
+- `test/derived-guidance.test.js` asserts `!/&[a-z]{1,3}$/` while production
+  strips `{0,3}`, so a trailing bare `&` is unpinned.
+
+**A correction to `docs/engineering-record.md`, because its stated mechanism is
+now wrong.** The entry on the observations array says `parseHistorySlice` does
+`buffer.toString('utf8')` on a whole file and can throw `ERR_STRING_TOO_LONG`,
+with the trigger "revisit when any single transcript passes 200 MB".
+`parseJsonlRecords` decodes PER LINE; the only whole-buffer decode left is
+inside the 1 MiB-capped `codexHeadSeed`. So that error is unreachable there,
+and the 64 MiB ingest cap makes the 200 MB trigger unreachable too. The entry
+guards a door that no longer exists, while the real axis -- total observations
+per scan across 969 files, not per transcript -- has no trigger written against
+it at all.
+
 ### ANSWERED 2026-09-22: desktop-ai-companion's optimisation learnings, and which ones transfer
 
 The item below was the question. This is the answer, kept short because the finding it produced

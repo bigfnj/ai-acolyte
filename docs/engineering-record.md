@@ -879,6 +879,25 @@ The measurement bar these were held to: cold, in fresh interleaved processes, ag
 purpose-built variant with the change REMOVED. A warm loop or a sandboxed temp HOME has
 been wrong every time, twice with the conclusion inverted.
 
+### The four refuted rows from the 2026-09-10 ranked table
+
+Moved out of `BACKLOG.md` on 2026-09-22, where they had sat struck through inside a
+priority table for twelve days. A struck-through row in a worklist is still a row: it
+reads as something someone decided not to do yet, rather than something that was measured
+and is false.
+
+**All four shared one cause: they were measured in a sandboxed temp `HOME`, where reads
+cost roughly 6x what the same bytes cost in the real `~/.claude`.** That inflation is the
+single most productive error in this project's measurement history, and it is why the bar
+above says what it says.
+
+| claim | measured figure | truth |
+|---|---|---|
+| `fullReport` re-reads the whole memory corpus every push | 6.98 / 7.96 ms | **0.56 ms.** Read 1.46 ms p50 against stat 0.90 ms over 17 files is a 1.6x ratio, not 10.3x. The growth argument was wrong too: a stat stamp scales with the corpus exactly as the reads do |
+| 44 KB of verb bodies compiled on every hook call | 1.12 / 2.50 ms | **0.00 ms.** The real 44.4 KB file is 43.87 / 48.54 ms; a 1.8 KB stub is 44.00 / 48.73; a 212-byte floor is 43.01 / 48.48. V8 pre-parses and lazily compiles, so unexecuted verb code is free. **Do not re-derive this**: it proposed a 30 KB refactor of the most safety-critical file in the project for nothing |
+| `gates.generated.md` read 5x per push | 1.55 / 1.69 ms | **~0.34 ms** |
+| `CLAUDE.md` and `~/.codex/AGENTS.md` read twice each | ~0.89 ms | **~0.17 ms** |
+
 ### From the hook and extension profiling pass
 
 **`activate()`'s two lock acquisitions.** Premise stale, counted empirically: a converged

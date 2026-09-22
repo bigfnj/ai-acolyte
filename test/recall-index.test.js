@@ -238,6 +238,16 @@ test('the index write is atomic and survives a deletion-only change', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'memory', 'recall.py'), 'utf8');
   assert.match(source, /if todo or gone or force:\s*\r?\n\s*save_index\(idx, MEMORY_DIR\)/,
     'a deletion-only change, or a forced rebuild of an empty corpus, is no longer persisted');
-  assert.match(source, /os\.replace\(tmp, INDEX_PATH\)/,
-    'the index write is no longer atomic');
+  // The ORDER, not the presence. `/os\.replace\(tmp, INDEX_PATH\)/` alone
+  // passed with the statement wrapped in `if False:`, and would pass with the
+  // dump going straight to INDEX_PATH and the replace left behind as dead
+  // code. What makes the write atomic is the sequence: a pid-suffixed temp,
+  // the dump into THAT, then the replace. Each of the three is load-bearing,
+  // and the pid is what stops two writers interleaving before the replace.
+  assert.match(
+    source,
+    /tmp = f"\{INDEX_PATH\}\.\{os\.getpid\(\)\}\.tmp"\s*\r?\n\s*with open\(tmp,[^\n]*\r?\n\s*json\.dump\(idx, f\)\s*\r?\n\s*os\.replace\(tmp, INDEX_PATH\)/,
+    'the index write is no longer atomic: it must dump into a pid-suffixed '
+    + 'temp and THEN os.replace it over INDEX_PATH, in that order',
+  );
 });

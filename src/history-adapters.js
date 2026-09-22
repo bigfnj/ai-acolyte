@@ -950,15 +950,19 @@ function findJsonlFiles(root, source, output, failures) {
     if (stat && !stat.isDirectory()) continue;
     let canonical;
     if (knownDirectory) {
-      // `path.resolve` is load-bearing, not tidiness. Without it a RELATIVE
-      // root yields a visited key that never matches the absolute one
-      // `realpathSync` produces for the same directory reached through a
-      // junction, and the transcript is enumerated TWICE -- two observation
-      // sets for one file, inflating the success count that gates auto-safe.
-      // The audit's first draft of this change had exactly that defect and it
-      // passed all 551 tests.
-      const resolved = path.resolve(current);
-      canonical = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+      // The key comes from the PARENT's canonical key plus this entry's name,
+      // so every key descends from a realpath'd ancestor and is spelled the
+      // way realpath spells it.
+      //
+      // `path.resolve` was tried here first and is NOT enough. It preserves an
+      // 8.3 short component -- GitHub's Windows runners hand out a %TEMP% of
+      // `C:\Users\RUNNER~1\...` -- while `realpathSync.native` expands it, so
+      // the same directory reached directly and through a junction got two
+      // different keys, was walked twice, and its transcripts were observed
+      // twice. A double count inflates the success total that gates auto-safe.
+      // It passed the whole suite locally and failed only on CI, which is the
+      // second time this exact short-path trap has bitten this repo.
+      canonical = queued.canonical;
     } else {
       try { canonical = fs.realpathSync.native(current); } catch (error) { note(current, error); continue; }
       canonical = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
@@ -981,7 +985,10 @@ function findJsonlFiles(root, source, output, failures) {
       // including a Windows junction, is queued bare so `statSync` and
       // `realpathSync` still decide what it is and the cycle set still sees
       // its true identity.
-      if (entry.isDirectory()) pending.push({ path: child, dir: true });
+      if (entry.isDirectory()) {
+        const name = process.platform === 'win32' ? entry.name.toLowerCase() : entry.name;
+        pending.push({ path: child, dir: true, canonical: canonical + path.sep + name });
+      }
       else if (entry.isSymbolicLink()) pending.push(child);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl')) {
         output.push({ source, path: path.resolve(child) });

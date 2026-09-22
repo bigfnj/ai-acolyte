@@ -1530,3 +1530,33 @@ test('a result whose call is genuinely absent is still reported', (t) => {
   assert.equal(entry.unmatchedResults, 1,
     'narrowing the definition must not silence the case the counter exists for');
 });
+
+// The deterministic form of the test above. That one only exposes the defect
+// where the walked spelling differs from realpath's, which on GitHub's Windows
+// runners is an 8.3 %TEMP% (C:\Users\RUNNER~1\...) and on a box with 8.3
+// generation disabled is nothing at all -- so it passed locally and failed only
+// on CI. A symlinked ANCESTOR produces the same divergence everywhere symlinks
+// work, which makes the regression reproducible rather than platform luck.
+test('a directory reached through a symlinked ancestor is still visited once',
+  { skip: !CAN_LINK_DIR }, (t) => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wildcard-history-ancestor-'));
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+    const real = path.join(base, 'real');
+    const root = path.join(real, 'root');
+    fs.mkdirSync(path.join(root, 'inside'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'inside', 'only.jsonl'), codexCall('only', 'rg once'));
+    // One junction inside the tree, so the walk reaches one real directory twice.
+    fs.symlinkSync(path.join(root, 'inside'), path.join(root, 'alias'), DIR_LINK);
+    // One over the whole tree, so the walked path is not spelled as its realpath.
+    fs.symlinkSync(real, path.join(base, 'link'), DIR_LINK);
+
+    const walked = path.join(base, 'link', 'root');
+    assert.notEqual(walked.toLowerCase(), fs.realpathSync.native(walked).toLowerCase(),
+      'precondition: the walked spelling really does differ from its realpath');
+
+    const result = scanHistoryFiles({ roots: { codex: walked }, platform: 'win32' });
+    const seen = result.observations.filter((observation) => observation.callId === 'only');
+    assert.equal(seen.length, 1,
+      `one transcript reached by two paths must be observed once, not ${seen.length} times; `
+      + 'a visited key built from the walked spelling never matches the realpath one');
+  });

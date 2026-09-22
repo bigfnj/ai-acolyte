@@ -86,8 +86,11 @@ counted per tool with no path and no inferred rule at all. The review list also 
 candidate that the current deny or ask policy would override.
 
 The extension scans at startup, watches both agents' JSONL history, and reconciles every five
-minutes by default. Incremental reconciliation, stable observation IDs, and deduplication
-prevent gaps and double counting. Workspace-partitioned state stays under the user profile at
+minutes by default. Incremental reconciliation, stable observation IDs and deduplication
+prevent double counting. A scan will not always finish a file: one tick ingests a bounded amount
+per transcript, and what it could not reach is REPORTED rather than papered over, as `partial`,
+`unreadable` and `unmatchedResults`. The cursor records what was consumed, so the next tick
+resumes exactly where it stopped. Workspace-partitioned state stays under the user profile at
 `~/.claude/wildcarding/auto-learn-state.<workspace-hash>.json` (or
 `auto-learn-state.json` without a workspace). It contains normalized families, source labels,
 outcome counts, stable hashes, and `path-sha256:<24-hex>` cursor locators — never raw command
@@ -240,9 +243,12 @@ CLI half in the repository.
 Download the `.vsix` from the repository's
 [Releases](https://github.com/bigfnj/permission-wildcarding/releases), then in
 VS Code: **Extensions view (`Ctrl+Shift+X`) → `···` menu → Install from VSIX…**
-and pick the file. Installing via the GUI registers the extension into the
-active profile (a plain `code --install-extension` or folder copy does not, and
-the Activity Bar icon will not appear).
+and pick the file. `code --install-extension <file>.vsix --force` also works and
+does register into the active profile -- measured on VS Code 1.10x, 2026-09-22,
+three installs in a row, each one appearing in `extensions.json` as the active
+`local.permission-wildcarding-<version>`. A folder copy still does not. The
+earlier text here claimed the CLI did not register either; it contradicted the
+root README, which tells you to use exactly that command.
 
 The `PostToolUse` hook (the non-GUI half of this tool) is installed separately
 from the repository root — see `install.sh` / `install.ps1`.
@@ -268,7 +274,7 @@ removing it too would leave nothing able to refuse a command. You still get
 stopped for out-of-workspace writes and network access, which are the cases worth
 being asked about. On a console-managed org an `allowed_approval_policies` cap
 may forbid `never`. The switch then reports itself **unavailable** and writes nothing
-(`blockedBy: 'enterprise-policy'` at `src/codex-max.js:335-340`): every other value it could
+(`blockedBy: 'enterprise-policy'` at `src/codex-max.js:331-336`): every other value it could
 write still prompts *and* equals the org's own default, so setting it and calling that "MAX
 on" would claim prompts are skipped when they are not. Restart Codex to apply; it reads
 config at startup.
@@ -277,7 +283,7 @@ That cap is read from a cache with its own stated lifetime, and an **expired** o
 handled differently: still honoured, because a machine offline past the TTL would otherwise
 drop a control that is genuinely in force, but no longer presented as current. The button
 stays clickable, the card names the date the cache was written, and clicking asks before
-anything is written (`blockedBy: 'enterprise-policy-stale'` at `src/codex-max.js:349-354`).
+anything is written (`blockedBy: 'enterprise-policy-stale'` at `src/codex-max.js:345-350`).
 From the CLI the same override is `wildcard-perms --codex-max on --override-stale-policy`.
 Absence of an expiry is not expiry: a cache that never stated a lifetime is treated as
 current.

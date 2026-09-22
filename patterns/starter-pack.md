@@ -1,7 +1,7 @@
 # Starter Pack — permission-wildcarding
 
 Seed list of commonly-approved Claude Code permissions. `patterns/starter-pack.json`
-is the source of truth and now carries a comprehensive snapshot (290+ entries) taken
+is the source of truth and now carries a comprehensive snapshot (400+ entries) taken
 from a real, fully-wildcarded allow list — command roots for the standard dev toolbox
 (git, gh, node/npm/npx, uv, ripgrep/fd/jq/yq, ffmpeg/imagemagick/poppler/ghostscript/
 pandoc/tesseract, duckdb, sqlite-utils, and more), a broad set of PowerShell cmdlets

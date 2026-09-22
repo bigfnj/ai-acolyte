@@ -407,7 +407,7 @@ which `wildcard-perms --version` prints. `test/installers.test.js:567` asserts t
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
-node --test                         # 530 tests; `npm test` runs the same thing
+node --test                         # 575 tests; `npm test` runs the same thing
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN
 python memory/recall.py --lint      # index clean, gates not stale against source
 ```

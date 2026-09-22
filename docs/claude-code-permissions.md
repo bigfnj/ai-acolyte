@@ -425,9 +425,13 @@ that would bypass it, one debug line per entry:
 
 `scripts/auto-mode-audit.js` measures this against a real settings file. It is
 free and cannot touch your configuration: `CLAUDE_CONFIG_DIR` points at an empty
-sandbox, only a copy of the allow array is written there, and with no
-credentials the run stops at "Not logged in" AFTER the permission load, so the
-answer arrives without an API call. It reports when it did not get that far
+sandbox, only a copy of the allow array is written there, every credential-bearing
+environment variable is stripped from the child (`stripCredentials`), and the run
+then stops at "Not logged in" AFTER the permission load, so the answer arrives
+without an API call. The stripping is what makes that true. Redirecting the config
+directory alone hides the stored login and leaves the ENVIRONMENT untouched, so
+anyone with `ANTHROPIC_API_KEY` exported made a real API call from a script whose
+header promised there could not be one. It reports when it did not get that far
 rather than presenting an empty result as a clean bill.
 
 Measured on a ~300-entry list **[measured 2026-09-02, Claude Code 2.1.258]**:

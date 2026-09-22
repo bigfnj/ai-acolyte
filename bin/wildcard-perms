@@ -40,6 +40,12 @@ const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
   '       wildcard-perms --guidance derived\n' +
   '       wildcard-perms --guidance accept|decline|reset <id>\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n';
+// Overriding an EXPIRED enterprise cap is an explicit act, never a silent one:
+// the flag is how the user says they accept a cap read off a lapsed cache is no
+// longer their org's policy. Named once, because the refusal message has to be
+// able to print the exact command that gets past it.
+const CODEX_MAX_OVERRIDE = '--override-stale-policy';
+const CODEX_MAX_USAGE = `usage: wildcard-perms --codex-max on|off|status [${CODEX_MAX_OVERRIDE}]\n`;
 
 // Every verb, so an unrecognized flag can be told apart from hook mode below.
 const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
@@ -49,7 +55,7 @@ const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex
   LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
   'usage: wildcard-perms --seed\n' +
   'usage: wildcard-perms --max on|off|status\n' +
-  'usage: wildcard-perms --codex-max on|off|status\n' +
+  CODEX_MAX_USAGE +
   'usage: wildcard-perms --bypass on|off|status\n' +
   'usage: wildcard-perms --help | --version\n';
 
@@ -819,11 +825,16 @@ function codexMax(args) {
   const { writeFileAtomicSync } = require('../src/permissions');
   const {
     CODEX_CONFIG, applyCodexMax, isCodexMaxOn, readApproval, sandboxMode,
-    readEnterpriseBundle, targetApproval,
+    readEnterpriseBundle, targetApproval, bundleFreshness,
   } = require('../src/codex-max');
   const cmd = (args[args.indexOf('--codex-max') + 1] || 'status').toLowerCase();
+  const overrideStale = args.includes(CODEX_MAX_OVERRIDE);
   const text = fs.existsSync(CODEX_CONFIG) ? fs.readFileSync(CODEX_CONFIG, 'utf8') : null;
-  const target = targetApproval(readEnterpriseBundle());
+  // One read of the bundle for the whole verb, so the ON/OFF line and the cap
+  // note underneath it cannot be computed from two different reads of the file.
+  const bundle = readEnterpriseBundle();
+  const target = targetApproval(bundle);
+  const freshness = bundleFreshness(bundle);
 
   if (cmd === 'status') {
     if (text === null) {
@@ -831,7 +842,7 @@ function codexMax(args) {
       return;
     }
     process.stdout.write(
-      `wildcard-perms Codex MAX: ${isCodexMaxOn(text) ? 'ON' : 'OFF'} ` +
+      `wildcard-perms Codex MAX: ${isCodexMaxOn(text, bundle) ? 'ON' : 'OFF'} ` +
       `(approval_policy=${readApproval(text) ?? 'unset'}, sandbox_mode=${sandboxMode(text) ?? 'unset'})\n`
     );
     if (target.restricted) {
@@ -839,16 +850,26 @@ function codexMax(args) {
         `  enterprise policy allows only [${(target.allowed || []).join(', ')}] — ` +
         `'never' is not permitted, so the best available is ${target.value ?? 'nothing'}.\n`
       );
+      // A cap read off a lapsed cache is reported as lapsed. Stating only "the
+      // org forbids it" about an eighteen-day-expired one-hour TTL is how this
+      // feature sat unreachable for eighteen days with status looking correct.
+      if (freshness.expired) {
+        process.stdout.write(
+          `  STALE: that cap comes from a cache dated ${freshness.cachedAt ?? 'an unrecorded time'}, ` +
+          `which expired ${freshness.expiresAt}, so it may no longer be your org's policy.\n` +
+          `  To set 'never' anyway: wildcard-perms --codex-max on ${CODEX_MAX_OVERRIDE}\n`
+        );
+      }
     }
     return;
   }
 
   if (cmd !== 'on' && cmd !== 'off') {
-    process.stderr.write('usage: wildcard-perms --codex-max on|off|status\n');
+    process.stderr.write(CODEX_MAX_USAGE);
     process.exit(1);
   }
 
-  const res = applyCodexMax(text ?? '', cmd === 'on');
+  const res = applyCodexMax(text ?? '', cmd === 'on', { overrideStale });
   // Same reasoning as --max: the snapshot is the only record of the user's prior
   // approval_policy, so without it, turning Codex MAX off would delete the key
   // rather than restore the value. Refuse and say so.
@@ -868,6 +889,22 @@ function codexMax(args) {
     );
     process.exit(1);
   }
+  // Distinct from the refusal above, and deliberately not merged into it. The
+  // cap is the same cap; what differs is that the cache asserting it has
+  // expired, so the answer is "ask, then override" rather than "unavailable".
+  // Silently overriding instead would be the opposite defect: a machine offline
+  // past the TTL dropping a control that is genuinely in force.
+  if (res.blockedBy === 'enterprise-policy-stale') {
+    process.stderr.write(
+      "wildcard-perms --codex-max: the policy forbidding 'never' (allowed: " +
+      `${(res.allowed || []).join(', ') || 'none'}) was read from a CACHE dated ` +
+      `${res.cachedAt ?? 'an unrecorded time'}, which expired ${res.expiresAt}.\n` +
+      '  It is still honoured rather than ignored, because a machine offline past the TTL\n' +
+      '  would otherwise drop a control that is genuinely in force. config.toml is unchanged.\n' +
+      `  If that cap no longer applies: wildcard-perms --codex-max on ${CODEX_MAX_OVERRIDE}\n`
+    );
+    process.exit(1);
+  }
   if (!res.changed) {
     process.stdout.write(`wildcard-perms Codex MAX: already ${cmd.toUpperCase()}\n`);
     return;
@@ -877,10 +914,16 @@ function codexMax(args) {
     fs.mkdirSync(path.dirname(CODEX_CONFIG), { recursive: true });
     writeFileAtomicSync(CODEX_CONFIG, res.text);
     const sandbox = sandboxMode(res.text) ?? 'unset';
+    // Three states, not two. Saying "enterprise policy forbids 'never'" on the
+    // line that just WROTE 'never' over an expired cap reads as a contradiction.
+    const capNote = !res.restricted ? ''
+      : res.stale
+        ? ` (over an expired cap cached ${res.cachedAt ?? 'at an unrecorded time'})`
+        : " (enterprise policy forbids 'never')";
     process.stdout.write(
       `wildcard-perms Codex MAX: ${cmd.toUpperCase()} — ` +
       `${cmd === 'on'
-        ? `approval_policy=${res.target}${res.restricted ? " (enterprise policy forbids 'never')" : ''} (sandbox_mode=${sandbox}, untouched)`
+        ? `approval_policy=${res.target}${capNote} (sandbox_mode=${sandbox}, untouched)`
         : `approval_policy=${res.restoredTo ?? 'unset (key removed)'}`}. ` +
       'Restart Codex to apply.\n'
     );

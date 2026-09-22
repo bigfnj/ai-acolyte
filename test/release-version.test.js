@@ -243,7 +243,7 @@ const psStatements = (body) => body
 
 test('verify-release.ps1 captures STDERR from --gates refresh, or it cannot see it fail', () => {
   // `--gates refresh` reports its one interesting failure -- recall.py's compile step failing,
-  // so a stale block is installed on every invocation -- on STDERR (bin/wildcard-perms:635).
+  // so a stale block is installed on every invocation -- on STDERR (bin/wildcard-perms:641).
   // The assertion beside it says "refresh is silent when nothing changed". Capture stdout
   // only and that sentence is TRUE in precisely the state it exists to report: the warning
   // goes to the console, the captured text is empty, and the board prints PASS.

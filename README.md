@@ -94,7 +94,10 @@ is reversible.
 The card is also honest about what it cannot do. In the screenshot Codex MAX is
 *unavailable*, because the organisation's policy allows only `on-request` and
 `untrusted`. Rather than silently settling for a weaker setting and reporting
-success, it refuses and tells you why.
+success, it refuses and tells you why. That policy is read from a cache with a
+stated lifetime, so when the cache has expired the card says so, names the date
+it was written, and asks before overriding it instead of staying greyed out
+against a restriction that may be months out of date.
 
 ## 4. Project-local approvals
 
@@ -326,7 +329,11 @@ alone, because Codex has no deny list and the sandbox is its only floor. That fi
 by line and never re-serialised, so literal-string Windows paths and nested `[plugins."x@y"]`
 tables survive, and a bare key lands in the top-level table, not at end-of-file inside the last
 `[table]`. Where a managed bundle caps `allowed_approval_policies` without `never`, the toggle
-reports unavailable and changes nothing.
+reports unavailable and changes nothing. That bundle is a cache carrying its own `expires_at`,
+and an expired one keeps capping — a machine offline past the TTL must not drop a control that
+is still in force — but stops being reported as current: the switch becomes available behind a
+confirmation naming the cache date, or `--override-stale-policy` from the CLI. A bundle that
+never stated an expiry is treated as current, because silence is not expiry.
 
 ### The policy guard and the backups
 

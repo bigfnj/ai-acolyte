@@ -793,3 +793,87 @@ test('--max reports contention as transient, not as a refusal', (t) => {
     'the constant has to be required inside the catch; this file loads no src module at module scope');
   assert.doesNotMatch(r.stderr, /refused —/, 'and not as a refusal the user might act on');
 });
+
+// ── --codex-max against an expired policy cache ──────────────────────────────
+//
+// The cap Codex MAX obeys is read from ~/.codex/cloud-config-bundle-cache.json,
+// which states its own lifetime. On the owner's box that lifetime was one hour
+// and had been over for eighteen days, so the CLI refused a policy that was not
+// in force and said nothing about why its evidence was old. Overriding is now
+// possible, but only explicitly: a silent override would be the same defect
+// pointing the other way, since a machine offline past the TTL would drop a
+// control that is genuinely in force.
+
+const CAP_TOML = 'allowed_approval_policies = ["on-request", "untrusted"]';
+const CODEX_CACHED_AT = '2026-09-03T16:20:47Z';
+
+// A temp HOME carrying both files the verb reads. os.homedir() in the child
+// follows HOME/USERPROFILE, which runArgs already sets.
+function codexHome(t, expiresAt) {
+  const home = tempHome(t, { permissions: { allow: [] } });
+  fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.codex', 'config.toml'),
+    'model = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n');
+  fs.writeFileSync(path.join(home, '.codex', 'cloud-config-bundle-cache.json'), JSON.stringify({
+    signed_payload: {
+      cached_at: CODEX_CACHED_AT,
+      expires_at: expiresAt,
+      bundle: { requirements_toml: { enterprise_managed: [{ contents: CAP_TOML }] } },
+    },
+  }));
+  return home;
+}
+const codexConfigOf = (home) => fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+// Comfortably past any wall clock this suite will run under, and comfortably short
+// of a date a Date.parse implementation might refuse.
+const STILL_LIVE = '2099-01-01T00:00:00Z';
+
+test('--codex-max on over an expired cap refuses, names the date, and says how to override', (t) => {
+  const home = codexHome(t, '2026-09-03T17:20:47Z');
+
+  const run = runArgs(home, ['--codex-max', 'on']);
+
+  assert.equal(run.status, 1, 'a refusal is still non-zero');
+  assert.match(run.stderr, /CACHE dated 2026-09-03T16:20:47Z/,
+    'the user cannot judge a cap without being told how old the evidence is');
+  assert.match(run.stderr, /expired 2026-09-03T17:20:47Z/);
+  assert.match(run.stderr, /--override-stale-policy/,
+    'a refusal with no way past it is the state this feature was already stuck in');
+  assert.equal(codexConfigOf(home), 'model = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n',
+    'and it writes nothing: asking is not overriding');
+});
+
+test('--codex-max on --override-stale-policy writes never, and only past the expiry', (t) => {
+  const stale = codexHome(t, '2026-09-03T17:20:47Z');
+
+  const run = runArgs(stale, ['--codex-max', 'on', '--override-stale-policy']);
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(codexConfigOf(stale), /^approval_policy = "never"$/m,
+    'the override writes the value the user asked for');
+  assert.match(run.stdout, /over an expired cap cached 2026-09-03T16:20:47Z/,
+    "and must not claim the org 'forbids never' on the line that just wrote it");
+  assert.match(codexConfigOf(stale), /^sandbox_mode = "workspace-write"$/m, 'the floor is untouched');
+
+  // The flag is scoped to staleness. Against a cache still inside its TTL it
+  // changes nothing, or an informed override becomes a policy bypass.
+  const live = codexHome(t, STILL_LIVE);
+  const forced = runArgs(live, ['--codex-max', 'on', '--override-stale-policy']);
+  assert.equal(forced.status, 1);
+  assert.match(forced.stderr, /enterprise policy permits no approval policy this can set/);
+  assert.doesNotMatch(codexConfigOf(live), /approval_policy/, 'a live cap is still a live cap');
+});
+
+test('--codex-max status reports an expired cap as expired', (t) => {
+  const stale = runArgs(codexHome(t, '2026-09-03T17:20:47Z'), ['--codex-max', 'status']);
+  assert.equal(stale.status, 0, stale.stderr);
+  assert.match(stale.stdout, /STALE: that cap comes from a cache dated 2026-09-03T16:20:47Z/);
+  assert.match(stale.stdout, /--override-stale-policy/);
+
+  // …and a live one exactly as before, with no staleness note at all.
+  const live = runArgs(codexHome(t, STILL_LIVE), ['--codex-max', 'status']);
+  assert.equal(live.status, 0, live.stderr);
+  assert.match(live.stdout, /enterprise policy allows only \[on-request, untrusted\]/);
+  assert.doesNotMatch(live.stdout, /STALE/,
+    'a current cap reported as stale would invite an override nobody should make');
+});

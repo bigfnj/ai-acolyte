@@ -21,7 +21,7 @@ const {
 } = require('./src/policy-lock');
 const {
   CODEX_CONFIG, CODEX_BUNDLE_CACHE, applyCodexMax, isCodexMaxOn, readApproval, sandboxMode,
-  readEnterpriseBundle, targetApproval, enterpriseDecisionFor,
+  readEnterpriseBundle, targetApproval, enterpriseDecisionFor, bundleFreshness,
 } = require('./src/codex-max');
 const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
@@ -2224,7 +2224,7 @@ function updateStatusBar() {
 
 // Codex MAX writes Codex's own config.toml, so it takes no policy lock — it
 // shares no file with Auto Learn or the wildcarding pass.
-function toggleCodexMax() {
+async function toggleCodexMax() {
   const text = codexConfigText();
   if (text === null) {
     vscode.window.showWarningMessage(
@@ -2236,6 +2236,29 @@ function toggleCodexMax() {
   let res;
   try {
     res = applyCodexMax(text, turningOn);
+    // The cap was read off a cache that has expired, so it is not evidence about
+    // today's policy — but neither is its absence, which is why nothing has been
+    // written yet. Ask, naming the date, and only then re-run with the override.
+    // A modal, because this is the one place the user takes on a policy decision
+    // the cache can no longer answer, and a toast is dismissible by not looking.
+    if (res.blockedBy === 'enterprise-policy-stale') {
+      const allowed = (res.allowed || []).join(', ') || 'none';
+      const go = 'Set approval_policy="never" anyway';
+      const answer = await vscode.window.showWarningMessage(
+        'Codex MAX: the policy capping approval has expired', {
+          modal: true,
+          detail:
+            `The restriction allowing only [${allowed}] comes from Codex's cached policy bundle, ` +
+            `written ${res.cachedAt || 'at an unrecorded time'} and expired ${res.expiresAt}. ` +
+            'It may no longer be your organization\'s policy — or it may still be, and this machine ' +
+            'simply has not refreshed it.\n\n' +
+            'Overriding writes approval_policy="never" to ~/.codex/config.toml, so Codex stops asking. ' +
+            'Your sandbox_mode is untouched and still blocks network and out-of-workspace writes.',
+        }, go
+      );
+      if (answer !== go) return;
+      res = applyCodexMax(text, true, { overrideStale: true });
+    }
     if (res.blockedBy === 'enterprise-policy') {
       const allowed = (res.allowed || []).join(', ') || 'none';
       vscode.window.showWarningMessage(
@@ -2252,7 +2275,7 @@ function toggleCodexMax() {
     // snapshot that alone can restore the previous Codex settings did not land
     // — and falling through to the silent `!res.changed` return told the user
     // nothing at all: Codex MAX stays off while they believe it went on. The
-    // CLI already reports this (bin/wildcard-perms:955 for the Claude half);
+    // CLI already reports this (bin/wildcard-perms:998 for the Claude half);
     // both extension toggles ignored it.
     if (res.error === 'codex-max-snapshot-failed') {
       vscode.window.showErrorMessage(
@@ -2275,9 +2298,12 @@ function toggleCodexMax() {
   if (turningOn) {
     vscode.window.showWarningMessage(
       `⚡ Codex MAX ON — approval_policy=${res.target}. ` +
-      (res.restricted
-        ? "Your organization's Codex policy forbids 'never', so this is the least-friction policy it allows. "
-        : 'Codex stops asking. ') +
+      // Three states. The middle one is new: the cap is still on record, the
+      // cache asserting it is not, and the user said to proceed anyway.
+      (!res.restricted ? 'Codex stops asking. '
+        : res.stale
+          ? `Codex stops asking — set over an expired policy cache dated ${res.cachedAt || 'an unrecorded date'}. `
+          : "Your organization's Codex policy forbids 'never', so this is the least-friction policy it allows. ") +
       `The ${sandbox} sandbox is untouched and still blocks out-of-workspace writes and network. ` +
       'Restart Codex to apply.'
     );
@@ -2505,7 +2531,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:287-296 — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:293-302 — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -2557,7 +2583,7 @@ function runWildcarding(manual = false) {
   // Until now this function satisfied that precondition only BY ACCIDENT, because
   // its read happened to sit inside the lock. Handing writeAllow the probe's
   // snapshot instead would reintroduce the failure spelled out at
-  // bin/wildcard-perms:354-368: with MAX on, Claude Code persists
+  // bin/wildcard-perms:360-374: with MAX on, Claude Code persists
   // `Bash(npm test)`; the unlocked pass marks it removed because `Bash(*)` covers
   // it; `--max off` then deliberately preserves it; replaying `removed` deletes it
   // for good.
@@ -3408,7 +3434,13 @@ class WildcardingViewProvider {
       max: { on: isMaxOn(settings), layers: maxLayers(settings) },
       codexMax: (() => {
         const state = frictionState();
-        const target = targetApproval(readEnterpriseBundle());
+        const bundle = readEnterpriseBundle();
+        const target = targetApproval(bundle);
+        // `stale` travels with `restricted` because the card has to be able to
+        // say WHEN the cap was cached. A restriction read off an expired cache
+        // is still shown, but as a cache and a date rather than as today's
+        // policy, and the button stays clickable behind a confirmation.
+        const freshness = bundleFreshness(bundle);
         return {
           on: state.codex === 'max',
           absent: state.codex === 'absent',
@@ -3416,6 +3448,8 @@ class WildcardingViewProvider {
           sandbox: state.codexSandbox,
           restricted: target.restricted,
           allowed: target.allowed,
+          stale: freshness.expired,
+          cachedAt: freshness.cachedAt,
         };
       })(),
       autoLearn,
@@ -3772,6 +3806,9 @@ class WildcardingViewProvider {
     if (cOn && xOn) setState('stMax', 'both ON', 'hot');
     else if (cOn) setState('stMax', 'Claude ON', 'hot');
     else if (xOn) setState('stMax', 'Codex ON', 'hot');
+    // A cap off an expired cache is reported as expired here too. "Codex capped"
+    // states a live org restriction, and this row is the summary most people read.
+    else if (d.codexMax && d.codexMax.restricted && d.codexMax.stale) setState('stMax', 'off · Codex cap expired', 'warn');
     else if (d.codexMax && d.codexMax.restricted) setState('stMax', 'off · Codex capped');
     else setState('stMax', 'both off');
 
@@ -3845,21 +3882,34 @@ class WildcardingViewProvider {
     // forbids it, Codex MAX has no on-state to reach, so it is unavailable rather
     // than off — and the button is disabled, because clicking it can only write
     // the org default (which the card would otherwise misread as "MAX on").
-    const restricted = !on && !absent && !!(c && c.restricted);
+    const capped = !on && !absent && !!(c && c.restricted);
+    // …unless the cap was read off an EXPIRED cache, which is not evidence about
+    // today's policy. Then the switch is available behind a confirmation naming
+    // the cache's date, and this card must not claim the cap is current: on this
+    // box an eighteen-day-dead one-hour TTL kept the button greyed out while
+    // Codex itself had been accepting "never" for a week.
+    const stale = capped && !!c.stale;
+    const restricted = capped && !stale;
+    const cached = (c && c.cachedAt) || 'an unrecorded date';
     $('cxdot').className = 'dot' + (on ? ' on' : restricted ? ' blocked' : ' idle');
     $('cxtext').textContent = absent
       ? 'Codex MAX: no config.toml'
       : on ? 'Codex MAX: ON — all Codex prompts skipped'
       : restricted ? 'Codex MAX: unavailable — org policy caps approval'
+      : stale ? 'Codex MAX: OFF — capped by an EXPIRED policy cache'
       : 'Codex MAX: OFF';
     // Always name the remaining floor: this switch never touches the sandbox.
     const allowed = (c && c.allowed && c.allowed.length) ? c.allowed.join(', ') : 'the org-permitted set';
     $('cxsub').textContent = absent
       ? 'Codex · no ~/.codex/config.toml found'
       : on
-        ? 'Codex · approval_policy=' + (c.approval || '?') + (c.restricted ? ' (org policy caps this)' : '') + ' · ' + (c.sandbox || 'sandbox') + ' sandbox still blocks network + out-of-workspace writes'
+        ? 'Codex · approval_policy=' + (c.approval || '?') + (c.restricted && !c.stale ? ' (org policy caps this)' : '') + ' · ' + (c.sandbox || 'sandbox') + ' sandbox still blocks network + out-of-workspace writes'
       : restricted
         ? "Codex · org allows only [" + allowed + "], so 'never' (skip all prompts) can't be set. Current approval_policy=" + (c.approval || 'default') + '.'
+      : stale
+        ? 'Codex · the cap allowing only [' + allowed + '] comes from a cache dated ' + cached
+          + ', which has expired and may no longer apply. Turning MAX on asks first, then sets '
+          + "approval_policy='never'. Current approval_policy=" + (c.approval || 'default') + '.'
         : 'Codex · approval_policy=' + (c.approval || 'default') + ' — sandbox stays as the floor';
     $('codexMaxBtn').textContent = on ? '⚡ Turn Codex MAX OFF' : '⚡ Turn Codex MAX ON';
     $('codexMaxBtn').className = 'bypass' + (on ? ' on' : '');

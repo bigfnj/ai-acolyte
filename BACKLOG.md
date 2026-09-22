@@ -93,85 +93,6 @@ the same failure modes on record:
   loopback port "obviously" refuses instantly. It takes **2,063 ms**. Measure what a guard guards
   before deleting it. See `docs/engineering-record.md` for the local equivalents.
 
-### Codex MAX is disabled by a policy cache that is expired AND signed for another account
-
-Reported by the owner 2026-09-21: Codex is not currently restricted from `never`, but the
-extension has gone on reporting that it is, across many sessions and a fresh Codex sign-in.
-Confirmed the same day, and the cause is two missing checks rather than a parse bug.
-
-`src/codex-max.js:153` reads `~/.codex/cloud-config-bundle-cache.json` and pulls
-`signed_payload.bundle.requirements_toml` out of it. It never looks at the three fields sitting
-one level up in the same object: `cached_at`, `expires_at`, `account_id`. Grep for any of those
-names across `src/`, `bin/` and `vscode-extension/` returns **nothing** (2026-09-21). The cache
-is treated as permanent truth about the current account.
-
-On this machine, measured 2026-09-21:
-
-- The cache carries `cached_at 2026-09-03T16:20:47Z` / `expires_at 2026-09-03T17:20:47Z`. That is
-  a **one-hour TTL, 18 days past**, and Codex has not rewritten the file since, not on any session
-  and not on a new sign-in (`auth.json.last_refresh` = `2026-09-21T05:14:59Z`).
-- The cached payload's `account_id` is **not** the signed-in account (`auth.json` →
-  `tokens.account_id`, which matches the `accountId` in Codex's live global state). The bundle
-  belongs to a previous login, so those requirements were never this account's.
-- It asserts `allowed_approval_policies = ["on-request", "untrusted"]`, i.e. `never` absent. Codex
-  itself disagrees: `~/.codex/.codex-global-state.json` →
-  `electron-persisted-atom-state.heartbeat-thread-permissions-by-id` shows
-  `approvalPolicy: "never"` with `sandboxPolicy: { type: "dangerFullAccess" }` on the threads
-  dated 2026-09-14 14:20, 2026-09-14 15:01 and 2026-09-16 15:46, against `on-request` on the
-  2026-09-11 and 2026-09-12 threads. Codex started accepting `never` after the cache went stale.
-
-The live verdict, taken by requiring the real module against the real files rather than read off
-the source:
-
-```
-allowedApprovalPolicies: ["on-request","untrusted"]
-targetApproval:          {"value":"on-request","restricted":true,"allowed":[...]}
-readApproval(config.toml): null
-applyCodexMax(on):       {"changed":false,"blockedBy":"enterprise-policy","restricted":true}
-```
-
-So `vscode-extension/extension.js:3866` disables the Codex MAX button, `:3775` renders
-`off · Codex capped`, `:3853` says "unavailable — org policy caps approval", and
-`bin/wildcard-perms:837` refuses the same way from the CLI — all enforcing a restriction that is
-not in force. `~/.codex/config.toml` still has no `approval_policy` line at all, so the feature
-has been unreachable on this box for 18 days while the toggle looked like it was working.
-
-**Not a watcher bug; do not "fix" it there.** `readEnterpriseBundle()` re-reads from disk on
-every call and nothing is memoised, and the bundle watcher at `extension.js:1889` is correctly
-wired for change/create/delete — its comment even names this exact failure. The staleness is in
-the FILE: no write means no event, and forcing a re-render recomputes the same wrong answer. That
-is the whole reason it survives session restarts.
-
-**Why this is not a one-line change.** `src/codex-max.js:167-169` fails closed on purpose: "treating
-an unreadable restriction as 'no restriction' is how a policy control silently stops
-controlling". Expiry pulls the other way, and both failure modes are real — an expired cache that
-keeps capping is the bug above, while an expired cache read as unrestricted lets a machine that
-has been offline past the TTL drop a live org control. A reading that serves both: keep the cap,
-stop presenting it as certain. An expired bundle should leave the toggle **enabled** behind a
-confirmation that names the cache date, not a disabled button and a flat refusal. The
-foreign-account case is weaker still and probably should not cap at all: a bundle signed for a
-different `account_id` is not evidence about this one.
-
-**What a fix must not break.** Every bundle in `test/codex-max.test.js` is built by `bundleWith`
-(`:16`), which emits only `signed_payload.bundle.requirements_toml` — no `cached_at`, no
-`expires_at`, no `account_id`. So "absent expiry means expired" inverts the entire suite, and
-"absent expiry means trust forever" is what a truncated cache already gets. Whichever rule lands
-needs its own cases, and the mutation to run is: put `expires_at` in the past on `RESTRICTED` and
-confirm exactly one new assertion fires, naming that file.
-
-**Unverified, and it comes first.** Whether Codex still writes this path at all. Eighteen days of
-no rewrite across a re-login is equally consistent with a renamed or relocated cache in a newer
-Codex build, in which case the file the extension reads is a fossil and no expiry logic is worth
-writing until the path is re-confirmed. Nothing else under `~/.codex` mentions
-`allowed_approval_policies` except the two `codex.exe` copies, `logs_2.sqlite` and session
-rollouts (checked 2026-09-21).
-
-Unblocking this box in the meantime needs no code: with the file absent, `readEnterpriseBundle`
-returns null, `targetApproval` goes back to `{ value: "never", restricted: false }` and the
-toggle is available — that is `src/codex-max.js:153-157` plus the "with no bundle, nothing is
-capped" test at `test/codex-max.test.js:191`. Move the cache aside rather than deleting it, since
-it is the only local copy of what that policy said.
-
 ### Test harnesses can silently assert against a frozen home
 
 `src/*` modules capture `os` at require time and their exported helpers default
@@ -254,7 +175,7 @@ at `vscode-extension/extension.js:908` takes the FIRST workspace folder, and
 `return path.join(workspaceRoot, LOCAL_RELATIVE);` at `src/local-settings.js:44` is a
 single join with no recursion.
 
-The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:331`
+The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:337`
 takes the Claude Code session's own directory, and `:332-333` tests
 `<cwd>/.claude/settings.local.json` on every tool call.
 
@@ -350,7 +271,7 @@ what was deliberately left.
 ### Small, confirmed, no urgency
 
 - Dead: `mineWildcard` (`src/permissions.js:190`),
-  `readConfig` (`src/codex-max.js:112`), `readAllow` (`vscode-extension/extension.js:120`),
+  `readConfig` (`src/codex-max.js:120`), `readAllow` (`vscode-extension/extension.js:120`),
   the exported alias `DEFAULT_POLICY_LOCK_STALE_MS`, and the option keys
   `claudeHistoryPath` / `codexHistoryPath` / `validateCodexRules` (one occurrence
   repo-wide each).
@@ -401,7 +322,7 @@ MAX_STATE_FILE       src/permissions.js:601
 APPROVE_SCRIPT       src/permissions.js:607
 BYPASS_STATE_FILE    src/permissions.js:522
 POLICY_LOCK_PATH     src/policy-lock.js:19
-CODEX_CONFIG         src/codex-max.js:35
+CODEX_CONFIG         src/codex-max.js:43
 ```
 
 **No assertion is vacuous today** — only `policy-backup.test.js` touches any of
@@ -471,15 +392,15 @@ VSIX gap.
 Re-verified 2026-09-14 against the tree. Four of the original seven are gone: the
 zero-byte `policy-lock` orphan is FIXED (`honourFor` in `src/policy-lock.js`), `run()` now
 reads `if (!settings || typeof settings !== 'object') return finish(input, false);` at
-`bin/wildcard-perms:282` so the missing `return` is CLOSED, and the junction-breadth and
+`bin/wildcard-perms:288` so the missing `return` is CLOSED, and the junction-breadth and
 `/cygdrive` items were argued out rather than fixed (text proposed for
 `docs/engineering-record.md`). What is left needs files this pass was not allowed to touch.
 
-- **The hook accumulates stdin without a bound.** `input += chunk` at `bin/wildcard-perms:96`
+- **The hook accumulates stdin without a bound.** `input += chunk` at `bin/wildcard-perms:102`
   has no cap, and a PostToolUse payload carries tool output.
   A cap with a graceful "no cwd, no drain" fallback costs nothing.
 - **`wildcardUnderLock` ignores `writeAllow`'s `addedAllow`.** `const added   =
-  after.filter(...)` / `const removed = before.filter(...)` at `bin/wildcard-perms:382-383`
+  after.filter(...)` / `const removed = before.filter(...)` at `bin/wildcard-perms:388-389`
   compute the diff from this function's own pre-write snapshot, while the write it just
   made returns the real counts. That is the exact anti-pattern `src/settings-write.js:212-214`
   documents ("A caller that reports its own intent instead ends up announcing … '+299
@@ -806,14 +727,14 @@ the failure the differential-test gate describes. The corrected pattern is
 `^(?:[-*]\s+)?\*\*`, and it flagged both headings immediately.
 
 **Project `settings.local.json` is promoted to user scope with no trust gate on the CLI path.**
-`bin/wildcard-perms:348-351` takes `cwd` from the hook's stdin JSON, `:332-333` tests that project
+`bin/wildcard-perms:354-357` takes `cwd` from the hook's stdin JSON, `:332-333` tests that project
 for `.claude/settings.local.json`, and `:340` calls `drainUnderLock(cwd)`, which promotes that
 project's local allow entries into USER-scope allow on the next tool call and announces it with one
 stderr line at `:399-402`, on a path that is quiet by design. The gate is `PROMOTABLE` at
 `src/local-settings.js:56`, which tests PORTABILITY, never provenance: a repo that commits
 `.claude/settings.local.json` containing `Bash(curl *)`, `Bash(python *)` or `Bash(node *)` clears
 it and lands in the user's global allow list. The extension refuses exactly this for an untrusted
-workspace (`vscode-extension/extension.js:2631-2634`, "an untrusted window reads but never
+workspace (`vscode-extension/extension.js:2657-2660`, "an untrusted window reads but never
 writes", plus `:909` and `:2669`); the CLI has no equivalent, and VS Code trust has no CLI
 analogue. May be inherent to a CLI, but it deserves a decision rather than an accident. This is the
 highest-consequence item in this section.

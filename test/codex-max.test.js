@@ -9,7 +9,7 @@ const {
   readApproval, setApproval, clearApproval, isCodexMaxOn, applyCodexMax,
   sandboxMode, topLevelBound, APPROVAL_VALUES,
   allowedApprovalPolicies, allowedSandboxModes, targetApproval,
-  enterprisePrefixRules, enterpriseDecisionFor,
+  enterprisePrefixRules, enterpriseDecisionFor, bundleFreshness,
 } = require('../src/codex-max');
 
 // A real enterprise requirements bundle, in the shape Codex caches it.
@@ -20,6 +20,24 @@ const RESTRICTED = bundleWith([
   'allowed_sandbox_modes = ["read-only", "workspace-write"]',
   'allowed_approval_policies = ["on-request", "untrusted"]',
 ].join('\n'));
+
+// The TTL fields sit one level UP from the requirements the parser reads, which
+// is how they went unread: a grep for any of cached_at / expires_at /
+// account_id across src/, bin/ and vscode-extension/ returned nothing on
+// 2026-09-21. Every fixture above omits them, and that is deliberate — the rule
+// under test has to leave those cases alone.
+const withTtl = (bundle, cachedAt, expiresAt) => ({
+  signed_payload: { ...bundle.signed_payload, cached_at: cachedAt, expires_at: expiresAt },
+});
+// The owner's real cache, measured 2026-09-21: a ONE-HOUR TTL, read weeks later.
+const CACHED_AT = '2026-09-03T16:20:47Z';
+const EXPIRES_AT = '2026-09-03T17:20:47Z';
+const NOW_ISO = '2026-09-22T12:00:00Z';
+const NOW = Date.parse(NOW_ISO);
+const STALE_CAP = withTtl(RESTRICTED, CACHED_AT, EXPIRES_AT);
+const LIVE_CAP = withTtl(RESTRICTED, NOW_ISO, '2026-09-22T13:00:00Z');
+// The injected clock applyCodexMax already carries, reused for expiry.
+const clock = () => NOW_ISO;
 
 // A config shaped like a real one: literal-string Windows paths, an inline
 // array, and several nested tables after the top-level keys.
@@ -192,6 +210,101 @@ test('with no bundle, nothing is capped and "never" is still the target', () => 
   assert.equal(allowedApprovalPolicies(null), null, 'absent key = unrestricted');
   assert.equal(targetApproval(null).value, 'never');
   assert.equal(targetApproval(null).restricted, false);
+});
+
+// ── an expired policy cache ───────────────────────────────────────────────────
+// The cap on this box was read from a cache with a one-hour TTL that lapsed on
+// 2026-09-03, and Codex itself had been accepting "never" since 2026-09-14. The
+// toggle stayed disabled for eighteen days while looking like it worked.
+
+test('bundleFreshness reads the TTL beside the payload, and absence is not expiry', () => {
+  const stale = bundleFreshness(STALE_CAP, NOW);
+  assert.equal(stale.cachedAt, CACHED_AT, 'the date the card has to name');
+  assert.equal(stale.expiresAt, EXPIRES_AT);
+  assert.equal(stale.expired, true, 'a one-hour TTL read nineteen days later is expired');
+
+  // The comparison is strict and forward. Both sides of the boundary, because a
+  // flipped or widened operator is the cheapest way to get this wrong.
+  assert.equal(bundleFreshness(STALE_CAP, Date.parse(EXPIRES_AT)).expired, false,
+    'exactly at the deadline is not yet past it');
+  assert.equal(bundleFreshness(LIVE_CAP, NOW).expired, false,
+    'an hour still to run is current policy, not a lapsed cache');
+
+  // Absence is the case EVERY other fixture in this file is in. "No expiry means
+  // expired" would invert the whole suite, and a truncated cache would then read
+  // as no restriction at all — the failure allowedApprovalPolicies fails closed
+  // against, arriving through the other door.
+  assert.deepEqual(bundleFreshness(RESTRICTED, NOW), { cachedAt: null, expiresAt: null, expired: false });
+  assert.equal(bundleFreshness(null, NOW).expired, false, 'no bundle, nothing to expire');
+  assert.equal(bundleFreshness(withTtl(RESTRICTED, CACHED_AT, 'whenever'), NOW).expired, false,
+    'an unparseable expiry fails closed and leaves the cap exactly where it was');
+  assert.equal(bundleFreshness(STALE_CAP, 'not-a-time').expired, false,
+    'and so does an unreadable clock');
+});
+
+test('an expired cap still blocks, but as a question rather than a flat refusal', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-max-stale-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const statePath = path.join(dir, 'state.json');
+
+  const res = applyCodexMax(REAL_SHAPE, true, { statePath, bundle: STALE_CAP, now: clock });
+  // A DISTINCT code. A caller that saw 'enterprise-policy' here would disable
+  // the switch and never ask, which is the bug this replaces.
+  assert.equal(res.blockedBy, 'enterprise-policy-stale');
+  assert.equal(res.changed, false, 'an expired bundle does not silently become "no restriction"');
+  assert.equal(res.text, REAL_SHAPE, 'nothing is written before the user is asked');
+  assert.equal(res.stale, true);
+  assert.equal(res.cachedAt, CACHED_AT, 'the caller must be able to name the date without re-reading');
+  assert.equal(res.expiresAt, EXPIRES_AT);
+  assert.equal(fs.existsSync(statePath), false, 'and no snapshot is taken for a write that did not happen');
+});
+
+test('a cache still inside its TTL is refused exactly as before', () => {
+  const res = applyCodexMax(REAL_SHAPE, true, { bundle: LIVE_CAP, now: clock });
+  assert.equal(res.blockedBy, 'enterprise-policy');
+  assert.equal(res.stale, false);
+  // And the override is scoped to STALENESS, not a general escape hatch: a live
+  // cap does not take it. Getting this wrong turns an informed override into a
+  // way to ignore org policy outright.
+  const forced = applyCodexMax(REAL_SHAPE, true, { bundle: LIVE_CAP, overrideStale: true, now: clock });
+  assert.equal(forced.blockedBy, 'enterprise-policy', 'a current cap is current policy');
+  assert.equal(forced.changed, false);
+  assert.equal(/never/.test(forced.text), false, 'a forbidden value is still never written');
+});
+
+test('the override writes "never", and the card then reads ON', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-max-override-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const statePath = path.join(dir, 'state.json');
+
+  const on = applyCodexMax(REAL_SHAPE, true, {
+    statePath, bundle: STALE_CAP, overrideStale: true, now: clock,
+  });
+  assert.equal(on.blockedBy, undefined);
+  assert.equal(on.changed, true);
+  assert.equal(readApproval(on.text), 'never',
+    'the value the user asked for, not the least-friction one a lapsed cache happened to permit');
+  assert.equal(on.target, 'never');
+  assert.equal(on.stale, true, 'the result still says where the cap came from');
+  assert.equal(sandboxMode(on.text), 'workspace-write', 'the sandbox floor is untouched, as always');
+
+  // The half that recreates the v1.24.0 bug INVERTED if it is wrong: the
+  // override lands, the config says "never", and the card still reads OFF, so
+  // the user clicks a toggle that already fired.
+  assert.equal(isCodexMaxOn(on.text, STALE_CAP, { now: NOW_ISO }), true,
+    'an expired cap does not cap, so "never" in the file is MAX on');
+
+  // Not a blanket allowance, though. The org default under a stale cap is still
+  // not MAX: the cache ceasing to be evidence does not make on-request skip
+  // prompts, and reading it as on is the original "MAX turned itself on" report.
+  const withDefault = setApproval(REAL_SHAPE, 'on-request').text;
+  assert.equal(isCodexMaxOn(withDefault, STALE_CAP, { now: NOW_ISO }), false);
+  // And under a LIVE cap the original answer is unchanged, file contents aside.
+  assert.equal(isCodexMaxOn(on.text, LIVE_CAP, { now: NOW_ISO }), false);
+
+  // Off has to agree it was on, or the restore never runs.
+  const off = applyCodexMax(on.text, false, { statePath, bundle: STALE_CAP, now: clock });
+  assert.equal(off.text, REAL_SHAPE, 'off restores the original bytes over a stale cap too');
 });
 
 // The enterprise bundle carries prefix rules that force a prompt regardless of

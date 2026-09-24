@@ -29,9 +29,10 @@ const os = require('os');
 const path = require('path');
 
 const {
-  generalizePermission, createCoverIndex, isMaxAllowOn, writeFileAtomicSync,
+  generalizePermission, createCoverIndex, writeFileAtomicSync,
   BASH_SCRIPT_KEYWORDS,
 } = require('./permissions');
+const { legacyClaudeMaxStatus } = require('./legacy-max-cleanup');
 // The same glob matcher the policy guard uses to decide whether managed policy
 // outranks an entry. A deny rule beats a user allow entry, so a candidate it
 // matches is not worth promoting — reusing the matcher keeps "would this even
@@ -193,6 +194,9 @@ function drainLocalSettings({
   applyUserAllow,
   dryRun = false,
   backupDir = path.join(os.homedir(), '.claude', 'backups'),
+  legacyStatePath,
+  legacyScriptPath,
+  platform,
 } = {}) {
   const file = localSettingsPath(workspaceRoot);
 
@@ -208,12 +212,16 @@ function drainLocalSettings({
   if (!localAllow.length) return emptyReport(file, { exists: true });
 
   const user = (typeof readUserSettings === 'function' ? readUserSettings() : null) ?? {};
-  // MAX mode collapses user scope to `Bash(*)`/`PowerShell(*)`, which covers
-  // every local entry. Draining against that would empty the local file, and
-  // MAX-off restores only the user-scope snapshot — the project's own grants
-  // would be gone for good. Refuse while the blanket layer is on.
-  if (isMaxAllowOn(user)) {
-    return emptyReport(file, { exists: true, blocked: 'max', kept: localAllow.length });
+  // Old releases could leave both blanket grants in user scope. Draining
+  // against those would treat every project-local entry as redundant and empty
+  // the local file before the one-way migration has restored user scope.
+  const legacy = legacyClaudeMaxStatus(user, {
+    ...(legacyStatePath ? { statePath: legacyStatePath } : {}),
+    ...(legacyScriptPath ? { scriptPath: legacyScriptPath } : {}),
+    ...(platform ? { platform } : {}),
+  });
+  if (legacy.hook || legacy.generatedAllow.length) {
+    return emptyReport(file, { exists: true, blocked: 'legacy-blanket', kept: localAllow.length });
   }
 
   const userAllow = Array.isArray(user?.permissions?.allow) ? user.permissions.allow : [];

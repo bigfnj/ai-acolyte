@@ -370,20 +370,6 @@ foreach ($repoPair in ($ProbeRepos | ForEach-Object { @{ n = $_.k; p = $_.v } })
     }
 }
 
-$bundle = Join-Path $env:USERPROFILE '.codex\cloud-config-bundle-cache.json'
-if (Test-Path $bundle) {
-    $pol = [regex]::Match((Get-Content $bundle -Raw), 'allowed_approval_policies\s*=\s*\[([^\]]*)\]')
-    $when = (Get-Item $bundle).LastWriteTime
-    if ($pol.Success) {
-        Note 'Codex org policy' ("allowed = [" + $pol.Groups[1].Value + "]  (cache written $when)")
-        if ($pol.Groups[1].Value -match 'never') {
-            Note 'Codex MAX' 'org now permits "never" -- the MAX card should be enabled'
-        } else {
-            Note 'Codex MAX' 'org still caps approval; Codex has not refetched the new account policy yet'
-        }
-    }
-}
-
 # --------------------------------------------------------- freshness mechanism
 Section 'Freshness (extension corpus watcher)'
 # The SessionStart hook does NOT fire under a managed policy that sets allowManagedHooksOnly:
@@ -418,8 +404,8 @@ Note 'SessionStart hook' $hookNote
 
 # ------------------------------------------------- is the new code even loaded?
 Section 'Installed extension'
-# The dashboard changes (Memory gates card, the de-reddened guidance button, the Codex
-# bundle watcher) live in the VSIX. Reloading VS Code re-runs whatever is INSTALLED, so a
+# The dashboard changes, including the Memory gates card and the guidance button,
+# live in the VSIX. Reloading VS Code re-runs whatever is INSTALLED, so a
 # reload without a repackage shows none of it -- and looks like the feature is broken.
 $installedDirs = @(Get-ChildItem (Join-Path $env:USERPROFILE '.vscode\extensions') -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like '*permission-wildcarding*' })

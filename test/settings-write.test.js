@@ -137,11 +137,9 @@ test('the injected write hook receives what actually landed', (t) => {
 // ── writeTransform ───────────────────────────────────────────────────────────
 //
 // The other writer shape, for callers whose change cannot be expressed as an
-// allow-list delta. `applyMax` and `applyBypass` both DELETE keys
-// (permissions.defaultMode, hooks.PreToolUse) rather than nulling them, and
-// writeAllow is a merge — `{ ...latest, permissions }` — which can never express
-// a delete and can only carry permissions.allow. Routing MAX through it would
-// silently drop the approve-hook registration, i.e. half the feature.
+// allow-list delta. Bypass restoration and one-way legacy cleanup both delete
+// keys rather than nulling them, while writeAllow is a merge that cannot express
+// a delete and can only carry permissions.allow.
 
 test('the transform runs against the file as it is NOW, not the caller read', (t) => {
   const env = tempSettings(t, { model: 'A', permissions: { allow: ['Bash(git status)'] } });
@@ -203,11 +201,9 @@ test('an unreadable file is refused BEFORE the transform runs', (t) => {
     (err) => err.code === SETTINGS_UNREADABLE_CODE,
   );
 
-  // The ordering is the whole point, not an implementation detail. applyMax
-  // writes the allow-list snapshot as a side effect of being called, so a
-  // transform that ran before the refusal would overwrite a real snapshot with
-  // one taken from a file we then decline to write — turning MAX-on into
-  // permanent loss of the allow list.
+  // The ordering is the whole point, not an implementation detail. A transform
+  // may make decisions from the object it receives, so it must never run on a
+  // fabricated empty object when the real file is present but unreadable.
   assert.deepEqual(sideEffects, [], 'the transform was never invoked');
 });
 
@@ -378,12 +374,9 @@ test('a file that VANISHES mid-transform is refused, not replaced with a stump',
   // and is now gone" is not a first run. The preflight SETTINGS_UNREADABLE guard
   // runs once before the loop, so it could not see it.
   //
-  // Reproduced end to end through the real verb: `--max on` against a 432-entry
-  // file with one external delete landing inside the transform wrote a
-  // settings.json holding 7 blanket entries and a hooks key — `model`,
-  // `effortLevel`, `agentPushNotifEnabled` and all 432 entries gone — recorded an
-  // EMPTY allow snapshot, and exited 0 reporting success. `--max off` then
-  // "restored" nothing. On a CLI-only install there is no backup.
+  // Reproduced against a 432-entry file with one external delete landing inside
+  // the transform: the retry treated absence as a fresh install and replaced the
+  // deleted file with a tiny settings object, losing every unrelated field.
   const env = tempSettings(t, {
     model: 'claude-opus-5',
     effortLevel: 'high',
@@ -398,7 +391,7 @@ test('a file that VANISHES mid-transform is refused, not replaced with a stump',
       // attempt 1 this fails the compare-and-swap (bytes -> null) and retries;
       // attempt 2 is the one that used to see `{}` and write the stump.
       if (calls === 1) fs.rmSync(env.file);
-      return { changed: true, settings: { ...latest, permissions: { allow: ['Bash(*)'] } } };
+      return { changed: true, settings: { ...latest, permissions: { allow: ['Bash(fd *)'] } } };
     }),
     (err) => {
       assert.match(err.message, /has since been deleted/);
@@ -409,11 +402,11 @@ test('a file that VANISHES mid-transform is refused, not replaced with a stump',
 
   // Once, not twice: attempt 1 ran the transform and lost the CAS, and attempt 2
   // refused on the READ, before calling it again. That ordering matters — the
-  // transform has side effects (applyMax writes the allow snapshot), so refusing
-  // ahead of it is what keeps the second attempt from taking a snapshot of {}.
+  // a transform may have side effects, so refusing ahead of it is what keeps a
+  // second attempt from acting on a fabricated empty object.
   assert.equal(calls, 1, 'the refusal came from the read, ahead of a second transform');
   // The refusal must leave the file exactly as the external actor left it. A
-  // stump here is the mutant: `{"permissions":{"allow":["Bash(*)"]}}`.
+  // stump here is the mutant: `{"permissions":{"allow":["Bash(fd *)"]}}`.
   assert.equal(fs.existsSync(env.file), false,
     'the writer materialised a stump over a file it had just seen with real content');
 });

@@ -1,6 +1,6 @@
 'use strict';
 
-// The dashboard had no tests at all. It is the extension's whole UI — 18 message
+// The dashboard had no tests at all. It is the extension's whole UI — its message
 // cases, a 15-helper work-up run on every one of ~35 refresh() call sites, and a
 // hide/show identity check that decides whether the panel keeps working — and
 // none of it was reachable from a test, because nothing ever called
@@ -327,8 +327,6 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['autoLearnReview', 'permission-wildcarding.autoLearnReview'],
       ['autoLearnUndo', 'permission-wildcarding.autoLearnUndo'],
       ['autoLearnWhy', 'permission-wildcarding.autoLearnWhy'],
-      ['toggleMax', 'permission-wildcarding.toggleMax'],
-      ['toggleCodexMax', 'permission-wildcarding.toggleCodexMax'],
       ['rebuildRecall', 'permission-wildcarding.rebuildRecall'],
       ['lintMemory', 'permission-wildcarding.lintMemory'],
       ['drainLocal', 'permission-wildcarding.drainLocal'],
@@ -341,6 +339,13 @@ test('every dashboard message reaches its command, and nothing else does', async
       ui.on.message({ type });
       assert.deepEqual(app.executed, [command], `${type} routes to ${command}`);
     }
+
+    // The old ids remain unadvertised cleanup aliases for installations that
+    // carried MAX state across the upgrade. They must not regain a dashboard
+    // route, card, button, or status surface.
+    assert.equal(app.commands.has('permission-wildcarding.toggleMax'), true);
+    assert.equal(app.commands.has('permission-wildcarding.toggleCodexMax'), true);
+    assert.doesNotMatch(ui.view.webview.html, /toggle(?:Codex)?Max|codexMaxBtn|stMax/);
 
     // A route added to the switch without a row above would otherwise ship
     // untested — the panel's buttons are the only way most of these are reached.
@@ -992,11 +997,9 @@ test('a concurrent write inside the lock is not flattened by a stale delta', asy
   //
   // The shape that actually loses data — my first attempt at this test injected an
   // UNRELATED entry, which survives a stale replay fine, and the mutant lived. The
-  // entry has to be one the probe's pass PRUNED, so it lands in `removed`, which a
-  // concurrent writer then legitimately keeps. That is the MAX case at
-  // bin/wildcard-perms:360-374: with MAX on, `Bash(*)` covers everything, so the
-  // pass prunes the specific entries; `--max off` then deliberately restores them;
-  // replaying `removed` deletes them for good.
+  // entry has to be one the probe's pass derived from a specific entry while a
+  // concurrent writer legitimately changes that specific entry. Replaying the
+  // stale delta can otherwise revoke an approval neither writer meant to remove.
   //
   // FIXTURE CORRECTED. My first choice of inputs killed the mutants that revert
   // the in-lock RECOMPUTE, but not the one that reverts only the SNAPSHOT
@@ -1085,121 +1088,6 @@ test('a view that is alive but not visible gets no push and no work-up', async (
     ui.on.visibility();
     await settle();
     assert.ok(ui.posted.length > posts, 'showing the view again pushes fresh state');
-  } finally {
-    await app.dispose();
-  }
-});
-
-// A Codex home carrying both files the Codex MAX path reads. Written before the
-// harness is built, because os.homedir() is stubbed to tempHome for the
-// extension and every src/ module it pulls in, and CODEX_BUNDLE_CACHE resolves
-// against it at require time.
-function writeCodexHome(tempHome, expiresAt) {
-  fs.mkdirSync(path.join(tempHome, '.codex'), { recursive: true });
-  fs.writeFileSync(path.join(tempHome, '.codex', 'config.toml'),
-    'model = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n');
-  fs.writeFileSync(path.join(tempHome, '.codex', 'cloud-config-bundle-cache.json'), JSON.stringify({
-    signed_payload: {
-      cached_at: '2026-09-03T16:20:47Z',
-      expires_at: expiresAt,
-      bundle: {
-        requirements_toml: {
-          enterprise_managed: [{ contents: 'allowed_approval_policies = ["on-request", "untrusted"]' }],
-        },
-      },
-    },
-  }));
-}
-const codexConfigOf = (tempHome) => fs.readFileSync(path.join(tempHome, '.codex', 'config.toml'), 'utf8');
-
-// The card test below delivers a hand-built payload, which proves the renderer
-// and nothing about the builder. This drives the builder for real, because a
-// `stale` field the payload never carries renders identically to one that is
-// always false — and this suite has already been bitten by exactly that shape.
-test('the dashboard payload carries the cache date, not just the cap', async (t) => {
-  const env = setup(t);
-  env.write({ permissions: { allow: [], deny: [] } });
-  writeCodexHome(env.tempHome, '2026-09-03T17:20:47Z');
-  const app = harness(env.tempHome);
-  try {
-    const ui = fakeView();
-    app.provider.resolveWebviewView(ui.view);
-    await settle();
-    const c = ui.posted[0].codexMax;
-    assert.equal(c.restricted, true, 'precondition: the bundle on disk caps approval');
-    assert.equal(c.stale, true, 'a one-hour TTL from 2026-09-03 is long past');
-    assert.equal(c.cachedAt, '2026-09-03T16:20:47Z');
-  } finally {
-    await app.dispose();
-  }
-});
-
-// The toggle used to refuse outright. Now it asks — and asking is a branch, so
-// both sides of it are pinned: dismissing writes nothing, accepting writes the
-// value. An override that fired without the question would be the same defect
-// inverted, dropping a control that may still be in force.
-test('turning Codex MAX on over an expired cap asks first, naming the date', async (t) => {
-  const env = setup(t);
-  env.write({ permissions: { allow: [], deny: [] } });
-  writeCodexHome(env.tempHome, '2026-09-03T17:20:47Z');
-  const app = harness(env.tempHome);
-  try {
-    await app.commands.get('permission-wildcarding.toggleCodexMax')();
-
-    const asked = app.shown.filter((entry) => entry.options && entry.options.modal);
-    assert.equal(asked.length, 1, 'the override must be a modal question, never a silent write');
-    assert.match(asked[0].options.detail, /written 2026-09-03T16:20:47Z/,
-      'the question has to carry the date: "' + asked[0].options.detail + '"');
-    assert.match(asked[0].options.detail, /expired 2026-09-03T17:20:47Z/);
-    assert.doesNotMatch(codexConfigOf(env.tempHome), /approval_policy/,
-      'dismissing the question writes nothing at all');
-
-    // …and accepting it writes the value the user asked for.
-    app.answer(asked[0].actions[0]);
-    await app.commands.get('permission-wildcarding.toggleCodexMax')();
-    assert.match(codexConfigOf(env.tempHome), /^approval_policy = "never"$/m);
-    assert.match(codexConfigOf(env.tempHome), /^sandbox_mode = "workspace-write"$/m,
-      'the sandbox floor is untouched, as it is on every other path');
-  } finally {
-    await app.dispose();
-  }
-});
-
-// The Codex MAX card disabled its own button whenever an enterprise bundle
-// capped approval below "never". On the owner's box that cap came from a cache
-// with a one-hour TTL that had been over for eighteen days, so the button was
-// greyed out and the card stated a current org restriction — while Codex itself
-// had been accepting "never" for a week. The cap is kept; presenting it as
-// certain is not.
-test('a cap read from an expired cache leaves the Codex MAX button clickable', async (t) => {
-  const env = setup(t);
-  env.write({ permissions: { allow: [], deny: [] } });
-  const app = harness(env.tempHome);
-  try {
-    const ui = fakeView();
-    app.provider.resolveWebviewView(ui.view);
-    await settle();
-    const panel = runPanelScript(ui.view.webview.html);
-    const base = { on: false, absent: false, approval: null, sandbox: 'workspace-write',
-      restricted: true, allowed: ['on-request', 'untrusted'] };
-
-    panel.deliver({ ...ui.posted[0], codexMax: { ...base, stale: true, cachedAt: '2026-09-03T16:20:47Z' } });
-    assert.equal(panel.dom.byId.get('codexMaxBtn').disabled, false,
-      'an expired cap must not disable the switch: that is the eighteen-day dead end');
-    const sub = panel.dom.byId.get('cxsub').textContent;
-    assert.match(sub, /cache dated 2026-09-03T16:20:47Z/,
-      'the card has to name the date, or the user cannot judge the cap: "' + sub + '"');
-    assert.match(sub, /expired and may no longer apply/,
-      'and must not state the restriction as current: "' + sub + '"');
-    assert.match(panel.dom.byId.get('stMax').textContent, /expired/,
-      'the summary row says "Codex capped" too, and it is read more often than the card');
-
-    // The live cap is untouched: still disabled, still stated as the org's policy.
-    panel.deliver({ ...ui.posted[0], codexMax: { ...base, stale: false, cachedAt: '2026-09-03T16:20:47Z' } });
-    assert.equal(panel.dom.byId.get('codexMaxBtn').disabled, true,
-      'a cap inside its TTL is current policy and the button stays disabled');
-    assert.match(panel.dom.byId.get('cxtext').textContent, /unavailable — org policy caps approval/);
-    assert.doesNotMatch(panel.dom.byId.get('cxsub').textContent, /expired/);
   } finally {
     await app.dispose();
   }

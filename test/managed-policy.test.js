@@ -12,7 +12,6 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { readPolicy, assessPermission, overridingRule, hookEventAllowed } = require('../src/managed-policy');
-const { maxLayers } = require('../src/permissions');
 const { createAutoLearnManager } = require('../src/auto-learn-manager');
 
 function policyHome(t, policy) {
@@ -108,25 +107,6 @@ test('an inert family is withheld from Claude but still offered to Codex', (t) =
   // because managed policy is a cache and may not be there tomorrow.
   assert.equal(head.policy, 'redundant');
   assert.equal(head.eligibleTargets.includes('claude'), true);
-});
-
-test('MAX mode reports a hook the managed policy will drop', (t) => {
-  const settings = {
-    hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node "x/approve-all.js"' }] }] },
-  };
-  const blocked = maxLayers(settings, { home: policyHome(t, MANAGED) });
-  assert.equal(blocked.hook, true, 'the hook is registered');
-  assert.equal(blocked.hookEventPermitted, false, 'but PreToolUse is not a managed hook event');
-  assert.equal(blocked.hookBlocked, true, 'so MAX must say the layer cannot run');
-
-  // A policy that does define the event, and no policy at all, both permit it.
-  const permissive = policyHome(t, { allowManagedHooksOnly: true, hooks: { PreToolUse: [], PostToolUse: [] } });
-  assert.equal(maxLayers(settings, { home: permissive }).hookBlocked, false);
-  assert.equal(maxLayers(settings, { home: policyHome(t, undefined) }).hookBlocked, false);
-  assert.equal(hookEventAllowed(readPolicy({ home: policyHome(t, undefined) }), 'PreToolUse'), true);
-
-  // An unregistered hook is not "blocked", it is simply off.
-  assert.equal(maxLayers({}, { home: policyHome(t, MANAGED) }).hookBlocked, false);
 });
 
 test('the rule that outranks a permission is named, with deny before ask', (t) => {
@@ -375,4 +355,3 @@ test('a blanket managed rule governs its whole tool, in all three spellings', (t
   assert.equal(overridingRule(permissive, 'Bash(docker exec *)'), null,
     'an allow does not outrank, so there is nothing to name');
 });
-

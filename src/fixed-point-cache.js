@@ -66,10 +66,10 @@ const KEY_SHAPE = /^\d+:[0-9a-f]{8}:\d+:[0-9a-f]{8}$/;
 // substitute the home directory and a module-level constant would freeze whatever
 // os.homedir() said at require time and then write to the real ~/.claude.
 //
-// Alongside the policy lock, the Auto Learn state and the recall models.
-// src/permissions.js:606 defines the same directory as APPROVE_DIR; joined
-// independently here on purpose, since importing it would pull in permissions.js and
-// defeat the entire point of the cache.
+// Alongside the policy lock, the Auto Learn state and the recall models. The
+// durable `.claude/wildcarding` directory is joined independently here on
+// purpose, since importing permissions.js would defeat the entire point of the
+// cache.
 function cachePath({ home = os.homedir(), cacheFile } = {}) {
   return cacheFile || path.join(home, '.claude', 'wildcarding', 'fixed-point.json');
 }

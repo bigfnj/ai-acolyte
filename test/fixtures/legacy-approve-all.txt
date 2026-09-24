@@ -1,0 +1,22 @@
+'use strict';
+// permission-wildcarding MAX mode — PreToolUse auto-approve hook.
+// Returns permissionDecision:"allow" for every tool call, skipping the prompt.
+// SAFE BY DESIGN: Claude Code still enforces permissions.deny and its hard
+// circuit breakers regardless of this decision — a hook "allow" cannot override
+// a deny rule. Managed by permission-wildcarding; remove via MAX mode OFF.
+let done = false;
+function emit() {
+  if (done) return; done = true;
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      permissionDecisionReason: 'permission-wildcarding MAX mode',
+    },
+  }));
+  process.exit(0);
+}
+// Drain stdin (Claude Code sends tool context we don't need) then emit; a short
+// fallback timer guarantees we answer even if 'end' never arrives.
+try { process.stdin.resume(); process.stdin.on('data', () => {}); process.stdin.on('end', emit); process.stdin.on('error', emit); } catch { emit(); }
+setTimeout(emit, 800);

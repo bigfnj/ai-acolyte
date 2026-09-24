@@ -6,7 +6,7 @@
 //   package.json                    is what `bin/wildcard-perms --version` prints
 //
 // scripts/package.mjs used to write the release-tag override into the first one only,
-// which is precisely the drift test/installers.test.js:567 exists to catch. That guard
+// which is precisely the drift test/installers.test.js:465 exists to catch. That guard
 // could never see it: .github/workflows/release.yml runs `npm test` BEFORE the packaging
 // step, so the tests ran against manifests that still agreed, and the packaging step then
 // pulled them apart. The 1.4.2-from-the-CLI / 1.4.4-in-the-badge split recorded in

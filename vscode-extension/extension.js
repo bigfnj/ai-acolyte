@@ -12,17 +12,22 @@ const { createAutoLearnWorkerRunner } = require('./autoLearnWorkerRunner');
 // Share core logic with the hook variant — permissions.js is copied into
 // src/ by scripts/package.mjs so both modes stay in sync from a single source.
 const {
-  processAllowList, writeFileAtomicSync, isBypassOn,
-  applyMax, isMaxOn, maxLayers, buildMaxAllowSet, MAX_MARKERS,
+  processAllowList, writeFileAtomicSync,
 } = require('./src/permissions');
 const { createAutoLearnManager } = require('./src/auto-learn-manager');
 const {
   createPolicyLock, POLICY_LOCK_CODE, POLICY_LOCK_PATH, POLICY_LOCK_BUSY_MESSAGE,
 } = require('./src/policy-lock');
 const {
-  CODEX_CONFIG, CODEX_BUNDLE_CACHE, applyCodexMax, isCodexMaxOn, readApproval, sandboxMode,
-  readEnterpriseBundle, targetApproval, enterpriseDecisionFor, bundleFreshness,
-} = require('./src/codex-max');
+  readEnterpriseBundle, allowedApprovalPolicies, enterpriseDecisionFor,
+} = require('./src/codex-policy');
+const {
+  CODEX_CONFIG, LEGACY_CLAUDE_STATE_FILE, LEGACY_CODEX_STATE_FILE,
+  legacyClaudeMaxStatus, removeLegacyClaudeMax,
+  legacyCodexMaxStatus, removeLegacyCodexMax, removeLegacyApproveScript,
+  removeLegacyStateFile, legacyGeneratedAllowFromState, withoutLegacyGeneratedBackup,
+} = require('./src/legacy-max-cleanup');
+const { purgeLegacyBackupCopies } = require('./src/legacy-backup-cleanup');
 const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
 } = require('./src/policy-guard');
@@ -61,9 +66,10 @@ const LATEST_BACKUP = path.join(BACKUP_DIR, 'allow-list.latest.json');
 const MIRROR_BACKUP_DEFAULT = path.join(os.homedir(), '.permission-wildcarding', 'allow-list.latest.json');
 const PROJECTS_DIR  = path.join(os.homedir(), '.claude', 'projects');
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
-// Auto Learn, this wildcarding pass, and the MAX/bypass toggles are all writers
-// of one settings.json. They take the same lock (POLICY_LOCK_PATH, defined once
-// in src/policy-lock.js) so none can land between another's writes.
+// Auto Learn, this wildcarding pass, the legacy cleanup, and the CLI bypass
+// toggle are all writers of one settings.json. They take the same lock
+// (POLICY_LOCK_PATH, defined once in src/policy-lock.js) so none can land
+// between another's writes.
 
 let debounceTimer = null;
 // One channel for the extension's lifetime, disposed with it. Three sites used
@@ -78,7 +84,6 @@ let policyLock = null;      // shared with Auto Learn; created on first write
 let lockedRetries = 0;      // consecutive deferrals while Auto Learn holds it
 let dashboard = null;        // WildcardingViewProvider instance
 let lastRun = null;          // timestamp of the last write we made
-let statusBar = null;        // persistent status-bar indicator while MAX/bypass is on
 let memBounce = null;        // debounce for MEMORY.md-driven dashboard refreshes
 let gatesBounce = null;      // debounce for corpus-driven gate recompiles
 let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gate)
@@ -155,7 +160,6 @@ function readSettings() {
 const {
   createSettingsWriter,
   SETTINGS_ABSENT, SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
-  SETTINGS_CONTENDED_CODE,
 } = require('./src/settings-write');
 
 // backupPolicy is INJECTED rather than imported by the writer: it reaches
@@ -176,9 +180,8 @@ const writeAllow = (settings, allow, denyAdditions) =>
 // reset settings.json and wipe accumulated wildcards. This keeps a copy of the
 // allow list *and* the deny list in ~/.claude/backups so a reset is recoverable.
 //
-// Both halves matter. deny is the safety boundary every other feature defers to
-// — MAX mode, bypass mode and auto-safe all end their safety argument at "deny
-// still wins" — so restoring allow alone would hand back every permission with
+// Both halves matter. deny is the safety boundary bypass mode and auto-safe
+// defer to, so restoring allow alone would hand back every permission with
 // the killswitch still off, which is strictly worse than not restoring at all.
 //
 // It's a high-water mark: the backup only grows. A reset that *shrinks* the live
@@ -223,8 +226,17 @@ function readOneBackup(file) {
 // which is the single failure `forgetFromBackup` exists to prevent. The mirror
 // therefore only speaks when the primary is gone or unparseable, which is
 // exactly the recovery case it was added for.
-function readBackup() {
+function readBackupRaw() {
   return readOneBackup(LATEST_BACKUP) ?? readOneBackup(mirrorBackupPath());
+}
+
+// While a migration snapshot remains, never offer its exactly-known generated
+// MAX entries to the policy guard or manual restore. The physical copies are
+// retained until a confirmed cleanup verifies both writes, so a failed purge
+// cannot destroy the only ownership record and a stale backup cannot resurrect
+// the retired grants in the meantime.
+function readBackup() {
+  return withoutLegacyGeneratedBackup(readBackupRaw());
 }
 
 // Atomic per file via temp + rename. The mirror is best-effort and written
@@ -263,7 +275,7 @@ function backupPolicy(allow, deny) {
     const nextDeny = Array.isArray(deny) ? deny : [];
     if (!nextAllow.length && !nextDeny.length) return;
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    const previous = readBackup() ?? { allow: [], deny: [] };
+    const previous = readBackupRaw() ?? { allow: [], deny: [] };
     // Union rather than comparing only lengths: a same-sized settings refresh
     // can replace one wildcard with another and must not silently drop either.
     const merged = {
@@ -283,13 +295,13 @@ function backupCount() {
 // The one way an entry leaves the high-water mark: the user said to remove it.
 // Without this the backup would resurrect every deliberate prune, and the policy
 // guard would read the user's own edit as damage.
-function forgetFromBackup(permissions) {
+function forgetFromBackup(permissions, kind = 'both') {
   const drop = new Set(Array.isArray(permissions) ? permissions : [permissions]);
-  const backup = readBackup();
+  const backup = readBackupRaw();
   if (!backup) return;
   const next = {
-    allow: backup.allow.filter((entry) => !drop.has(entry)),
-    deny: backup.deny.filter((entry) => !drop.has(entry)),
+    allow: kind === 'deny' ? backup.allow : backup.allow.filter((entry) => !drop.has(entry)),
+    deny: kind === 'allow' ? backup.deny : backup.deny.filter((entry) => !drop.has(entry)),
   };
   if (next.allow.length === backup.allow.length && next.deny.length === backup.deny.length) return;
   try {
@@ -389,9 +401,6 @@ function onManagedPolicyChanged() {
       `${assessment.shadowed.length} now overridden by managed rules (cannot be restored — managed policy outranks your allow list)`
     );
   }
-  if (assessment.capabilities.userHooksDisabled && isMaxOn(live)) {
-    notes.push('managed policy disables user hooks, so MAX layer 2 (approve hook) is inert — the allow-wildcard layer still applies');
-  }
   if (!notes.length) return;
 
   vscode.window.showWarningMessage(
@@ -485,13 +494,10 @@ function restoreFromBackup(options = {}) {
   const settings = liveState.settings ?? {};
   const current  = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
   const currentDeny = Array.isArray(settings.permissions?.deny) ? settings.permissions.deny : [];
-  // Never restore the MAX blanket markers (Bash(*) / PowerShell(*)) from backup.
-  // MAX is an explicit mode choice — a restore should not silently re-enable it.
-  // The full MAX set (Read(*), Edit, Write, …) is legitimately used outside MAX too,
-  // so only the two markers that uniquely signal MAX-on are excluded.
-  const maxMarkerSet = new Set(MAX_MARKERS);
-  const safeBackupAllow = backup.allow.filter((p) => !maxMarkerSet.has(p));
-  const merged   = processAllowList([...new Set([...current, ...safeBackupAllow])]);
+  // Cleanup removes only entries proved to belong to the retired feature from
+  // the backup itself. A blanket-looking grant is otherwise user policy and
+  // must survive restore.
+  const merged   = processAllowList([...new Set([...current, ...backup.allow])]);
   const missingDeny = backup.deny.filter((rule) => !currentDeny.includes(rule));
 
   if (JSON.stringify(current) === JSON.stringify(merged) && !missingDeny.length) {
@@ -576,7 +582,7 @@ function recallScriptPath() {
 // Stable home for the 32MB model, deliberately outside both the extension dir and any
 // checkout: the extension dir is replaced on every upgrade (which would mean a
 // re-download per version), and a checkout can be deleted or sit in a synced OneDrive
-// folder. Same ~/.claude/wildcarding state dir MAX mode writes its approve hook into.
+// folder. The ~/.claude/wildcarding state dir remains stable across upgrades.
 const RECALL_MODEL_HOME = path.join(os.homedir(), '.claude', 'wildcarding', 'models');
 const RECALL_MODEL_FILE = 'bge-small.onnx';
 const RECALL_VOCAB_FILE = 'bge-small.vocab.txt';
@@ -1598,7 +1604,7 @@ async function explainAutoLearnPrompt() {
     .map((invocation) => ({ invocation, rule: enterpriseDecisionFor(bundle, invocation.argv) }))
     .filter((entry) => entry.rule);
   if (enterprise.length) {
-    const target = targetApproval(bundle);
+    const allowed = allowedApprovalPolicies(bundle);
     vscode.window.showInformationMessage('Codex enterprise policy', {
       modal: true,
       detail: [
@@ -1608,9 +1614,8 @@ async function explainAutoLearnPrompt() {
         ...enterprise.map((entry) =>
           `  ${entry.rule.root} — decision "${entry.rule.decision}"\n    ${entry.rule.justification}`),
         '',
-        target.restricted
-          ? `Approval policy is also capped: the org allows only [${(target.allowed || []).join(', ')}], ` +
-            'so "never" cannot be set. Codex MAX applies the least-friction policy permitted.'
+        allowed
+          ? `Approval policy is also capped: the org allows only [${allowed.join(', ')}].`
           : 'No approval-policy cap was found.',
         '',
         'A user rule cannot override this. The prompt is the policy working as configured.',
@@ -1876,31 +1881,6 @@ function activate(context) {
   // mid-write right now the read guard makes it a no-op instead of a false alarm.
   try { onManagedPolicyChanged(); } catch { /* never block activation */ }
 
-  // Codex config.toml drives the Codex half of the friction indicator.
-  try {
-    const codexWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(vscode.Uri.file(path.dirname(CODEX_CONFIG)), path.basename(CODEX_CONFIG))
-    );
-    codexWatcher.onDidChange(() => { updateStatusBar(); dashboard?.refresh(); });
-    codexWatcher.onDidCreate(() => { updateStatusBar(); dashboard?.refresh(); });
-    context.subscriptions.push(codexWatcher);
-  } catch { /* never block activation */ }
-
-  // The org's signed requirements bundle, which decides whether Codex MAX is legal at all.
-  // Codex owns this file and refetches it on its own schedule, so the card would otherwise
-  // keep reporting "org policy caps approval" from a stale cache long after an account or
-  // policy change made `never` legal — right up until something unrelated forced a render.
-  try {
-    const bundleWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(
-        vscode.Uri.file(path.dirname(CODEX_BUNDLE_CACHE)), path.basename(CODEX_BUNDLE_CACHE))
-    );
-    bundleWatcher.onDidChange(() => { updateStatusBar(); dashboard?.refresh(); });
-    bundleWatcher.onDidCreate(() => { updateStatusBar(); dashboard?.refresh(); });
-    bundleWatcher.onDidDelete(() => { updateStatusBar(); dashboard?.refresh(); });
-    context.subscriptions.push(bundleWatcher);
-  } catch { /* never block activation */ }
-
   // The compiled gates file. Whoever recompiles (the CLI, or the SessionStart hook) only
   // writes this file; watching it is what turns a corpus edit into an installed block
   // without waiting for the next activation. ensureGates is a no-op when already current.
@@ -1956,10 +1936,11 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.rebuildRecall', () => rebuildRecall())
   );
 
-  // MAX mode (primary) + bypass (secondary; palette/CLI) "skip everything" toggles.
+  // Compatibility-only command ids from releases that exposed MAX. They are
+  // deliberately absent from package.json and can only remove legacy state.
   context.subscriptions.push(
-    vscode.commands.registerCommand('permission-wildcarding.toggleMax', () => toggleMax()),
-    vscode.commands.registerCommand('permission-wildcarding.toggleCodexMax', () => toggleCodexMax())
+    vscode.commands.registerCommand('permission-wildcarding.toggleMax', () => offerLegacyCleanup({ explicit: true })),
+    vscode.commands.registerCommand('permission-wildcarding.toggleCodexMax', () => offerLegacyCleanup({ explicit: true }))
   );
 
   // Project-local approvals → user scope, and the shell-style block that stops
@@ -1975,18 +1956,13 @@ function activate(context) {
     console.error('permission-wildcarding: local-settings watchers failed —', err);
   }
 
-  // Persistent status-bar indicator so an active "skip everything" is never invisible.
-  statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBar.command = 'permission-wildcarding.toggleMax';
-  context.subscriptions.push(statusBar);
-  updateStatusBar();
-
   // Process once on activation to catch anything missed while VS Code was closed.
   runWildcarding();
   // Same for approvals that landed in a project's settings.local.json, and for
   // the guidance block — an upgrade refreshes stale wording, and neither writes
   // anything when the state is already right.
   drainLocal();
+  offerLegacyCleanup({ explicit: false });
   ensureGuidance();
   // Gates too. Install-only: this never spawns python, so a corpus edit reaches the block
   // through the compiled file that the CLI or the SessionStart hook last wrote.
@@ -2138,8 +2114,6 @@ function disposeMemoryWatchers() {
   }
 }
 
-// Reflect the live "skip everything" state in the status bar (warning-tinted ON).
-// Primary signal is MAX mode; bypassPermissions mode also lights it.
 // Learn on startup, on either agent's JSONL appends, and periodically to
 // reconcile events missed while the extension host was suspended.
 // This sits immediately after activate() so all dashboard state already exists.
@@ -2148,333 +2122,173 @@ function startAutoLearn(context) {
   scheduleAutoLearn(750);
 }
 
-// ── one vocabulary for "how much friction is left" ──────────────────────────────
-// There are two agents and three switches, which is exactly the sort of thing
-// that becomes folklore. Everything that reports state derives it from here, so
-// the status bar, the tooltip and the dashboard can never disagree, and every
-// label names the agent it applies to.
-//
-//   Claude  MAX    — blanket allow wildcards + PreToolUse approve hook.
-//                    Floor: permissions.deny + hard circuit breakers.
-//   Claude  BYPASS  — flips permissions.defaultMode. Legacy/advanced; managed
-//                    policy can disable it, which is why MAX exists.
-//   Codex   MAX    — approval_policy = "never" in config.toml.
-//                    Floor: the sandbox (sandbox_mode is never touched).
-//
-// The two MAX switches are siblings, not one setting: they write different
-// files, for different agents, with different floors.
-function codexConfigText() {
-  try { return fs.readFileSync(CODEX_CONFIG, 'utf8'); }
-  catch { return null; }
-}
-
-function frictionState() {
-  const settings = readSettings();
-  const codexText = codexConfigText();
-  // bypass is detected but no longer offered: it is Claude Code's own setting,
-  // and where policy permits it the user can set it there. Reported so an
-  // externally-enabled bypass is never invisible.
-  const claude = isMaxOn(settings) ? 'max' : isBypassOn(settings) ? 'bypass' : 'prompts';
-  return {
-    claude,
-    claudeLayers: maxLayers(settings),
-    codex: codexText === null ? 'absent' : isCodexMaxOn(codexText) ? 'max' : 'prompts',
-    codexApproval: codexText === null ? null : readApproval(codexText),
-    codexSandbox: codexText === null ? null : sandboxMode(codexText),
-  };
-}
-
-const CLAUDE_LABEL = { max: 'Claude MAX', bypass: 'Claude BYPASS', prompts: 'Claude prompts' };
-const CODEX_LABEL = { max: 'Codex MAX', prompts: 'Codex prompts', absent: 'Codex n/a' };
-
-function frictionSummary(state = frictionState()) {
-  return `${CLAUDE_LABEL[state.claude]} · ${CODEX_LABEL[state.codex]}`;
-}
-
-function updateStatusBar() {
-  // `deactivated` first, because `!statusBar` alone cannot be true after the first
-  // activation: the slot is assigned once and nulled nowhere, including in deactivate(),
-  // which nulls seven other retainers. Worse than merely dead -- activate() pushes the item
-  // into context.subscriptions, so VS Code DISPOSES it on teardown while this variable stays
-  // truthy, and the guard passed on exactly the state it looks like it exists to catch.
-  // Reachable from the Codex config.toml and requirements-bundle watchers, which stay live
-  // until VS Code drains the subscriptions after deactivate() resolves.
-  if (deactivated || !statusBar) return;
-  const state = frictionState();
-  const anyOn = state.claude !== 'prompts' || state.codex === 'max';
-  statusBar.text = `${anyOn ? '$(zap)' : '$(shield)'} ${frictionSummary(state)}`;
-  statusBar.tooltip = [
-    state.claude === 'max'
-      ? `Claude: MAX — every prompt skipped (allow-wildcards ${state.claudeLayers.allow ? 'on' : 'off'}, approve-hook ${state.claudeLayers.hook ? 'on' : 'off'}). permissions.deny + circuit breakers still apply.`
-      : state.claude === 'bypass'
-        ? 'Claude: BYPASS — defaultMode flipped. Managed policy can disable this; MAX is the durable option.'
-        : 'Claude: prompts active.',
-    state.codex === 'max'
-      ? `Codex: MAX — approval_policy=never. The ${state.codexSandbox || 'configured'} sandbox is still the floor, so out-of-workspace writes and network remain blocked.`
-      : state.codex === 'prompts'
-        ? `Codex: prompts active (approval_policy=${state.codexApproval || 'default'}).`
-        : 'Codex: no config.toml found.',
-    '',
-    'Click to toggle Claude MAX.',
-  ].join('\n');
-  statusBar.backgroundColor = anyOn
-    ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
-  statusBar.show();
-}
-
-// Codex MAX writes Codex's own config.toml, so it takes no policy lock — it
-// shares no file with Auto Learn or the wildcarding pass.
-async function toggleCodexMax() {
-  const text = codexConfigText();
-  if (text === null) {
-    vscode.window.showWarningMessage(
-      `permission-wildcarding: no Codex config at ${CODEX_CONFIG} — cannot toggle Codex MAX.`
-    );
-    return;
+function readCodexConfigState() {
+  try { return { readable: true, exists: true, text: fs.readFileSync(CODEX_CONFIG, 'utf8') }; }
+  catch (error) {
+    if (error?.code === 'ENOENT') return { readable: true, exists: false, text: '' };
+    return { readable: false, exists: true, text: null, error };
   }
-  const turningOn = !isCodexMaxOn(text);
-  let res;
-  try {
-    res = applyCodexMax(text, turningOn);
-    // The cap was read off a cache that has expired, so it is not evidence about
-    // today's policy — but neither is its absence, which is why nothing has been
-    // written yet. Ask, naming the date, and only then re-run with the override.
-    // A modal, because this is the one place the user takes on a policy decision
-    // the cache can no longer answer, and a toast is dismissible by not looking.
-    if (res.blockedBy === 'enterprise-policy-stale') {
-      const allowed = (res.allowed || []).join(', ') || 'none';
-      const go = 'Set approval_policy="never" anyway';
-      const answer = await vscode.window.showWarningMessage(
-        'Codex MAX: the policy capping approval has expired', {
-          modal: true,
-          detail:
-            `The restriction allowing only [${allowed}] comes from Codex's cached policy bundle, ` +
-            `written ${res.cachedAt || 'at an unrecorded time'} and expired ${res.expiresAt}. ` +
-            'It may no longer be your organization\'s policy — or it may still be, and this machine ' +
-            'simply has not refreshed it.\n\n' +
-            'Overriding writes approval_policy="never" to ~/.codex/config.toml, so Codex stops asking. ' +
-            'Your sandbox_mode is untouched and still blocks network and out-of-workspace writes.',
-        }, go
-      );
-      if (answer !== go) return;
-      res = applyCodexMax(text, true, { overrideStale: true });
-    }
-    if (res.blockedBy === 'enterprise-policy') {
-      const allowed = (res.allowed || []).join(', ') || 'none';
+}
+
+function readCodexConfigText() {
+  const state = readCodexConfigState();
+  return state.readable ? state.text : null;
+}
+
+async function offerLegacyCleanup({ explicit = false } = {}) {
+  if (deactivated) return;
+  const settingsState = readSettingsState();
+  const codexState = readCodexConfigState();
+  if (settingsState.state === SETTINGS_UNREADABLE || !codexState.readable) {
+    if (explicit) {
+      const unreadable = [
+        settingsState.state === SETTINGS_UNREADABLE ? 'Claude settings.json' : null,
+        !codexState.readable ? 'Codex config.toml' : null,
+      ].filter(Boolean).join(' and ');
       vscode.window.showWarningMessage(
-        res.restricted
-          ? "Codex MAX skips every prompt by setting approval_policy=\"never\", but your organization's " +
-            `Codex policy forbids it (allows only [${allowed}]). Codex will keep prompting; nothing was changed.`
-          : "Codex MAX: your organization's Codex policy permits no approval policy this can set " +
-            `(allowed: ${allowed}). Nothing was changed.`
+        `permission-wildcarding: ${unreadable} could not be read safely; legacy cleanup left every artifact unchanged.`
       );
-      return;
     }
-    // A refusal is not "already in that state". applyCodexMax returns
-    // `changed: false` with `error: 'codex-max-snapshot-failed'` when the
-    // snapshot that alone can restore the previous Codex settings did not land
-    // — and falling through to the silent `!res.changed` return told the user
-    // nothing at all: Codex MAX stays off while they believe it went on. The
-    // CLI already reports this (bin/wildcard-perms:998 for the Claude half);
-    // both extension toggles ignored it.
-    if (res.error === 'codex-max-snapshot-failed') {
-      vscode.window.showErrorMessage(
-        'Codex MAX: refused — could not write the settings snapshot to ~/.claude/backups, '
-        + 'so turning it off later could not restore your Codex approval policy. '
-        + 'Nothing was changed. Check that directory is writable and retry.'
-      );
-      updateStatusBar();
-      dashboard?.refresh();
-      return;
-    }
-    if (!res.changed) { updateStatusBar(); dashboard?.refresh(); return; }
-    fs.mkdirSync(path.dirname(CODEX_CONFIG), { recursive: true });
-    writeFileAtomicSync(CODEX_CONFIG, res.text);
-  } catch (err) {
-    vscode.window.showErrorMessage(`permission-wildcarding: Codex MAX toggle failed — ${err.message}`);
     return;
   }
-  const sandbox = sandboxMode(res.text) || 'configured';
-  if (turningOn) {
-    vscode.window.showWarningMessage(
-      `⚡ Codex MAX ON — approval_policy=${res.target}. ` +
-      // Three states. The middle one is new: the cap is still on record, the
-      // cache asserting it is not, and the user said to proceed anyway.
-      (!res.restricted ? 'Codex stops asking. '
-        : res.stale
-          ? `Codex stops asking — set over an expired policy cache dated ${res.cachedAt || 'an unrecorded date'}. `
-          : "Your organization's Codex policy forbids 'never', so this is the least-friction policy it allows. ") +
-      `The ${sandbox} sandbox is untouched and still blocks out-of-workspace writes and network. ` +
-      'Restart Codex to apply.'
-    );
-  } else {
-    vscode.window.showInformationMessage(
-      `permission-wildcarding: Codex MAX OFF — approval_policy=${res.restoredTo ?? 'unset (key removed)'}. Restart Codex to apply.`
-    );
+  const claude = legacyClaudeMaxStatus(settingsState.settings ?? {});
+  const codex = legacyCodexMaxStatus(codexState.text);
+
+  // Blanket-looking grants and approval_policy="never" are valid user choices
+  // on their own. An exact old hook is current ownership evidence; either
+  // snapshot can be stale after MAX was turned off. The review names the exact
+  // proposed delta before a second, modal confirmation.
+  const shouldOffer = explicit
+    ? claude.present || codex.present || claude.snapshotExists || codex.snapshotExists
+    : claude.candidate;
+  if (!shouldOffer) {
+    if (explicit) {
+      vscode.window.showInformationMessage(
+        'permission-wildcarding: no owned legacy MAX configuration was found. The feature cannot be enabled.'
+      );
+    }
+    return;
   }
-  updateStatusBar();
-  dashboard?.refresh();
+
+  const review = 'Review legacy cleanup';
+  const choice = await vscode.window.showWarningMessage(
+    'permission-wildcarding found configuration shaped like the retired MAX feature. ' +
+    'Old snapshot files can outlive the feature, so no permission is changed automatically.',
+    review,
+    'Keep unchanged'
+  );
+  if (choice !== review || deactivated) return;
+
+  const found = [];
+  if (claude.present) {
+    found.push(`Claude: generated grants proposed for removal: ` +
+      `${claude.generatedAllow.length ? claude.generatedAllow.join(', ') : 'none'}; ` +
+      `owned approve hook ${claude.hook ? 'found' : 'not found'}, ` +
+      `valid restore snapshot ${claude.snapshotValid ? 'found' : 'not found'}.`);
+  } else if (claude.snapshotExists) {
+    found.push('Claude: no active legacy layer found; the saved snapshot will be used only to purge retired grants from verified backup copies.');
+  }
+  if (codex.present) {
+    found.push(`Codex: approval_policy="never" found; valid restore snapshot ` +
+      `${codex.snapshotValid ? 'found' : 'not found'}; proposed restore ` +
+      `${codex.snapshotValid ? codex.savedApproval ?? 'unset' : 'unavailable'}.`);
+  } else if (codex.snapshotExists) {
+    found.push('Codex: no active legacy value found; the stale snapshot can be removed without changing config.toml.');
+  }
+  const remove = 'Remove legacy configuration';
+  const confirmed = await vscode.window.showWarningMessage(
+    'Remove legacy MAX configuration?', {
+      modal: true,
+      detail: found.join('\n') +
+        '\n\nSnapshots can outlive MAX-off. Review the values above: an identical grant or "never" ' +
+        'chosen later by you is indistinguishable from the retired feature. Cleanup preserves ' +
+        'all other permissions and hooks and refuses invalid restore data. Restart the affected agent after cleanup.',
+    }, remove
+  );
+  if (confirmed !== remove || deactivated) return;
+  await cleanupLegacyMaxConfiguration();
 }
 
-// Flip MAX mode: blanket allow-list wildcards (Layer 1) + a PreToolUse auto-approve
-// hook (Layer 2), independent of Claude Code's bypassPermissions mode. Reversible
-// via the sidecar snapshot. deny rules + circuit breakers still apply.
-function toggleMax() {
-  // Read and write under the lock: MAX-off unions the sidecar snapshot with
-  // whatever was granted since, so an Auto Learn write landing between the read
-  // and the write would be re-pruned back out.
-  let turningOn = false;
-  let layers = null;
-  let switchedMode = null;
-  let restoredMode = null;
+async function cleanupLegacyMaxConfiguration() {
+  if (deactivated) return;
+  const notes = [];
+  const warnings = [];
+
   try {
+    let claudeResult = null;
+    let backupResult = null;
+    const retiredBackupEntries = legacyGeneratedAllowFromState();
     getPolicyLock().locked(() => {
-      // Read, transform and write are one operation now, all against the SAME
-      // fresh read taken inside the writer.
-      //
-      // What this replaces: a readSettings() here, applyMax against it, and a
-      // whole-object writeFileAtomicSync at the end. That held the policy lock
-      // the entire time and it did not matter — Claude Code never takes this lock
-      // and rewrites settings.json on every /model, /effort and approval, so
-      // anything landing in the window was reverted. The CLI had the identical
-      // shape and was fixed in the same change; fixing only one would have left
-      // half the bug, which is the mistake that was made in the other direction
-      // when the drain was rebased.
-      //
-      // `turningOn` is derived INSIDE the closure, not before it. Deriving it
-      // from an earlier read let the request and the file disagree: if MAX had
-      // already reached the requested state, applyMax returned changed:false,
-      // nothing was written, `layers` stayed null, and BOTH notification branches
-      // below were skipped — the user clicked and got no message at all, the
-      // exact failure the snapshot-refusal branch was added to fix.
-      //
-      // It also deletes a guard that told a lie. readSettings() collapses absent
-      // and unreadable into null and reported "settings.json not found" for a
-      // file that was merely mid-write, and it refused on an ABSENT file where
-      // the CLI proceeds. Now: absent yields {} and MAX-on works on a fresh
-      // install like the CLI's does, and unreadable throws SETTINGS_UNREADABLE
-      // into the catch below, which says "could not be parsed" — which is true.
-      let res;
-      let wroteOnto;
-      ({ result: res, latest: wroteOnto } = settingsWriter.writeTransform((latest) => {
-        turningOn = !isMaxOn(latest);
-        return applyMax(latest, turningOn);
-      }));
-      // A refusal is not "already in that state". `changed: false` with
-      // `error: 'max-snapshot-failed'` means the allow-list snapshot did not
-      // land, so MAX-off could never restore the user's entries. Falling
-      // through to the bare `!res.changed` return left `layers` null, which
-      // skips BOTH notification branches below — the user got no message at
-      // all, and believes MAX is on while it is off.
-      if (res.error === 'max-snapshot-failed') {
-        vscode.window.showErrorMessage(
-          'permission-wildcarding: MAX refused — could not write the allow-list snapshot to '
-          + '~/.claude/backups, so turning MAX off later could not restore your entries. '
-          + 'MAX is unchanged. Check that directory is writable and retry.'
-        );
-        return;
-      }
-      if (!res.changed) {
-        // Defensive, and the comment that was here had it exactly backwards.
-        //
-        // It claimed deriving `turningOn` inside the closure made this reachable.
-        // It does the opposite: because intent now comes from the SAME read the
-        // transform runs on, `isMaxOn(latest) === false` implies `turningOn` is
-        // true implies `enableMaxAllow` returns changed:true — or the single
-        // `max-snapshot-failed`, which the branch above already intercepts.
-        // Enumerating all four layer states leaves no path here.
-        //
-        // Kept rather than deleted: it is the difference between a silent return
-        // and a message if applyMax ever grows a second refusal, and that silent
-        // return is the bug the branch above exists to fix. The CLI's equivalent
-        // IS reachable, because there intent comes from argv rather than from the
-        // read — that asymmetry is the point.
-        vscode.window.showInformationMessage(
-          `permission-wildcarding: MAX is already ${turningOn ? 'OFF' : 'ON'} — nothing to change.`
-        );
-        return;
-      }
-      switchedMode = res.switchedMode;
-      restoredMode = res.restoredMode;
-      if (!turningOn) {
-        // Purge MAX blanket entries from the backup so the policy guard does not
-        // treat them as "missing" and re-assert them, re-enabling MAX silently.
-        //
-        // Only the ones MAX itself added, which is what MAX-off actually removed:
-        // res.settings already unions the pre-MAX snapshot back in, so anything
-        // still present there is the user's and must keep its backup cover.
-        //
-        // NAMING, corrected: this used to be called `preMax`, which was wrong and
-        // actively misleading. `wroteOnto` is writeTransform's `latest` — the read
-        // the write landed on — so when turning MAX OFF its allow list is the
-        // MAX-ON on-disk state, NOT the pre-MAX list. The pre-MAX list exists only
-        // in the sidecar snapshot, and disableMaxAllow is what unions it back.
-        //
-        // Both halves come from ONE read, which is the point: the set to purge is
-        // derived from the list the write actually rebased onto, and measured
-        // against the list the write produced.
-        //
-        // What actually varies with this argument is narrow, and worth stating so
-        // nobody mistakes a passing suite for coverage. buildMaxAllowSet's first
-        // seven entries are the MAX_ALLOW_CORE constant, so only the `mcp__*` tail
-        // depends on it — and detectMcpServers matches the PREFIX `mcp__S__`, so a
-        // specific `mcp__S__tool` surviving into the restored list still yields
-        // server S. The only input that distinguishes this from the post-MAX list
-        // is an `mcp__S__*` blanket that arrived WHILE MAX was on, for a server
-        // with no other `mcp__S__` entry: disableMaxAllow strips it and the
-        // snapshot cannot restore it, so only the freshest read knows S existed.
-        // That is the case test/policy-backup.test.js now pins.
-        const restoredAllow = res.settings?.permissions?.allow ?? [];
-        const wroteOntoAllow = wroteOnto?.permissions?.allow ?? [];
-        forgetFromBackup(buildMaxAllowSet(wroteOntoAllow)
-          .filter((entry) => !restoredAllow.includes(entry)));
-      }
-      lastRun = Date.now();
-      layers = maxLayers(res.settings);
+      ({ result: claudeResult } = settingsWriter.writeTransform((latest) =>
+        removeLegacyClaudeMax(latest, { confirmAmbiguous: true })));
+      // The settings writer maintains a high-water backup as part of its write,
+      // so purge only after that transform and under the same cross-process
+      // lock. Each physical copy is edited and verified independently.
+      backupResult = purgeLegacyBackupCopies(
+        [LATEST_BACKUP, mirrorBackupPath()],
+        retiredBackupEntries,
+      );
     });
-  } catch (err) {
-    // User-initiated, so report the contention instead of deferring silently the
-    // way runWildcarding's watcher-driven pass does.
-    //
-    // SETTINGS_CONTENDED is transient by construction and nothing was written,
-    // so it gets the same "try again" wording as a held policy lock rather than
-    // "MAX toggle failed". Until now this code had ZERO readers anywhere: it was
-    // set on both throws in settings-write and every catch in the repo tested
-    // only POLICY_LOCK_CODE or SETTINGS_UNREADABLE, so a routine race with
-    // Claude Code surfaced as a hard failure — the exact opposite of what its
-    // own comment promises ("nothing was written, retry on the next trigger").
-    const transient = err?.code === POLICY_LOCK_CODE || err?.code === SETTINGS_CONTENDED_CODE;
-    vscode.window.showWarningMessage(transient
-      ? `permission-wildcarding: ${err?.code === POLICY_LOCK_CODE ? POLICY_LOCK_BUSY_MESSAGE
-        : 'settings.json is being written by another process — try the toggle again in a moment.'}`
-      : `permission-wildcarding: MAX toggle failed — ${err.message}`);
-    updateStatusBar();
-    dashboard?.refresh();
-    return;
+    const verifiedState = readSettingsState();
+    const verifiedClaude = verifiedState.state === SETTINGS_UNREADABLE
+      ? null : legacyClaudeMaxStatus(verifiedState.settings ?? {});
+    if (!verifiedClaude || verifiedClaude.present) {
+      warnings.push('Claude cleanup could not verify that all legacy configuration was removed; artifacts were retained');
+    } else if (claudeResult?.changed) {
+      notes.push('Claude settings restored');
+    }
+    if (!backupResult?.ok) {
+      const failed = (backupResult?.failures ?? []).map((entry) => entry.file).join(', ');
+      warnings.push(`legacy backup cleanup could not verify every copy${failed ? ` (${failed})` : ''}; the migration snapshot was retained`);
+    } else if (backupResult.changed) {
+      notes.push('legacy backup copies cleaned');
+    }
+    if (verifiedClaude && !verifiedClaude.present
+      && claudeResult?.canRemoveArtifacts && backupResult?.ok) {
+      const script = removeLegacyApproveScript();
+      removeLegacyStateFile(LEGACY_CLAUDE_STATE_FILE);
+      if (script.reason === 'ownership-ambiguous') warnings.push('approve-all.js was not removed because its contents are not owned by this extension');
+    }
+    warnings.push(...(claudeResult?.warnings ?? []));
+  } catch (error) {
+    warnings.push(`Claude cleanup failed: ${error.message}`);
   }
 
-  if (layers && turningOn) {
-    vscode.window.showWarningMessage(
-      `⚡ MAX mode ON — every prompt skipped via allow-wildcards${layers.hook ? ' + approve hook' : ''} ` +
-      '(deny rules + circuit breakers still apply). Reload the window for the approve hook to take effect.' +
-      (switchedMode
-        ? ` Permission mode switched from ${switchedMode} to default: auto mode discards Bash(*) as ` +
-          'classifier-bypassing, so MAX would have granted nothing there. MAX off puts the mode back.'
-        : ''),
-      'Reload Window'
-    ).then((choice) => {
-      if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
-    });
-  } else if (layers) {
+  try {
+    const before = readCodexConfigText();
+    if (before !== null) {
+      const codexResult = removeLegacyCodexMax(before, { confirmAmbiguous: true });
+      if (codexResult.changed) {
+        const current = readCodexConfigText();
+        if (current !== before) throw new Error('config.toml changed during cleanup; nothing was written');
+        writeFileAtomicSync(CODEX_CONFIG, codexResult.text);
+        const verified = fs.readFileSync(CODEX_CONFIG, 'utf8');
+        if (verified !== codexResult.text || legacyCodexMaxStatus(verified).present) {
+          throw new Error('config.toml verification failed');
+        }
+        removeLegacyStateFile(LEGACY_CODEX_STATE_FILE);
+        notes.push(`Codex approval policy restored to ${codexResult.restoredTo ?? 'its default'}`);
+      }
+      warnings.push(...codexResult.warnings);
+    }
+  } catch (error) {
+    warnings.push(`Codex cleanup failed: ${error.message}`);
+  }
+
+  dashboard?.refresh();
+  if (notes.length) {
     vscode.window.showInformationMessage(
-      'permission-wildcarding: MAX mode OFF — restored your allow list, kept anything approved while MAX was on, ' +
-      'and removed the approve hook.' +
-      (restoredMode ? ` Permission mode restored to ${restoredMode}.` : '') +
-      ' Reload the window to apply.'
+      `permission-wildcarding: legacy cleanup complete. ${notes.join('; ')}. Restart the affected agent.`
     );
   }
-  updateStatusBar();
-  dashboard?.refresh();
+  if (warnings.length) {
+    vscode.window.showWarningMessage(
+      `permission-wildcarding: legacy cleanup left items unchanged. ${[...new Set(warnings)].join('; ')}.`
+    );
+  }
+  if (!notes.length && !warnings.length) {
+    vscode.window.showInformationMessage('permission-wildcarding: no legacy configuration needed a change.');
+  }
 }
 
 
@@ -2506,10 +2320,6 @@ function wildcardingHint(after) {
 // Generalize + prune the allow list. `manual` = invoked via the button/command
 // (surface a status message even when nothing changed).
 function runWildcarding(manual = false) {
-  // Keep the status indicator current on every settings.json change — a flip via
-  // the CLI (`wildcard-perms --max` / `--bypass`) fires the watcher and lands here.
-  updateStatusBar();
-
   // Already optimal: the ~95% case. Factored out because it is now reachable from
   // two places — the unlocked probe below, and the post-lock path when somebody
   // else generalized the list while we were waiting.
@@ -2546,7 +2356,7 @@ function runWildcarding(manual = false) {
   // On the unchanged path the pass can now no longer lose it at all.
   //
   // And the lock never protected this read from the file's highest-frequency
-  // writer anyway: Claude Code does not take it (see toggleMax's note above).
+  // writer anyway: Claude Code does not take it.
   const settings = readSettings();
   if (!settings) {
     // Reset here too. Before the probe moved out of the lock, this path ran
@@ -2582,11 +2392,8 @@ function runWildcarding(manual = false) {
   //
   // Until now this function satisfied that precondition only BY ACCIDENT, because
   // its read happened to sit inside the lock. Handing writeAllow the probe's
-  // snapshot instead would reintroduce the failure spelled out at
-  // bin/wildcard-perms:360-374: with MAX on, Claude Code persists
-  // `Bash(npm test)`; the unlocked pass marks it removed because `Bash(*)` covers
-  // it; `--max off` then deliberately preserves it; replaying `removed` deletes it
-  // for good.
+  // snapshot instead would let another writer add or restore an entry between
+  // the probe and this write, then replay a stale removal over that newer state.
   //
   // So the changed path now runs the pass twice. That is the correct trade: it is
   // the ~5% case, it already pays for an atomic write, and 3.2 ms of recompute
@@ -2730,12 +2537,12 @@ function drainLocal(manual = false) {
   }
   localDrainRetries = 0;
 
-  if (reports.some((report) => report.blocked === 'max')) {
+  if (reports.some((report) => report.blocked === 'legacy-blanket')) {
     if (manual) {
       vscode.window.showWarningMessage(
-        'permission-wildcarding: Claude MAX is ON — its blanket Bash(*) layer covers every ' +
-        'project-local entry, so draining would empty that file and MAX-off would not bring it ' +
-        'back. Turn MAX off first.');
+        'permission-wildcarding: legacy Bash(*) and PowerShell(*) grants cover every ' +
+        'project-local entry, so draining could empty that file. Remove the legacy ' +
+        'configuration first.');
     }
     dashboard?.refresh();
     return;
@@ -3264,8 +3071,6 @@ class WildcardingViewProvider {
         case 'autoLearnReview': vscode.commands.executeCommand('permission-wildcarding.autoLearnReview'); break;
         case 'autoLearnUndo': vscode.commands.executeCommand('permission-wildcarding.autoLearnUndo'); break;
         case 'autoLearnWhy': vscode.commands.executeCommand('permission-wildcarding.autoLearnWhy'); break;
-        case 'toggleMax':    vscode.commands.executeCommand('permission-wildcarding.toggleMax'); break;
-        case 'toggleCodexMax': vscode.commands.executeCommand('permission-wildcarding.toggleCodexMax'); break;
         case 'rebuildRecall': vscode.commands.executeCommand('permission-wildcarding.rebuildRecall'); break;
         case 'lintMemory':   vscode.commands.executeCommand('permission-wildcarding.lintMemory'); break;
         case 'drainLocal':   vscode.commands.executeCommand('permission-wildcarding.drainLocal'); break;
@@ -3365,8 +3170,9 @@ class WildcardingViewProvider {
     // readSettings() returned on any failure, so the work-up below is unchanged.
     // Mapping every non-present state to null matches it too: absent hands back `{}`
     // and a JSON array or scalar hands back null, and all three uses below
-    // (`settings?.permissions?.allow`, isMaxOn, maxLayers) are optional-chained and
-    // Array-guarded, so `{}`, `null` and a non-object all read the same.
+    // The remaining settings read (`settings?.permissions?.allow`) is
+    // optional-chained and Array-guarded, so `{}`, `null` and a non-object all
+    // read the same.
     let settingsState;
     let settings = null;
     try {
@@ -3416,8 +3222,7 @@ class WildcardingViewProvider {
       type: 'data',
       // Three states, not existsSync. A corrupt or mid-write settings.json EXISTS, so the
       // pill read a green "Active" while every writer was throwing SETTINGS_UNREADABLE.
-      // This is the mirror of the bug already fixed in toggleMax, and readSettingsState
-      // was built for exactly this distinction. `active` stays a boolean for the two
+      // readSettingsState was built for exactly this distinction. `active` stays a boolean for the two
       // callers that only care whether writes can proceed; settingsState carries the third.
       active: settingsState === 'present',
       settingsState,
@@ -3431,27 +3236,6 @@ class WildcardingViewProvider {
       backupCount: backupCount(),
       wildcards,
       lastRun,
-      max: { on: isMaxOn(settings), layers: maxLayers(settings) },
-      codexMax: (() => {
-        const state = frictionState();
-        const bundle = readEnterpriseBundle();
-        const target = targetApproval(bundle);
-        // `stale` travels with `restricted` because the card has to be able to
-        // say WHEN the cap was cached. A restriction read off an expired cache
-        // is still shown, but as a cache and a date rather than as today's
-        // policy, and the button stays clickable behind a confirmation.
-        const freshness = bundleFreshness(bundle);
-        return {
-          on: state.codex === 'max',
-          absent: state.codex === 'absent',
-          approval: state.codexApproval,
-          sandbox: state.codexSandbox,
-          restricted: target.restricted,
-          allowed: target.allowed,
-          stale: freshness.expired,
-          cachedAt: freshness.cachedAt,
-        };
-      })(),
       autoLearn,
       memory: memoryCardData(memory),
       local: localCardData(),
@@ -3496,27 +3280,25 @@ class WildcardingViewProvider {
   .dot.idle { background: var(--vscode-charts-yellow, #d29922); box-shadow: 0 0 6px var(--vscode-charts-yellow, #d29922); }
   .dot.on { background: var(--vscode-charts-red, #f85149); box-shadow: 0 0 6px var(--vscode-charts-red, #f85149); }
   .dot.blocked { background: var(--vscode-charts-red, #f85149); box-shadow: 0 0 6px var(--vscode-charts-red, #f85149); }
-  #codexMaxCard.on, #maxCard.on { border-color: var(--vscode-charts-red, #f85149); }
-  button.bypass { width: 100%; padding: 7px; border-radius: 5px; cursor: pointer; margin-top: 8px;
+  button.managed-action { width: 100%; padding: 7px; border-radius: 5px; cursor: pointer; margin-top: 8px;
           font-size: 12px; font-weight: 600;
           border: 1px solid var(--vscode-button-border, var(--vscode-widget-border, transparent));
           background: var(--vscode-button-secondaryBackground, transparent);
           color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); }
-  button.bypass.on { background: var(--vscode-charts-red, #f85149); color: #fff; border-color: transparent; }
-  /* Guidance ON is the state you want, not a danger state, so it must not inherit the red
-     bypass look — red there says "you are exposed", which is backwards. Quiet it right
-     down: the remove action should not read as the card's primary call to action. */
-  button.bypass.managed, button.bypass.managed.on {
+  button.managed-action.on { background: var(--vscode-charts-red, #f85149); color: #fff; border-color: transparent; }
+  /* Guidance ON is the resting state. Quiet the remove action so it does not
+     read as the card's primary call to action. */
+  button.managed-action.managed, button.managed-action.managed.on {
     background: transparent; color: var(--vscode-descriptionForeground);
     border-color: var(--vscode-panel-border); font-weight: 400;
   }
-  button.bypass.managed:hover:not(:disabled) {
+  button.managed-action.managed:hover:not(:disabled) {
     color: var(--vscode-foreground); border-color: var(--vscode-focusBorder);
   }
-  button.bypass:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
-  button.bypass.on:hover { filter: brightness(1.1); }
-  button.bypass:disabled { opacity: 0.5; cursor: not-allowed; }
-  button.bypass:disabled:hover { background: var(--vscode-button-secondaryBackground, transparent); filter: none; }
+  button.managed-action:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
+  button.managed-action.on:hover { filter: brightness(1.1); }
+  button.managed-action:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.managed-action:disabled:hover { background: var(--vscode-button-secondaryBackground, transparent); filter: none; }
   .muted { color: var(--vscode-descriptionForeground); font-size: 11px; }
   .sub { margin-top: 4px; }
   .stats { display: flex; gap: 10px; }
@@ -3560,9 +3342,8 @@ class WildcardingViewProvider {
   .buttonrow button { margin: 0; }
 
   /* ── layout: one hero, everything else a stateful row ──────────────────────
-     Nine equally-weighted cards meant nothing was weighted: a destructive MAX
-     toggle rendered exactly like a token gauge. So exactly one card keeps card
-     chrome, and every secondary feature becomes a single collapsed row whose
+     Exactly one card keeps card chrome, and every secondary feature becomes a
+     single collapsed row whose
      CURRENT STATE is on the right-hand side — the point being that you never
      expand a row just to find out where it stands. */
   .hero { background: var(--vscode-editorWidget-background, rgba(127,127,127,0.08));
@@ -3598,9 +3379,6 @@ class WildcardingViewProvider {
      stops drawing itself as a card. */
   .row .card { background: none; border: none; border-radius: 0; padding: 0; margin: 0 0 8px; }
   .row .card:last-child { margin-bottom: 0; }
-  /* MAX-on has to stay loud, and a nested card has no border left to colour. */
-  .row #maxCard.on, .row #codexMaxCard.on {
-    border-left: 2px solid var(--vscode-charts-red, #f85149); padding-left: 8px; }
   /* The glow was 6px on every one of eleven dots. Kept as a plain 8px pip. */
   .dot { box-shadow: none; width: 8px; height: 8px; }
   .row .status { font-weight: 400; font-size: 12px; }
@@ -3647,25 +3425,6 @@ class WildcardingViewProvider {
     </div>
   </section>
 
-  <section class="row">
-    <div class="rowhead" data-row="max">
-      <span class="chev">▸</span><span class="glyph">↯</span>
-      <span class="rowname">MAX modes</span><span class="rowstate" id="stMax"></span>
-    </div>
-    <div class="rowbody" id="bodyMax" hidden>
-      <div class="card" id="maxCard">
-        <div class="status"><span id="mdot" class="dot idle"></span><span id="mtext">Claude MAX: OFF</span></div>
-        <div class="muted sub" id="msub">Claude · skip every prompt — allow-wildcards + approve hook</div>
-        <button class="bypass" id="maxBtn">⚡ Turn Claude MAX ON</button>
-      </div>
-      <div class="card" id="codexMaxCard">
-        <div class="status"><span id="cxdot" class="dot idle"></span><span id="cxtext">Codex MAX: OFF</span></div>
-        <div class="muted sub" id="cxsub">Codex · approval_policy=never — sandbox stays as the floor</div>
-        <button class="bypass" id="codexMaxBtn">⚡ Turn Codex MAX ON</button>
-      </div>
-    </div>
-  </section>
-
   <section class="row" id="localCard" style="display:none">
     <div class="rowhead" data-row="local">
       <span class="chev">▸</span><span class="glyph">▤</span>
@@ -3694,7 +3453,7 @@ class WildcardingViewProvider {
       <div class="card">
         <div class="status"><span id="gddot" class="dot idle"></span><span id="gdtext">Shell-style guidance</span></div>
         <div class="muted sub" id="gdsub"></div>
-        <button class="bypass" id="guidanceBtn">Add to ~/.claude/CLAUDE.md</button>
+        <button class="managed-action" id="guidanceBtn">Add to ~/.claude/CLAUDE.md</button>
       </div>
     </div>
   </section>
@@ -3708,7 +3467,7 @@ class WildcardingViewProvider {
       <div class="card">
         <div class="status"><span id="mgdot" class="dot idle"></span><span id="mgtext">Memory gates</span></div>
         <div class="muted sub" id="mgsub"></div>
-        <button class="bypass" id="gatesBtn">Compile and add</button>
+        <button class="managed-action" id="gatesBtn">Compile and add</button>
       </div>
     </div>
   </section>
@@ -3801,17 +3560,6 @@ class WildcardingViewProvider {
     else if (counts.safe) setState('stAutoLearn', counts.safe + ' safe to apply', 'warn');
     else setState('stAutoLearn', String(a.mode || 'recommend'));
 
-    const cOn = !!(d.max && d.max.on);
-    const xOn = !!(d.codexMax && d.codexMax.on);
-    if (cOn && xOn) setState('stMax', 'both ON', 'hot');
-    else if (cOn) setState('stMax', 'Claude ON', 'hot');
-    else if (xOn) setState('stMax', 'Codex ON', 'hot');
-    // A cap off an expired cache is reported as expired here too. "Codex capped"
-    // states a live org restriction, and this row is the summary most people read.
-    else if (d.codexMax && d.codexMax.restricted && d.codexMax.stale) setState('stMax', 'off · Codex cap expired', 'warn');
-    else if (d.codexMax && d.codexMax.restricted) setState('stMax', 'off · Codex capped');
-    else setState('stMax', 'both off');
-
     const g = d.guidance || {};
     setState('stGuidance', !g.on ? 'not installed' : (g.current ? 'on' : 'older wording'),
       !g.on || g.current ? null : 'warn');
@@ -3845,7 +3593,7 @@ class WildcardingViewProvider {
     // renderLocal defines it, so the row and the card can never disagree.
     const l = d.local || {};
     const pending = (l.promote || 0) + (l.prune || 0);
-    if (l.blocked) setState('stLocal', 'blocked by MAX', 'warn');
+    if (l.blocked) setState('stLocal', 'legacy blanket detected', 'warn');
     else if (!l.trusted) setState('stLocal', 'workspace not trusted');
     else if (pending) setState('stLocal', pending + ' to drain', 'warn');
     else setState('stLocal', 'drained');
@@ -3861,62 +3609,6 @@ class WildcardingViewProvider {
     if (s < 3600) return 'last wildcarded: ' + Math.round(s/60) + 'm ago';
     return 'last wildcarded: ' + Math.round(s/3600) + 'h ago';
   }
-
-  function renderMax(m) {
-    const on = !!(m && m.on);
-    const L = (m && m.layers) || {};
-    $('mdot').className = 'dot' + (on ? ' on' : ' idle');
-    $('mtext').textContent = on ? 'Claude MAX: ON — all Claude prompts skipped' : 'Claude MAX: OFF';
-    $('msub').textContent = on
-      ? 'Claude · layers: allow-wildcards ' + (L.allow ? '✓' : '✕') + ', approve-hook ' + (L.hook ? '✓' : '✕') + ' · deny still applies'
-      : 'Claude · skip every prompt — allow-wildcards + approve hook';
-    $('maxBtn').textContent = on ? '⚡ Turn Claude MAX OFF' : '⚡ Turn Claude MAX ON';
-    $('maxBtn').className = 'bypass' + (on ? ' on' : '');
-    $('maxCard').className = 'card' + (on ? ' on' : '');
-  }
-
-  function renderCodexMax(c) {
-    const on = !!(c && c.on);
-    const absent = !!(c && c.absent);
-    // "never" is the only approval_policy that skips every prompt. Where the org
-    // forbids it, Codex MAX has no on-state to reach, so it is unavailable rather
-    // than off — and the button is disabled, because clicking it can only write
-    // the org default (which the card would otherwise misread as "MAX on").
-    const capped = !on && !absent && !!(c && c.restricted);
-    // …unless the cap was read off an EXPIRED cache, which is not evidence about
-    // today's policy. Then the switch is available behind a confirmation naming
-    // the cache's date, and this card must not claim the cap is current: on this
-    // box an eighteen-day-dead one-hour TTL kept the button greyed out while
-    // Codex itself had been accepting "never" for a week.
-    const stale = capped && !!c.stale;
-    const restricted = capped && !stale;
-    const cached = (c && c.cachedAt) || 'an unrecorded date';
-    $('cxdot').className = 'dot' + (on ? ' on' : restricted ? ' blocked' : ' idle');
-    $('cxtext').textContent = absent
-      ? 'Codex MAX: no config.toml'
-      : on ? 'Codex MAX: ON — all Codex prompts skipped'
-      : restricted ? 'Codex MAX: unavailable — org policy caps approval'
-      : stale ? 'Codex MAX: OFF — capped by an EXPIRED policy cache'
-      : 'Codex MAX: OFF';
-    // Always name the remaining floor: this switch never touches the sandbox.
-    const allowed = (c && c.allowed && c.allowed.length) ? c.allowed.join(', ') : 'the org-permitted set';
-    $('cxsub').textContent = absent
-      ? 'Codex · no ~/.codex/config.toml found'
-      : on
-        ? 'Codex · approval_policy=' + (c.approval || '?') + (c.restricted && !c.stale ? ' (org policy caps this)' : '') + ' · ' + (c.sandbox || 'sandbox') + ' sandbox still blocks network + out-of-workspace writes'
-      : restricted
-        ? "Codex · org allows only [" + allowed + "], so 'never' (skip all prompts) can't be set. Current approval_policy=" + (c.approval || 'default') + '.'
-      : stale
-        ? 'Codex · the cap allowing only [' + allowed + '] comes from a cache dated ' + cached
-          + ', which has expired and may no longer apply. Turning MAX on asks first, then sets '
-          + "approval_policy='never'. Current approval_policy=" + (c.approval || 'default') + '.'
-        : 'Codex · approval_policy=' + (c.approval || 'default') + ' — sandbox stays as the floor';
-    $('codexMaxBtn').textContent = on ? '⚡ Turn Codex MAX OFF' : '⚡ Turn Codex MAX ON';
-    $('codexMaxBtn').className = 'bypass' + (on ? ' on' : '');
-    $('codexMaxBtn').disabled = absent || restricted;
-    $('codexMaxCard').className = 'card' + (on ? ' on' : '');
-  }
-
 
   function renderAutoLearn(a) {
     a = a || {};
@@ -4026,11 +3718,11 @@ class WildcardingViewProvider {
     const pending = l.promote + l.prune;
     $('locdot').className = 'dot' + (pending && l.trusted && !l.blocked ? '' : ' idle');
     $('loctext').textContent = l.blocked
-      ? 'Project-local approvals — blocked by MAX'
+      ? 'Project-local approvals - legacy blanket detected'
       : (pending ? 'Project-local approvals: ' + pending + ' to drain' : 'Project-local approvals: drained');
     $('loctext').style.fontWeight = '600';
     $('locsub').textContent = l.blocked
-      ? 'Claude MAX covers every local entry — turn MAX off before draining'
+      ? 'Legacy Bash(*) and PowerShell(*) grants cover every local entry. Remove the legacy configuration before draining.'
       : (!l.trusted ? 'workspace not trusted — read-only'
         : (l.folders > 1 ? l.folders + ' folders · ' + l.file : l.file)
           + (l.enabled ? '' : ' · auto-drain off'));
@@ -4114,8 +3806,6 @@ class WildcardingViewProvider {
     // rather than as 'v' or 'undefined'.
     $('version').textContent = d.version ? 'v' + d.version : '';
     $('watching').textContent = 'watching ' + d.settingsPath + (d.codexWatching ? ' + Codex history' : '');
-    renderMax(d.max);
-    renderCodexMax(d.codexMax);
     renderAutoLearn(d.autoLearn);
     renderLocal(d.local);
     renderGuidance(d.guidance);
@@ -4185,8 +3875,6 @@ class WildcardingViewProvider {
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
   $('restore').addEventListener('click', () => vscode.postMessage({ type: 'restore' }));
   $('rebuild').addEventListener('click', () => vscode.postMessage({ type: 'rebuildRecall' }));
-  $('maxBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleMax' }));
-  $('codexMaxBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleCodexMax' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));

@@ -5,14 +5,6 @@ const os = require('os');
 const path = require('path');
 
 const { ruleMatches, sameRule } = require('./permission-match');
-// NOTE: `./managed-policy` is deliberately NOT required here. It is reachable from
-// exactly one function, maxLayers(), and requiring it at module scope cost the
-// PostToolUse hook ~0.9 ms on EVERY tool call for a module the hook never reaches.
-// NOT 2.3 ms, which is what this line used to say: that figure came from a stub
-// harness that had already pre-cached permission-match, so it measured this file's
-// marginal cost rather than the chain's. The measurement history and the two
-// independent runs that settled it are written out at the lazy require inside
-// maxLayers. Same reasoning for the discipline itself at bin/wildcard-perms:11-26.
 
 // Rename codes that are transient on Windows: another process (Claude Code
 // writing settings.json, Defender/Search indexer scanning the temp file, or a
@@ -229,8 +221,7 @@ function isCoveredBy(specific, wildcard) {
 //
 // THOSE ARE THE "BEFORE" NUMBERS AND THEY ARE NO LONGER WHAT THIS COSTS. With the
 // index in place, measured 2026-09-10 cold in a fresh process: 8.1 ms at 430
-// entries, and ~9.6 ms for enableMaxAllow's pass over the allow list plus the
-// blanket set. Left in place because they are the justification for the index
+// entries. Left in place because they are the justification for the index
 // existing, but labelled — an unlabelled 52-254 ms already misled a reviewer into
 // sizing a concurrency window at 60 ms when it is 10 ms, which changed the design
 // they recommended.
@@ -513,7 +504,7 @@ function processAllowList(allows) {
 // touch (by Claude Code's design, not ours): your `permissions.deny` rules still
 // BLOCK matching commands, and Claude Code's hard circuit breakers (rm -rf / and
 // ~ removals, incl. command-substitution forms) always fire. Those are the only
-// things left standing at max, and both are safety floors rather than prompts.
+// things left standing under bypass, and both are safety floors rather than prompts.
 //
 // defaultMode is read at session start / context rollover, so a flip takes full
 // effect on the next Claude Code window reload rather than instantly mid-turn.
@@ -543,15 +534,13 @@ function isBypassOn(settings) {
   return currentMode(settings) === BYPASS_MODE;
 }
 
-// NOTE: a second `function withMode` used to be declared further down this file,
-// and because both were module-scope function declarations the LATER one won for
-// every caller — including applyBypass below, which reads as though it uses the
-// one that stood here. The two were not equivalent: this one always wrote
-// `defaultMode`, the surviving one deletes the key when mode is null "rather
-// than writing a value the user never had". So bypass-off has always taken the
-// deleting behaviour, which is the correct one, decided by declaration order
-// rather than by choice. The dead declaration is removed; the survivor and its
-// comment are the single definition now.
+// `mode === null` removes the key rather than writing a value the user never had.
+function withMode(settings, mode) {
+  const permissions = { ...(settings?.permissions ?? {}) };
+  if (mode === null || mode === undefined) delete permissions.defaultMode;
+  else permissions.defaultMode = mode;
+  return { ...settings, permissions };
+}
 
 // Compute the settings object for turning bypass on/off. Side effect: stashes the
 // previous mode (on) or reads it back (off) via the sidecar so the toggle round-
@@ -570,340 +559,9 @@ function applyBypass(settings, on) {
   return { changed: true, from, to, settings: withMode(settings, to) };
 }
 
-// ── MAX mode: "skip everything" without touching defaultMode ────────────────────
-//
-// Two INDEPENDENT layers, so they fail in different ways and cover each other:
-//
-//   Layer 1 — blanket allow-list wildcards. Inject Bash(*)/PowerShell(*) + the
-//     file/web tool-wide grants + a per-server mcp__<server>__* for every MCP
-//     server already seen in the allow list. This is the normal, sanctioned
-//     permission path, so it keeps working even where an org disables user hooks
-//     (allowManagedHooksOnly) and cannot be shut off by disableBypassPermissionsMode.
-//     Bash(*) matches the WHOLE command string, so compound / $(...) / subshell
-//     cases clear too. Gap: allow can't express a global mcp__*, so a brand-new
-//     MCP server (or a new tool type) isn't covered by this layer alone.
-//
-//   Layer 2 — a PreToolUse auto-approve hook (matcher "*") that returns
-//     permissionDecision:"allow" for every tool call. Covers ALL tools, including
-//     MCP servers you've never approved and future tool types — closing Layer 1's
-//     gap. Being a user hook, it's the layer an org "managed hooks only" policy
-//     would disable, which is exactly why Layer 1 exists as the fallback.
-//
-// Neither layer touches permissions.deny or Claude Code's hard circuit breakers:
-// deny ALWAYS wins (a hook "allow" cannot override a deny rule), so the killswitch
-// holds at max. Enabling MAX snapshots the pre-MAX allow list so OFF restores it
-// exactly. Like all hook/mode changes, the approve hook loads at session start, so
-// a flip takes effect on the next window reload.
-
-// Layer 1 — blanket allow set (tool-wide grants that are stable under the wildcarder).
-const MAX_ALLOW_CORE = ['Bash(*)', 'PowerShell(*)', 'Read(*)', 'Edit', 'Write', 'WebFetch(*)', 'WebSearch'];
-const MAX_MARKERS = ['Bash(*)', 'PowerShell(*)']; // presence of both == Layer 1 active
-const MAX_STATE_FILE = path.join(os.homedir(), '.claude', 'backups', 'wildcarding-max.json');
-
-// Layer 2 — the auto-approve hook. Written to a stable, location-independent path
-// so the CLI and the installed VSIX register the identical hook. Extensionless
-// scripts have no Windows association, so the command is `node "<path>"`.
-const APPROVE_DIR     = path.join(os.homedir(), '.claude', 'wildcarding');
-const APPROVE_SCRIPT  = path.join(APPROVE_DIR, 'approve-all.js');
-
-// Claude Code hands a hook's `command` to a SHELL — `/bin/sh -c <command>` on macOS
-// and Linux — so the path between those double quotes is shell source, not an
-// argument, and a home directory is user-controlled text. `/home/a"b` closes the
-// quote early and emits a string that does not parse; `/home/$USER.old` and a
-// directory holding a backtick are worse, because they parse fine and run something
-// else. This is the string written into the user's own settings.json as a
-// PreToolUse hook, so it fires before every tool call for as long as MAX is on.
-//
-// Inside sh's double quotes exactly four characters keep a meaning — \ " $ ` — and
-// a backslash in front is the escape for all four. Nothing else is touched, which
-// is why this is not a general-purpose shell quoter.
-//
-// Windows keeps the plain form deliberately. `"` is not a legal character in a
-// Windows path, so the defect being escaped here cannot arise; and Claude Code
-// chooses between Git Bash, pwsh and cmd.exe at run time, which want three
-// different escapes, so any choice made here would be wrong under two of them. The
-// backslash-to-slash rewrite is Windows-only for the same reason it was written:
-// `\` is the separator there, while on POSIX it is an ordinary filename character
-// that this used to rewrite into a directory boundary, aiming the hook at a path
-// that does not exist.
-//
-// Unregistration is unaffected: isApproveHookOn and unregisterApproveHook both match
-// on APPROVE_MARKER, a substring of the filename, never on this full string.
-function approveCommandFor(scriptPath, platform = process.platform) {
-  const inner = platform === 'win32'
-    ? String(scriptPath).replace(/\\/g, '/')
-    : String(scriptPath).replace(/[\\"$`]/g, (character) => `\\${character}`);
-  return `node "${inner}"`;
-}
-
-const APPROVE_COMMAND = approveCommandFor(APPROVE_SCRIPT);
-const APPROVE_MARKER  = 'approve-all'; // substring identifying our hook command
-
-const APPROVE_SCRIPT_SOURCE = `'use strict';
-// permission-wildcarding MAX mode — PreToolUse auto-approve hook.
-// Returns permissionDecision:"allow" for every tool call, skipping the prompt.
-// SAFE BY DESIGN: Claude Code still enforces permissions.deny and its hard
-// circuit breakers regardless of this decision — a hook "allow" cannot override
-// a deny rule. Managed by permission-wildcarding; remove via MAX mode OFF.
-let done = false;
-function emit() {
-  if (done) return; done = true;
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'allow',
-      permissionDecisionReason: 'permission-wildcarding MAX mode',
-    },
-  }));
-  process.exit(0);
-}
-// Drain stdin (Claude Code sends tool context we don't need) then emit; a short
-// fallback timer guarantees we answer even if 'end' never arrives.
-try { process.stdin.resume(); process.stdin.on('data', () => {}); process.stdin.on('end', emit); process.stdin.on('error', emit); } catch { emit(); }
-setTimeout(emit, 800);
-`;
-
-function readMaxState() {
-  try { return JSON.parse(fs.readFileSync(MAX_STATE_FILE, 'utf8')) || {}; }
-  catch { return {}; }
-}
-
-// Returns whether the snapshot actually landed. It used to swallow the failure
-// and return nothing, and its "best-effort" comment was borrowed from
-// writeBypassState below — where a lost stash genuinely only degrades the OFF
-// restore to FALLBACK_MODE. Here the consequence is total: enableMaxAllow goes on
-// to prune every specific entry under Bash(*), and with no snapshot to read back
-// disableMaxAllow computes `restored = kept`, leaving the user the 7 blanket
-// entries and nothing else. `readMaxState` returns {} for both "never written"
-// and "corrupt", so that call site cannot tell the difference either.
-function writeMaxState(state) {
-  try {
-    fs.mkdirSync(path.dirname(MAX_STATE_FILE), { recursive: true });
-    writeFileAtomicSync(MAX_STATE_FILE, JSON.stringify(state, null, 2) + '\n');
-    return true;
-  } catch { return false; }
-}
-
-// Servers to blanket-wildcard, derived from mcp__<server>__… entries already in
-// the allow list. `mcp__` is the prefix; the server name runs to the next `__`.
-function detectMcpServers(allow) {
-  const servers = new Set();
-  for (const p of Array.isArray(allow) ? allow : []) {
-    const m = /^mcp__(.+?)__/.exec(p);
-    if (m) servers.add(m[1]);
-  }
-  return [...servers];
-}
-
-function buildMaxAllowSet(allow) {
-  return [...MAX_ALLOW_CORE, ...detectMcpServers(allow).map((s) => `mcp__${s}__*`)];
-}
-
-function withAllow(settings, allow) {
-  return { ...settings, permissions: { ...(settings?.permissions ?? {}), allow } };
-}
-
-// Auto mode routes every decision through Claude Code's classifier, and it drops
-// any allow entry that would bypass that classifier. Measured against 2.1.238 and
-// 2.1.245: in auto mode `Bash(*)`, `PowerShell(*)` and every interpreter root
-// (bash, python, node, npx, ssh, xargs, lua, and their PowerShell twins) load with
-// "Ignoring dangerous permission … (bypasses classifier)"; in default mode the
-// same list loads intact.
-//
-// So MAX cannot keep its promise in auto mode. Worse, it would still collapse the
-// specific entries it replaced, leaving a shorter allow list *and* no blanket to
-// stand in for it — strictly worse than never touching MAX. The mode therefore
-// travels with the toggle, and comes back when MAX goes off.
-const CLASSIFIER_MODE = 'auto';
-const MAX_MODE = 'default';
-
-function classifierModeOn(settings) {
-  return settings?.permissions?.defaultMode === CLASSIFIER_MODE;
-}
-
-// `mode === null` removes the key rather than writing a value the user never had.
-function withMode(settings, mode) {
-  const permissions = { ...(settings?.permissions ?? {}) };
-  if (mode === null || mode === undefined) delete permissions.defaultMode;
-  else permissions.defaultMode = mode;
-  return { ...settings, permissions };
-}
-
-function isMaxAllowOn(settings) {
-  const allow = settings?.permissions?.allow;
-  return Array.isArray(allow) && MAX_MARKERS.every((m) => allow.includes(m));
-}
-
-// Layer 1 enable: snapshot the current allow list, then inject the blanket set
-// (processAllowList prunes the now-redundant specific entries under Bash(*)).
-function enableMaxAllow(settings) {
-  if (isMaxAllowOn(settings)) return { changed: false, settings };
-  const current = Array.isArray(settings?.permissions?.allow) ? settings.permissions.allow : [];
-  const previousMode = settings?.permissions?.defaultMode ?? null;
-  // Refuse rather than proceed. The next line prunes every specific entry the
-  // blanket set covers, and only this snapshot can bring them back — so a
-  // silently failed write turns MAX-on into permanent loss of the whole allow
-  // list. Reported as a reason the caller can surface, not thrown, because every
-  // caller of applyMax already renders a `{ changed, ... }` result.
-  if (!writeMaxState({ allowSnapshot: current, defaultMode: previousMode, savedAt: new Date().toISOString() })) {
-    return { changed: false, settings, error: 'max-snapshot-failed' };
-  }
-  const merged = processAllowList([...new Set([...current, ...buildMaxAllowSet(current)])]);
-  const switchedMode = classifierModeOn(settings);
-  const next = switchedMode
-    ? withMode(withAllow(settings, merged), MAX_MODE)
-    : withAllow(settings, merged);
-  return { changed: true, settings: next, switchedMode: switchedMode ? CLASSIFIER_MODE : null };
-}
-
-// Layer 1 disable: restore the pre-MAX snapshot *and* keep anything granted
-// while MAX was on — an Auto Learn application, or a permission Claude Code
-// persisted from a real approval. Restoring the snapshot alone silently dropped
-// those, which also left the Auto Learn claims registry describing entries that
-// no longer existed.
-//
-// A plain set-difference cannot replace the snapshot: enableMaxAllow already
-// pruned the specific entries away under Bash(*), so the originals only survive
-// in the snapshot. Union the two — snapshot order first, later grants appended.
-function disableMaxAllow(settings) {
-  if (!isMaxAllowOn(settings)) return { changed: false, settings };
-  const current = Array.isArray(settings?.permissions?.allow) ? settings.permissions.allow : [];
-  const state = readMaxState();
-  const snap = state.allowSnapshot;
-  const blanket = new Set(buildMaxAllowSet(current));
-  const kept = current.filter((p) => !blanket.has(p));
-  const restored = Array.isArray(snap) ? [...new Set([...snap, ...kept])] : kept;
-  // Hand the permission mode back too, but only if it is still the one MAX put
-  // there. A mode the user changed by hand while MAX was on is theirs to keep.
-  const restoreMode = Object.prototype.hasOwnProperty.call(state, 'defaultMode')
-    && settings?.permissions?.defaultMode === MAX_MODE;
-  const next = restoreMode
-    ? withMode(withAllow(settings, restored), state.defaultMode)
-    : withAllow(settings, restored);
-  return { changed: true, settings: next, restoredMode: restoreMode ? state.defaultMode : null };
-}
-
-// Write Layer 2's hook script to its stable path (idempotent).
-function ensureApproveScript() {
-  try {
-    fs.mkdirSync(APPROVE_DIR, { recursive: true });
-    fs.writeFileSync(APPROVE_SCRIPT, APPROVE_SCRIPT_SOURCE, 'utf8');
-    return true;
-  } catch { return false; }
-}
-
-function isApproveHookOn(settings) {
-  const entries = settings?.hooks?.PreToolUse;
-  if (!Array.isArray(entries)) return false;
-  return entries.some((e) =>
-    Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(APPROVE_MARKER))
-  );
-}
-
-// Layer 2 enable: write the script and register a matcher:"*" PreToolUse hook.
-function registerApproveHook(settings) {
-  if (isApproveHookOn(settings)) return { changed: false, settings };
-  ensureApproveScript();
-  const hooks = { ...(settings?.hooks ?? {}) };
-  const pre = Array.isArray(hooks.PreToolUse) ? [...hooks.PreToolUse] : [];
-  pre.push({ matcher: '*', hooks: [{ type: 'command', command: APPROVE_COMMAND }] });
-  hooks.PreToolUse = pre;
-  return { changed: true, settings: { ...settings, hooks } };
-}
-
-// Layer 2 disable: drop any PreToolUse entry that references our approve hook,
-// and prune emptied entries. Leaves every other PreToolUse hook untouched.
-function unregisterApproveHook(settings) {
-  if (!isApproveHookOn(settings)) return { changed: false, settings };
-  const hooks = { ...(settings?.hooks ?? {}) };
-  const pre = (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : [])
-    .map((e) => ({ ...e, hooks: (e.hooks ?? []).filter((h) => !(typeof h?.command === 'string' && h.command.includes(APPROVE_MARKER))) }))
-    .filter((e) => Array.isArray(e.hooks) && e.hooks.length > 0);
-  if (pre.length) hooks.PreToolUse = pre; else delete hooks.PreToolUse;
-  return { changed: true, settings: { ...settings, hooks } };
-}
-
-// MAX is "on" if either layer is active (a partial state still reads as on so the
-// toggle cleans up both). Fully on == both layers.
-function isMaxOn(settings) {
-  return isApproveHookOn(settings) || isMaxAllowOn(settings);
-}
-
-// MAX mode has two layers, and the hook layer can be registered yet never run:
-// with `allowManagedHooksOnly` set, a user hook fires only on an event the
-// managed policy itself defines, and a policy that defines only PostToolUse
-// silently drops a PreToolUse hook. Reporting `hook: true` in that case would
-// claim a control that is not running, so the state is named instead.
-//
-// `hookBlocked` is a policy declaration rather than an observation. Enforcement
-// has changed across policy versions, so confirm with a canary before relying
-// on it in either direction.
-function maxLayers(settings, options = {}) {
-  // Required here, not at module scope. This is the ONLY function in the file that
-  // touches managed policy, and nothing on the hook's common path calls it — the
-  // callers are `--max status` and three sites in the extension, which is a
-  // long-lived process where the load is paid once.
-  //
-  // Worth ~0.9 ms per tool call. That figure has now been measured four times and
-  // the first three were all wrong: 0.61 ms originally recorded, then 2.3 ms from
-  // a stub harness that also pre-cached permission-match (so it measured this
-  // file's marginal cost, not the chain's), then 1.27 ms. Two independent
-  // second-party runs settle it — 30 interleaved repo-resident pairs at 0.889 ms
-  // (min 0.858) and 40 pairs across materialized trees at 1.01 ms p50/min.
-  //
-  // The lesson is the method, not the number: only a cold measurement in fresh
-  // interleaved processes, against a purpose-built variant with the change
-  // removed, has ever been right in this project.
-  //
-  // At the top of the function rather than inside the `else` below: readPolicy is
-  // conditional, but hookEventAllowed two lines down is not.
-  const { readPolicy, hookEventAllowed } = require('./managed-policy');
-  const policy = options.managedPolicy !== undefined
-    ? options.managedPolicy
-    : readPolicy({ home: options.home, policyPath: options.managedPolicyPath });
-  const hook = isApproveHookOn(settings);
-  const permitted = hookEventAllowed(policy, 'PreToolUse');
-  return {
-    allow: isMaxAllowOn(settings),
-    hook,
-    hookBlocked: hook && !permitted,
-    hookEventPermitted: permitted,
-    policyPresent: Boolean(policy && policy.present),
-  };
-}
-
-// Turn both layers on/off in a single settings transform.
-function applyMax(settings, on) {
-  let s = settings, changed = false, switchedMode = null, restoredMode = null, error = null;
-  // Returns whether the sequence may continue. A refusal has to STOP it, not
-  // merely contribute nothing: MAX-on that went on to register the approve hook
-  // after the allow snapshot failed would report a layer it never established,
-  // which is precisely the failure maxLayers' own comment warns about — "claiming
-  // a control that is not running".
-  const step = (res) => {
-    if (res.error) { error = res.error; return false; }
-    if (!res.changed) return true;
-    s = res.settings; changed = true;
-    if (res.switchedMode) switchedMode = res.switchedMode;
-    if (res.restoredMode !== undefined && res.restoredMode !== null) restoredMode = res.restoredMode;
-    return true;
-  };
-  if (on) {
-    if (step(enableMaxAllow(s))) step(registerApproveHook(s));
-  } else {
-    if (step(disableMaxAllow(s))) step(unregisterApproveHook(s));
-  }
-  return { changed, settings: s, switchedMode, restoredMode, ...(error ? { error } : {}) };
-}
-
 module.exports = {
   generalizePermission, mineWildcard, BASH_SCRIPT_KEYWORDS,
   isCoveredBy, createCoverIndex, prunePermissions, processAllowList, writeFileAtomicSync,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   BYPASS_MODE, BYPASS_STATE_FILE, currentMode, isBypassOn, applyBypass, readBypassState,
-  CLASSIFIER_MODE, MAX_MODE, classifierModeOn,
-  MAX_ALLOW_CORE, MAX_MARKERS, MAX_STATE_FILE, APPROVE_SCRIPT, APPROVE_COMMAND, approveCommandFor,
-  detectMcpServers, buildMaxAllowSet, isMaxAllowOn, enableMaxAllow, disableMaxAllow,
-  ensureApproveScript, isApproveHookOn, registerApproveHook, unregisterApproveHook,
-  isMaxOn, maxLayers, applyMax,
 };

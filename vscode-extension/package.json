@@ -1,7 +1,7 @@
 {
   "name": "permission-wildcarding",
   "displayName": "Permission Wildcarding",
-  "description": "Reduces Claude Code and Codex approval friction. Generalizes approved permissions into command-family wildcards on change, learns from Claude Code and Codex history (Auto Learn), recommends deterministic safe policy, writes separate Claude and validated Codex outputs, drains project-local approvals into user scope, installs a wildcardable shell style for the agent, and includes memory-index diagnostics and MAX/bypass controls.",
+  "description": "Reduces Claude Code and Codex approval friction. Generalizes approved permissions into command-family wildcards on change, learns from Claude Code and Codex history (Auto Learn), recommends deterministic safe policy, writes separate Claude and validated Codex outputs, drains project-local approvals into user scope, installs a wildcardable shell style for the agent, and includes memory-index diagnostics.",
   "version": "1.5.1",
   "publisher": "local",
   "license": "MIT",
@@ -97,16 +97,6 @@
         "icon": "$(lightbulb)"
       },
       {
-        "command": "permission-wildcarding.toggleMax",
-        "title": "Permission Wildcarding: Toggle Claude MAX (skip all Claude prompts — allow-wildcards + approve hook)",
-        "icon": "$(zap)"
-      },
-      {
-        "command": "permission-wildcarding.toggleCodexMax",
-        "title": "Permission Wildcarding: Toggle Codex MAX (Codex — approval_policy=never, sandbox kept)",
-        "icon": "$(zap)"
-      },
-      {
         "command": "permission-wildcarding.drainLocal",
         "title": "Permission Wildcarding: Drain project-local approvals into user scope",
         "icon": "$(export)"
@@ -135,24 +125,19 @@
     "menus": {
       "view/title": [
         {
-          "command": "permission-wildcarding.toggleMax",
+          "command": "permission-wildcarding.runNow",
           "when": "view == permissionWildcarding.dashboard",
           "group": "navigation@1"
         },
         {
-          "command": "permission-wildcarding.runNow",
+          "command": "permission-wildcarding.autoLearnScan",
           "when": "view == permissionWildcarding.dashboard",
           "group": "navigation@2"
         },
         {
-          "command": "permission-wildcarding.autoLearnScan",
-          "when": "view == permissionWildcarding.dashboard",
-          "group": "navigation@3"
-        },
-        {
           "command": "permission-wildcarding.restoreBackup",
           "when": "view == permissionWildcarding.dashboard",
-          "group": "navigation@4"
+          "group": "navigation@3"
         }
       ]
     },
@@ -228,7 +213,7 @@
         "permissionWildcarding.localDrain.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Promote portable approvals from each workspace's `.claude/settings.local.json` — the file Claude Code writes an \"always approve\" into — up to user-scope `settings.json`, then drop the local entries user scope now covers. Only clean command families move (`Bash(<root> *)`, `Tool(<root> <sub> *)`); script blobs, absolute-path executables, MCP tools and file/web families stay local. A local entry is removed only after its promotion is verified in `settings.json`, so a pruned entry is always still granted. Refused while Claude MAX is on, because its blanket `Bash(*)` would match everything. Untrusted workspaces are read-only."
+          "markdownDescription": "Promote portable approvals from each workspace's `.claude/settings.local.json` — the file Claude Code writes an \"always approve\" into — up to user-scope `settings.json`, then drop the local entries user scope now covers. Only clean command families move (`Bash(<root> *)`, `Tool(<root> <sub> *)`); script blobs, absolute-path executables, MCP tools and file/web families stay local. A local entry is removed only after its promotion is verified in `settings.json`, so a pruned entry is always still granted. Refused while legacy blanket `Bash(*)` and `PowerShell(*)` grants remain, because they cover every local entry. Untrusted workspaces are read-only."
         },
         "permissionWildcarding.guidance.enabled": {
           "type": "boolean",

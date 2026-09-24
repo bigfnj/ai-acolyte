@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { artefactName, writeBuildStamp } from './build-stamp.mjs';
+import { assertRetiredMaxAbsent } from './assert-retired-max-absent.mjs';
 import { syncVersion } from './sync-version.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,4 +59,5 @@ execSync(`npx --yes @vscode/vsce package --no-dependencies -o "${out}"`, {
   cwd: ext,
   stdio: 'inherit',
 });
+assertRetiredMaxAbsent(out);
 console.log(`\nPackaged ${out}`);

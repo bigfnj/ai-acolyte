@@ -102,10 +102,10 @@ function list(value) {
 // "No longer grants" is not the same as "no longer present verbatim". A backup
 // entry is still granted if a broader live wildcard covers it — which is the
 // normal state, not damage: the wildcarding pass generalizes `Bash(git status *)`
-// into `Bash(git *)`, and MAX collapses every specific entry under `Bash(*)`.
-// A verbatim set-difference reads all of those as missing and, once the count
-// crosses the bulk-loss line, auto-"restores" them on every settings.json change
-// — the churn that makes MAX look like it re-enables itself. So an entry counts
+// into `Bash(git *)`, and a user may deliberately replace specific entries with
+// a broader wildcard. A verbatim set-difference reads all of those as missing
+// and, once the count crosses the bulk-loss line, auto-"restores" them on every
+// settings.json change. So an entry counts
 // as missing only when neither present verbatim nor covered by a live wildcard.
 // deny stays verbatim: a missing killswitch rule is a real gap even if a broader
 // deny exists, and re-asserting a redundant deny is harmless (deny is unioned).
@@ -143,9 +143,8 @@ function shadowedByManaged(managed, permissions) {
   return shadowed;
 }
 
-// Managed policy can also switch off the layer MAX mode relies on. Layer 1
-// (blanket allow wildcards) is ordinary permission data and survives; layer 2
-// (the PreToolUse approve hook) is a user hook and does not.
+// Managed policy can disable user hooks or bypass mode independently of ordinary
+// allow-list entries. Report those capabilities without changing user policy.
 function managedCapabilities(managed) {
   return {
     userHooksDisabled: managed?.allowManagedHooksOnly === true,

@@ -4,16 +4,16 @@
 const fs = require('fs');
 const path = require('path');
 const os  = require('os');
-// NOTE: `../src/permissions` is NOT required here. Every name this file used to
-// destructure from it -- writeFileAtomicSync, applyBypass, isBypassOn,
-// currentMode, applyMax, isMaxOn, maxLayers -- is used only inside bypass(),
-// codexMax() and max(), which are command verbs. Nothing on the hook path needs
-// it once the fixed-point cache answers the common case, and the require is
+// NOTE: `../src/permissions` is NOT required here. The names used by bypass()
+// and the wildcarding pass are loaded only when those paths run. Nothing on the
+// hook path needs the module once the fixed-point cache answers the common case,
+// and the require is
 // 3.5 ms of the ~13 ms that cache saves. A test asserts the module is absent
 // from require.cache on a hit, because moving this back would halve the win with
 // no functional symptom at all.
-// codex-max, agent-guidance, agent-gates and child_process are used by exactly
-// one command verb each and by nothing on the hook path, which runs after every
+// Legacy cleanup, agent-guidance, agent-gates and child_process are used by
+// individual command verbs and by nothing on the hook path, which runs after
+// every
 // single tool call. `learn()` below already lazy-requires the learner stack for
 // this reason; the same reasoning was never extended to these. Measured at the
 // process level: 50 ms for bare node, 58 ms with only what the hook needs,
@@ -40,22 +40,16 @@ const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
   '       wildcard-perms --guidance derived\n' +
   '       wildcard-perms --guidance accept|decline|reset <id>\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n';
-// Overriding an EXPIRED enterprise cap is an explicit act, never a silent one:
-// the flag is how the user says they accept a cap read off a lapsed cache is no
-// longer their org's policy. Named once, because the refusal message has to be
-// able to print the exact command that gets past it.
-const CODEX_MAX_OVERRIDE = '--override-stale-policy';
-const CODEX_MAX_USAGE = `usage: wildcard-perms --codex-max on|off|status [${CODEX_MAX_OVERRIDE}]\n`;
 
-// Every verb, so an unrecognized flag can be told apart from hook mode below.
+// Every active verb plus the two retired MAX flags. Keeping the retired flags in
+// dispatch is a safety boundary: an old invocation must reach a read-only or
+// cleanup handler, never fall through to hook mode and rewrite settings.json.
 const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
   '--codex-max', '--max', '--bypass'];
 const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex permissions\n\n' +
   'Run with NO arguments to act as a PostToolUse hook (reads a JSON event on stdin).\n\n' +
   LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
   'usage: wildcard-perms --seed\n' +
-  'usage: wildcard-perms --max on|off|status\n' +
-  CODEX_MAX_USAGE +
   'usage: wildcard-perms --bypass on|off|status\n' +
   'usage: wildcard-perms --help | --version\n';
 
@@ -88,9 +82,9 @@ if (argv.includes('--help') || argv.includes('-h')) {
 } else if (argv.includes('--gates')) {
   gates(argv);
 } else if (argv.includes('--codex-max')) {
-  codexMax(argv);
+  legacyCodexMax(argv);
 } else if (argv.includes('--max')) {
-  max(argv);
+  legacyClaudeMax(argv);
 } else if (argv.includes('--bypass')) {
   bypass(argv);
 } else {
@@ -214,15 +208,12 @@ function settingsWriter() {
 // readSettings() collapses "absent" and "unreadable" into null, which is right
 // for a reader and destructive for a WRITER: `readSettings() ?? {}` followed by
 // a whole-object write replaces the user's settings.json with just the key the
-// verb happened to touch. Measured: `--max on` against an unparseable file wrote
-// `{"permissions":{...7 blanket entries},"hooks":{"PreToolUse":[...]}}` and
-// nothing else, having already recorded an EMPTY allowSnapshot — so `--max off`
-// would restore nothing. The CLI writes no high-water backup, so on a CLI-only
-// install there was no way back at all.
+// verb happened to touch. A removed whole-object writer demonstrated the failure
+// at its worst by replacing the file with only blanket grants and a hook. The
+// remaining bypass writer and the one-way legacy cleanup both refuse instead.
 //
 // This is the "exists but could not be parsed" refusal src/settings-write.js:150-162
-// documents, reached from the two verbs that do not go through writeAllow. The
-// extension's toggleMax already got this right; the CLI half was left behind.
+// documents, reached from verbs that do not go through writeAllow.
 function readSettingsForWrite(label) {
   const { readSettingsState, SETTINGS_UNREADABLE } = require('../src/settings-write');
   const state = readSettingsState(SETTINGS);
@@ -239,9 +230,8 @@ function readSettingsForWrite(label) {
 }
 
 // writeSettings is GONE. It was a naive whole-object writer — read, compute,
-// spread the snapshot back — and its two callers were `--max` and `--bypass`,
-// the last two writers of settings.json in this file that could revert a
-// concurrent change. Both now go through settingsWriter().writeTransform, which
+// spread the snapshot back. The remaining whole-object transforms go through
+// settingsWriter().writeTransform, which
 // re-reads, runs the transform against that read, and compare-and-swaps on the
 // bytes. Deleting the primitive matters as much as fixing the callers: it was
 // the thing the next verb author would have found and reused.
@@ -360,12 +350,9 @@ function hookCwd(input) {
 // The authoritative half of the pass: the caller's snapshot is DISCARDED and
 // everything recomputed from a read taken inside the lock.
 //
-// Replaying the earlier delta instead would be unsound, and not subtly. With MAX
-// on, Claude Code persists `Bash(npm test)`; the unlocked pass marks it removed
-// because `Bash(*)` covers it; `--max off` then runs and deliberately preserves
-// it; replaying `removed` deletes it for good, since it is absent from
-// allowSnapshot precisely because it was granted while MAX was on. Recomputing
-// costs the warm 57 ms, and only on the rare changed path.
+// Replaying the earlier delta would be unsound because settings can change after
+// the unlocked pass. Recomputing costs the warm 57 ms, and only on the rare
+// changed path.
 //
 // Because `fresh` is what writeAllow re-reads, its rebase degenerates to
 // identity here, and what it contributes is the rest of its contract: deny is
@@ -462,11 +449,10 @@ function drain(args) {
       process.exitCode = 1;
       return;
     }
-    if (report.blocked === 'max') {
+    if (report.blocked === 'legacy-blanket') {
       process.stderr.write(
-        'wildcard-perms --drain: Claude MAX is ON — its blanket Bash(*)/PowerShell(*) layer ' +
-        'covers every local entry, so a drain would empty the file and MAX-off would not ' +
-        'bring it back. Turn MAX off first.\n'
+        'wildcard-perms --drain: legacy MAX configuration is still active and its blanket ' +
+        'grants cover every local entry. Run wildcard-perms --max off to remove it first.\n'
       );
       process.exitCode = 1;
       return;
@@ -687,7 +673,7 @@ function seed() {
   // Read, merge and write all INSIDE the lock, through the rebasing writer.
   // --seed had the same shape as the old hook path — read, merge, spread, write
   // — so it reverted whatever landed in between, and it took no lock at all
-  // while `withPolicyLock` sat twenty lines below serving --drain/--bypass/--max.
+  // while `withPolicyLock` sat twenty lines below serving the other policy writers.
   //
   // Reporting happens after the lock is released, and nothing inside it calls
   // process.exit: an exit skips the release, and while recoverLock() reclaims a
@@ -730,10 +716,8 @@ function seed() {
   }
 }
 
-// Every policy writer shares one lock, so a toggle cannot land between Auto
-// Learn's settings write and its claims write. Read and write both go inside:
-// MAX-off unions the sidecar snapshot with what was granted since, so a write
-// landing between the read and the write would be re-pruned back out.
+// Every Claude policy writer shares one lock, so one cannot land between Auto
+// Learn's settings write and its claims write. Reads and writes both go inside.
 function withPolicyLock(flag, run) {
   const {
     createPolicyLock, POLICY_LOCK_PATH, POLICY_LOCK_CODE, POLICY_LOCK_BUSY_MESSAGE,
@@ -813,223 +797,263 @@ function bypass(args) {
   });
 }
 
-// Codex MAX — the Codex-side counterpart of `--max`. Sets approval_policy in
-// ~/.codex/config.toml and deliberately leaves sandbox_mode alone, so prompts
-// stop but the sandbox stays as the floor (Codex has no deny list to fall back
-// on). It aims for "never" but obeys an enterprise requirements bundle that
-// restricts which policies are legal. `--codex-max on|off|status`.
-//
-// No policy lock here: this writes Codex's config.toml, not Claude's
-// settings.json, so it shares no file with Auto Learn or the wildcarding pass.
-function codexMax(args) {
-  const { writeFileAtomicSync } = require('../src/permissions');
+// Hidden compatibility handler for the retired Codex MAX flag. It can inspect
+// or remove state written by old releases. There is deliberately no enable path.
+function legacyCodexMax(args) {
   const {
-    CODEX_CONFIG, applyCodexMax, isCodexMaxOn, readApproval, sandboxMode,
-    readEnterpriseBundle, targetApproval, bundleFreshness,
-  } = require('../src/codex-max');
-  const cmd = (args[args.indexOf('--codex-max') + 1] || 'status').toLowerCase();
-  const overrideStale = args.includes(CODEX_MAX_OVERRIDE);
-  const text = fs.existsSync(CODEX_CONFIG) ? fs.readFileSync(CODEX_CONFIG, 'utf8') : null;
-  // One read of the bundle for the whole verb, so the ON/OFF line and the cap
-  // note underneath it cannot be computed from two different reads of the file.
-  const bundle = readEnterpriseBundle();
-  const target = targetApproval(bundle);
-  const freshness = bundleFreshness(bundle);
+    CODEX_CONFIG, LEGACY_CODEX_STATE_FILE, legacyCodexMaxStatus,
+    removeLegacyCodexMax, removeLegacyStateFile,
+  } = require('../src/legacy-max-cleanup');
+  const cmd = String(args[args.indexOf('--codex-max') + 1] || 'status').toLowerCase();
 
-  if (cmd === 'status') {
-    if (text === null) {
-      process.stdout.write(`wildcard-perms Codex MAX: no config at ${CODEX_CONFIG}\n`);
-      return;
-    }
-    process.stdout.write(
-      `wildcard-perms Codex MAX: ${isCodexMaxOn(text, bundle) ? 'ON' : 'OFF'} ` +
-      `(approval_policy=${readApproval(text) ?? 'unset'}, sandbox_mode=${sandboxMode(text) ?? 'unset'})\n`
-    );
-    if (target.restricted) {
-      process.stdout.write(
-        `  enterprise policy allows only [${(target.allowed || []).join(', ')}] — ` +
-        `'never' is not permitted, so the best available is ${target.value ?? 'nothing'}.\n`
-      );
-      // A cap read off a lapsed cache is reported as lapsed. Stating only "the
-      // org forbids it" about an eighteen-day-expired one-hour TTL is how this
-      // feature sat unreachable for eighteen days with status looking correct.
-      if (freshness.expired) {
-        process.stdout.write(
-          `  STALE: that cap comes from a cache dated ${freshness.cachedAt ?? 'an unrecorded time'}, ` +
-          `which expired ${freshness.expiresAt}, so it may no longer be your org's policy.\n` +
-          `  To set 'never' anyway: wildcard-perms --codex-max on ${CODEX_MAX_OVERRIDE}\n`
-        );
-      }
-    }
-    return;
-  }
-
-  if (cmd !== 'on' && cmd !== 'off') {
-    process.stderr.write(CODEX_MAX_USAGE);
-    process.exit(1);
-  }
-
-  const res = applyCodexMax(text ?? '', cmd === 'on', { overrideStale });
-  // Same reasoning as --max: the snapshot is the only record of the user's prior
-  // approval_policy, so without it, turning Codex MAX off would delete the key
-  // rather than restore the value. Refuse and say so.
-  if (res.error === 'codex-max-snapshot-failed') {
+  if (cmd === 'on') {
     process.stderr.write(
-      'wildcard-perms --codex-max: refused — could not write the approval snapshot to\n'
-      + '  ~/.claude/backups, so turning Codex MAX off later would remove approval_policy\n'
-      + '  instead of restoring yours. config.toml is unchanged.\n'
+      'wildcard-perms --codex-max: this feature was removed; nothing was changed.\n'
     );
     process.exitCode = 1;
     return;
   }
-  if (res.blockedBy === 'enterprise-policy') {
+  if (args.some((arg) => arg.startsWith('--') && arg !== '--codex-max')) {
     process.stderr.write(
-      'wildcard-perms --codex-max: enterprise policy permits no approval policy this can set ' +
-      `(allowed: ${(res.allowed || []).join(', ') || 'none'}).\n`
+      'wildcard-perms --codex-max: the retired compatibility command accepts no options.\n'
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
-  // Distinct from the refusal above, and deliberately not merged into it. The
-  // cap is the same cap; what differs is that the cache asserting it has
-  // expired, so the answer is "ask, then override" rather than "unavailable".
-  // Silently overriding instead would be the opposite defect: a machine offline
-  // past the TTL dropping a control that is genuinely in force.
-  if (res.blockedBy === 'enterprise-policy-stale') {
+  if (cmd !== 'status' && cmd !== 'off') {
     process.stderr.write(
-      "wildcard-perms --codex-max: the policy forbidding 'never' (allowed: " +
-      `${(res.allowed || []).join(', ') || 'none'}) was read from a CACHE dated ` +
-      `${res.cachedAt ?? 'an unrecorded time'}, which expired ${res.expiresAt}.\n` +
-      '  It is still honoured rather than ignored, because a machine offline past the TTL\n' +
-      '  would otherwise drop a control that is genuinely in force. config.toml is unchanged.\n' +
-      `  If that cap no longer applies: wildcard-perms --codex-max on ${CODEX_MAX_OVERRIDE}\n`
+      'wildcard-perms --codex-max: retired compatibility command accepts only off or status.\n'
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
-  if (!res.changed) {
-    process.stdout.write(`wildcard-perms Codex MAX: already ${cmd.toUpperCase()}\n`);
+
+  let text = '';
+  try { text = fs.readFileSync(CODEX_CONFIG, 'utf8'); }
+  catch (err) {
+    if (err?.code !== 'ENOENT') {
+      process.stderr.write(`wildcard-perms --codex-max: read error: ${err.message}\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  const status = legacyCodexMaxStatus(text);
+  if (cmd === 'status') {
+    process.stdout.write(
+      `wildcard-perms legacy Codex MAX configuration: ${status.present ? 'DETECTED' : 'not active'} ` +
+      `(approval_policy=${status.approval ?? 'unset'}, ` +
+      `snapshot=${status.snapshotValid ? 'valid' : status.snapshotExists ? 'invalid' : 'absent'})\n`
+    );
+    return;
+  }
+
+  // A bare `approval_policy = "never"` is not proof that this project wrote it.
+  // Without a valid old snapshot, leave it byte-for-byte untouched.
+  if (status.present && !status.snapshotValid) {
+    process.stderr.write(
+      'wildcard-perms --codex-max off: refused because approval_policy="never" is present ' +
+      'but no valid legacy snapshot proves ownership. config.toml is unchanged.\n'
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (!status.present) {
+    let removedState = false;
+    try { removedState = removeLegacyStateFile(LEGACY_CODEX_STATE_FILE); }
+    catch (err) {
+      process.stderr.write(
+        `wildcard-perms --codex-max off: could not remove the stale legacy snapshot: ${err.message}\n`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(
+      'wildcard-perms --codex-max off: no active legacy configuration' +
+      `${removedState ? '; removed the stale legacy snapshot' : ''}.\n`
+    );
+    return;
+  }
+
+  const result = removeLegacyCodexMax(text, { confirmAmbiguous: true });
+  if (!result.changed) {
+    process.stderr.write(
+      'wildcard-perms --codex-max off: cleanup could not prove a safe restore; config.toml is unchanged.\n'
+    );
+    process.exitCode = 1;
     return;
   }
 
   try {
-    fs.mkdirSync(path.dirname(CODEX_CONFIG), { recursive: true });
-    writeFileAtomicSync(CODEX_CONFIG, res.text);
-    const sandbox = sandboxMode(res.text) ?? 'unset';
-    // Three states, not two. Saying "enterprise policy forbids 'never'" on the
-    // line that just WROTE 'never' over an expired cap reads as a contradiction.
-    const capNote = !res.restricted ? ''
-      : res.stale
-        ? ` (over an expired cap cached ${res.cachedAt ?? 'at an unrecorded time'})`
-        : " (enterprise policy forbids 'never')";
-    process.stdout.write(
-      `wildcard-perms Codex MAX: ${cmd.toUpperCase()} — ` +
-      `${cmd === 'on'
-        ? `approval_policy=${res.target}${capNote} (sandbox_mode=${sandbox}, untouched)`
-        : `approval_policy=${res.restoredTo ?? 'unset (key removed)'}`}. ` +
-      'Restart Codex to apply.\n'
-    );
-    if (cmd === 'on') {
-      process.stdout.write(
-        `  the ${sandbox} sandbox is still the floor: out-of-workspace writes and network remain blocked.\n`
+    // Read again before replacing so a Codex or editor write already visible
+    // after the cleanup read is not overwritten by this compatibility path.
+    const current = fs.readFileSync(CODEX_CONFIG, 'utf8');
+    if (current !== text) {
+      process.stderr.write(
+        'wildcard-perms --codex-max off: config.toml changed during cleanup; nothing was written.\n'
       );
+      process.exitCode = 1;
+      return;
+    }
+    const { writeFileAtomicSync } = require('../src/permissions');
+    writeFileAtomicSync(CODEX_CONFIG, result.text);
+    const verifiedText = fs.readFileSync(CODEX_CONFIG, 'utf8');
+    if (legacyCodexMaxStatus(verifiedText).present) {
+      process.stderr.write(
+        'wildcard-perms --codex-max off: the legacy setting is still present after the write; ' +
+        'the snapshot was retained.\n'
+      );
+      process.exitCode = 1;
+      return;
+    }
+    removeLegacyStateFile(LEGACY_CODEX_STATE_FILE);
+    process.stdout.write(
+      'wildcard-perms --codex-max off: removed legacy configuration; ' +
+      `approval_policy=${result.restoredTo ?? 'unset (key removed)'}. Restart Codex to apply.\n`
+    );
+    for (const warning of result.warnings || []) {
+      process.stdout.write(`  note: ${warning}\n`);
     }
   } catch (err) {
-    process.stderr.write(`wildcard-perms --codex-max: write error: ${err.message}\n`);
-    process.exit(1);
+    process.stderr.write(`wildcard-perms --codex-max off: write error: ${err.message}\n`);
+    process.exitCode = 1;
   }
 }
 
-// Flip MAX mode — the two-layer "skip everything" switch (blanket allow-list
-// wildcards + a PreToolUse auto-approve hook), independent of Claude Code's
-// bypassPermissions mode. `--max on|off|status`; bare `--max` reports status.
-function max(args) {
-  const { applyMax, isMaxOn, maxLayers } = require('../src/permissions');
-  const cmd = (args[args.indexOf('--max') + 1] || 'status').toLowerCase();
+// Hidden compatibility handler for the retired Claude MAX flag. It uses the
+// normal settings lock and compare-and-swap writer, then verifies the saved file
+// before removing artifacts owned by old releases. There is no enable path.
+function legacyClaudeMax(args) {
+  const {
+    legacyClaudeMaxStatus, removeLegacyClaudeMax,
+    removeLegacyApproveScript, legacyGeneratedAllowFromState,
+  } = require('../src/legacy-max-cleanup');
+  const { purgeLegacyBackupCopies } = require('../src/legacy-backup-cleanup');
+  const cmd = String(args[args.indexOf('--max') + 1] || 'status').toLowerCase();
 
+  if (cmd === 'on') {
+    process.stderr.write('wildcard-perms --max: this feature was removed; nothing was changed.\n');
+    process.exitCode = 1;
+    return;
+  }
+  if (cmd !== 'status' && cmd !== 'off') {
+    process.stderr.write(
+      'wildcard-perms --max: retired compatibility command accepts only off or status.\n'
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const writer = settingsWriter();
+  const initial = writer.readSettingsState();
+  if (initial.state === 'unreadable') {
+    process.stderr.write(
+      `wildcard-perms --max: refused because ${SETTINGS} could not be read or parsed. Nothing was changed.\n`
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const status = legacyClaudeMaxStatus(initial.settings ?? {});
   if (cmd === 'status') {
-    const settings = readSettings() ?? {};
-    const L = maxLayers(settings);
     process.stdout.write(
-      `wildcard-perms MAX: ${isMaxOn(settings) ? 'ON' : 'OFF'} ` +
-      `(allow-wildcards=${L.allow ? 'on' : 'off'}, approve-hook=${L.hook ? 'on' : 'off'})\n`
+      `wildcard-perms legacy Claude MAX configuration: ${status.present ? 'DETECTED' : 'not active'} ` +
+      `(allow-wildcards=${status.allow ? 'present' : 'absent'}, ` +
+      `generated-grants=${status.generatedAllow.length}, ` +
+      `approve-hook=${status.hook ? 'present' : status.hookLike ? 'ambiguous' : 'absent'}, ` +
+      `snapshot=${status.snapshotValid ? 'valid' : status.snapshotExists ? 'invalid' : 'absent'})\n`
     );
     return;
   }
 
-  if (cmd !== 'on' && cmd !== 'off') {
-    process.stderr.write('usage: wildcard-perms --max on|off|status\n');
-    process.exit(1);
-  }
-
   withPolicyLock('--max', () => {
-    // Before applyMax, which writes the allow-list snapshot as a side effect —
-    // an unreadable read here would have recorded an EMPTY snapshot over a real
-    // one, making `--max off` unable to restore anything. writeTransform refuses
-    // that case too, and refuses BEFORE running the transform for the same
-    // reason; this check stays because it owns the "refused" wording the tests
-    // pin, and because the file can become unreadable between the two reads.
-    if (readSettingsForWrite('--max') === null) { process.exitCode = 1; return; }
-    let res;
+    let result;
     let wrote = false;
     try {
-      // applyMax IS the transform, not a value computed before the write. Its
-      // side effects — the allow-list snapshot and the approve script — are
-      // therefore taken against the same read the write lands on, which is what
-      // makes the snapshot reflect the freshest list rather than one from before
-      // the ~9.6 ms pass. An approval that lands in that window is now restored
-      // by `--max off` instead of being lost.
-      ({ result: res, wrote } = settingsWriter().writeTransform((latest) => applyMax(latest, cmd === 'on')));
+      ({ result, wrote } = writer.writeTransform((latest) => (
+        removeLegacyClaudeMax(latest, { confirmAmbiguous: true })
+      )));
     } catch (err) {
-      // Contention is transient and nothing was written, so say so rather
-      // than reporting a refusal the user might act on. This code had no
-      // reader anywhere until now.
-      //
-      // Required HERE, not at module scope: this file loads nothing from src/ on
-      // the hook's common path. A catch body is the safest possible place for it
-      // — it runs only on an error, and by then settingsWriter() has already
-      // pulled the module in, so this is a require.cache hit.
       const { SETTINGS_CONTENDED_CODE } = require('../src/settings-write');
       process.stderr.write(err?.code === SETTINGS_CONTENDED_CODE
-        ? `wildcard-perms --max: settings.json is being written by another `
-          + `process — nothing was changed, try again in a moment.\n`
-        : `wildcard-perms --max: refused — ${err.message}\n`);
+        ? 'wildcard-perms --max off: settings.json changed during cleanup; nothing was written.\n'
+        : `wildcard-perms --max off: refused: ${err.message}\n`);
       process.exitCode = 1;
       return;
     }
-    // A refusal is not "already in that state". Reporting "already ON" after the
-    // allow snapshot failed to land would be the worst possible answer: MAX is
-    // off, the user believes it is on, and the snapshot that alone could restore
-    // their allow list does not exist.
-    if (res.error === 'max-snapshot-failed') {
+
+    if (result.changed && !wrote) {
       process.stderr.write(
-        'wildcard-perms --max: refused — could not write the allow-list snapshot to\n'
-        + '  ~/.claude/backups, so turning MAX off later could not restore your entries.\n'
-        + '  MAX is unchanged. Check that directory is writable and retry.\n'
+        'wildcard-perms --max off: cleanup was not written; legacy artifacts were retained.\n'
       );
       process.exitCode = 1;
       return;
     }
-    if (!res.changed) {
-      process.stdout.write(`wildcard-perms MAX: already ${cmd.toUpperCase()}\n`);
+
+    // Re-read the bytes written by writeTransform before deleting the only
+    // snapshot that can restore them. If no settings change was needed, this
+    // same check proves the active configuration was already absent.
+    const verifiedState = writer.readSettingsState();
+    if (verifiedState.state === 'unreadable') {
+      process.stderr.write(
+        'wildcard-perms --max off: settings.json could not be verified; legacy artifacts were retained.\n'
+      );
+      process.exitCode = 1;
       return;
     }
-    const L = maxLayers(res.settings);
-    process.stdout.write(
-      `wildcard-perms MAX: ${cmd.toUpperCase()} — ` +
-      `${cmd === 'on' ? 'ALL PROMPTS SKIPPED' : 'restored your allow list (keeping anything approved since) + removed approve hook'} ` +
-      `(allow-wildcards=${L.allow ? 'on' : 'off'}, approve-hook=${L.hook ? 'on' : 'off'}). ` +
-      `Reload the Claude Code window to apply.\n`
-    );
-    if (cmd === 'on') {
-      process.stdout.write('  deny rules and hard circuit breakers still apply.\n');
-    }
-    if (res.switchedMode) {
-      process.stdout.write(
-        `  permission mode switched from ${res.switchedMode} to default: auto mode discards Bash(*) as\n` +
-        '  classifier-bypassing, so MAX would have granted nothing there. --max off puts the mode back.\n'
+    const verified = legacyClaudeMaxStatus(verifiedState.settings ?? {});
+    if (verified.present) {
+      process.stderr.write(
+        'wildcard-perms --max off: legacy configuration remains after cleanup; ' +
+        'the script and snapshot were retained.\n'
       );
+      for (const warning of result.warnings || []) {
+        process.stderr.write(`  note: ${warning}\n`);
+      }
+      process.exitCode = 1;
+      return;
     }
-    if (res.restoredMode) {
-      process.stdout.write(`  permission mode restored to ${res.restoredMode}.\n`);
+
+    const backupResult = purgeLegacyBackupCopies([
+      path.join(os.homedir(), '.claude', 'backups', 'allow-list.latest.json'),
+      path.join(os.homedir(), '.permission-wildcarding', 'allow-list.latest.json'),
+    ], legacyGeneratedAllowFromState());
+    if (!backupResult.ok) {
+      process.stderr.write(
+        'wildcard-perms --max off: settings were cleaned, but every policy backup copy ' +
+        'could not be verified; the cleanup snapshot and script were retained.\n'
+      );
+      for (const failure of backupResult.failures) {
+        process.stderr.write(`  ${failure.file}: ${failure.error}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!result.canRemoveArtifacts) {
+      process.stderr.write(
+        'wildcard-perms --max off: cleanup lacks a valid ownership snapshot; artifacts were retained.\n'
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    let scriptResult;
+    try { scriptResult = removeLegacyApproveScript(); }
+    catch (err) {
+      process.stderr.write(
+        `wildcard-perms --max off: settings were cleaned, but the legacy script could not be removed: ${err.message}\n`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(
+      'wildcard-perms --max off: removed legacy configuration' +
+      `${wrote ? ' and updated settings.json' : ''}; ` +
+      `approve script ${scriptResult.removed ? 'removed' : scriptResult.reason}; ` +
+      'the inert snapshot was retained so an installed extension can filter a configured backup mirror.\n'
+    );
+    for (const warning of result.warnings || []) {
+      process.stdout.write(`  note: ${warning}\n`);
     }
   });
 }

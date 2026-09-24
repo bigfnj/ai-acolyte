@@ -199,9 +199,34 @@ test('a promotion that does not land prunes nothing', () => {
   assert.deepEqual(box.readLocal().permissions.allow, ['Bash(git status)']);
 });
 
-test('MAX mode blocks the drain, because its blanket wildcard covers everything', () => {
+test('a retired blanket configuration blocks the drain until migration cleanup', () => {
   const box = scratch();
   box.writeLocal({ permissions: { allow: ['Bash(git status)', 'PowerShell($x = 1; ls)'] } });
+  const user = userScope(['Bash(*)', 'PowerShell(*)']);
+  const legacyStatePath = path.join(box.backupDir, 'wildcarding-max.json');
+  fs.mkdirSync(path.dirname(legacyStatePath), { recursive: true });
+  fs.writeFileSync(legacyStatePath, JSON.stringify({
+    allowSnapshot: ['Bash(rg *)'], defaultMode: null,
+  }) + '\n');
+
+  const report = drainLocalSettings({
+    workspaceRoot: box.workspace,
+    readUserSettings: user.readUserSettings,
+    applyUserAllow: user.applyUserAllow,
+    backupDir: box.backupDir,
+    legacyStatePath,
+  });
+
+  assert.equal(report.blocked, 'legacy-blanket');
+  assert.equal(report.changed, false);
+  assert.equal(report.kept, 2);
+  assert.deepEqual(box.readLocal().permissions.allow, ['Bash(git status)', 'PowerShell($x = 1; ls)']);
+  assert.deepEqual(user.state.permissions.allow, ['Bash(*)', 'PowerShell(*)']);
+});
+
+test('user-owned broad grants without migration evidence do not block the drain', () => {
+  const box = scratch();
+  box.writeLocal({ permissions: { allow: ['Bash(git status)'] } });
   const user = userScope(['Bash(*)', 'PowerShell(*)']);
 
   const report = drainLocalSettings({
@@ -209,13 +234,12 @@ test('MAX mode blocks the drain, because its blanket wildcard covers everything'
     readUserSettings: user.readUserSettings,
     applyUserAllow: user.applyUserAllow,
     backupDir: box.backupDir,
+    legacyStatePath: path.join(box.backupDir, 'missing-max-state.json'),
   });
 
-  assert.equal(report.blocked, 'max');
-  assert.equal(report.changed, false);
-  assert.equal(report.kept, 2);
-  assert.deepEqual(box.readLocal().permissions.allow, ['Bash(git status)', 'PowerShell($x = 1; ls)']);
-  assert.deepEqual(user.state.permissions.allow, ['Bash(*)', 'PowerShell(*)']);
+  assert.equal(report.blocked, null);
+  assert.equal(report.changed, true);
+  assert.deepEqual(box.readLocal().permissions.allow, []);
 });
 
 test('a dry run reports the same plan and writes neither file', () => {

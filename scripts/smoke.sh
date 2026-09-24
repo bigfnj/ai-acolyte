@@ -48,13 +48,12 @@ if [ ! -f "$CLI" ]; then
 fi
 
 echo "== CLI status verbs"
-# Each pattern asserts a real invariant of the output. Three of these used to be
-# the pattern `.` — which matches any non-empty output, so `--max`, `--bypass` and
-# `--learn` were passing on literally anything the process printed, including an
+# Each pattern asserts a real invariant of the output. Two of these used to be
+# the pattern `.` — which matches any non-empty output, so `--bypass` and `--learn`
+# were passing on literally anything the process printed, including an
 # error message. Same vacuous-check family as the hook-quiet one below.
 check "--gates status"    'gates \[claude\]'                          "$(node "$CLI" --gates status 2>&1)"
 check "--guidance status" 'guidance \[claude\]'                       "$(node "$CLI" --guidance status 2>&1)"
-check "--max status"      'MAX: (ON|OFF)'                             "$(node "$CLI" --max status 2>&1)"
 check "--bypass status"   'bypass: (ON|OFF)'                          "$(node "$CLI" --bypass status 2>&1)"
 # --learn status emits the state file as JSON, not prose. Pin the one field whose
 # value set is closed, so a malformed or empty state cannot pass.

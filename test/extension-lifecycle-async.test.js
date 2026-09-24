@@ -611,37 +611,6 @@ test('extension.js keeps no second copy of the memory configuration', () => {
     'a second, unreconciled memory-store discovery is back');
 });
 
-// `updateStatusBar` opened with `if (!statusBar) return;`, and that condition could not be
-// false after the first activation: the slot is assigned once and nulled nowhere, including
-// in deactivate(), which nulls seven other retainers. It is worse than dead. activate()
-// pushes the item into context.subscriptions, so VS Code disposes it on teardown while the
-// variable stays truthy — the guard passed on precisely the state it looks like it exists
-// to catch.
-test('a watcher event after teardown does not repaint a disposed status-bar item', TEST_TIMEOUT, async (t) => {
-  const home = tempHome(t);
-  const app = harness(home);
-  try {
-    const [item] = app.statusBarItems;
-    assert.ok(item, 'precondition: activation created the friction indicator');
-    assert.equal(item.disposed, false);
-
-    await app.extension.deactivate();
-    // What VS Code does next, and what `!statusBar` could never see.
-    app.disposeSubscriptions();
-    assert.equal(item.disposed, true, 'precondition: the host disposed the item');
-
-    // The Codex config watcher is one of five handlers that call updateStatusBar()
-    // unconditionally, and every one of them stays live until the subscriptions drain.
-    item.paintsAfterDispose = 0;
-    app.watcherFor('config.toml').fire('change', { fsPath: 'config.toml' });
-
-    assert.equal(item.paintsAfterDispose, 0,
-      'a torn-down extension repainted a status-bar item VS Code had already disposed');
-  } finally {
-    await app.dispose();
-  }
-});
-
 // autoSyncRecallIfStale ended in `} catch { /* auto-sync is best-effort */ }` with no
 // logging at all. Three reachable throwers sit inside that try — memoryReport(),
 // recallStatus() and cfg() — and it is not a one-shot: the 10 s startup timer is, but

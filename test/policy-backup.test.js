@@ -2,7 +2,7 @@
 
 // The backup exists to survive a managed-settings refresh that resets
 // settings.json. Restoring the allow list alone hands every permission back with
-// the deny list — the boundary MAX mode, bypass mode and auto-safe all defer to —
+// the deny list — the boundary bypass mode and auto-safe both defer to —
 // still missing, which is worse than not restoring. These drive the real commands
 // through the extension against a throwaway home.
 
@@ -32,6 +32,8 @@ function purgeProjectModules(extensionPath, rootSrc) {
 
 function harness(tempHome) {
   const commands = new Map();
+  const warnings = [];
+  const warningAnswers = [];
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     RelativePattern: class RelativePattern {
@@ -50,7 +52,10 @@ function harness(tempHome) {
       setStatusBarMessage() {},
       showErrorMessage() {},
       showInformationMessage() { return Promise.resolve(undefined); },
-      showWarningMessage() { return Promise.resolve(undefined); },
+      showWarningMessage(message) {
+        warnings.push(message);
+        return Promise.resolve(warningAnswers.length ? warningAnswers.shift() : undefined);
+      },
     },
     workspace: {
       isTrusted: true,
@@ -97,6 +102,8 @@ function harness(tempHome) {
   return {
     commands,
     extension,
+    warnings,
+    warningAnswers,
     async dispose() {
       await extension.deactivate();
       Module._load = originalLoad;
@@ -125,6 +132,47 @@ function setup(t) {
 }
 
 const DENY = ['Bash(rm -rf /*)', 'Bash(mkfs* *)', 'Bash(dd * of=/dev/*)'];
+const RETIRED_CORE = [
+  'Bash(*)', 'PowerShell(*)', 'Read(*)', 'Edit', 'Write', 'WebFetch(*)', 'WebSearch',
+];
+
+// Materialise the exact on-disk shape written by v1.5.1. The current product
+// cannot create this state; it can only recognise and remove it after the user
+// confirms the migration.
+function writeRetiredFixture(env, { snapshot, current, deny = DENY, defaultMode = 'default' }) {
+  const statePath = path.join(env.tempHome, '.claude', 'backups', 'wildcarding-max.json');
+  const scriptPath = path.join(env.tempHome, '.claude', 'wildcarding', 'approve-all.js');
+  const command = `node "${scriptPath.replace(/\\/g, '/')}"`;
+
+  env.write({
+    model: 'claude-opus-5',
+    permissions: { allow: current, deny, defaultMode },
+    hooks: {
+      PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command }] }],
+      PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'neighbour-tool' }] }],
+    },
+  });
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    allowSnapshot: snapshot,
+    defaultMode: null,
+    savedAt: '2026-09-01T00:00:00.000Z',
+  }, null, 2) + '\n');
+  return { statePath, command };
+}
+
+function writeBackupCopies(env, allow, deny = DENY) {
+  const body = JSON.stringify({ allow, deny }, null, 2) + '\n';
+  fs.mkdirSync(path.dirname(env.backupPath), { recursive: true });
+  fs.mkdirSync(path.dirname(env.mirrorPath), { recursive: true });
+  fs.writeFileSync(env.backupPath, body);
+  fs.writeFileSync(env.mirrorPath, body);
+}
+
+async function confirmRetiredCleanup(app) {
+  app.warningAnswers.push('Review legacy cleanup', 'Remove legacy configuration');
+  await app.commands.get('permission-wildcarding.toggleMax')();
+}
 
 test('a policy wipe restores the deny list, not just the allow list', async (t) => {
   const env = setup(t);
@@ -191,101 +239,83 @@ test('settings with no deny key never gain an empty one', async (t) => {
   }
 });
 
-// Regression: MAX on → backup grows to include Bash(*)/PowerShell(*) → MAX off →
-// backup still had the blanket entries → policy guard reported them as "missing" →
-// "Re-assert them" silently re-enabled MAX.
-test('turning MAX off purges blanket entries from the backup', async (t) => {
+test('confirmed legacy cleanup purges owned blanket entries from both backups', async (t) => {
   const env = setup(t);
   const userPerms = ['Bash(git status *)', 'Bash(rg *)'];
-  env.write({ permissions: { allow: userPerms, deny: DENY } });
+  const legacyAllow = [...RETIRED_CORE, 'Bash(git status *)'];
+  const deny = [...DENY, 'Bash(*)'];
+  const fixture = writeRetiredFixture(env, { snapshot: userPerms, current: legacyAllow, deny });
+  writeBackupCopies(env, [...new Set([...userPerms, ...legacyAllow])], deny);
 
   const app = harness(env.tempHome);
   try {
-    // Seed the backup with the user's real permissions.
-    await app.commands.get('permission-wildcarding.runNow')();
+    await confirmRetiredCleanup(app);
 
-    // Turn MAX on: blanket wildcards land in settings.json.
-    await app.commands.get('permission-wildcarding.toggleMax')();
-    const maxSettings = env.read().permissions;
-    assert.ok(maxSettings.allow.includes('Bash(*)'), 'MAX on must add Bash(*)');
-
-    // The file watcher would normally trigger a backup here.  Simulate it by
-    // running the wildcarding pass so the blanket entries make it into the backup.
-    await app.commands.get('permission-wildcarding.runNow')();
-    const backupWhileMax = JSON.parse(fs.readFileSync(env.backupPath, 'utf8'));
-    assert.ok(backupWhileMax.allow.includes('Bash(*)'), 'backup must capture MAX entries');
-
-    // Turn MAX off: the fix must purge the blanket entries from the backup.
-    await app.commands.get('permission-wildcarding.toggleMax')();
-    const backupAfterMax = JSON.parse(fs.readFileSync(env.backupPath, 'utf8'));
-    assert.ok(!backupAfterMax.allow.includes('Bash(*)'),   'Bash(*) must leave the backup on MAX off');
-    assert.ok(!backupAfterMax.allow.includes('PowerShell(*)'), 'PowerShell(*) must leave the backup on MAX off');
-    // The user's real permissions must still be in the backup.
+    const live = env.read();
+    const primary = JSON.parse(fs.readFileSync(env.backupPath, 'utf8'));
+    const mirror = JSON.parse(fs.readFileSync(env.mirrorPath, 'utf8'));
+    assert.ok(!live.permissions.allow.includes('Bash(*)'));
+    assert.ok(!primary.allow.includes('Bash(*)'), 'the primary must not reassert a removed grant');
+    assert.ok(!mirror.allow.includes('Bash(*)'), 'the mirror must not reassert a removed grant');
+    assert.ok(!primary.allow.includes('PowerShell(*)'));
+    assert.ok(!mirror.allow.includes('PowerShell(*)'));
+    assert.ok(live.permissions.deny.includes('Bash(*)'), 'an identically spelled deny remains live');
+    assert.ok(primary.deny.includes('Bash(*)'), 'allow cleanup must not purge the primary deny list');
+    assert.ok(mirror.deny.includes('Bash(*)'), 'allow cleanup must not purge the mirrored deny list');
     for (const p of userPerms) {
-      assert.ok(backupAfterMax.allow.includes(p), `user permission ${p} must survive in backup`);
+      assert.ok(live.permissions.allow.includes(p), `live user permission ${p} must survive cleanup`);
+      assert.ok(primary.allow.includes(p), `primary must retain user permission ${p}`);
+      assert.ok(mirror.allow.includes(p), `mirror must retain user permission ${p}`);
     }
+    assert.ok(live.hooks.PostToolUse, 'an unrelated hook must survive cleanup');
+    assert.equal(live.hooks.PreToolUse, undefined, 'the exactly owned approve hook is removed');
+    assert.equal(fs.existsSync(fixture.statePath), false, 'the consumed migration snapshot is removed');
   } finally {
     await app.dispose();
   }
 });
 
-// The purge above is right about Bash(*) and PowerShell(*) and used to be wrong
-// about everything else in the MAX set. Read(*), Edit, Write, WebFetch(*),
-// WebSearch and every mcp__<server>__* are ordinary grants that people hold
-// without ever touching MAX — restoreFromBackup says so itself: "The full MAX set
-// (Read(*), Edit, Write, …) is legitimately used outside MAX too, so only the two
-// markers that uniquely signal MAX-on are excluded." One MAX round trip forgot
-// the user's copies of them, and a backup entry that is silently dropped is only
-// discovered on the day it was needed.
-test('MAX off forgets what MAX added, not the same entries the user already had', async (t) => {
+// A valid snapshot is provenance. Entries present both in that snapshot and the
+// retired blanket set belong to the user; cleanup must restore them and retain
+// their backup cover while removing only additions absent from the snapshot.
+test('legacy cleanup keeps overlapping user grants recorded by the snapshot', async (t) => {
   const env = setup(t);
-  // Four of these overlap the MAX blanket set and belong to the user.
   const held = ['Read(*)', 'Edit', 'WebSearch', 'mcp__context7__*'];
   const userPerms = ['Bash(git status *)', 'Bash(rg *)', ...held];
-  env.write({ permissions: { allow: userPerms, deny: DENY } });
+  const legacyAllow = [...RETIRED_CORE, 'mcp__context7__*'];
+  writeRetiredFixture(env, { snapshot: userPerms, current: legacyAllow });
+  writeBackupCopies(env, [...new Set([...userPerms, ...legacyAllow])]);
 
   const app = harness(env.tempHome);
   try {
-    await app.commands.get('permission-wildcarding.runNow')();
-    await app.commands.get('permission-wildcarding.toggleMax')();
-    // The watcher would do this; run the pass so the blanket set reaches the backup.
-    await app.commands.get('permission-wildcarding.runNow')();
-    const whileMax = JSON.parse(fs.readFileSync(env.backupPath, 'utf8')).allow;
-    assert.ok(whileMax.includes('Write'), 'precondition: MAX added Write and the backup caught it');
-
-    await app.commands.get('permission-wildcarding.toggleMax')();
+    await confirmRetiredCleanup(app);
     const live = env.read().permissions.allow;
     const saved = JSON.parse(fs.readFileSync(env.backupPath, 'utf8')).allow;
 
-    // MAX-off restores the pre-MAX snapshot, so these are live again — an entry
-    // that is live and absent from the high-water mark is unrecoverable.
     for (const permission of held) {
-      assert.ok(live.includes(permission), `precondition: ${permission} is live after MAX off`);
+      assert.ok(live.includes(permission), `${permission} is restored from the ownership snapshot`);
       assert.ok(saved.includes(permission), `${permission} is the user's and keeps its backup cover`);
     }
-    // What MAX itself introduced is gone from settings.json, so it must be gone
-    // from the backup too or the guard re-asserts it and MAX comes back on.
     for (const added of ['Bash(*)', 'PowerShell(*)', 'Write', 'WebFetch(*)']) {
-      assert.ok(!live.includes(added), `precondition: MAX off removed ${added}`);
-      assert.ok(!saved.includes(added), `${added} was MAX's, so it leaves the backup`);
+      assert.ok(!live.includes(added), `cleanup removes owned ${added}`);
+      assert.ok(!saved.includes(added), `${added} must not remain available for reassertion`);
     }
   } finally {
     await app.dispose();
   }
 });
 
-// Second layer of defense: even if Bash(*)/PowerShell(*) somehow end up in the
-// backup (stale file, pre-fix version), restoreFromBackup must never silently
-// write them back, because MAX is an explicit mode choice, not a permission.
-test('restore never re-enables MAX even if backup holds the markers', async (t) => {
+// The two broad grants are not ownership proof by themselves. A user may have
+// chosen them directly, so ordinary backup restoration must preserve them when
+// no valid cleanup fixture proves that the retired feature created them.
+test('backup restore preserves legitimate broad grants without cleanup evidence', async (t) => {
   const env = setup(t);
-  const userPerms = ['Bash(git status *)', 'Bash(rg *)'];
-  env.write({ permissions: { allow: userPerms, deny: DENY } });
+  const userPerms = ['Bash(*)', 'PowerShell(*)'];
+  env.write({ permissions: { allow: [], deny: DENY } });
 
-  // Manually poison the backup with MAX markers — simulates a stale pre-fix file.
   fs.mkdirSync(path.dirname(env.backupPath), { recursive: true });
   fs.writeFileSync(env.backupPath, JSON.stringify({
-    allow: [...userPerms, 'Bash(*)', 'PowerShell(*)'],
+    allow: userPerms,
     deny: DENY,
   }) + '\n');
 
@@ -293,21 +323,127 @@ test('restore never re-enables MAX even if backup holds the markers', async (t) 
   try {
     await app.commands.get('permission-wildcarding.restoreBackup')();
     const after = env.read().permissions;
-    assert.ok(!after.allow.includes('Bash(*)'),      'Bash(*) must never be restored');
-    assert.ok(!after.allow.includes('PowerShell(*)'), 'PowerShell(*) must never be restored');
     for (const p of userPerms) {
-      assert.ok(after.allow.includes(p), `legitimate permission ${p} must still be restored`);
+      assert.ok(after.allow.includes(p), `legitimate permission ${p} must be restored`);
     }
   } finally {
     await app.dispose();
   }
 });
 
-// ── the off-tree mirror ─────────────────────────────────────────────────────────
+test('startup policy recovery cannot resurrect MAX grants from a dormant backup', async (t) => {
+  const env = setup(t);
+  const snapshot = [
+    'Bash(git status *)', 'Bash(rg *)', 'Bash(tokei *)', 'Read(src/**)', 'WebSearch',
+  ];
+  env.write({ permissions: { allow: [], deny: [] } });
+  const statePath = path.join(env.tempHome, '.claude', 'backups', 'wildcarding-max.json');
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ allowSnapshot: snapshot }, null, 2) + '\n');
+  writeBackupCopies(env, [...snapshot, ...RETIRED_CORE]);
+
+  const app = harness(env.tempHome);
+  try {
+    const live = env.read().permissions.allow;
+    for (const permission of snapshot) assert.ok(live.includes(permission));
+    for (const permission of RETIRED_CORE.filter((entry) => !snapshot.includes(entry))) {
+      assert.ok(!live.includes(permission), `${permission} must stay masked during startup restore`);
+    }
+    assert.equal(fs.existsSync(statePath), true,
+      'the snapshot remains until both physical backup copies are explicitly cleaned');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('activation retains every legacy artifact when a policy file is unreadable', async (t) => {
+  const env = setup(t);
+  fs.writeFileSync(env.settingsPath, '{ half-written');
+  const statePath = path.join(env.tempHome, '.claude', 'backups', 'wildcarding-max.json');
+  const scriptPath = path.join(env.tempHome, '.claude', 'wildcarding', 'approve-all.js');
+  const codexStatePath = path.join(env.tempHome, '.claude', 'backups', 'wildcarding-codex-max.json');
+  const codexPath = path.join(env.tempHome, '.codex', 'config.toml');
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.mkdirSync(codexPath, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ allowSnapshot: [] }) + '\n');
+  fs.writeFileSync(codexStatePath, JSON.stringify({ priorApproval: 'on-request' }) + '\n');
+  fs.writeFileSync(scriptPath, 'foreign bytes that cleanup must not inspect after a read failure\n');
+
+  const app = harness(env.tempHome);
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fs.existsSync(statePath), true);
+    assert.equal(fs.existsSync(codexStatePath), true);
+    assert.equal(fs.existsSync(scriptPath), true);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// ── ownership evidence ────────────────────────────────────────────────────────
+// Values that can also be chosen directly do not prove that this extension owns
+// them. Activation must stay silent until an exact old hook or valid snapshot
+// provides evidence.
+
+test('activation does not prompt for broad grants or Codex never without ownership evidence', async (t) => {
+  const env = setup(t);
+  const allow = ['Bash(*)', 'PowerShell(*)', 'Bash(git status *)'];
+  env.write({ permissions: { allow, deny: DENY } });
+  const codexPath = path.join(env.tempHome, '.codex', 'config.toml');
+  fs.mkdirSync(path.dirname(codexPath), { recursive: true });
+  fs.writeFileSync(codexPath, 'approval_policy = "never"\nmodel = "gpt-5.4"\n');
+  const beforeCodex = fs.readFileSync(codexPath, 'utf8');
+
+  const app = harness(env.tempHome);
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(!app.warnings.some((message) => message.includes('configuration shaped like the retired')),
+      'automatic migration must not ask based only on values the user can choose independently');
+    const afterAllow = env.read().permissions.allow;
+    assert.ok(afterAllow.includes('Bash(*)'), 'activation leaves the broad Bash grant untouched');
+    assert.ok(afterAllow.includes('PowerShell(*)'), 'activation leaves the broad PowerShell grant untouched');
+    assert.equal(fs.readFileSync(codexPath, 'utf8'), beforeCodex,
+      'activation leaves an independently chosen Codex policy untouched');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('stale snapshots plus later broad choices never trigger automatic cleanup', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(*)', 'PowerShell(*)'], deny: DENY } });
+  const backupDir = path.join(env.tempHome, '.claude', 'backups');
+  const claudeState = path.join(backupDir, 'wildcarding-max.json');
+  const codexState = path.join(backupDir, 'wildcarding-codex-max.json');
+  const codexPath = path.join(env.tempHome, '.codex', 'config.toml');
+  fs.mkdirSync(backupDir, { recursive: true });
+  fs.mkdirSync(path.dirname(codexPath), { recursive: true });
+  fs.writeFileSync(claudeState, JSON.stringify({
+    allowSnapshot: ['Bash(git status *)'], defaultMode: null,
+  }) + '\n');
+  fs.writeFileSync(codexState, JSON.stringify({ priorApproval: 'on-request' }) + '\n');
+  fs.writeFileSync(codexPath, 'approval_policy = "never"\nmodel = "gpt-5.6-sol"\n');
+  const settingsBefore = fs.readFileSync(env.settingsPath);
+  const codexBefore = fs.readFileSync(codexPath);
+
+  const app = harness(env.tempHome);
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(fs.readFileSync(env.settingsPath).equals(settingsBefore));
+    assert.ok(fs.readFileSync(codexPath).equals(codexBefore));
+    assert.equal(app.warnings.some((message) => /legacy cleanup/i.test(message)), false);
+    assert.equal(fs.existsSync(claudeState), true);
+    assert.equal(fs.existsSync(codexState), true);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// ── the off-tree mirror ────────────────────────────────────────────────────────────────────────────────
 // Observed 2026-09-09: every directory under ~/.claude was recreated, so the
 // primary backup went with the thing it exists to protect. These cover the
 // recovery that failure needs, and the two ways a second copy goes wrong.
-
 test('the backup is mirrored outside ~/.claude', async (t) => {
   const env = setup(t);
   env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(rg *)'], deny: DENY } });
@@ -357,32 +493,6 @@ test('losing all of ~/.claude still restores, from the mirror', async (t) => {
   }
 });
 
-test('a pruned entry leaves the mirror too, and cannot come back', async (t) => {
-  const env = setup(t);
-  env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(rg *)'], deny: DENY } });
-
-  const app = harness(env.tempHome);
-  try {
-    await app.commands.get('permission-wildcarding.runNow')();
-    await app.commands.get('permission-wildcarding.toggleMax')();
-    await app.commands.get('permission-wildcarding.runNow')();
-    assert.ok(JSON.parse(fs.readFileSync(env.mirrorPath, 'utf8')).allow.includes('Bash(*)'),
-      'precondition: the mirror captured the blanket entry');
-
-    // MAX off purges the blanket entries. If the purge skipped the mirror, the
-    // high-water mark would survive off-tree and the next restore would hand it
-    // straight back -- so assert on the mirror, not the primary.
-    await app.commands.get('permission-wildcarding.toggleMax')();
-    const mirrored = JSON.parse(fs.readFileSync(env.mirrorPath, 'utf8'));
-    assert.ok(!mirrored.allow.includes('Bash(*)'), 'Bash(*) must leave the mirror on MAX off');
-    assert.ok(!mirrored.allow.includes('PowerShell(*)'),
-      'PowerShell(*) must leave the mirror on MAX off');
-    assert.ok(mirrored.allow.includes('Bash(rg *)'), 'a real permission must survive the purge');
-  } finally {
-    await app.dispose();
-  }
-});
-
 // The reason readBackup falls back rather than unioning. A stale mirror is the
 // normal state after upgrading from a version that wrote only the primary, or
 // after the mirror path changes -- and a union read would treat whatever it still
@@ -413,79 +523,33 @@ test('a stale mirror cannot resurrect an entry pruned from the primary', async (
   }
 });
 
-test('MAX off purges a blanket that arrived WHILE MAX was on', async (t) => {
-  // The first coverage of what buildMaxAllowSet's ARGUMENT actually decides.
-  //
-  // An audit reported two surviving mutants here and concluded the change was
-  // untested. Both halves needed correcting. The change cannot be reverted —
-  // f041031 deleted the readSettings() call, so the mutation that would test it
-  // (`the earlier read's allow`) cannot be written against the current code. And
-  // the two mutants it did run are indistinguishable on every existing fixture,
-  // for a findable reason: buildMaxAllowSet's first seven entries are the
-  // MAX_ALLOW_CORE constant, so only the `mcp__*` tail varies, and
-  // detectMcpServers matches the PREFIX `mcp__S__` — so a specific
-  // `mcp__S__tool` surviving into the restored list still yields server S.
-  //
-  // The only discriminating input is an `mcp__S__*` blanket that lands WHILE MAX
-  // is on, for a server with no other `mcp__S__` entry. disableMaxAllow computes
-  // `blanket` from the CURRENT list, so it strips that entry, and the pre-MAX
-  // snapshot cannot restore it — meaning only the read the write landed on ever
-  // knew server S existed.
-  //
-  // Verified against the real functions:
-  //   pre-MAX     ['Bash(git status *)', 'mcp__context7__query-docs']  (a fixed point)
-  //   MAX-ON      the 7 core + mcp__context7__*   (context7 comes from the prefix)
-  //   injected    + mcp__figma__*                 (still a fixed point)
-  //   purge set from the MAX-ON list  -> includes BOTH mcp blankets   <- correct
-  //   from the post-off list          -> includes only mcp__context7__*
-  //   from []                         -> the 7 core only
+test('legacy cleanup preserves MCP blankets for servers introduced after MAX', async (t) => {
+  // Old MAX generated a blanket only for servers represented in the pre-MAX
+  // snapshot. A current-only server blanket is therefore a later user/learner
+  // grant, while context7's blanket is an owned generated addition.
   const env = setup(t);
-  // context7 appears ONLY in specific form, so it is the user's and must keep
-  // its cover; figma will appear only as a blanket, so it must lose it.
-  env.write({ permissions: { allow: ['Bash(git status *)', 'mcp__context7__query-docs'], deny: DENY } });
+  const snapshot = ['Bash(git status *)', 'mcp__context7__query-docs'];
+  const legacyAllow = [...RETIRED_CORE, 'mcp__context7__*', 'mcp__figma__*'];
+  writeRetiredFixture(env, { snapshot, current: legacyAllow });
+  writeBackupCopies(env, [...new Set([...snapshot, ...legacyAllow])]);
 
   const app = harness(env.tempHome);
   try {
-    await app.commands.get('permission-wildcarding.runNow')();
-    await app.commands.get('permission-wildcarding.toggleMax')();
-
-    // What a Claude Code approval or an Auto Learn apply does while MAX is on.
-    const whileOn = env.read();
-    whileOn.permissions.allow.push('mcp__figma__*');
-    fs.writeFileSync(env.settingsPath, JSON.stringify(whileOn, null, 2) + '\n');
-    await app.commands.get('permission-wildcarding.runNow')();
-
-    const whileMax = JSON.parse(fs.readFileSync(env.backupPath, 'utf8')).allow;
-    assert.ok(whileMax.includes('mcp__figma__*'),
-      'precondition: the blanket that arrived during MAX reached the backup');
-    assert.ok(whileMax.includes('mcp__context7__*'),
-      'precondition: MAX\u2019s own context7 blanket reached the backup');
-
-    await app.commands.get('permission-wildcarding.toggleMax')();
+    await confirmRetiredCleanup(app);
     const live = env.read().permissions.allow;
     const saved = JSON.parse(fs.readFileSync(env.backupPath, 'utf8')).allow;
 
-    // A. Kills both of the audit's mutants (the post-MAX list, and []). figma's
-    //    only footprint was the blanket, so it is visible only in the list the
-    //    write landed on. Verified: both die here, on this assertion.
-    assert.ok(!live.includes('mcp__figma__*'),
-      'precondition: MAX off dropped the blanket it could not restore');
-    assert.ok(!saved.includes('mcp__figma__*'),
-      'the purge set must come from the list the write landed on, not the list it '
-      + 'produced — otherwise the policy guard re-asserts an mcp blanket and MAX '
-      + 'creeps back on');
+    assert.ok(live.includes('mcp__figma__*'),
+      'the later figma blanket must survive live cleanup');
+    assert.ok(saved.includes('mcp__figma__*'),
+      'the later figma blanket must keep its backup cover');
 
-    // B. Not a discriminator between the two mutants — assert.ok throws on A
-    //    first, so B is never reached for either. It pins the other half of the
-    //    contract: MAX's own mcp blanket goes while the user's specific entry
-    //    keeps its cover, which is what makes A a statement about PROVENANCE
-    //    rather than about mcp entries in general.
     assert.ok(!saved.includes('mcp__context7__*'),
-      'MAX\u2019s own mcp blanket leaves the backup');
+      'a generated context7 blanket leaves the backup');
     assert.ok(saved.includes('mcp__context7__query-docs'),
-      'the user\u2019s specific entry is not MAX\u2019s and keeps its cover');
+      'the user\u2019s specific context7 grant keeps its backup cover');
     assert.ok(live.includes('mcp__context7__query-docs'),
-      'precondition: the specific entry is live again after MAX off');
+      'the user\u2019s specific context7 grant is restored live');
   } finally {
     await app.dispose();
   }

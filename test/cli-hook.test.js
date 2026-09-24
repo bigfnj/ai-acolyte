@@ -142,18 +142,11 @@ test('a missing settings.json is not an error either', (t) => {
   assert.equal(result.stderr, '');
 });
 
-// ── the two verbs that do not go through the rebasing writer ─────────────────
+// ── direct policy verbs and retired compatibility dispatch ──────────────────
 
-// `--max` and `--bypass` build their whole output from `readSettings() ?? {}`
-// and then write the WHOLE object. readSettings collapses "absent" and
-// "unreadable" into null, so an unparseable file — the zero-byte window of
-// somebody else's write, routine here — became `{}` and the write replaced the
-// user's entire settings.json with just the key the verb touched.
-//
-// `--max on` was the worst of the two: applyMax records the allow-list snapshot
-// as a side effect, so it wrote an EMPTY snapshot over the real one and `--max
-// off` could then restore nothing. The CLI keeps no high-water backup, so on a
-// CLI-only install there was no way back.
+// Bypass still writes Claude settings and must distinguish an absent file from
+// an unreadable one. The retired MAX spellings remain in dispatch only so old
+// scripts cannot fall through to hook mode; their `on` paths must never write.
 function runVerb(home, args) {
   const root = path.parse(home).root;
   return spawnSync(process.execPath, [CLI, ...args], {
@@ -175,38 +168,38 @@ function brokenHome(t) {
   return home;
 }
 
-for (const verb of ['--max', '--bypass']) {
-  test(`${verb} on refuses an unreadable settings.json instead of replacing it`, (t) => {
-    const home = brokenHome(t);
-    const settingsPath = path.join(home, '.claude', 'settings.json');
-    const before = fs.readFileSync(settingsPath, 'utf8');
-
-    const run = runVerb(home, [verb, 'on']);
-
-    assert.notEqual(run.status, 0, 'a refusal has to be visible in the exit code');
-    assert.match(run.stderr, /refused/, run.stderr || run.stdout);
-    assert.equal(fs.readFileSync(settingsPath, 'utf8'), before,
-      'the bytes are untouched, so the damaged file stays recoverable');
-  });
-}
-
-test('--max on does not record an empty allow snapshot over a real one', (t) => {
+test('--bypass on refuses an unreadable settings.json instead of replacing it', (t) => {
   const home = brokenHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const before = fs.readFileSync(settingsPath, 'utf8');
+
+  const run = runVerb(home, ['--bypass', 'on']);
+
+  assert.notEqual(run.status, 0, 'a refusal has to be visible in the exit code');
+  assert.match(run.stderr, /refused/, run.stderr || run.stdout);
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), before,
+    'the bytes are untouched, so the damaged file stays recoverable');
+});
+
+test('retired --max on preserves settings and an existing cleanup snapshot', (t) => {
+  const home = brokenHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const settingsBefore = fs.readFileSync(settingsPath);
   const snapshot = path.join(home, '.claude', 'backups', 'wildcarding-max.json');
   fs.mkdirSync(path.dirname(snapshot), { recursive: true });
-  // A real snapshot from a previous, healthy MAX-on. Overwriting this with []
-  // is what makes the loss permanent: `--max off` restores from here.
   const real = JSON.stringify({ allowSnapshot: ['Bash(git *)', 'Bash(rg *)'] }, null, 2) + '\n';
   fs.writeFileSync(snapshot, real);
 
   const run = runVerb(home, ['--max', 'on']);
 
-  assert.notEqual(run.status, 0);
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /feature was removed; nothing was changed/);
+  assert.ok(fs.readFileSync(settingsPath).equals(settingsBefore), 'settings are byte-identical');
   assert.equal(fs.readFileSync(snapshot, 'utf8'), real,
-    'the snapshot is the only thing that can restore the allow list');
+    'the cleanup snapshot remains available to the hidden off path');
 });
 
-test('--max and --bypass still work on an absent settings.json, which is the legitimate case', (t) => {
+test('--bypass still works on an absent settings.json, which is the legitimate case', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-fresh-'));
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -222,8 +215,8 @@ test('--max and --bypass still work on an absent settings.json, which is the leg
 
 // ── the concurrency the toggles used to lose ─────────────────────────────────
 //
-// `--max` and `--bypass` used to read settings.json, compute a whole new object,
-// and write it back. They hold the policy lock, and the lock is irrelevant:
+// Bypass used to read settings.json, compute a whole new object, and write it
+// back. It holds the policy lock, and the lock is irrelevant:
 // Claude Code never takes it and rewrites this file on every /model, /effort and
 // approval. So anything that landed between the read and the write was reverted.
 // Nothing in the suite covered that — every existing test writes the file once
@@ -252,7 +245,7 @@ function staleReadShim(t, stalePayload, { poisonRead = 1 } = {}) {
     // Targeting a specific read INDEX, not just the first. The first read of
     // settings.json is readSettingsForWrite's preflight, whose parsed value is
     // only tested against null and then discarded — poisoning it proves nothing
-    // about the window that matters. Traced order for --max/--bypass:
+    // about the window that matters. Traced order for --bypass:
     //   #1 readSettingsState  (preflight, discarded)
     //   #2 rawSettingsText    (writeTransform: the transform's input AND the
     //                          compare-and-swap baseline, one read for both)
@@ -305,28 +298,6 @@ test('--bypass keeps a key that landed between its read and its write', (t) => {
   assert.ok(after.permissions.allow.includes('Bash(npm test)'),
     'and the approval that landed in the window survived');
 });
-
-test('--max on snapshots the list as it is now, not as its first read saw it', (t) => {
-  const home = tempHome(t, {
-    model: 'claude-opus-5',
-    permissions: { allow: ['Bash(git status *)', 'Bash(npm test)'] },
-  });
-  const stale = JSON.stringify({ permissions: { allow: ['Bash(git status *)'] } }, null, 2) + '\n';
-
-  const run = runVerbWithShim(home, staleReadShim(t, stale, { poisonRead: 2 }), ['--max', 'on']);
-  assert.equal(run.status, 0, run.stderr);
-
-  // The snapshot is the only thing that can restore the list, so what it captured
-  // is the whole question. Taken from the stale read, `Bash(npm test)` would be
-  // absent from it AND pruned from the live list by the blanket set — gone for
-  // good, which is exactly the loss this change was made to stop.
-  const snapshot = JSON.parse(
-    fs.readFileSync(path.join(home, '.claude', 'backups', 'wildcarding-max.json'), 'utf8'));
-  assert.ok(snapshot.allowSnapshot.includes('Bash(npm test)'),
-    'the snapshot came from the freshest read');
-  assert.equal(settingsOf(home).model, 'claude-opus-5', 'and unrelated keys survived the write');
-});
-
 
 // ── the fixed-point cache, from the hook's side ──────────────────────────────
 //
@@ -686,10 +657,12 @@ for (const flag of ['--help', '-h']) {
     assert.match(run.stdout,
       /^Run with NO arguments to act as a PostToolUse hook \(reads a JSON event on stdin\)\.$/m);
     for (const verb of ['--learn', '--drain', '--guidance', '--gates', '--seed',
-      '--max', '--codex-max', '--bypass']) {
+      '--bypass']) {
       assert.ok(run.stdout.includes(`usage: wildcard-perms ${verb}`),
         `${verb} is dispatched but undocumented, so --help cannot be trusted to be complete`);
     }
+    assert.doesNotMatch(run.stdout, /--max|--codex-max/,
+      'retired compatibility spellings must not remain in the public help surface');
     assert.ok(bytesOf(home).equals(before), 'help must not touch the policy file');
   });
 }
@@ -732,148 +705,70 @@ for (const flag of ['--version', '-V']) {
 }
 
 
-// A shim that makes EVERY compare-and-swap fail, by handing back a different
-// byte sequence for settings.json on every read. writeTransform then exhausts
-// its 3 attempts and throws SETTINGS_CONTENDED — the path whose error code had
-// no reader anywhere in the repo until it was wired up.
-//
-// Same seam as staleReadShim: a Node --require preload patching fs.readFileSync
-// in the child. Nothing in bin/wildcard-perms knows it is under test.
-function neverSettlesShim(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-contend-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const shim = path.join(dir, 'always-moving.js');
-  fs.writeFileSync(shim, [
-    "const fs = require('fs');",
-    "const real = fs.readFileSync;",
-    "let n = 0;",
-    "fs.readFileSync = function (file, ...rest) {",
-    "  if (typeof file === 'string' && file.endsWith('settings.json')) {",
-    "    n += 1;",
-    // A real, parseable settings object that differs on every read, so the CAS
-    // can never hold. `model` is an unrelated key, exactly what Claude Code
-    // rewrites on every /model.
-    "    const body = JSON.stringify({",
-    "      model: 'moving-target-' + n,",
-    "      permissions: { allow: ['Bash(git status *)'], deny: [] },",
-    "    }, null, 2) + '\\n';",
-    "    return Buffer.isBuffer(real.call(fs, file, ...rest)) && rest.length === 0",
-    "      ? Buffer.from(body) : body;",
-    "  }",
-    "  return real.call(fs, file, ...rest);",
-    "};",
-  ].join('\n'));
-  return shim;
-}
+// ── retired Codex compatibility command ─────────────────────────────────────
 
-test('--max reports contention as transient, not as a refusal', (t) => {
-  // SETTINGS_CONTENDED_CODE was set on both throws in src/settings-write.js and
-  // read by NOBODY: every catch in the repo tested only POLICY_LOCK_CODE or
-  // SETTINGS_UNREADABLE. So a routine race with Claude Code — which rewrites
-  // settings.json on every /model, /effort and approval — surfaced as
-  // "refused", the exact opposite of what the code's own comment promises
-  // ("nothing was written, retry on the next trigger").
-  //
-  // This test also exists because wiring it up nearly shipped a ReferenceError:
-  // bin/wildcard-perms loads nothing from src/ at module scope, so the constant
-  // is not in scope there and `node --check` cannot see it. The catch body has
-  // to require it locally, and only running the path proves it does.
-  const home = tempHome(t);
-  fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
-    JSON.stringify({ model: 'start', permissions: { allow: ['Bash(git status *)'], deny: [] } }, null, 2) + '\n');
-
-  const r = spawnSync(process.execPath, ['--require', neverSettlesShim(t), CLI, '--max', 'on'], {
-    cwd: home, encoding: 'utf8', env: { ...process.env, USERPROFILE: home, HOME: home },
-  });
-
-  assert.equal(r.status, 1, 'a contended toggle is still a non-zero exit');
-  assert.match(r.stderr, /being written by another process/,
-    'contention must read as transient — a ReferenceError or a bare "refused" both fail here');
-  assert.doesNotMatch(r.stderr, /ReferenceError/,
-    'the constant has to be required inside the catch; this file loads no src module at module scope');
-  assert.doesNotMatch(r.stderr, /refused —/, 'and not as a refusal the user might act on');
-});
-
-// ── --codex-max against an expired policy cache ──────────────────────────────
-//
-// The cap Codex MAX obeys is read from ~/.codex/cloud-config-bundle-cache.json,
-// which states its own lifetime. On the owner's box that lifetime was one hour
-// and had been over for eighteen days, so the CLI refused a policy that was not
-// in force and said nothing about why its evidence was old. Overriding is now
-// possible, but only explicitly: a silent override would be the same defect
-// pointing the other way, since a machine offline past the TTL would drop a
-// control that is genuinely in force.
-
-const CAP_TOML = 'allowed_approval_policies = ["on-request", "untrusted"]';
-const CODEX_CACHED_AT = '2026-09-03T16:20:47Z';
-
-// A temp HOME carrying both files the verb reads. os.homedir() in the child
-// follows HOME/USERPROFILE, which runArgs already sets.
-function codexHome(t, expiresAt) {
+function codexLegacyHome(t, { snapshot = true } = {}) {
   const home = tempHome(t, { permissions: { allow: [] } });
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   fs.writeFileSync(path.join(home, '.codex', 'config.toml'),
-    'model = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n');
-  fs.writeFileSync(path.join(home, '.codex', 'cloud-config-bundle-cache.json'), JSON.stringify({
-    signed_payload: {
-      cached_at: CODEX_CACHED_AT,
-      expires_at: expiresAt,
-      bundle: { requirements_toml: { enterprise_managed: [{ contents: CAP_TOML }] } },
-    },
-  }));
+    'approval_policy = "never"\nmodel = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n');
+  if (snapshot) {
+    const state = path.join(home, '.claude', 'backups', 'wildcarding-codex-max.json');
+    fs.mkdirSync(path.dirname(state), { recursive: true });
+    fs.writeFileSync(state, JSON.stringify({ priorApproval: 'on-request' }, null, 2) + '\n');
+  }
   return home;
 }
 const codexConfigOf = (home) => fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
-// Comfortably past any wall clock this suite will run under, and comfortably short
-// of a date a Date.parse implementation might refuse.
-const STILL_LIVE = '2099-01-01T00:00:00Z';
 
-test('--codex-max on over an expired cap refuses, names the date, and says how to override', (t) => {
-  const home = codexHome(t, '2026-09-03T17:20:47Z');
+for (const args of [
+  ['--codex-max', 'on'],
+  ['--codex-max', 'on', '--override-stale-policy'],
+]) {
+  test(`${args.join(' ')} cannot enable the retired feature`, (t) => {
+    const home = codexLegacyHome(t);
+    const configPath = path.join(home, '.codex', 'config.toml');
+    const statePath = path.join(home, '.claude', 'backups', 'wildcarding-codex-max.json');
+    const configBefore = fs.readFileSync(configPath);
+    const stateBefore = fs.readFileSync(statePath);
 
-  const run = runArgs(home, ['--codex-max', 'on']);
+    const run = runArgs(home, args);
 
-  assert.equal(run.status, 1, 'a refusal is still non-zero');
-  assert.match(run.stderr, /CACHE dated 2026-09-03T16:20:47Z/,
-    'the user cannot judge a cap without being told how old the evidence is');
-  assert.match(run.stderr, /expired 2026-09-03T17:20:47Z/);
-  assert.match(run.stderr, /--override-stale-policy/,
-    'a refusal with no way past it is the state this feature was already stuck in');
-  assert.equal(codexConfigOf(home), 'model = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n',
-    'and it writes nothing: asking is not overriding');
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /feature was removed; nothing was changed/);
+    assert.ok(fs.readFileSync(configPath).equals(configBefore), 'config.toml stays byte-identical');
+    assert.ok(fs.readFileSync(statePath).equals(stateBefore), 'the cleanup snapshot is retained');
+  });
+}
+
+test('--codex-max status reports only legacy cleanup state', (t) => {
+  const run = runArgs(codexLegacyHome(t), ['--codex-max', 'status']);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /legacy Codex MAX configuration: DETECTED/);
+  assert.match(run.stdout, /approval_policy=never, snapshot=valid/);
+  assert.doesNotMatch(run.stdout, /enterprise policy|override|enable/i);
 });
 
-test('--codex-max on --override-stale-policy writes never, and only past the expiry', (t) => {
-  const stale = codexHome(t, '2026-09-03T17:20:47Z');
+test('--codex-max off restores an owned legacy setting and preserves other config', (t) => {
+  const home = codexLegacyHome(t);
+  const statePath = path.join(home, '.claude', 'backups', 'wildcarding-codex-max.json');
 
-  const run = runArgs(stale, ['--codex-max', 'on', '--override-stale-policy']);
+  const run = runArgs(home, ['--codex-max', 'off']);
 
   assert.equal(run.status, 0, run.stderr);
-  assert.match(codexConfigOf(stale), /^approval_policy = "never"$/m,
-    'the override writes the value the user asked for');
-  assert.match(run.stdout, /over an expired cap cached 2026-09-03T16:20:47Z/,
-    "and must not claim the org 'forbids never' on the line that just wrote it");
-  assert.match(codexConfigOf(stale), /^sandbox_mode = "workspace-write"$/m, 'the floor is untouched');
-
-  // The flag is scoped to staleness. Against a cache still inside its TTL it
-  // changes nothing, or an informed override becomes a policy bypass.
-  const live = codexHome(t, STILL_LIVE);
-  const forced = runArgs(live, ['--codex-max', 'on', '--override-stale-policy']);
-  assert.equal(forced.status, 1);
-  assert.match(forced.stderr, /enterprise policy permits no approval policy this can set/);
-  assert.doesNotMatch(codexConfigOf(live), /approval_policy/, 'a live cap is still a live cap');
+  assert.match(run.stdout, /removed legacy configuration/);
+  assert.equal(codexConfigOf(home),
+    'approval_policy = "on-request"\nmodel = "gpt-5.6-sol"\nsandbox_mode = "workspace-write"\n');
+  assert.equal(fs.existsSync(statePath), false, 'the consumed cleanup snapshot is removed');
 });
 
-test('--codex-max status reports an expired cap as expired', (t) => {
-  const stale = runArgs(codexHome(t, '2026-09-03T17:20:47Z'), ['--codex-max', 'status']);
-  assert.equal(stale.status, 0, stale.stderr);
-  assert.match(stale.stdout, /STALE: that cap comes from a cache dated 2026-09-03T16:20:47Z/);
-  assert.match(stale.stdout, /--override-stale-policy/);
+test('--codex-max off refuses an unowned never policy without changing it', (t) => {
+  const home = codexLegacyHome(t, { snapshot: false });
+  const before = codexConfigOf(home);
 
-  // …and a live one exactly as before, with no staleness note at all.
-  const live = runArgs(codexHome(t, STILL_LIVE), ['--codex-max', 'status']);
-  assert.equal(live.status, 0, live.stderr);
-  assert.match(live.stdout, /enterprise policy allows only \[on-request, untrusted\]/);
-  assert.doesNotMatch(live.stdout, /STALE/,
-    'a current cap reported as stale would invite an override nobody should make');
+  const run = runArgs(home, ['--codex-max', 'off']);
+
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /no valid legacy snapshot proves ownership/);
+  assert.equal(codexConfigOf(home), before);
 });

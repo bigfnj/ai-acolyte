@@ -8,9 +8,12 @@ const os = require('node:os');
 const path = require('node:path');
 
 const CLI = path.resolve(__dirname, '..', 'bin', 'wildcard-perms');
+const LEGACY_APPROVE_SCRIPT = fs.readFileSync(
+  path.join(__dirname, 'fixtures', 'legacy-approve-all.txt'), 'utf8',
+);
 
-// Run the real CLI against a throwaway home, so MAX's sidecar snapshot and the
-// approve hook land in the temp tree rather than the developer's ~/.claude.
+// Run the real CLI against a throwaway home, so compatibility cleanup and Auto
+// Learn state land in the temp tree rather than the developer's ~/.claude.
 function runCli(home, args) {
   const root = path.parse(home).root;
   return spawnSync(process.execPath, [CLI, ...args], {
@@ -23,7 +26,7 @@ function runCli(home, args) {
 }
 
 function tempHome(t, allow) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-max-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-cli-'));
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   fs.writeFileSync(
     path.join(home, '.claude', 'settings.json'),
@@ -37,46 +40,65 @@ const allowList = (home) => JSON.parse(
   fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'),
 ).permissions.allow;
 
-// MAX-on prunes the real allow list away under Bash(*), so MAX-off has to union
-// the sidecar snapshot with what is present now. Restoring the snapshot alone
-// silently dropped anything granted in between — an Auto Learn application, or a
-// permission Claude Code persisted from a real approval.
-test('CLI --max round-trip keeps permissions granted while MAX was on', (t) => {
+test('CLI retired --max on fails without writing policy or compatibility state', (t) => {
   const home = tempHome(t, ['Bash(git status *)', 'Bash(rg *)']);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const before = fs.readFileSync(settingsPath);
 
   const on = runCli(home, ['--max', 'on']);
-  assert.equal(on.status, 0, on.stderr || on.stdout);
-  assert.ok(allowList(home).includes('Bash(*)'), 'MAX on should inject the blanket set');
-
-  // A grant that lands while MAX is on.
-  const settingsPath = path.join(home, '.claude', 'settings.json');
-  const during = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-  during.permissions.allow.push('Bash(tokei *)');
-  fs.writeFileSync(settingsPath, JSON.stringify(during, null, 2) + '\n');
-
-  const off = runCli(home, ['--max', 'off']);
-  assert.equal(off.status, 0, off.stderr || off.stdout);
-
-  const after = allowList(home);
-  assert.deepEqual(after, ['Bash(git status *)', 'Bash(rg *)', 'Bash(tokei *)']);
-  assert.equal(after.includes('Bash(*)'), false, 'no blanket marker may survive MAX off');
+  assert.equal(on.status, 1, on.stdout);
+  assert.match(on.stderr, /feature was removed; nothing was changed/);
+  assert.equal(on.stdout, '');
+  assert.ok(fs.readFileSync(settingsPath).equals(before), 'settings stay byte-identical');
+  assert.equal(fs.existsSync(path.join(home, '.claude', 'backups')), false,
+    'the retired enable path must not create a snapshot');
+  assert.equal(fs.existsSync(path.join(home, '.claude', 'wildcarding', 'approve-all.js')), false,
+    'the retired enable path must not recreate the approve hook script');
 });
 
-// The toggles are policy writers like any other, so they take the shared lock
-// rather than racing Auto Learn's settings + claims-registry write.
-test('CLI --max refuses to write while the policy lock is held', (t) => {
-  const home = tempHome(t, ['Bash(git status *)']);
-  const lockPath = path.join(home, '.claude', 'wildcarding', 'auto-learn-policy.lock');
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-  // This test process is alive, so the lock is never reclaimed as stale.
-  fs.writeFileSync(lockPath, JSON.stringify({
-    pid: process.pid, owner: 'test-owner', at: new Date().toISOString(),
-  }) + '\n');
+test('CLI retired --max off cleans an owned legacy install without losing later grants', (t) => {
+  const home = tempHome(t, [
+    'Bash(*)', 'PowerShell(*)', 'Read(*)', 'Edit', 'Write', 'WebFetch(*)', 'WebSearch',
+    'Bash(tokei *)',
+  ]);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const statePath = path.join(home, '.claude', 'backups', 'wildcarding-max.json');
+  const scriptPath = path.join(home, '.claude', 'wildcarding', 'approve-all.js');
+  const backupPath = path.join(home, '.claude', 'backups', 'allow-list.latest.json');
+  const mirrorPath = path.join(home, '.permission-wildcarding', 'allow-list.latest.json');
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.mkdirSync(path.dirname(mirrorPath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    allowSnapshot: ['Bash(git status *)', 'Bash(rg *)'],
+  }, null, 2) + '\n');
+  fs.writeFileSync(scriptPath, LEGACY_APPROVE_SCRIPT);
+  const backup = {
+    allow: ['Bash(*)', 'PowerShell(*)', 'Bash(git status *)', 'Bash(tokei *)'],
+    deny: ['Bash(*)'],
+  };
+  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2) + '\n');
+  fs.writeFileSync(mirrorPath, JSON.stringify(backup, null, 2) + '\n');
+  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  settings.hooks = { PreToolUse: [{
+    matcher: '*',
+    hooks: [{ type: 'command', command: `node \"${scriptPath.split(path.sep).join('/')}\"` }],
+  }] };
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
 
-  const result = runCli(home, ['--max', 'on']);
-  assert.equal(result.status, 1, result.stdout);
-  assert.match(result.stderr, /Auto Learn is mid-scan/);
-  assert.deepEqual(allowList(home), ['Bash(git status *)'], 'settings must be untouched');
+  const result = runCli(home, ['--max', 'off']);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(allowList(home), ['Bash(git status *)', 'Bash(rg *)', 'Bash(tokei *)']);
+  const after = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  assert.equal(after.hooks?.PreToolUse, undefined, 'the exact old hook is removed');
+  assert.equal(fs.existsSync(statePath), true,
+    'the inert snapshot remains so a configured extension mirror can be filtered safely');
+  assert.equal(fs.existsSync(scriptPath), false, 'the owned old script is removed');
+  for (const file of [backupPath, mirrorPath]) {
+    const cleaned = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(cleaned.allow, ['Bash(git status *)', 'Bash(tokei *)']);
+    assert.deepEqual(cleaned.deny, ['Bash(*)'], 'allow cleanup never changes deny');
+  }
 });
 
 test('CLI --learn honors explicit workspace partition and Codex off scope', (t) => {
@@ -118,31 +140,4 @@ test('CLI --learn honors explicit workspace partition and Codex off scope', (t) 
   assert.equal(fs.existsSync(
     path.join(workspace, '.codex', 'rules', 'permission-wildcarding.rules'),
   ), false);
-});
-
-// MAX-on snapshots the allow list, then prunes every specific entry the blanket
-// set covers. That snapshot is the ONLY way MAX-off restores them, and the write
-// used to be best-effort: it swallowed its failure and returned nothing, so the
-// prune went ahead anyway. With no snapshot, disableMaxAllow computes
-// `restored = kept` and leaves the user the blanket entries and nothing else —
-// 423 permissions traded for 7. The comment justifying "best-effort" was borrowed
-// from writeBypassState, where a lost stash really is benign.
-test('CLI --max refuses to turn on when the snapshot cannot be written', (t) => {
-  const home = tempHome(t, ['Bash(git status *)', 'Bash(rg *)']);
-  // Make the snapshot's directory un-creatable by putting a FILE where it goes,
-  // so mkdirSync throws. Portable, and no permission fiddling.
-  fs.writeFileSync(path.join(home, '.claude', 'backups'), 'not a directory\n');
-
-  const result = runCli(home, ['--max', 'on']);
-  assert.equal(result.status, 1, `must refuse, not proceed; stdout: ${result.stdout}`);
-  assert.match(result.stderr, /refused/, 'and say so');
-  assert.doesNotMatch(result.stdout, /already ON/,
-    '"already ON" would be the worst answer: MAX is off, the user thinks it is on, '
-      + 'and the snapshot that alone could restore their list does not exist');
-  assert.deepEqual(allowList(home), ['Bash(git status *)', 'Bash(rg *)'],
-    'the allow list is untouched — nothing was pruned under a blanket that was never added');
-  const settings = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'));
-  assert.ok(!settings.hooks?.PreToolUse,
-    'and the approve hook must not be registered either: a half-applied MAX reports a '
-      + 'layer it never established');
 });

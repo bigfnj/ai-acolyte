@@ -177,17 +177,20 @@ test('a deny rule still outranks a local approval, which stays where it was', as
   }
 });
 
-test('MAX mode refuses the drain rather than emptying the local file', async (t) => {
+test('a retired blanket configuration refuses the drain rather than emptying the local file', async (t) => {
   const env = setup(t, {
     allow: ['Bash(*)', 'PowerShell(*)'],
     local: ['Bash(dotnet build src/App.csproj)'],
   });
+  const statePath = path.join(env.tempHome, '.claude', 'backups', 'wildcarding-max.json');
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ allowSnapshot: ['Bash(rg *)'] }) + '\n');
   const app = harness(env.tempHome);
   try {
     await app.commands.get('permission-wildcarding.drainLocal')();
     assert.deepEqual(env.localAllow(), ['Bash(dotnet build src/App.csproj)']);
     assert.ok(
-      app.warnings.some((message) => message.includes('Claude MAX is ON')),
+      app.warnings.some((message) => message.includes('legacy Bash(*) and PowerShell(*) grants')),
       'the refusal is explained rather than silent'
     );
   } finally {

@@ -234,23 +234,18 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
   //                   change `permissions.allow` plus additive `permissions.deny`.
   //   writeTransform  runs the caller's function against a fresh read and writes
   //                   what it returns, VERBATIM. It can therefore delete keys —
-  //                   which `applyMax`/`applyBypass` require, since both remove
-  //                   `permissions.defaultMode` and `hooks.PreToolUse` rather than
-  //                   nulling them — and it gets none of writeAllow's protections.
+  //                   which `applyBypass` and one-way legacy cleanup require —
+  //                   and it gets none of writeAllow's protections.
   //
-  // Routing MAX through writeAllow would silently drop Layer 2 entirely: `hooks`
-  // comes from `latest` in that merge, so the approve-hook registration would
-  // never be written. That is why a second writer exists.
+  // Routing a whole-object migration through writeAllow would silently drop
+  // changes outside permissions.allow. That is why a second writer exists.
   //
   // Compare-and-swap, not just a rebase. A rebase alone would close nothing here:
-  // the caller's expensive work happens INSIDE this function (enableMaxAllow runs
-  // processAllowList, measured 9.6 ms), so the read-to-write window survives the
-  // change. Re-reading the bytes after the transform and retrying when they moved
-  // is what actually shrinks it, and it is the pattern auto-learn-manager already
-  // uses for its own transactional write. Retry is safe because both transforms
-  // are idempotent overwrites — each attempt re-snapshots from the newest read,
-  // which is also what makes "the MAX snapshot comes from the freshest read" true
-  // at the moment of the write rather than merely at the moment of the read.
+  // the caller's work happens INSIDE this function, so the read-to-write window
+  // survives the change. Re-reading the bytes after the transform and retrying
+  // when they moved is what actually shrinks it, and it is the pattern
+  // auto-learn-manager already uses for its own transactional write. Retry is
+  // safe only for idempotent transforms, which every current caller supplies.
   function writeTransform(transform, { attempts = 3 } = {}) {
     let lastLatest = null;
     let lastResult = null;
@@ -267,10 +262,9 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
       // writer exists to prevent, reintroduced in a smaller window.
       const { text: beforeText, code: beforeCode } = rawSettingsRead(target);
       const before = stateOfText(target, beforeText, beforeCode);
-      // Refuse BEFORE running the transform, never after. applyMax writes the
-      // allow-list snapshot as a side effect, so transforming first would clobber
-      // a real snapshot with one taken from a file we then refuse to write.
-      // test/cli-hook.test.js asserts those snapshot bytes survive a refusal.
+      // Refuse BEFORE running the transform, never after. A transform may persist
+      // a sidecar snapshot, so running it against unreadable input can corrupt the
+      // only record needed to undo that change.
       if (before.state === SETTINGS_UNREADABLE) {
         const err = new Error(`${target} exists but could not be parsed, so it is not safe to write over`);
         err.code = SETTINGS_UNREADABLE_CODE;
@@ -280,18 +274,14 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
       // an attempt where the file has never been seen. On a retry it means the
       // file VANISHED while the transform ran, and that is the single worst input
       // this function can be handed: {} spreads to a settings.json holding
-      // nothing but the key the verb touched, and applyMax additionally overwrites
-      // a correct allow snapshot with an EMPTY one, so `--max off` then restores
-      // nothing. Both verbs exit 0 reporting success, and a CLI-only install has
-      // no backup.
+      // nothing but the keys the verb touched. A CLI-only install may have no
+      // second process available to reconstruct the discarded settings.
       //
-      // Measured end to end through the real verb, with one external delete landing
-      // inside the transform: 432 allow entries plus `model`, `effortLevel` and
-      // `agentPushNotifEnabled` were replaced by 7 blanket entries and a hooks key,
-      // and `--max off` "restored" an empty list. That is verbatim the disaster the
+      // Measured end to end through a whole-object transform, one external delete
+      // landing inside the transform replaced 432 allow entries plus unrelated
+      // settings with a small stump. That is the disaster the
       // SETTINGS_UNREADABLE refusal exists to prevent, reached through the retry
-      // loop instead of through the read — which is why the preflight guard could
-      // not see it: it ran once, before the loop.
+      // loop rather than the initial read.
       //
       // Refusing leaves the file exactly as the external actor left it, which is
       // strictly safer than materialising a stump. The code is CONTENDED because
@@ -337,12 +327,10 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
       // ORDERING, stated because it is a real limitation and not an oversight:
       // the two guards below judge the transform's OUTPUT, so unlike the
       // SETTINGS_UNREADABLE refusal above they cannot run before the transform.
-      // By the time either throws, `applyMax`'s side effects (the allow snapshot
-      // and the approve script) have already landed. That is tolerable only
-      // because both transforms are idempotent overwrites, so the leftovers are
-      // inert — a snapshot and an approve script for a MAX that never turned on,
-      // which the next successful call replaces. A future transform whose side
-      // effects are NOT idempotent must not use this writer.
+      // By the time either throws, a transform's sidecar effects may already have
+      // landed. That is tolerable only because current side effects are
+      // idempotent. A future transform whose side effects are not idempotent must
+      // not use this writer.
       //
       // A shape guard before the deny guard, because its failure is worse.
       // `JSON.stringify(undefined, null, 2) + '\n'` is the ten bytes
@@ -367,14 +355,9 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
       }
 
       writeFileAtomicSync(target, JSON.stringify(result.settings, null, 2) + '\n');
-      // Deliberately NOT calling onWrite. That hook is the allow-list high-water
-      // backup, and the reason is narrower than it looks: MAX's blanket set does
-      // legitimately reach the backup in production (via the watcher, which
-      // test/policy-backup.test.js relies on), so this is not about keeping it
-      // out. It is about preserving today's behaviour byte-for-byte through a
-      // correctness change — the extension compensates by hand with
-      // forgetFromBackup, and moving that here would be a second change riding
-      // the first.
+      // Deliberately NOT calling onWrite. A whole-object transform can remove
+      // entries intentionally, while the high-water backup only grows. Callers
+      // that remove retired generated entries reconcile the backup explicitly.
       return { wrote: true, result, latest };
     }
     // Out of attempts: another writer is winning every race. Report rather than

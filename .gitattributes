@@ -35,3 +35,13 @@ bin/wildcard-perms text eol=lf
 # exactly the drift this file's header describes, regressed for a file added after
 # that fix landed. Nothing guards this; no test mentions .gitattributes.
 scripts/check-line-refs.js text eol=lf
+
+# The retired approve-all.js, kept verbatim so the cleanup path can prove a file is
+# OURS before deleting it. src/legacy-max-cleanup.js compares a SHA-256 of the bytes
+# on disk against LEGACY_SCRIPT_SHA256, so line-ending conversion changes the
+# identity of the artefact, not just its formatting. Marked -text rather than
+# `text eol=lf`: these bytes are the evidence, and nothing should normalise them in
+# either direction. Caught 2026-09-24 the moment the fixture was first committed --
+# it was authored LF, checkout rewrote it to CRLF under core.autocrlf, the digest
+# moved d9f7e435 -> f4b04634, and two tests failed on Windows that pass on CI.
+test/fixtures/legacy-approve-all.txt -text

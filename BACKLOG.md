@@ -13,7 +13,98 @@ Anything measured says so and names the date. Anything unverified says that too.
 
 ## Open
 
-### From the 2026-09-22 post-merge audit: leaks, lifecycle and the Codex override
+### Codex compatibility certification, opened 2026-09-24
+
+The Codex-facing paths are **not certified yet**. Removing the MAX toggles
+eliminated a misleading cross-agent feature, but a green unit suite still proves
+only the repository's model of Codex. Certification means proving the installed
+VSIX and CLI against real Codex releases and the effective policy Codex actually
+loads.
+
+**Correctness blockers, in order:**
+
+1. Fix evidence inflation at the `observationHashes` cap. The live map was at
+   20,000/20,000 and actively pruning during the 2026-09-22 measurement. Once a
+   transcript cursor and its old hashes are both evicted, a full reread can count
+   the same successful calls again and push a family toward `auto-safe`. The
+   detailed finding below names `pruneCursors` and the two eviction paths. Prove
+   the repair with tiny limits and a transcript whose old successes would cross
+   the threshold if counted twice.
+2. Resolve workspace-scope trust. The extension gates workspace rule writes on
+   VS Code's `workspace.isTrusted` (`vscode-extension/extension.js`,
+   `autoLearnConfig`), while the CLI accepts `--codex-scope workspace` and writes
+   directly. Codex loads project `.codex` rules only for projects Codex itself
+   trusts, which is a different trust decision. Either establish both trust
+   conditions from both entry points or remove workspace scope until that can be
+   proved.
+3. Validate the effective Codex rule set, not only the generated file.
+   `defaultCodexValidator` calls `codex execpolicy check --rules <temporary-file>`.
+   Another visible `.rules` file can be more restrictive, and Codex resolves a
+   conflict in favour of the more restrictive decision. The validator and the
+   "Why did this prompt?" explanation must include all active user and
+   Codex-trusted project rule files regardless of which file receives the
+   generated block, and must say what managed/system policy remains outside local
+   inspection.
+4. Replace the cached managed-requirements parser in `src/codex-policy.js`.
+   `enterprisePrefixRules` currently collects quoted strings from every pattern
+   position and `enterpriseDecisionFor` compares them all with `argv[0]`.
+   Root-position `any_of` happens to work, but ordered multi-token patterns and
+   alternatives in later positions do not. Parse the supported schema exactly
+   and surface an explicit degraded/unknown result for anything else.
+5. Publish a feature matrix before restoring broad "works on both agents"
+   wording. Wildcarding, project-local promotion, Claude policy backup, and the
+   tracked allow list are Claude features. The Codex paths are history ingestion,
+   validated reviewed and `auto-safe` rule export, AGENTS guidance, memory gates,
+   and prompt diagnostics. Shared UI does not make the underlying policy
+   mechanisms equivalent. Correct both package descriptions too; they currently
+   join Claude-only and shared capabilities in one unqualified sentence.
+6. Detect Codex history-storage migration. The reader is hard-coded to
+   `~/.codex/sessions`, while Codex 0.154 exposes migration from legacy rollout
+   files to paginated thread history. Support the migrated backend or show a
+   visible degraded state instead of reporting a clean scan of the old directory.
+
+**Executable contract tests required after those blockers:**
+
+- Run a real `codex` binary in CI rather than an echo or parser shim. Declare a
+  supported version window and record `codex --version` in the artefact. The
+  2026-09-24 local audit exercised 0.145.0 and 0.154.0 on Windows; that is a
+  baseline, not a version guarantee.
+- For every emitted rule, prove an exact positive, a near miss, a non-member of
+  an emitted union, and an inverted `match`/`not_match` case. A rejected check must
+  leave the target byte-identical and the manager must record no application.
+- Keep one sanitized real Codex history fixture and assert the expected call to
+  output correlation. If shell-call-like records exist in an unsupported shape,
+  emit a parser-health error rather than silently looking clean; a genuinely
+  chat-only session is not an error.
+- Add an extension-host test for the full "Why did this prompt?" Codex path. The
+  current unit tests prove helpers and webview messages separately, not the
+  installed command against a real policy set.
+- Move temporary-rule creation inside cleanup protection. If the validator's
+  initial `writeFileSync` partially creates a file and then throws, the current
+  `finally` is never entered.
+
+**Real-app release proof required for the certification record:**
+
+- Build and install the VSIX, verify activation from the packaged artefact, and
+  record the installed artefact hash.
+- In fresh Codex sessions, show one generated rule suppressing the intended
+  prompt and a neighbouring command still prompting.
+- Exercise user scope and either a genuinely Codex-trusted workspace or the
+  product's explicit refusal of workspace scope.
+- Exercise dashboard scan, review, apply, undo, and prompt diagnosis through the
+  installed extension. Confirm a failed `execpolicy` check leaves the deployed
+  rule file byte-identical.
+- Start a fresh Codex session and prove the generated AGENTS guidance and memory
+  gates were actually loaded, rather than merely written to disk.
+
+Codex rules are still documented as experimental. Gate releases on this contract,
+write the completed evidence to `docs/codex-certification.md`, and repeat it when
+the supported Codex version window, rule syntax, or session-history storage
+changes. Also qualify the shell-guidance claim: official documentation permits
+splitting simple chains for policy evaluation, while the Windows 0.154 probe in
+this audit did not match the wrapper form the extension currently describes.
+
+### From the 2026-09-22 post-merge audit: leaks, lifecycle and policy
 
 Four read-only audits ran after the day's work was pushed. Everything the
 regression audit found in that work was FIXED the same session and is not
@@ -45,26 +136,6 @@ a `statSync` against a dead network mount makes `deactivate()` never resolve,
 worker per reload. `test/extension-lifecycle-async.test.js` already defines
 `WedgedWorker.terminated` with a comment naming this exact leak; `grep -rn
 terminated test/` shows it is written twice and read by no assertion.
-
-**Overriding a stale Codex cap creates a state the tool cannot leave.** After
-an override writes `approval_policy = "never"`, if the bundle later refreshes,
-`isCodexMaxOn` returns false for a live cap regardless of file contents. So
-`--codex-max off` prints "already OFF", `on` returns `blockedBy:
-'enterprise-policy'`, the card reads "unavailable", and the `never` this tool
-wrote stays in `config.toml` in violation of a cap that is live again. The
-`priorApproval` snapshot is stranded and never consumed. Before the override
-existed this state was unreachable. Off-while-stale is tested; off-after-refresh
-is not.
-
-**The Codex confirmation modal opens a read-modify-write window.**
-`vscode-extension/extension.js` reads `config.toml` before the modal, which can
-sit open indefinitely, then writes the WHOLE file back from that snapshot. Any
-edit in between, by the user or by Codex, is silently reverted. `applyCodexMax`
-is a surgical line editor precisely so it does not clobber unrelated keys; the
-async gap defeats that at the caller. The toggle is also registered
-fire-and-forget, so nothing can await it, and it writes after the await with no
-`deactivated` re-check -- the class already recorded as fixed for three other
-writers.
 
 **The 32 MB model download is the one in-flight job `deactivate()` does not
 cancel.** The four `execFile` children are tracked and killed; the https
@@ -103,9 +174,6 @@ where every sibling structure is explicitly capped.
 - `readRange`'s `fs.closeSync` in the `finally` can throw and mask the
   in-flight error, which now includes the only diagnostic for an unreadable
   stretch. `policy-lock.js` and `auto-learn-manager.js` both wrap theirs.
-- `src/codex-max.js` uses `now` as a function in one place and a value in
-  another. Passing the wrong one yields `NaN` and silently disables the expiry
-  check. It fails closed, but it is one identifier with two types.
 - `errors` is now returned by `scan()` and printed by the CLI, but the
   dashboard still reads neither it nor `lastScanStats`. `files[].consumedEnd`
   has no reader at all.
@@ -178,7 +246,7 @@ The five things checked here and found NOT worth doing moved to
 They were conclusions sitting in a queue, which is how a settled decision gets
 re-litigated by someone who sees an unticked box.
 
-### 42 dead export names, and 6 option keys with no supplier
+### Dead exports and unsupplied options need a new census
 
 Verified 2026-09-09 by loading every module and diffing declared exports against
 all references across `src/`, `bin/`, `vscode-extension/` and `test/`.
@@ -194,31 +262,11 @@ when they have a production consumer. Tests use member access too, in at least
 four files. Any future census must count exports, destructures, member access
 AND namespace aliases.
 
-**Re-measured with that method: 36 dead export entries, not 42**, and the
-composition moved. Four claims in this section are WRONG and are corrected
-below rather than left to be re-derived:
-
-- `readAllow` is not in `vscode-extension/extension.js` at all, and the only
-  `readAllow` in the tree (`scripts/auto-mode-audit.js:51`) is CALLED at `:107`.
-- `busyMessage` has two real suppliers (`src/agent-guidance.js:281` and
-  `test/policy-lock.test.js:48`, the latter asserting the custom message comes
-  back), so the "six option keys with no supplier" is five.
-- `enableMaxAllow`, `disableMaxAllow` and `registerApproveHook` are all three
-  dead EXPORTS, not "one live, two test-only": every hit outside
-  `src/permissions.js` is prose.
-- "Zero orphaned functions across 578 declarations" is wrong twice over. There
-  are 662 declarations, and one orphan was found: `readConfig` in
-  `src/codex-max.js`, whose only two references were its own declaration and
-  its export entry. REMOVED 2026-09-22, so there is no line left to cite.
-
-The functions themselves are live inside their own modules; only the
-module.exports entry is dead, so removing the name is safe and free. Largest
-concentration is `src/permissions.js` (15 of 36 exports, re-measured 2026-09-22),
-then `codex-max.js` (5), `agent-guidance.js` (3), `memoryLint.js` (3), `autoLearnUi.js` (3), with
-singles across agent-gates, local-settings, permission-match, recall-index,
-derived-guidance, exec-resolve, tool-learn and mirror-pack. A separate set is
-**test-only** — real consumers, just not public API — and should be labelled
-rather than removed.
+The 2026-09-22 count and composition were invalidated when the MAX implementation
+and its Codex module were deleted on 2026-09-24. Re-run the census before quoting
+a total. The method must count destructured imports, namespace aliases, and
+member access, and must label test-only exports separately from exports with no
+consumer at all.
 
 Six option keys are read with zero suppliers anywhere including tests, each
 leaving an unreachable branch: `managedPolicyPath` (3 reads, 0 writes),
@@ -227,7 +275,7 @@ leaving an unreachable branch: `managedPolicyPath` (3 reads, 0 writes),
 `successThreshold` — the last two unreachable because `extension.js:941-942` sets
 both spellings on the same object, so the `||` and `??` legs never fire.
 
-Also unreachable: `extension.js:1058` (`typeof manager?.overview ===
+Also unreachable: `extension.js:1064` (`typeof manager?.overview ===
 'function'` is always true, the same shape as the three fallbacks already
 recorded here), `policy-exporters.js:682-686` (a mergeClaudeAllow overload shim
 nobody calls with an object third argument) and `:691-694` (that third parameter
@@ -254,7 +302,7 @@ at `vscode-extension/extension.js:908` takes the FIRST workspace folder, and
 `return path.join(workspaceRoot, LOCAL_RELATIVE);` at `src/local-settings.js:44` is a
 single join with no recursion.
 
-The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:337`
+The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:327`
 takes the Claude Code session's own directory, and `:332-333` tests
 `<cwd>/.claude/settings.local.json` on every tool call.
 
@@ -297,15 +345,6 @@ and the only metadata chunk is the capture tool's name, with no EXIF, author or 
 
 ### Small, off-axis, confirmed
 
-- **The MAX hook command is escaped for POSIX sh only, and Windows is a coin flip.**
-  Found while fixing the POSIX half. `approveCommandFor` (`src/permissions.js:632`)
-  leaves the Windows form unescaped, which is right for `cmd.exe` and wrong for the
-  other two: Claude Code tries Git Bash first, then `pwsh`, then `cmd.exe`, and the
-  three want three incompatible escapes. A Windows home containing `$` or a backtick
-  — both legal in a filename, unlike `"` — therefore breaks under two of the three,
-  and the launcher cannot know which it got. Escaping for one would break the other
-  two, so nothing was changed. Needs a runtime probe, or a hook body that does not
-  interpolate a path at all.
 - **RESOLVED, and the entry that claimed otherwise was wrong.** This file used to
   state that a work-domain address authored 3 of 48 commits in this public repo.
   Re-verified 2026-09-22 three independent ways: the three commits it named are
@@ -355,14 +394,14 @@ what was deliberately left.
 
 ### Small, confirmed, no urgency
 
-- Dead: `mineWildcard` (`src/permissions.js:190`),
+- Dead: `mineWildcard` (`src/permissions.js:182`),
   `readConfig` (removed 2026-09-22), `readAllow` (`vscode-extension/extension.js:120`),
   the exported alias `DEFAULT_POLICY_LOCK_STALE_MS`, and the option keys
   `claudeHistoryPath` / `codexHistoryPath` / `validateCodexRules` (one occurrence
   repo-wide each).
 - Two fallback branches can never run, because each is an alias of the function
   checked immediately before it and no test injects a partial mock.
-  `return manager.getStatus();` at `vscode-extension/extension.js:1019` follows a
+`return manager.getStatus();` at `vscode-extension/extension.js:1025` follows a
   `manager.status` check, and `src/auto-learn-manager.js:2022` exports
   `getStatus: status`. `manager.getCandidates(options)` at
   `vscode-extension/extension.js:1026` follows a `manager.listCandidates` check, and
@@ -391,43 +430,17 @@ follows is what was confirmed and left. Note two of them independently found the
 same two Tier-1 defects (the installers and the coverage index), which is worth
 knowing when deciding how much to trust a single agent's report.
 
-### Four test harnesses can still assert against a frozen home
-
-The general form is already recorded above. The specific audit, 2026-09-10:
-`dashboard-view.test.js`, `local-drain-extension.test.js` and
-`extension-lifecycle-async.test.js` purge repo `src/` from `require.cache`.
-`policy-backup.test.js`, `policy-guard-unreadable.test.js`,
-`extension-activation.test.js` and `extension-managed-blocked.test.js` delete only
-`extensionPath`.
-
-Exactly five module-level paths leak from the first harness to every later one:
-
-```
-MAX_STATE_FILE       src/permissions.js:601
-APPROVE_SCRIPT       src/permissions.js:607
-BYPASS_STATE_FILE    src/permissions.js:522
-POLICY_LOCK_PATH     src/policy-lock.js:19
-CODEX_CONFIG         src/codex-max.js:43
-```
-
-**No assertion is vacuous today** — only `policy-backup.test.js` touches any of
-them, and it survives because each test writes the MAX snapshot and reads it back
-within itself while `writeMaxState`'s `mkdirSync(..., {recursive:true})` silently
-recreates the deleted temp home. But every one of those tests is one early return
-away from becoming vacuous, and the suite leaves stray directories in
-`os.tmpdir()`.
-
 ### Assertions whose guarantee is narrower than their comment claims
 
 None is vacuous — each has a nameable killing mutation — but the stated guarantee
 is wider than the check:
 
-- `test/dashboard-view.test.js:330` counts webview routes with
+- `test/dashboard-view.test.js:353` counts webview routes with
   `/case '[A-Za-z]+':\s*vscode\.commands\.executeCommand\(/g`. A route written
   as `case 'x': { ... }`, dispatched via a variable, or named with a digit is not
   counted, so "fails if a route is added untested" holds only for the current
   spelling.
-- `test/extension-lifecycle-async.test.js:442` uses `/(?<![\w.])execFile\(/g`,
+- `test/extension-lifecycle-async.test.js:585` uses `/(?<![\w.])execFile\(/g`,
   which excludes `.execFile(` — a fifth spawn written `cp.execFile(` passes
   silently.
 - Half of the `onWrite` gap is closed: a write that throws is now asserted NOT
@@ -440,11 +453,8 @@ is wider than the check:
 
 ### Dead exports and unreachable options, re-measured
 
-The recorded "42 dead export names" still holds as a count; the composition moved
-(`enableMaxAllow` gained a real consumer; `disableMaxAllow` and
-`registerApproveHook` are now test-only rather than dead). 51 export names are
-referenced only from `test/`. Newly confirmed 2026-09-10, all with zero code
-references:
+The old totals and MAX classifications were invalidated by the 2026-09-24
+removal. The non-MAX findings below still need a fresh census before work begins:
 
 - `defaultSettingsPath` (`src/settings-write.js:24`) — used only internally at
   `:143`. Landed the same day it became dead.

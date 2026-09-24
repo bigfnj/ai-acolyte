@@ -4,6 +4,10 @@ What this project already decided, measured, or disproved. **Not a queue.** Open
 in `BACKLOG.md`; this file exists so a later session does not re-derive an answer,
 or re-propose something already refuted with evidence.
 
+MAX modes were removed from the product in the post-1.5.1 work. References below
+are retained as historical incident evidence, not as descriptions of current
+commands or supported behavior.
+
 Split out of `BACKLOG.md` on 2026-09-14, when that file had reached 2,509 lines.
 Its own preamble said closed items are removed since git holds the history, and that had
 never once been practised: measured across twelve commits the file only ever grew. That pass
@@ -329,7 +333,7 @@ and not ours.
 
 | Item | Measured | Frequency |
 |---|---|---|
-| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. ~~**The retracted 2.3 ms figure still ships in a code comment at `src/permissions.js:686-687`**, in the very commit whose message retracts it~~ — **FIXED 2026-09-14.** It shipped at `src/permissions.js:10`, not 686-687; the reference in this very sentence was itself stale. The header now says "~0.9 ms on EVERY tool call" and why 2.3 ms was wrong | ~0.9 ms | per hook call |
+| ~~`require('./managed-policy')` is eager~~ **DONE 2026-09-10.** The figure was wrong three times: 0.61 ms recorded, 2.3 ms predicted by a stub harness that also pre-cached `permission-match`, then 1.27 ms claimed here. Two independent second-party measurements — 30 interleaved repo-resident pairs (**0.889 ms**, min 0.858) and 40 pairs across materialized `33612fe` vs `cd1f50c` trees (**1.01 ms** p50/min) — put it at **0.86–1.04 ms**. The 1.27 was 20–35% high. ~~**The retracted 2.3 ms figure still shipped in a code comment**~~ — **FIXED 2026-09-14.** It shipped in the former managed-policy header near the top of `permissions.js`; that header was later removed with the retired MAX implementation, so Git now holds the historical location rather than a current file:line anchor. | ~0.9 ms | per hook call |
 | A fixed-point cache keyed on a CONTENT HASH of settings.json lets the hook skip the read, the module load and the pass | our-code p50 11.80 -> 2.46 ms; wall 62.3 -> 53.6 ms; 30/30 hits | per hook call |
 | ~~`memoryReport()` runs TWICE per dashboard refresh~~ **DONE 2026-09-10.** "11.22 ms" was the COMBINED cost of both calls, not the saving — the second is much cheaper because the file cache and the JIT are warm. Measured directly, 11 interleaved fresh processes: one call 6.99 ms, two 9.92 ms, so hoisting saves **2.93 ms** and 25 fs syscalls | 2.93 ms | per refresh |
 | `runWildcarding` takes the policy lock even on the unchanged path; the CLI hook was deliberately changed not to | lock cycle 3.72 ms of 9.60 ms, plus contention with Auto Learn | per settings.json write |
@@ -533,8 +537,9 @@ already a fixed point, which is the only state in which it must fire zero times.
   untested.** Its message calls it a correctness fix — "both halves now come from
   ONE read" — but the old code was `applyMax(settings, turningOn)`, whose
   `res.settings` was computed **in memory from `settings`**. There was one read
-  then and one now. Two mutants on `wroteOntoAllow` at `extension.js:2428` — it
-  was named `preMax` when this was written — the post-MAX list, and `[]`, both
+  then and one now. Two mutants on the former `wroteOntoAllow` variable in the
+  pre-removal extension implementation — it was named `preMax` when this was
+  written — the post-MAX list, and `[]`, both
   **SURVIVED** the full 400-test suite. The four purge assertions in
   `test/policy-backup.test.js` guard the filter and the `MAX_ALLOW_CORE`
   constant; the only thing that varies with the argument is `detectMcpServers`,
@@ -795,8 +800,9 @@ deliberately fixed away from for the hook.
 
 ## `preMax` is misnamed, and the audit's read of it was wrong too
 
-The purge argument: `const wroteOntoAllow = wroteOnto?.permissions?.allow ?? []`
-at `vscode-extension/extension.js:2428`, named `preMax` when this was written.
+The removed purge argument was
+`const wroteOntoAllow = wroteOnto?.permissions?.allow ?? []`, named `preMax`
+when this record was written.
 Two corrections:
 
 - **It cannot be reverted.** `f041031` deleted the `readSettings()` call
@@ -809,8 +815,8 @@ Two corrections:
   `wroteOnto?.permissions?.allow` is the **MAX-ON on-disk list**, not the pre-MAX
   list — the pre-MAX list lives only in the sidecar snapshot and is re-unioned by
   `disableMaxAllow`. The comment repeated the error too. Both have since been
-  fixed in place: the variable is `wroteOntoAllow`, and `:2381-2385` now states
-  the correction rather than the error.
+  fixed in place before the feature was retired: the variable became
+  `wroteOntoAllow`, and its comment stated the correction rather than the error.
 
 Why both mutants survive, verified by running the real functions on both existing
 fixtures (byte-identical purge sets for all three variants):
@@ -925,7 +931,7 @@ installing an equal version over an existing one is a silent no-op, which presen
 "in-place upgrades do not work". Bumped to 1.4.5 on 2026-09-14.
 
 Bump `vscode-extension/package.json` and the root `package.json` together.
-`test/installers.test.js:567` — "the two package manifests report the same version" —
+`test/installers.test.js:465` — "the two package manifests report the same version" —
 asserts they agree, and the extension manifest is authoritative because `release.yml`
 defaults its version input to it.
 

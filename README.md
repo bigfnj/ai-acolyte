@@ -5,18 +5,20 @@ things. Approve `Bash(git status)` and you will be asked again for `git log`, th
 `git diff`, then `git show`. This collapses each approval into the *family* it
 belongs to, so one decision covers the whole family from then on.
 
-It is a VS Code extension plus a CLI, and it works on both agents: it watches
-Claude Code's `~/.claude/settings.json` and reads Codex history, writing separately
-validated policy for each.
+It is a VS Code extension plus a CLI. The Claude Code path watches and rewrites
+`~/.claude/settings.json`; cross-agent Auto Learn reads Claude Code and Codex
+history and emits policy in each agent's native format. The Codex path is useful,
+but is not yet compatibility-certified; the remaining proof is tracked at the top
+of [BACKLOG.md](BACKLOG.md).
 
 ![Wildcarding status card](img/01-wildcarding.png)
 
 What you get:
 
 - Far fewer approval prompts, without hand-editing a settings file.
-- One tool covering Claude Code and Codex rather than two half-solutions.
+- One dashboard for Claude Code policy and reviewed Codex rule export.
 - Proposals earned from what you actually ran, not a guessed-at allow list.
-- Your `permissions.deny` list still wins, always, on every sub-command.
+- Claude Code's `permissions.deny` list still wins on every sub-command.
 
 ---
 
@@ -39,14 +41,22 @@ code --install-extension permission-wildcarding-*.vsix
 No dependencies, no lockfile, no `node_modules`. Node 20 or later, VS Code 1.80 or
 later.
 
+Upgrading from a release that exposed MAX does not leave an enable path behind.
+The extension offers an automatic review only when the exact retired Claude hook
+is still registered. Snapshot-only state can be stale, so it is left inert and
+used to stop old backup copies from reasserting generated blanket grants. A
+CLI-only installation can explicitly run `wildcard-perms --max off` or
+`wildcard-perms --codex-max off`; those hidden compatibility commands can only
+inspect or remove old state, and `on` always fails without writing.
+
 ---
 
 # What it does
 
-Eight things, each with its own card on the dashboard. Every screenshot below is the
+Seven things, each with its own card on the dashboard. Every screenshot below is the
 real UI.
 
-## 1. Wildcarding
+## 1. Wildcarding (Claude Code)
 
 The core, and the card at the top of this page. Every time you approve a command,
 the hook fires and rewrites your allow list so the approval covers its whole command
@@ -61,7 +71,7 @@ subcommand boundary, so approving `git status` does not silently approve `git pu
 Because Claude Code checks each sub-command of a compound separately, one root
 wildcard also clears prompts inside pipelines and `&&` chains.
 
-## 2. Auto Learn
+## 2. Auto Learn (Claude Code and Codex)
 
 ![Auto Learn card](img/02-autolearn.png)
 
@@ -81,25 +91,7 @@ Each row shows the family, which agents it applies to, how many successful runs
 back it, and why it was classified that way. A family that a managed policy already
 blocks is labelled as such instead of being offered as a fix that cannot work.
 
-## 3. MAX modes
-
-![MAX modes card](img/03-maxmode.png)
-
-The blunt instrument. MAX turns off approval prompts wholesale, per agent, and it
-is reversible.
-
-> **Buys you:** an explicit, visible, one-click escape hatch, instead of quietly
-> loosening your settings and forgetting you did.
-
-The card is also honest about what it cannot do. In the screenshot Codex MAX is
-*unavailable*, because the organisation's policy allows only `on-request` and
-`untrusted`. Rather than silently settling for a weaker setting and reporting
-success, it refuses and tells you why. That policy is read from a cache with a
-stated lifetime, so when the cache has expired the card says so, names the date
-it was written, and asks before overriding it instead of staying greyed out
-against a restriction that may be months out of date.
-
-## 4. Project-local approvals
+## 3. Project-local approvals (Claude Code)
 
 ![Project-local card](img/04-projectlocal.png)
 
@@ -114,7 +106,7 @@ user scope now covers.
 Only entries that are genuinely portable are promoted. Anything tied to that
 project's paths stays where it is.
 
-## 5. Shell-style guidance
+## 4. Shell-style guidance (both agents)
 
 ![Shell-style guidance card](img/05-shellguidance.png)
 
@@ -130,7 +122,7 @@ This installs a short managed block into `~/.claude/CLAUDE.md` and
 `~/.codex/AGENTS.md`. It is one toggle, and removing it takes the block back out
 without touching a byte of your own text.
 
-## 6. Memory gates
+## 5. Memory gates (both agents)
 
 ![Memory gates card](img/06-memorygates.png)
 
@@ -144,7 +136,7 @@ The compiler is deliberately strict: a gate must say where it belongs, and one t
 does not is reported rather than guessed at. The extension watches the memory
 directory and recompiles when a gate changes.
 
-## 7. Recall over your memory
+## 6. Recall over your memory
 
 ![Memory and recall card](img/07-memoryllm.png)
 
@@ -158,7 +150,7 @@ It runs on bge-small ONNX fused with BM25, and only changed files re-embed. The 
 also lints the index: size against the budget that is actually loaded every session,
 broken links, and gates that were written but never compiled.
 
-## 8. What it is tracking
+## 7. What it is tracking (Claude Code)
 
 ![Tracked wildcards](img/08-tracking.png)
 
@@ -215,7 +207,6 @@ That asymmetry is why `test/cover-index.test.js` can assert cover-sets identical
 The drain in `src/local-settings.js` promotes, verifies, then prunes, and that order is not
 negotiable: coverage is re-read from disk after the write, never assumed from what the pass meant
 to write, so a failed or policy-filtered promotion cannot revoke a grant the project already had.
-It refuses entirely while MAX is on.
 
 ### Writing settings.json safely
 
@@ -224,8 +215,8 @@ place on every approval, so a naive read-modify-write reverts what landed in bet
 replays the caller's delta onto a fresh read, refuses when the file exists but does not parse, and
 treats deny as additive only, never rebasing it away. `writeTransform`, the second writer, runs
 the caller's transform against a fresh read, writes the result verbatim, and compare-and-swaps on
-the raw bytes. MAX needs it because a merge cannot express a delete, and routing MAX through
-`writeAllow` would silently drop Layer 2, since `hooks` comes from the fresh read in that merge.
+the raw bytes. It is the path for changes that cannot be represented as an additive allow-list
+delta while still preserving concurrent edits.
 
 Every in-process policy writer takes one advisory lock; instruction files get a separate one per
 target file (`instructionLockPath`, `src/agent-guidance.js:265`), and
@@ -293,7 +284,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2129`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2105`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
@@ -304,45 +295,15 @@ went 0.58 to 0.79 and the worst rank 94 to 48; `memory/bench/gate_recall.py` rep
 fails if the lexical leg is switched off. `src/recall-index.js` mirrors that cache's staleness
 rule in Node, so the extension can tell whether spawning Python is worth it without spawning it.
 
-### MAX and Codex MAX
-
-Layer 1 injects `Bash(*)`, `PowerShell(*)`, `Read(*)`, `Edit`, `Write`, `WebFetch(*)`,
-`WebSearch`, and an `mcp__<server>__*` per MCP server already in the allow list. That is the
-sanctioned permission path, so it survives an org that disables user hooks; its gap is that an
-allow list cannot express a global `mcp__*`. Layer 2 closes that with a `PreToolUse` hook at
-`~/.claude/wildcarding/approve-all.js`, `matcher: "*"`, returning `permissionDecision: "allow"`
-for every call. Being a user hook, it is what a managed-hooks-only policy disables, which is why
-Layer 1 is the fallback; `maxLayers` reports Layer 2 active only where the policy permits that
-event. Neither layer touches `permissions.deny` or the hard circuit breakers: a hook `allow`
-cannot override a deny in any mode.
-
-MAX-on snapshots the allow list and reports whether that write landed, since the restore is
-computed from it; MAX-off unions the snapshot with what is present now, so a permission granted
-while MAX was on survives the round trip, and restores the recorded `defaultMode` only while the
-mode is still the one MAX set. MAX moves that mode off `auto` because auto mode refuses to load
-any entry that would bypass its classifier: measured with `scripts/auto-mode-audit.js` against
-Claude Code 2.1.258 on a real ~300-entry list, auto discarded 19 entries and manual none, exactly
-the interpreter and shell-wrapper grants, Layer 1 among them.
-
-Codex MAX sets `approval_policy = "never"` in `~/.codex/config.toml` and leaves `sandbox_mode`
-alone, because Codex has no deny list and the sandbox is its only floor. That file is edited line
-by line and never re-serialised, so literal-string Windows paths and nested `[plugins."x@y"]`
-tables survive, and a bare key lands in the top-level table, not at end-of-file inside the last
-`[table]`. Where a managed bundle caps `allowed_approval_policies` without `never`, the toggle
-reports unavailable and changes nothing. That bundle is a cache carrying its own `expires_at`,
-and an expired one keeps capping — a machine offline past the TTL must not drop a control that
-is still in force — but stops being reported as current: the switch becomes available behind a
-confirmation naming the cache date, or `--override-stale-policy` from the CLI. A bundle that
-never stated an expiry is treated as current, because silence is not expiry.
-
 ### The policy guard and the backups
 
 Org policy does not necessarily arrive as a file: a console-managed organization configures
 restrictions server-side, where the only local trace is `~/.claude/policy-limits.json`, so the
 trigger is source-agnostic: "approvals stopped being granted". Missing means no longer granted,
 not no longer present verbatim, so the guard uses the wildcarder's own coverage index and a
-broader live wildcard is not a loss; without that, MAX-on reads as losing hundreds of entries and
-auto-restores on every change. Missing also requires having looked: a `settings.json` that exists
+broader live wildcard is not a loss; without that, a settings refresh that preserves broad
+coverage can look like a bulk loss and trigger an unnecessary restore. Missing also requires
+having looked: a `settings.json` that exists
 but does not parse is unknown and nothing is written, while a genuinely absent file still
 restores. Only a bulk loss is repaired unasked, and shadowed entries are reported with the managed
 rule responsible, never rewritten.
@@ -403,7 +364,7 @@ association. Neither uninstaller touches the allow list. Cutting a GitHub Releas
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:
 `syncVersion`'s `MANIFESTS` list (`scripts/sync-version.mjs:21`) covers both
 `vscode-extension/package.json`, which drives the sidebar badge, and the root `package.json`,
-which `wildcard-perms --version` prints. `test/installers.test.js:567` asserts they agree, and the
+which `wildcard-perms --version` prints. `test/installers.test.js:465` asserts they agree, and the
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash

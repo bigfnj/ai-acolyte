@@ -297,9 +297,8 @@ Two lessons that outrank the rest:
 
 Also: where `allowManagedHooksOnly` is set and `PreToolUse` is not among the
 events the policy itself defines, **a user `PreToolUse` hook is silently
-dropped**. That disables the
-project's own MAX-mode approve-all hook on such a machine, and it disables the
-most powerful non-bypass lever in the next section.
+dropped**. Any local hook-based permission strategy must account for that
+managed-policy boundary.
 
 `src/managed-policy.js` reads this file so the tool can act on it:
 `assessPermission` labels a permission `inert` when a managed ask or deny covers
@@ -307,9 +306,8 @@ every command it would match, `partial` when the grant is broader than such a
 rule, `redundant` when a managed allow already covers it, and `effective`
 otherwise. An `inert` family is withheld from the Claude review list **and from
 the write**, because writing that rule cannot stop the prompt.
-`hookEventAllowed` answers the hook question, and `maxLayers` now returns
-`hookBlocked` so MAX mode names a layer that cannot run instead of reporting
-itself as on.
+`hookEventAllowed` answers the hook question for diagnostics that inspect
+whether a user event can run.
 
 The "and from the write" half was a documentation claim before it was true.
 `clone` dropped `claude` from `eligibleTargets` for an inert family, but the
@@ -453,8 +451,8 @@ Two consequences worth holding onto. Sibling spellings are not interchangeable:
 `PowerShell(& *)` survives in both modes, so a call-operator grant is live even
 under the classifier. And the blanket wrapper grants a seed installs are inert
 while you run auto, which means switching to manual mode activates all of them
-at once. MAX mode switches you to manual by design (`MAX_MODE = 'default'` in
-`src/permissions.js`), so that is exactly when they go live.
+at once. Treat any manual mode change as a policy expansion and review those
+wrapper grants first.
 
 ### Levers that do not work
 

@@ -4,11 +4,17 @@ Watches `~/.claude/settings.json` and live-generalizes approved Claude Code
 permissions to depth-aware wildcards. Adds an Activity Bar dashboard: a hero card
 with the "Active" / "Idle" state, the version, the approved total and the
 wildcards / specific split, plus **Wildcard Now** and **Restore prunes from
-backup**; then seven collapsible rows, closed by default and summarised on the
-right — **Auto Learn**, **MAX modes**, **Project-local**, **Shell-style
-guidance**, **Memory gates**, **Memory**, and **Wildcards tracked**. That last
+backup**; then six collapsible rows, closed by default and summarised on the
+right: **Auto Learn**, **Project-local**, **Shell-style guidance**, **Memory
+gates**, **Memory**, and **Wildcards tracked**. That last
 row lists each tracked wildcard with a one-click prune, capped at a 12-entry
 preview so it cannot become the panel.
+
+Claude Code policy handling is the established path. Codex history ingestion,
+reviewed rule export, AGENTS guidance, memory gates, and prompt diagnostics are
+available, but the Codex path is not yet compatibility-certified. The required
+correctness fixes and real-CLI proof are tracked under "Codex compatibility
+certification" in the repository `BACKLOG.md`.
 
 Because it is a VS Code extension rather than a Claude Code hook, none of this
 depends on a hook being allowed to fire, so it keeps working where a managed
@@ -86,8 +92,9 @@ counted per tool with no path and no inferred rule at all. The review list also 
 candidate that the current deny or ask policy would override.
 
 The extension scans at startup, watches both agents' JSONL history, and reconciles every five
-minutes by default. Incremental reconciliation, stable observation IDs and deduplication
-prevent double counting. A scan will not always finish a file: one tick ingests a bounded amount
+minutes by default. Incremental reconciliation, stable observation IDs and deduplication are
+designed to prevent double counting. A known eviction defect at the observation-hash cap still
+blocks Codex certification and is recorded in `BACKLOG.md`. A scan will not always finish a file: one tick ingests a bounded amount
 per transcript, and what it could not reach is REPORTED rather than papered over, as `partial`,
 `unreadable` and `unmatchedResults`. The cursor records what was consumed, so the next tick
 resumes exactly where it stopped. Workspace-partitioned state stays under the user profile at
@@ -125,7 +132,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 those are also the only four message arms the webview host handles (`autoLearnScan`,
-`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:3263-3266`).
+`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:1925-1927`).
 **Apply safe candidates** and **Cycle mode** are Command Palette only — see the command
 list at the end of this file. Apply keeps a recoverable snapshot; Undo restores the most
 recent Auto Learn application. The repository CLI uses the same service:
@@ -140,13 +147,16 @@ bin/wildcard-perms --learn undo
 The CLI uses its current directory as the workspace partition and user Codex rules by
 default. Run it from the same workspace as VS Code, or pass `--workspace <path>` plus
 `--codex-scope user|workspace|off`, `--threshold <count>`, `--mode`, and
-`--codex-executable` to mirror the extension settings.
+`--codex-executable` to mirror the extension settings. Workspace Codex scope is not
+certified: the CLI does not currently establish Codex's own project-trust decision.
 
 Codex rules default to `~/.codex/rules/permission-wildcarding.rules`. The
 `permissionWildcarding.autoLearn.codexScope` setting can target the trusted workspace's
 `.codex/rules/permission-wildcarding.rules`, or be `off` to learn without exporting Codex policy.
-Auto Learn never overwrites `default.rules`. Every generated rule must pass
-`codex execpolicy check` before a write; validation failure leaves active rules unchanged.
+Auto Learn never overwrites `default.rules`. Every generated rule must pass an
+isolated `codex execpolicy check` before a write; validation failure leaves active rules unchanged.
+That check does not yet prove the decision after every other visible rule file is loaded, which is
+one of the certification blockers.
 Claude and Codex applications use separate snapshots and output targets. Restart Codex after
 applying or undoing Codex rules because it loads them at startup.
 
@@ -197,7 +207,7 @@ packaging copies it into `extMemory` (`scripts/package.mjs:38`), and `recallScri
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing `<name>.tmp`
 and renaming on success. **Cancel** or any failure unlinks that partial inside `close()`'s
-callback — `fs.unlinkSync(tmp)` (`extension.js:693`) — and resolves only after it, so a
+callback — `fs.unlinkSync(tmp)` (`extension.js:699`) — and resolves only after it, so a
 cancelled download leaves nothing behind. Unlinking *beside* the close raced the still-open
 write handle and lost on Windows, which orphaned every cancelled transfer. See the Memory
 card section below.
@@ -206,7 +216,7 @@ card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:622`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:628`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -255,43 +265,6 @@ from the repository root — see `install.sh` / `install.ps1`.
 
 MIT licensed.
 
-## Skip every prompt — two agents, two switches
-
-Each switch names the agent it applies to, writes a different file, and leaves a
-different floor underneath. They are siblings, not one setting.
-
-| Switch | Agent | Writes | Floor left underneath |
-| --- | --- | --- | --- |
-| **Claude MAX** (recommended) | Claude Code | `~/.claude/settings.json` | `permissions.deny` + circuit breakers |
-| **Codex MAX** | Codex | `~/.codex/config.toml` | the sandbox (`sandbox_mode` untouched) |
-
-The status bar shows both agents at once (`Claude MAX · Codex prompts`), so an
-active "skip everything" is never ambiguous about what it covers.
-
-**Codex MAX** targets `approval_policy = "never"` and deliberately leaves
-`sandbox_mode` alone. Codex has no deny list, so the sandbox is its only floor —
-removing it too would leave nothing able to refuse a command. You still get
-stopped for out-of-workspace writes and network access, which are the cases worth
-being asked about. On a console-managed org an `allowed_approval_policies` cap
-may forbid `never`. The switch then reports itself **unavailable** and writes nothing
-(`blockedBy: 'enterprise-policy'` at `src/codex-max.js:331-336`): every other value it could
-write still prompts *and* equals the org's own default, so setting it and calling that "MAX
-on" would claim prompts are skipped when they are not. Restart Codex to apply; it reads
-config at startup.
-
-That cap is read from a cache with its own stated lifetime, and an **expired** one is
-handled differently: still honoured, because a machine offline past the TTL would otherwise
-drop a control that is genuinely in force, but no longer presented as current. The button
-stays clickable, the card names the date the cache was written, and clicking asks before
-anything is written (`blockedBy: 'enterprise-policy-stale'` at `src/codex-max.js:345-350`).
-From the CLI the same override is `wildcard-perms --codex-max on --override-stale-policy`.
-Absence of an expiry is not expiry: a cache that never stated a lifetime is treated as
-current.
-
-`config.toml` is edited surgically, line by line, so literal-string paths, inline
-arrays and nested `[plugins."x@y"]` tables survive. Turning it off restores the
-file byte for byte.
-
 ## When managed policy lands
 
 Org policy does not necessarily arrive as a file. A console-managed org
@@ -311,9 +284,6 @@ is never resurrected. Approvals are affected two ways, and only one is recoverab
 - **Shadowed** — managed `deny`/`ask` outranks a user `allow` entry, by Claude
   Code's precedence. Reported with the exact managed rule responsible, never
   rewritten, because rewriting cannot win.
-
-It also flags when `allowManagedHooksOnly` makes MAX's approve hook inert — the
-allow-wildcard layer keeps working, which is why MAX has two layers.
 
 ## Why did this prompt?
 
@@ -349,10 +319,9 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-All 19, as registered in `contributes.commands`. Each is prefixed
-`Permission Wildcarding:` in the Command Palette. Four are also title-bar buttons on the
-dashboard view: Toggle Claude MAX, Wildcard Now, Auto Learn - Scan now, and Restore prunes
-from backup.
+All 17, as registered in `contributes.commands`. Each is prefixed
+`Permission Wildcarding:` in the Command Palette. Selected commands also appear as
+dashboard title-bar buttons.
 
 | Command | What it does |
 | --- | --- |
@@ -368,8 +337,6 @@ from backup.
 | Auto Learn - Why did this prompt? | Diagnose one command against user settings and org policy |
 | Auto Learn - Show families blocked by managed policy | Families whose prompt no user rule can stop, with the rule |
 | Derived guidance - review mitigations for prompts no rule can stop | Accept / decline each measured mitigation by id |
-| Toggle Claude MAX | Allow-list wildcards + the `PreToolUse` approve hook |
-| Toggle Codex MAX | `approval_policy = "never"`; `sandbox_mode` untouched |
 | Drain project-local approvals into user scope | Promote, verify, then prune `.claude/settings.local.json` |
 | Toggle shell-style guidance in `~/.claude/CLAUDE.md` | The marker-fenced block that stops un-generalizable approvals |
 | Toggle memory gates in `~/.claude/CLAUDE.md` | Install or remove your compiled standing orders |

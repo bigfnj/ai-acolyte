@@ -46,10 +46,17 @@ found. The suite went 574 to 710 tests over it.
 
 `test/line-refs.test.js` fails a citation only when it lands on a **vacuous** line — blank,
 or a bare closing brace. A stale citation pointing at a plausible-looking line is invisible
-to CI. Measured 2026-09-25, and the label matters: `check-line-refs` reports **OK 35 | NEAR 16 |
-STALE 51 | UNVERIFIABLE 17** over 119 references. **84 is the non-OK TOTAL; STALE is 51.** An
-earlier version of this very entry called 84 the STALE count, which is the kind of error it
-exists to complain about. None of the 51 fails the suite.
+to CI.
+
+**The measurement, stated once so it cannot drift in two places: run**
+`node scripts/check-line-refs.js --quiet`. On 2026-09-25 it reported **OK 38 | NEAR 16 |
+STALE 54 | UNVERIFIABLE 17** over 125 references, against **OK 119 on 2026-09-16**. None of
+the 54 fails the suite.
+
+Two corrections this entry had to make to ITSELF, which is the point. It first called 84 the
+STALE count when 84 was the non-OK TOTAL. It then quoted two different counts in two places,
+both already stale within hours. **Re-run the command rather than trusting any number written
+here**, including this one.
 
 This bit three times during the 2026-09-25 work. A README citation was semantically wrong
 for several revisions and stayed green until an unrelated two-line comment edit pushed its
@@ -169,10 +176,9 @@ constant equalling itself — the property it argues for is delivered by making 
 unconditional, not by that assertion. And `test/codex-contract.test.js` builds a `swapped`
 string it never asserts on (`void swapped;`); the real mutant is built two lines below.
 
-⚠ **The `file:line` corpus got worse across this effort, not better.** `check-line-refs`
-reports **OK 36 | NEAR 16 | STALE 55 | UNVERIFIABLE 17** over 124 references, against OK 119
-on 2026-09-16. Twenty-six of the STALE ones were written by this effort. The gate cannot see
-them, for the reason given in the entry above.
+⚠ **The `file:line` corpus got worse across this effort, not better**, and roughly half the
+stale citations were written by it. The counts live in one place only, in the entry above;
+do not restate them here. The gate cannot see them, for the reason that entry gives.
 ---
 
 ## Deliberately not here

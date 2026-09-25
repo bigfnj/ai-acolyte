@@ -772,3 +772,85 @@ test('--codex-max off refuses an unowned never policy without changing it', (t) 
   assert.match(run.stderr, /no valid legacy snapshot proves ownership/);
   assert.equal(codexConfigOf(home), before);
 });
+
+// ── the stdin cap ─────────────────────────────────────────────────────────────
+//
+// A PostToolUse payload carries the tool's OUTPUT, so its size is whatever the
+// tool printed, and the hook accumulated it without a bound to read one short
+// string out of it.
+//
+// The dangerous way to cap it is to keep the prefix. A truncated prefix is
+// invalid JSON, hookCwd() returns null, and the project-local drain then stops
+// promoting approvals FOREVER with nothing in any log to say why — which is why
+// these two tests are a pair: one proves the drain still happens under the cap,
+// the other proves that when it does not happen the run says so.
+
+// A workspace with one project-local approval that user scope does not cover, so
+// "the drain ran" and "the drain did not run" are distinguishable on disk.
+function workspaceWithLocalApproval(home) {
+  const workspace = path.join(home, 'project');
+  fs.mkdirSync(path.join(workspace, '.claude'), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, '.claude', 'settings.local.json'),
+    JSON.stringify({ permissions: { allow: ['Bash(tokei .)'] } }, null, 2) + '\n',
+  );
+  return workspace;
+}
+
+const localAllowOf = (workspace) => JSON.parse(fs.readFileSync(
+  path.join(workspace, '.claude', 'settings.local.json'), 'utf8',
+)).permissions.allow;
+
+test('a hook event under the cap still drains the project-local approvals', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status *)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+
+  // Padded, but comfortably under the 1 MiB cap: this is the ordinary case, and
+  // it has to stay ordinary or the assertion below is about the padding.
+  const run = runHook(home, {
+    cwd: workspace, tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(256 * 1024) },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.doesNotMatch(run.stderr, /exceeded/, 'nothing was capped at this size');
+  assert.ok(settingsOf(home).permissions.allow.includes('Bash(tokei *)'),
+    'precondition for the test below: at this size the drain promotes the local entry');
+  assert.deepEqual(localAllowOf(workspace), [],
+    'and prunes it locally once the promotion is verified');
+});
+
+test('a hook event over the cap says so and skips the drain instead of truncating', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+
+  const run = runHook(home, {
+    cwd: workspace, tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(2 * 1024 * 1024) },
+  });
+
+  // Exit 0 whatever happens: this runs after every single tool call.
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, '', 'the hook path stays quiet on stdout');
+  // The line that makes this a graceful fallback rather than a silent one. A cap
+  // that truncates instead reports nothing at all, and the drain simply stops.
+  assert.match(run.stderr, /hook event exceeded 1048576 bytes/);
+  assert.match(run.stderr, /the project-local drain was skipped for this call/);
+
+  // No cwd was read, so no drain — and specifically NOT a half-drain.
+  assert.deepEqual(localAllowOf(workspace), ['Bash(tokei .)'],
+    'the local file must be untouched, not partially promoted');
+  assert.ok(!settingsOf(home).permissions.allow.includes('Bash(tokei *)'),
+    'nothing was promoted from a payload we could not read');
+
+  // And the half that does not depend on the payload still ran, which is what the
+  // stderr line promises. Without this the "user-scope pass still ran" sentence is
+  // a claim nothing checks.
+  assert.deepEqual(settingsOf(home).permissions.allow,
+    ['Bash(git status *)', 'Bash(git diff *)'],
+    'the wildcarding pass reads settings.json, not the event, and is unaffected');
+
+  // MUTATION: remove the cap (`input += chunk` unconditionally, `run(input)`) and
+  // this fails on the stderr match, with the local entry promoted and pruned.
+  // MUTATION: keep the prefix instead of dropping it (`input` not reset, still
+  // `run(input)`) and it fails the same way it would in production — silently, on
+  // the stderr assertion only, with the drain skipped and nothing saying why.
+});

@@ -91,10 +91,49 @@ if (argv.includes('--help') || argv.includes('-h')) {
   // Hook mode. Claude Code sends a JSON context on stdin, and one field of it
   // matters: `cwd` names the project whose settings.local.json may have just
   // received the approval that fired this hook.
+  //
+  // A PostToolUse payload carries the tool's OUTPUT, so its size is whatever the
+  // tool printed — a `git log` on a large repo, a build, a whole file read. This
+  // accumulated it without a bound, on the one path that runs after every single
+  // tool call, to read one short string out of it.
+  //
+  // The cap must never hand run() a TRUNCATED prefix, which is the trap this has
+  // to be written around: a prefix is invalid JSON, hookCwd() returns null, the
+  // project-local drain silently stops promoting approvals, and nothing in any
+  // log says why. A hook that quietly does half its job forever is strictly worse
+  // than one that says it did less. So overflow is EXPLICIT — stop accumulating,
+  // drop what was collected rather than parse half of it, say so on stderr, and
+  // pass null, which is the same "no cwd, no drain" route the payload-without-a-
+  // cwd case already takes. The user-scope wildcarding pass does not read the
+  // payload at all and still runs.
+  //
+  // Chunks keep being consumed after the cap so the writer is never left blocked
+  // on a full pipe; they are simply not kept.
+  const HOOK_STDIN_LIMIT = 1024 * 1024;
   let input = '';
+  let overflowed = false;
   process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => { input += chunk; });
-  process.stdin.on('end', () => run(input));
+  process.stdin.on('data', (chunk) => {
+    if (overflowed) return;
+    if (input.length + chunk.length > HOOK_STDIN_LIMIT) {
+      overflowed = true;
+      input = '';
+      return;
+    }
+    input += chunk;
+  });
+  process.stdin.on('end', () => {
+    if (overflowed) {
+      // Said out loud on every occurrence. A control that runs degraded and does
+      // not report it is indistinguishable from one that is working.
+      process.stderr.write(
+        `wildcard-perms: hook event exceeded ${HOOK_STDIN_LIMIT} bytes, so no cwd was `
+        + 'read from it and the project-local drain was skipped for this call. The '
+        + 'user-scope pass still ran.\n'
+      );
+    }
+    run(overflowed ? null : input);
+  });
   process.stdin.resume();
 }
 
@@ -125,7 +164,7 @@ function learnOption(args, name, fallback) {
 // can never capture the default.
 function stateWasScanned(statePath) {
   try {
-    return !!JSON.parse(fs.readFileSync(statePath, 'utf8').replace(/^﻿/, '')).lastScanAt;
+    return !!JSON.parse(fs.readFileSync(statePath, 'utf8').replace(/^\uFEFF/, '')).lastScanAt;
   } catch { return false; }
 }
 

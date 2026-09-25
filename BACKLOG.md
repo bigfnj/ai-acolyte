@@ -154,6 +154,49 @@ and that is currently correct: there is nothing publishable to push.
 Publishing itself stays manual regardless of CI: see `docs/acolyte-rename-migration.md` for
 why an agent tool call cannot do it (`EOTP`, no TTY to wait on the browser approval).
 
+### Three roots that fit neither family table
+
+Found 2026-09-25 while seeding `pipx`, `rclone`, `uv` and `uvx` from the development box's
+real allow list. These three also hold a bare `Bash(<root> *)` grant there, but neither
+`FAMILY_ROOTS` nor `SHELL_WRAPPERS` is obviously right for them, so they were left alone
+rather than guessed at.
+
+- **`just`** runs a recipe named by its argument. `SHELL_WRAPPERS` would strip the root and
+  classify the next token, but a recipe name is not a command, so the stripped result would
+  be meaningless rather than conservative.
+- **`hyperfine`** runs its quoted argument as a command. Stripping is arguably right here,
+  and would land on `quoted-executable`, which already bars auto-apply.
+- **`duckdb`** executes SQL that can read files, write files and install extensions. It is
+  neither a subcommand dispatcher nor a shell wrapper; it is closer to an interpreter, and
+  no existing table describes that shape.
+
+Each needs its own decision with its own evidence. One sweep across all three would be the
+wrong shape of answer.
+
+### 14% of this box's stored approvals can never be wildcarded
+
+Measured 2026-09-25 against the development box's live `~/.claude/settings.json`: of **509**
+`Bash`/`PowerShell` allow entries, **71 (13.9%)** begin with something that is not a command
+at all, and **65** contain an unquoted `;`.
+
+| Shape | Count |
+|---|---|
+| Starts with a `$variable` assignment | 57 |
+| Starts with a control keyword (`foreach`, `if`, `1..6`) | 14 |
+| Contains an unquoted `;` | 65 |
+
+These are multi-statement approvals stored verbatim. They can never match anything again,
+which is precisely what the shell-style guidance this tool installs into `CLAUDE.md` warns
+about. The tool has been generating that guidance while being unable to see that the user's
+own list is 14% populated by the thing it warns against.
+
+**The product opportunity is a diagnostic, not a rule.** Nothing can generalize these, so
+there is no rule to propose; what is missing is telling the user they exist and that each
+one is dead weight that will re-prompt on the next variation. `classifyInvocation` already
+records `script-syntax`, `shell-structure` and `compound-command` reasons, so the
+classification exists. Nothing surfaces it against the INSTALLED allow list, as opposed to
+against newly observed history.
+
 ### From the 2026-09-25 audits: what was found and NOT fixed
 
 Three read-only audits ran over the whole two-day effort. Everything they found in the

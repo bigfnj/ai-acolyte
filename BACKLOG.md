@@ -116,6 +116,44 @@ anything literal. Each can be made checkable by quoting the identifier that actu
 the cited line. **Worth doing when a sentence is being edited anyway, not as a sweep** — and
 note the record's standing warning never to bulk-apply the checker's `suggest` field.
 
+### Publishing the CLI to npm: packaging first, the workflow last
+
+The name is reserved. `ai-acolyte@0.0.1` was published 2026-09-25: two files, 1431 bytes
+unpacked, a `package.json` and a README saying outright that the version reserves the name
+and installs nothing useful. Verified from the registry rather than the publish output, by
+comparing `dist.shasum` against the `npm pack --dry-run` shasum that was privacy-scanned.
+
+**No CI change is needed yet, and the workflow is the last step rather than the first.**
+Neither `release.yml` nor `test.yml` contains `npm publish`, a `registry-url`, or any token,
+and that is currently correct: there is nothing publishable to push.
+
+- **The root manifest is not a package.** `name` is `permission-wildcarding`, not
+  `ai-acolyte`, so a publish would push the wrong name. There is no `bin`, so a global
+  install would put nothing on PATH. There is no `files` and no `.npmignore`, so a publish
+  would ship the entire tree including `test/`, `img/`, `docs/` and any VSIX sitting in the
+  root. Fixing that shape is the real work, and it rests on a decision nobody has made:
+  **does the CLI ship standalone at all, or only inside the extension?**
+- **`private` is undefined, so nothing guards an accidental publish.** `npm publish` run in
+  the repo root today would attempt `permission-wildcarding@1.5.2` with the whole tree
+  attached. Adding `"private": true` until publishing is deliberate costs nothing and is
+  the cheapest item here.
+- **Use Trusted Publishing over OIDC when it is wired, never a token.** This account's 2FA
+  is a security key, so CI has no OTP to present, and npm no longer offers a TOTP
+  authenticator at all. Granular tokens with 2FA bypass are being restricted by npm:
+  account changes Aug 2026, direct publishing Jan 2027. OIDC needs no stored secret. It
+  wants `permissions: id-token: write`, `setup-node` given
+  `registry-url: 'https://registry.npmjs.org'`, then a plain `npm publish`, authorized once
+  with `npm trust github ai-acolyte --file <workflow>.yml --repo bigfnj/ai-acolyte
+  --allow-publish`. Confirmed against docs.npmjs.com/trusted-publishers, 2026-09-25.
+- **It cannot reuse the existing release job.** Trusted publishing requires npm >= 11.5.1
+  and Node >= 22.14.0. `release.yml:23` and `test.yml:80` both read `node-version: "20"`,
+  and that pin is deliberate: Node 20 is where `node:sqlite` is absent, the asymmetry
+  `scripts/mask-sqlite.js` exists to catch. So the publish belongs in its own job on a
+  current Node, not as an edit to either of those.
+
+Publishing itself stays manual regardless of CI: see `docs/acolyte-rename-migration.md` for
+why an agent tool call cannot do it (`EOTP`, no TTY to wait on the browser approval).
+
 ### From the 2026-09-25 audits: what was found and NOT fixed
 
 Three read-only audits ran over the whole two-day effort. Everything they found in the

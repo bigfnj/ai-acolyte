@@ -207,7 +207,7 @@ packaging copies it into `extMemory` (`scripts/package.mjs:38`), and `recallScri
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing `<name>.tmp`
 and renaming on success. **Cancel** or any failure unlinks that partial inside `close()`'s
-callback — `fs.unlinkSync(tmp)` (`extension.js:699`) — and resolves only after it, so a
+callback — `fs.unlinkSync(tmp)` (`extension.js:764`) — and resolves only after it, so a
 cancelled download leaves nothing behind. Unlinking *beside* the close raced the still-open
 write handle and lost on Windows, which orphaned every cancelled transfer. See the Memory
 card section below.

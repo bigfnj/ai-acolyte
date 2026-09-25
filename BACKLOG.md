@@ -297,10 +297,16 @@ Found 2026-09-16 while answering why the Project-local card reads zero. Not a bu
 hook covers what the card misses. It is a UI blind spot, which is the class where a
 control reports on something other than what is actually running.
 
-The extension drains exactly one file. `const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath`
-at `vscode-extension/extension.js:908` takes the FIRST workspace folder, and
-`return path.join(workspaceRoot, LOCAL_RELATIVE);` at `src/local-settings.js:44` is a
-single join with no recursion.
+⚠ **This entry named the wrong cause, corrected 2026-09-24.** It said the extension drains
+exactly one file because `const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath`
+at `vscode-extension/extension.js:998` takes the FIRST workspace folder. That line is real but it
+is **not on the drain path**: it belongs to `autoLearnConfig()` and governs Auto Learn's state
+partitioning and Codex scope. The drain enumerates EVERY folder, at
+`vscode-extension/extension.js:2596`. The blind spot is caused solely by
+`return path.join(workspaceRoot, LOCAL_RELATIVE);` at `src/local-settings.js:45`, a single join
+with no recursion, so the extension drains one file PER OPEN FOLDER and never a subdirectory.
+A fix aimed at `workspaceFolders?.[0]` would change Auto Learn's state identity and cwd filter
+and would not touch the drain at all.
 
 The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:327`
 takes the Claude Code session's own directory, and `:332-333` tests
@@ -404,7 +410,7 @@ what was deliberately left.
 `return manager.getStatus();` at `vscode-extension/extension.js:1025` follows a
   `manager.status` check, and `src/auto-learn-manager.js:2022` exports
   `getStatus: status`. `manager.getCandidates(options)` at
-  `vscode-extension/extension.js:1026` follows a `manager.listCandidates` check, and
+  `vscode-extension/extension.js:1116` follows a `manager.listCandidates` check, and
   `src/auto-learn-manager.js:2024` exports `getCandidates: listCandidates`.
   Re-verified 2026-09-14. A correction pass read this entry as closed because it also
   named `list()`: that alias IS still exported on the same line as `getCandidates`, but
@@ -908,7 +914,7 @@ Every one was read against its target during the pass. Three known-good categori
   WRONGLY said to live and then corrects it. Making it verifiable would destroy the point.
 - Three references to code that was DELETED rather than moved, so there is no line to point at:
   the two dead webview switch arms, whose removal the comment naming `autoLearnApply` at
-  `test/dashboard-view.test.js:300` records, and `readAllow`, which no longer exists anywhere
+  `test/dashboard-view.test.js:369` records, and `readAllow`, which no longer exists anywhere
   in the extension.
 
 What is genuinely open:

@@ -135,32 +135,76 @@ if (argv.includes('--help') || argv.includes('-h')) {
   //
   // Chunks keep being consumed after the cap so the writer is never left blocked
   // on a full pipe; they are simply not kept.
+  //
+  // Read SYNCHRONOUSLY, with fs.readSync on fd 0, rather than through
+  // process.stdin. The stream was the single largest term left in a hook call:
+  // constructing the stdin Socket, entering the event loop for the 'data'/'end'
+  // round trip and tearing it back down costs 5.4 min / 5.1 p50 ms of a 59-65 ms
+  // hook, measured cold in fresh interleaved processes against a purpose-built
+  // arm with this change removed (n=41 x 3 runs: min -5.359/-6.382/-5.567,
+  // p50 -3.815/-5.852/-5.677). It is NOT the wait for the data: repeating the
+  // measurement with the payload written 20 ms after spawn gives the same
+  // -4.810 min / -6.205 p50, so what is saved is the stream machinery itself.
+  //
+  // Deliberately a bounded loop rather than the one-liner `fs.readFileSync(0)`.
+  // That reads the WHOLE payload into memory before anything can cap it, which
+  // reinstates exactly the unbounded accumulation the cap above exists to
+  // prevent — a PostToolUse payload carries the tool's output. This keeps both
+  // properties: at most HOOK_STDIN_LIMIT bytes are ever RETAINED, and the pipe
+  // is still drained to EOF so the writer is never left blocked.
+  //
+  // The loop must run to `read === 0`. A short read is not EOF — a pipe hands
+  // over whatever has arrived — so stopping at the first one truncates a payload
+  // delivered in pieces, and a truncated payload is invalid JSON, which is the
+  // silent-drain-failure trap this whole section is written around. That is what
+  // the chunked-delivery test pins.
   const HOOK_STDIN_LIMIT = 1024 * 1024;
   let input = '';
   let overflowed = false;
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => {
-    if (overflowed) return;
-    if (input.length + chunk.length > HOOK_STDIN_LIMIT) {
-      overflowed = true;
-      input = '';
-      return;
+  {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    const kept = [];
+    let total = 0;
+    for (;;) {
+      let read;
+      try { read = fs.readSync(0, buffer, 0, buffer.length, null); }
+      catch (err) {
+        // EAGAIN is a non-blocking pipe with nothing ready yet, which the stream
+        // used to wait out for us. Yield the thread rather than spinning on it.
+        // Anything else — EBADF from a closed stdin, EOF on the platforms that
+        // raise it instead of returning 0 — ends the payload.
+        if (err.code === 'EAGAIN') {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+          continue;
+        }
+        break;
+      }
+      if (read === 0) break;
+      if (overflowed) continue;
+      if (total + read > HOOK_STDIN_LIMIT) {
+        overflowed = true;
+        kept.length = 0;
+        total = 0;
+        continue;
+      }
+      // Copied out: `buffer` is reused by the next read.
+      kept.push(Buffer.from(buffer.subarray(0, read)));
+      total += read;
     }
-    input += chunk;
-  });
-  process.stdin.on('end', () => {
-    if (overflowed) {
-      // Said out loud on every occurrence. A control that runs degraded and does
-      // not report it is indistinguishable from one that is working.
-      process.stderr.write(
-        `wildcard-perms: hook event exceeded ${HOOK_STDIN_LIMIT} bytes, so no cwd was `
-        + 'read from it and the project-local drain was skipped for this call. The '
-        + 'user-scope pass still ran.\n'
-      );
-    }
-    run(overflowed ? null : input);
-  });
-  process.stdin.resume();
+    // Decoded once, from the joined bytes, so a multi-byte character split
+    // across two reads survives.
+    if (!overflowed) input = Buffer.concat(kept, total).toString('utf8');
+  }
+  if (overflowed) {
+    // Said out loud on every occurrence. A control that runs degraded and does
+    // not report it is indistinguishable from one that is working.
+    process.stderr.write(
+      `wildcard-perms: hook event exceeded ${HOOK_STDIN_LIMIT} bytes, so no cwd was `
+      + 'read from it and the project-local drain was skipped for this call. The '
+      + 'user-scope pass still ran.\n'
+    );
+  }
+  run(overflowed ? null : input);
 }
 
 // The first positional argument after a verb, with flag/value pairs skipped, so
@@ -471,10 +515,29 @@ function finish(input, wildcardPending) {
 }
 
 // The hook's event arrives as JSON on stdin; one field matters.
+//
+// The catch is NOT silent, and that is the whole point of it. Every way the
+// payload can be damaged — a truncated read, a non-JSON event, a writer that
+// died mid-message — lands here as a parse failure, returns null, and the
+// project-local drain is skipped. Skipped silently, it stays skipped forever
+// with nothing in any log to say why, which is the same failure the byte cap
+// above is written around and is reported the same way. An EMPTY payload is
+// different and stays quiet: no stdin at all is how every non-hook invocation
+// and every test that supplies nothing arrives here, and it is not a fault.
 function hookCwd(input) {
-  let cwd;
-  try { cwd = JSON.parse(String(input || '{}'))?.cwd; }
-  catch { return null; }
+  const text = String(input || '');
+  if (!text.trim()) return null;
+  let event;
+  try { event = JSON.parse(text); }
+  catch {
+    process.stderr.write(
+      `wildcard-perms: the ${text.length}-byte hook event on stdin did not parse as JSON, `
+      + 'so no cwd was read from it and the project-local drain was skipped for this call. '
+      + 'The user-scope pass still ran.\n'
+    );
+    return null;
+  }
+  const cwd = event?.cwd;
   return typeof cwd === 'string' && cwd ? cwd : null;
 }
 

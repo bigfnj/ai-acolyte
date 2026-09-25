@@ -14,7 +14,7 @@
 // Writes NOTHING to the real ~/.claude: os.homedir() is stubbed before the extension is
 // required, and the stub is asserted to have taken before anything runs.
 //
-//   node scripts/drive-installed.js [version]      default 1.5.2
+//   node scripts/drive-installed.js [version]      default: this checkout's manifest version
 //
 // Local only, like scripts/smoke.sh and scripts/verify-release.ps1: it needs the VSIX
 // actually installed, which CI has no way to arrange.
@@ -33,15 +33,39 @@ const path = require('path');
 const Module = require('node:module');
 const assert = require('node:assert/strict');
 
-const VERSION = process.argv[2] || '1.5.2';
+// The default is the version THIS CHECKOUT would produce, read from the extension
+// manifest. It used to be the literal '1.5.2', and that went stale the moment 1.5.3 was
+// built and installed: the harness drove the PREVIOUS install and reported 11 pass 0 fail
+// against an artefact that did not contain the change being verified. Nothing failed. It
+// prints the path it drives, and that line is the only reason it was caught rather than
+// believed — which is the argument for printing the subject of a check, not just its
+// verdict.
+const MANIFEST = path.join(__dirname, '..', 'vscode-extension', 'package.json');
+const MANIFEST_VERSION = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')).version;
+const VERSION = process.argv[2] || MANIFEST_VERSION;
 const INSTALLED = path.join(os.homedir(), '.vscode', 'extensions',
   `local.permission-wildcarding-${VERSION}`);
 const entry = path.join(INSTALLED, 'extension.js');
 
+// A missing directory is a LOUD failure that names what IS installed, never a fallback to
+// the newest thing lying around. "The build you just made is not installed" is the single
+// most useful sentence this script can produce, and falling back would hide exactly that.
 if (!fs.existsSync(entry)) {
+  const dir = path.join(os.homedir(), '.vscode', 'extensions');
+  const prefix = 'local.permission-wildcarding-';
+  const found = fs.existsSync(dir)
+    ? fs.readdirSync(dir).filter((d) => d.startsWith(prefix)).map((d) => d.slice(prefix.length))
+    : [];
   console.error(`no installed extension at ${entry}`);
+  console.error(process.argv[2]
+    ? `  ${VERSION} was requested explicitly.`
+    : `  ${VERSION} is this checkout's manifest version, so the build under test is NOT installed.`);
+  console.error(`  installed: ${found.length ? found.join(', ') : '(none)'}`);
+  console.error(`  fix: node scripts/package.mjs && code --install-extension permission-wildcarding-${VERSION}.vsix --force`);
   process.exit(2);
 }
+
+console.log(`driving ${VERSION} (${process.argv[2] ? 'explicit argument' : 'from vscode-extension/package.json'})`);
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-installed-drive-'));
 fs.mkdirSync(path.join(home, '.claude'), { recursive: true });

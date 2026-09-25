@@ -1540,12 +1540,234 @@ function scanHistoryFiles(options = {}) {
   return { observations, cursors, files };
 }
 
+// ── Codex history-store staleness ─────────────────────────────────────────────
+//
+// THE READER IS CORRECT TODAY. THIS IS THE DETECTOR FOR THE DAY IT IS NOT.
+//
+// MEASURED ON THE DEVELOPMENT BOX 2026-09-24 against codex-cli 0.145.0: Codex
+// writes the rollout JSONL files under `~/.codex/sessions` that `scanHistoryFiles`
+// consumes AND maintains `~/.codex/thread_history_1.sqlite` beside them, whose
+// tables are `thread_turns` (20 rows), `thread_items` (567) and
+// `thread_history_projection_state` (52). That last table is literally a cursor
+// INTO the rollout files — its columns are `thread_id`, `next_rollout_byte_offset`
+// and `next_rollout_ordinal` — and its 52 rows matched the 52 rollout files
+// exactly, with zero orphans in either direction. So sqlite is a PROJECTION of
+// the rollout files, not a replacement for them, and rewriting the reader to
+// read sqlite would trade a correct source for a derived one.
+//
+// What has no detector is the day that stops being true. A migration that moves
+// the source of truth into the store leaves `~/.codex/sessions` frozen, and a
+// scan of a frozen directory returns `{files: 52, observations: 0, errors: 0}` —
+// indistinguishable from a quiet week. Same shape as the `blindScan` guard in
+// auto-learn-manager.js, and it is here for the same reason: the numbers a
+// healthy scan reports and the numbers a blind one reports are identical.
+//
+// TWO TIERS, AND THE RESULT SAYS WHICH ONE RAN.
+//
+//   exact   — `node:sqlite` opened the store read-only and listed the thread ids
+//             it knows about. A thread id in the store with no rollout file on
+//             disk is proof the store outran the directory.
+//   partial — the store could not be opened (no `node:sqlite` before Node 22,
+//             a locked or corrupt database, a permission error). Falls back to
+//             `session_index.jsonl`, which names thread ids in plain JSONL, and
+//             to the presence of applied entries in `rollout-migrations/`.
+//
+// A partial inspection that finds nothing says `inspected: 'partial'` and names
+// why. It never reports `healthy`, because it cannot: the evidence it needs was
+// unavailable, and a control that can run degraded has to say so on every run.
+
+const CODEX_THREAD_STORE = /^thread_history[^/\\]*\.sqlite$/i;
+const THREAD_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+
+function rolloutThreadIds(sessionsDir) {
+  const ids = new Set();
+  let files = 0;
+  const pending = [sessionsDir];
+  const seen = new Set();
+  while (pending.length) {
+    const dir = pending.pop();
+    let real;
+    try { real = fs.realpathSync(dir); } catch { continue; }
+    if (seen.has(real)) continue;
+    seen.add(real);
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(full); continue; }
+      if (!entry.name.toLowerCase().endsWith('.jsonl')) continue;
+      files += 1;
+      const match = THREAD_ID.exec(entry.name);
+      if (match) ids.add(match[1].toLowerCase());
+    }
+  }
+  return { ids, files };
+}
+
+// Read-only, best effort, and never allowed to throw into a scan. `node:sqlite`
+// is unavailable on Node 20 and flagged on Node 22, so the require itself is the
+// first thing that can fail.
+function readThreadStoreIds(storePath) {
+  let sqlite;
+  try { sqlite = require('node:sqlite'); }
+  catch { return { ok: false, reason: 'node:sqlite is unavailable on this Node runtime' }; }
+  if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
+    return { ok: false, reason: 'node:sqlite exposes no DatabaseSync' };
+  }
+  let db = null;
+  try {
+    db = new sqlite.DatabaseSync(storePath, { readOnly: true });
+    const ids = new Set();
+    const tables = new Set(db.prepare(
+      "select name from sqlite_master where type='table'",
+    ).all().map((row) => String(row.name)));
+    let read = 0;
+    for (const [table, column] of [
+      ['thread_history_projection_state', 'thread_id'],
+      ['thread_items', 'thread_id'],
+      ['thread_turns', 'thread_id'],
+    ]) {
+      if (!tables.has(table)) continue;
+      for (const row of db.prepare(`select distinct ${column} as id from "${table}"`).all()) {
+        if (row.id) ids.add(String(row.id).toLowerCase());
+      }
+      read += 1;
+    }
+    if (!read) return { ok: false, reason: `${path.basename(storePath)} holds no known thread-history table` };
+    return { ok: true, ids };
+  } catch (error) {
+    return { ok: false, reason: `${path.basename(storePath)}: ${String(error?.message || error)}` };
+  } finally {
+    try { db?.close(); } catch { /* a close failure cannot change the verdict */ }
+  }
+}
+
+function sessionIndexIds(indexPath) {
+  let text;
+  try { text = fs.readFileSync(indexPath, 'utf8'); }
+  catch (error) { return error?.code === 'ENOENT' ? { ok: true, ids: new Set() } : { ok: false, reason: String(error?.message || error) }; }
+  const ids = new Set();
+  let malformed = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      const id = stringValue(firstDefined(record?.id, record?.thread_id, record?.threadId));
+      if (id) ids.add(id.toLowerCase());
+      else malformed += 1;
+    } catch { malformed += 1; }
+  }
+  return { ok: true, ids, malformed };
+}
+
+function codexHistoryStoreState(options = {}) {
+  const home = options.home ? String(options.home) : null;
+  const codexHome = options.codexHome ? String(options.codexHome)
+    : home ? path.join(home, '.codex') : null;
+  const sessionsDir = options.sessionsDir ? String(options.sessionsDir)
+    : codexHome ? path.join(codexHome, 'sessions') : null;
+  const reasons = [];
+  const notes = [];
+  if (!codexHome || !sessionsDir) {
+    return {
+      present: false, stale: false, inspected: 'skipped', reasons: [],
+      notes: ['No Codex home was supplied, so no history-store check ran.'],
+      rolloutFiles: 0, storeFiles: [], migrations: 0, orphans: [],
+    };
+  }
+
+  let entries = [];
+  try { entries = fs.readdirSync(codexHome, { withFileTypes: true }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') {
+      return {
+        present: false, stale: false, inspected: 'exact', reasons: [],
+        notes: ['No ~/.codex directory, so Codex history is not in use on this machine.'],
+        rolloutFiles: 0, storeFiles: [], migrations: 0, orphans: [],
+      };
+    }
+    return {
+      present: false, stale: false, inspected: 'partial',
+      reasons: [],
+      notes: [`The Codex home could not be listed (${error?.code || 'error'}), so staleness is unknown.`],
+      rolloutFiles: 0, storeFiles: [], migrations: 0, orphans: [],
+    };
+  }
+
+  const storeFiles = entries
+    .filter((entry) => entry.isFile() && CODEX_THREAD_STORE.test(entry.name))
+    .map((entry) => path.join(codexHome, entry.name))
+    .sort();
+  let migrations = 0;
+  try {
+    migrations = fs.readdirSync(path.join(codexHome, 'rollout-migrations')).length;
+  } catch { migrations = 0; }
+
+  const rollouts = rolloutThreadIds(sessionsDir);
+  const known = new Set();
+  // Starts exact and is DOWNGRADED by anything that could not be read. With no
+  // store file present there is nothing to diverge from, and that is a real
+  // exact answer rather than an absent one.
+  let inspected = 'exact';
+  for (const store of storeFiles) {
+    const result = readThreadStoreIds(store);
+    if (!result.ok) {
+      inspected = 'partial';
+      notes.push(`The thread-history store could not be read (${result.reason}), so the exact ` +
+        'rollout-versus-store comparison did not run.');
+      continue;
+    }
+    for (const id of result.ids) known.add(id);
+  }
+
+  const index = sessionIndexIds(path.join(codexHome, 'session_index.jsonl'));
+  if (!index.ok) {
+    inspected = 'partial';
+    notes.push(`session_index.jsonl could not be read (${index.reason}).`);
+  } else {
+    for (const id of index.ids) known.add(id);
+  }
+
+  const orphans = [...known].filter((id) => !rollouts.ids.has(id)).sort();
+  if (orphans.length) {
+    reasons.push(`${orphans.length} Codex thread(s) exist in the history store or session index ` +
+      `with no rollout file under ${sessionsDir}. The reader consumes rollout files only, so ` +
+      'those threads are invisible to it.');
+  }
+  if (migrations > 0) {
+    reasons.push(`${migrations} entr${migrations === 1 ? 'y' : 'ies'} in ${path.join(codexHome, 'rollout-migrations')}: ` +
+      'Codex has run a rollout migration, which is the mechanism that would move the source of truth.');
+  }
+  if (storeFiles.length && rollouts.files === 0 && known.size > 0) {
+    reasons.push(`The rollout directory holds no transcripts while the history store knows of ` +
+      `${known.size} thread(s). The reader would report a clean scan of an empty directory.`);
+  }
+
+  if (inspected === 'partial' && !reasons.length) {
+    notes.push('No divergence was found, but the check ran degraded: treat this as unknown, not healthy.');
+  }
+  return {
+    present: storeFiles.length > 0 || rollouts.files > 0,
+    stale: reasons.length > 0,
+    inspected,
+    reasons,
+    notes,
+    rolloutFiles: rollouts.files,
+    rolloutThreads: rollouts.ids.size,
+    storeFiles,
+    storeThreads: known.size,
+    migrations,
+    orphans: orphans.slice(0, 20),
+  };
+}
+
 module.exports = {
   parseClaudeJsonl,
   parseCodexJsonl,
   extractNestedShellCommands,
   cursorKeyForFile,
   scanHistoryFiles,
+  codexHistoryStoreState,
   // Exported for the guard that pins it below the int32 ceiling readSync
   // enforces. Nothing in production reads it from here.
   READ_CHUNK_BYTES,

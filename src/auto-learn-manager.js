@@ -16,9 +16,10 @@ const {
   preferredPrefixSpelling,
 } = require('./auto-learn');
 const { isCoveredBy } = require('./permissions');
-const { scanHistoryFiles } = require('./history-adapters');
+const { scanHistoryFiles, codexHistoryStoreState } = require('./history-adapters');
 const { createPolicyLock } = require('./policy-lock');
 const { commandLaunch } = require('./exec-resolve');
+const { codexRuleFileSet, codexRulesArguments } = require('./codex-policy');
 const {
   readPolicy, assessPermission, overridingRule, coversPermission, defaultPolicyPath,
 } = require('./managed-policy');
@@ -640,6 +641,19 @@ function scanStats(value) {
     prunedCandidates: count('prunedCandidates'),
     prunedGrants: count('prunedGrants'),
     blindScan: value.blindScan === true,
+    // "The Codex rollout directory this scan read may no longer be where Codex
+    // writes." Persisted with the rest of the scan stats, because a stale
+    // directory is exactly as invisible as a blind scan and the numbers beside
+    // it look healthy either way. `codexHistoryInspected` is the honesty half:
+    // `partial` means the comparison could not be made, which is not the same
+    // answer as `false`.
+    codexHistoryStale: value.codexHistoryStale === true,
+    codexHistoryInspected: ['exact', 'partial', 'skipped'].includes(value.codexHistoryInspected)
+      ? value.codexHistoryInspected : 'skipped',
+    codexHistoryReasons: Array.isArray(value.codexHistoryReasons)
+      ? value.codexHistoryReasons.slice(0, 8).map((entry) => clean(entry, 400)).filter(Boolean) : [],
+    codexHistoryNotes: Array.isArray(value.codexHistoryNotes)
+      ? value.codexHistoryNotes.slice(0, 8).map((entry) => clean(entry, 400)).filter(Boolean) : [],
   };
 }
 function persistentState(state) {
@@ -936,6 +950,19 @@ function applyArguments(value, additional) {
   if (Array.isArray(value)) return { ...(object(additional) ? additional : {}), keys: value };
   return object(value) ? { ...value } : object(additional) ? { ...additional } : {};
 }
+// Every message that reports a Codex verdict has to say which files produced it
+// and what it could not see. A verdict that names one file when several were
+// evaluated points the reader at the wrong file, and a verdict that stays silent
+// about managed and system policy claims to have checked more than it did.
+function ruleSetDescription(ruleSet, temp, targetPath) {
+  const checked = (ruleSet?.effective || []).map((file) => (file === temp ? `${targetPath} (pending)` : file));
+  if (!checked.length) return '';
+  const failures = (ruleSet?.failures || [])
+    .map((failure) => `${failure.path} (${failure.code})`);
+  return `\nRule files evaluated together: ${checked.join(', ')}.` +
+    (failures.length ? `\nRule directories that could not be listed: ${failures.join(', ')}.` : '') +
+    (ruleSet?.blindSpots?.length ? `\n${ruleSet.blindSpots.join(' ')}` : '');
+}
 function defaultCodexValidator(text, context) {
   fs.mkdirSync(path.dirname(context.path), { recursive: true });
   const temp = path.join(path.dirname(context.path),
@@ -955,11 +982,29 @@ function defaultCodexValidator(text, context) {
     fs.writeFileSync(temp, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     const command = Array.isArray(context.command) && context.command.length
       ? context.command.map(String) : ['__claude_wildcarding_validation__'];
+    // THE EFFECTIVE SET, NOT THE ONE FILE.
+    //
+    // `-r/--rules` is repeatable ("Paths to execpolicy rule files to evaluate"),
+    // and Codex resolves a conflict between visible rule files toward the MORE
+    // RESTRICTIVE decision. Checking the candidate alone therefore answers a
+    // question nobody asked: whether the file parses and allows the prefix in an
+    // empty world. A neighbouring `.rules` file that forbids the same prefix
+    // makes the deployed answer `forbidden` while this check still said `allow`.
+    //
+    // The temp file stands IN PLACE OF the file being replaced, never beside it.
+    // Adding it as an extra leaves the old copy visible too, which is a state no
+    // write ever produces and which would let a stale duplicate mask a conflict.
+    const ruleSet = context.ruleSet || codexRuleFileSet({
+      home: context.home, target: context.path, substitute: temp,
+    });
+    const rulesArgs = codexRulesArguments(
+      ruleSet.effective && ruleSet.effective.length ? ruleSet.effective : [temp],
+    );
     // Fails closed on purpose: no reachable codex means no validation, and an
     // unvalidated rules file must never be written.
     const executable = context.codexExecutable || 'codex';
     const launch = commandLaunch(executable,
-      ['execpolicy', 'check', '--rules', temp, '--', ...command]);
+      ['execpolicy', 'check', ...rulesArgs, '--', ...command]);
     // Name the way out. This surfaces in the dashboard's Auto Learn card, where
     // an error with no remedy reads as the feature being broken; the setting has
     // existed all along and nothing said so. An explicit path is honoured
@@ -979,16 +1024,27 @@ function defaultCodexValidator(text, context) {
     const result = spawnSync(launch.file, launch.args,
       { encoding: 'utf8', windowsHide: true, timeout: 30000, ...launch.options });
     if (result.error) throw result.error.code === 'ENOENT' ? notFound : result.error;
+    // Name the neighbours. A rejection or a non-allow decision is now an answer
+    // about the whole visible set, so reporting only the generated file sends
+    // the reader to the wrong file when another one is the harsher voice.
+    const checked = ruleSetDescription(ruleSet, temp, context.path);
     if (result.status !== 0) throw new Error(
-      `codex execpolicy check rejected generated rules: ${clean(result.stderr || result.stdout || `exit ${result.status}`, 500)}`,
+      `codex execpolicy check rejected generated rules: ${clean(result.stderr || result.stdout || `exit ${result.status}`, 500)}${checked}`,
     );
     let parsed = {};
     try { parsed = JSON.parse(result.stdout); } catch {}
     const decision = parsed.decision || parsed.result?.decision || parsed.effective_decision;
     if (context.command && decision !== 'allow') throw new Error(
-      `codex execpolicy check did not allow generated prefix: ${command.join(' ')}`,
+      `codex execpolicy check did not allow generated prefix: ${command.join(' ')}${checked}`,
     );
-    return { valid: true, decision: context.command ? decision : undefined };
+    return {
+      valid: true,
+      decision: context.command ? decision : undefined,
+      ruleFiles: ruleSet.files.slice(),
+      checkedFiles: (ruleSet.effective || []).map((file) => (file === temp ? context.path : file)),
+      ruleSetFailures: ruleSet.failures || [],
+      blindSpots: ruleSet.blindSpots || [],
+    };
   } finally {
     try { fs.unlinkSync(temp); } catch {}
   }
@@ -1033,6 +1089,34 @@ function createAutoLearnManager(options = {}) {
     options.codexRoots ?? options.codexHistoryPath ?? aliases.codexHistory,
     [path.join(home, '.codex', 'sessions')]);
   const historyScanner = typeof options.historyScanner === 'function' ? options.historyScanner : scanHistoryFiles;
+  // Injectable for the fixtures that have to make the two stores disagree, and
+  // resolved per codex root rather than once from `home`, because a test points
+  // the root somewhere else and a detector that ignored that would be checking
+  // the developer's real `~/.codex` while the fixture sat unread.
+  const historyStoreProbe = typeof options.codexHistoryStore === 'function'
+    ? options.codexHistoryStore : codexHistoryStoreState;
+  const RANK = { exact: 0, partial: 1, skipped: 2 };
+  function codexHistoryStore() {
+    const roots = codexRoots.length ? codexRoots : [path.join(home, '.codex', 'sessions')];
+    let stale = false;
+    let inspected = 'exact';
+    const reasons = [];
+    const notes = [];
+    for (const root of roots) {
+      const state = historyStoreProbe({
+        home, sessionsDir: root, codexHome: path.dirname(root),
+      }) || {};
+      if (state.stale) stale = true;
+      // Worst wins. One root inspected exactly does not redeem another that
+      // could not be read: the answer for the corpus is only as good as its
+      // weakest member, and rounding that up is the reporting failure this
+      // detector exists to prevent.
+      if ((RANK[state.inspected] ?? 2) > RANK[inspected]) inspected = state.inspected || 'skipped';
+      for (const reason of state.reasons || []) if (!reasons.includes(reason)) reasons.push(reason);
+      for (const note of state.notes || []) if (!notes.includes(note)) notes.push(note);
+    }
+    return { stale, inspected, reasons, notes };
+  }
   const codexValidator = typeof options.codexValidator === 'function' ? options.codexValidator
     : typeof options.validateCodexRules === 'function' ? options.validateCodexRules : defaultCodexValidator;
   const codexExecutable = options.codexExecutable || 'codex';
@@ -1468,7 +1552,7 @@ function createAutoLearnManager(options = {}) {
     const commands = prefixes.length ? prefixes : [null];
     for (const command of commands) {
       const result = codexValidator(merged, {
-        path: codexRulesPath, codexExecutable, internal,
+        path: codexRulesPath, codexExecutable, internal, home,
         command: command ? command.slice() : null,
       });
       if (result?.then) throw new Error('Codex validator must be synchronous');
@@ -1743,7 +1827,7 @@ function createAutoLearnManager(options = {}) {
       current = updateClaudeClaims(
         claims, claudeClaimantId, desiredPermissions, current, legacyManaged, coveredBy,
       );
-      const allow = mergeClaudeAllow(current, items, null, { includeReviewed: true })
+      const allow = mergeClaudeAllow(current, items, { includeReviewed: true })
         .filter((entry) => !coveredBy.has(entry));
       // Keyed by PERMISSION rather than by candidate key, because a key can now
       // carry more than one. Nothing reads these keys -- both consumers take
@@ -2068,6 +2152,22 @@ function createAutoLearnManager(options = {}) {
       // case is the one that matters: it is the only path on which nothing else
       // prunes a cursor at all.
       const prunedCursorCount = pruneCursors(state, cursorLimit);
+      // Asked on every scan, not once at construction: a migration lands between
+      // ticks, and a detector that answered at startup would keep reporting the
+      // pre-migration verdict for as long as the process lived. Same reason the
+      // managed-policy cache here is keyed on a stat rather than held.
+      //
+      // Never allowed to fail a scan. The whole point is to add a signal to an
+      // otherwise healthy-looking result; taking the result down with it would
+      // be a worse outcome than the blindness it reports.
+      let codexHistory = { stale: false, inspected: 'skipped', reasons: [], notes: [] };
+      try { codexHistory = codexHistoryStore({ home, codexRoots }); }
+      catch (error) {
+        codexHistory = {
+          stale: false, inspected: 'partial', reasons: [],
+          notes: [`The Codex history-store check threw (${clean(error?.message || error, 200)}), so staleness is unknown.`],
+        };
+      }
       state.lastScanAt = now();
       state.lastScanStats = {
         files: Array.isArray(result.files) ? result.files.length : Object.keys(state.cursors).length,
@@ -2089,6 +2189,10 @@ function createAutoLearnManager(options = {}) {
         // ordinary quiet scan. The signal is in the data -- walk failures carry
         // `scope: 'root'` -- so this only surfaces it.
         blindScan,
+        codexHistoryStale: codexHistory.stale === true,
+        codexHistoryInspected: codexHistory.inspected,
+        codexHistoryReasons: codexHistory.reasons,
+        codexHistoryNotes: codexHistory.notes,
       };
       save(state);
       const application = state.mode === 'auto-safe'
@@ -2105,6 +2209,10 @@ function createAutoLearnManager(options = {}) {
         prunedObservations, retainedObservations,
         prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidateCount, prunedGrants,
         blindScan,
+        codexHistoryStale: state.lastScanStats.codexHistoryStale,
+        codexHistoryInspected: state.lastScanStats.codexHistoryInspected,
+        codexHistoryReasons: state.lastScanStats.codexHistoryReasons,
+        codexHistoryNotes: state.lastScanStats.codexHistoryNotes,
         candidates: Object.keys(state.candidates).length, application, apply: application,
       };
     });
@@ -2215,6 +2323,10 @@ function createAutoLearnManager(options = {}) {
       codexRules: codexRulesPath,
     },
     scan, status, getStatus: status, overview, explainManaged, rebuildManagedHits,
+    // The one definition of "which rule files does Codex see", shared with the
+    // validator so the diagnostic and the write can never disagree about what
+    // was evaluated. Callers print `blindSpots` beside the verdict.
+    codexRuleSet: () => codexRuleFileSet({ home, target: codexRulesPath }),
     derivedReview, decideDerived,
     // `list` was a third alias of the same function with no consumer anywhere,
     // production or test. `getCandidates` is NOT one of those: it is the

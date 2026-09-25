@@ -14,10 +14,15 @@ const LEGACY_APPROVE_SCRIPT = fs.readFileSync(
 
 // Run the real CLI against a throwaway home, so compatibility cleanup and Auto
 // Learn state land in the temp tree rather than the developer's ~/.claude.
-function runCli(home, args) {
+//
+// `cwd` is a parameter rather than always `home`, because the workspace a
+// `--learn` invocation resolves to is a FUNCTION of the directory it was run
+// from. A harness that can only run from one place cannot tell a fixed default
+// from a resolved one.
+function runCli(home, args, cwd = home) {
   const root = path.parse(home).root;
   return spawnSync(process.execPath, [CLI, ...args], {
-    cwd: home, encoding: 'utf8', windowsHide: true,
+    cwd, encoding: 'utf8', windowsHide: true,
     env: {
       ...process.env, HOME: home, USERPROFILE: home,
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
@@ -140,4 +145,130 @@ test('CLI --learn honors explicit workspace partition and Codex off scope', (t) 
   assert.equal(fs.existsSync(
     path.join(workspace, '.codex', 'rules', 'permission-wildcarding.rules'),
   ), false);
+});
+
+// ── which workspace `--learn` reads when nobody says ──────────────────────────
+//
+// The state file is partitioned by a hash of the workspace root, the extension's
+// root is the VS Code workspace FOLDER, and the CLI used to default that to
+// `process.cwd()`. Run from anywhere but that exact folder — a subdirectory, a
+// git worktree, the terminal's last `cd` — it keyed a different and usually
+// absent file and printed zeros, which reads as "Auto Learn is doing nothing"
+// rather than "you are looking at the wrong file". Measured on the development
+// box before the fix: the CLI read `auto-learn-state.397b082565ea6f56.json`
+// (absent) while the extension wrote `auto-learn-state.4a20f158639aa72c.json`
+// (613 candidates). scripts/smoke.sh has the live-machine half of this gate.
+
+// Create the state partition for `workspace` the way the product does — through
+// the CLI, so the hashed filename is never spelled out in a test — and return
+// its path. `--mode` is what makes setMode() save on a partition that has none.
+function seedWorkspaceState(home, workspace) {
+  fs.mkdirSync(workspace, { recursive: true });
+  const seeded = runCli(home, [
+    '--learn', 'status', '--mode', 'recommend', '--workspace', workspace, '--codex-scope', 'off',
+  ]);
+  assert.equal(seeded.status, 0, seeded.stderr || seeded.stdout);
+  const statePath = JSON.parse(seeded.stdout).paths.state;
+  assert.equal(fs.existsSync(statePath), true, 'precondition: the partition was created');
+  return statePath;
+}
+
+// A partition that has been SCANNED, as opposed to the stub a mode change leaves.
+function markScanned(statePath, at) {
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  state.lastScanAt = at;
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+}
+
+const stateOf = (result) => {
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout).paths.state;
+};
+
+test('CLI --learn reads the workspace state from a subdirectory of that workspace', (t) => {
+  const home = tempHome(t, ['Bash(git status *)']);
+  const workspace = path.join(home, 'workspaces', 'sample');
+  const statePath = seedWorkspaceState(home, workspace);
+  markScanned(statePath, '2026-09-24T00:00:00.000Z');
+
+  // Deep enough that no plausible accident lands on it: four levels below the
+  // workspace root, which is an ordinary place to be standing in a repo.
+  const deep = path.join(workspace, 'src', 'a', 'b', 'c');
+  fs.mkdirSync(deep, { recursive: true });
+
+  const status = JSON.parse(runCli(home, ['--learn', 'status'], deep).stdout);
+  assert.equal(status.paths.state, statePath,
+    'the CLI read a different partition than the one that owns the directory it ran in');
+  assert.equal(status.lastScanAt, '2026-09-24T00:00:00.000Z',
+    'and it read that partition’s contents, not a fresh empty state that happens '
+    + 'to share the filename');
+
+  // MUTATION: restore the old default in bin/wildcard-perms — `workspaceRootFor`
+  // returning `path.resolve(process.cwd())` instead of inferWorkspaceRoot(...) —
+  // and this fails with the state path keyed on `deep` rather than `workspace`.
+});
+
+test('CLI --learn still obeys an explicit --workspace over the inferred one', (t) => {
+  const home = tempHome(t, ['Bash(git status *)']);
+  const outer = path.join(home, 'workspaces', 'outer');
+  const inner = path.join(outer, 'nested', 'inner');
+  const outerState = seedWorkspaceState(home, outer);
+  markScanned(outerState, '2026-09-24T00:00:00.000Z');
+  const innerState = seedWorkspaceState(home, inner);
+  markScanned(innerState, '2026-09-24T00:00:01.000Z');
+  assert.notEqual(outerState, innerState, 'precondition: two distinct partitions');
+
+  // Standing in the outer workspace, asking for the inner one by name.
+  assert.equal(stateOf(runCli(home, ['--learn', 'status', '--workspace', inner], outer)),
+    innerState, 'an explicit --workspace must win over anything inference would pick');
+  // And the other direction, from inside the inner one.
+  assert.equal(stateOf(runCli(home, ['--learn', 'status', '--workspace', outer], inner)),
+    outerState);
+
+  // MUTATION: make workspaceRootFor ignore the explicit value (always infer) and
+  // both assertions fail, each naming the other partition.
+});
+
+test('CLI --learn prefers a scanned ancestor to a nearer unscanned stub', (t) => {
+  const home = tempHome(t, ['Bash(git status *)']);
+  const outer = path.join(home, 'workspaces', 'outer');
+  const inner = path.join(outer, 'nested', 'inner');
+  const outerState = seedWorkspaceState(home, outer);
+  markScanned(outerState, '2026-09-24T00:00:00.000Z');
+  // The stub: opening a subdirectory in VS Code is enough to create one, because
+  // setMode() saves a partition that has none. It is nearer AND useless.
+  const innerState = seedWorkspaceState(home, inner);
+  assert.equal(JSON.parse(fs.readFileSync(innerState, 'utf8')).lastScanAt ?? null, null,
+    'precondition: the nearer partition has never been scanned');
+
+  assert.equal(stateOf(runCli(home, ['--learn', 'status'], inner)), outerState,
+    'the nearest partition won even though it has nothing in it');
+
+  // MUTATION: drop the stateWasScanned() preference from inferWorkspaceRoot —
+  // `if (fs.existsSync(statePath)) return dir;` — and this fails, reading the
+  // empty inner stub. The other two tests in this group stay green under that
+  // mutation, which is why this one exists separately.
+});
+
+test('CLI --learn never adopts the state of a workspace it is not inside', (t) => {
+  const home = tempHome(t, ['Bash(git status *)']);
+  const stranger = path.join(home, 'workspaces', 'someone-elses-project');
+  const strangerState = seedWorkspaceState(home, stranger);
+  markScanned(strangerState, '2026-09-24T00:00:00.000Z');
+
+  // A sibling with no partition of its own. The only scanned state on this
+  // machine belongs to a project that does NOT contain this directory.
+  const mine = path.join(home, 'workspaces', 'mine');
+  fs.mkdirSync(mine, { recursive: true });
+
+  const status = JSON.parse(runCli(home, ['--learn', 'status'], mine).stdout);
+  assert.notEqual(status.paths.state, strangerState,
+    'reporting another project’s candidates as this one’s is worse than reporting '
+    + 'none: every count, every applied grant and every Undo target would be theirs');
+  assert.equal(status.candidateCount, 0, 'an unscanned workspace reports nothing, honestly');
+
+  // MUTATION: widen the walk from "each ancestor" to "each ancestor and its
+  // child directories" — the obvious way to find a workspace the terminal is
+  // merely NEXT to, and a change the three tests above all survive — and this
+  // one fails, adopting the stranger's partition.
 });

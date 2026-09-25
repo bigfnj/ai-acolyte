@@ -90,20 +90,6 @@ local files beneath the workspace root rather than only at it. Neither is done. 
 root**, so the zeros on that card were never evidence about promotability in the first
 place.
 
-### The release workflow node24 pins have still never executed
-
-RESTORED 2026-09-25, dropped by the same burn-down, and now live rather than theoretical
-because 1.5.2 is the release whose run will execute them for the first time.
-
-`.github/workflows/release.yml` runs only on a release, so `actions/upload-artifact@v6` and
-`softprops/action-gh-release@v3` have never run. **Check that run rather than assuming it.**
-
-Worth keeping because the original entry got the fix wrong in a way that would have looked
-done. It said to bump both to `@v5`, and `actions/upload-artifact@v5` is STILL node20, so a
-uniform `@v5` would have left one action on the deprecated runtime while the annotation went
-quiet. The pins that actually clear it are checkout v5, setup-node v5, upload-artifact v6 and
-gh-release v3.
-
 ### Two surfaces with no way to configure them
 
 - **The Auto Learn worker deadline is environment-variable only.** It is overridable via

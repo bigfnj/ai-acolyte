@@ -90,33 +90,6 @@ local files beneath the workspace root rather than only at it. Neither is done. 
 root**, so the zeros on that card were never evidence about promotability in the first
 place.
 
-### A test whose named case its fixture cannot reach
-
-RESTORED 2026-09-25. This was open for weeks, and the burn-down DELETED it without fixing
-it and without moving it to the record. That is the one outcome the disposition rule
-forbids, and an audit OF the burn-down is what caught it.
-
-`test/dashboard-view.test.js:556` asserts `app.passes.count - before === 1` under the message
-"one pass per settings write, not two". Its fixture seeds `FIFTEEN` (`test/dashboard-view.test.js:364`),
-a list the same file elsewhere calls already a fixed point, so **no settings write happens**
-and the case the message names is unreachable. On the real write path `runWildcarding` runs
-`processAllowList` twice by design, the unlocked probe plus the in-lock recompute, which is
-what the assertion would have to tolerate.
-
-The evidence that came with the original entry, and which now survives only in git history:
-removing the hint on the optimal path is killed by this test; removing it on the **write**
-path survives. **The write-path hint has no coverage at all.**
-
-The MESSAGE was corrected 2026-09-25 to name the branch the fixture actually reaches, which
-is a real improvement and not a fix. An attempt to add the missing write-path test the same
-day was **reverted rather than shipped**, and the measurement is the useful part: a fixture of
-`Bash(git status *)` + `Bash(git status --short *)` is genuinely not a fixed point (it
-collapses to one entry, verified directly), the write demonstrably happens, and yet the pass
-counter moves by **1, not the 2** that two call sites at `vscode-extension/extension.js:2648`
-and `:2690` predict. Either one of those does not run on this path or the harness cannot see
-it. **Settle that before writing the test** -- an assertion carrying a number nobody can
-explain is worse than the gap it covers.
-
 ### The release workflow node24 pins have still never executed
 
 RESTORED 2026-09-25, dropped by the same burn-down, and now live rather than theoretical

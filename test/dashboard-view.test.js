@@ -601,6 +601,51 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
   }
 });
 
+// THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
+// branch where runWildcarding finds a fixed point and returns without writing. On a list
+// that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
+// vscode-extension/extension.js:2674 -- once for the unlocked probe that decides whether
+// there is work, and once for the authoritative in-lock recompute the write is built from.
+// Handing writeAllow the probe snapshot instead lets another writer land between the two
+// and have a stale removal replayed over its state.
+//
+// THE SEED HAS TO HAPPEN AFTER ACTIVATION, and getting that wrong is what made the first
+// version of this test measure 1. activate() schedules its own wildcarding pass, so a list
+// seeded before the harness starts is ALREADY collapsed by the time runNow is called;
+// runNow then finds a fixed point, takes the early return, and counts one. Worse, the
+// precondition asserting a write happened still passed, because activation had written.
+test('the write path runs the pass twice, and the second one is the authoritative read', async (t) => {
+  const env = setup(t);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    // Seeded NOW, after activation has had its pass. Two entries that collapse to one.
+    const seed = ['Bash(git status *)', 'Bash(git status --short *)'];
+    env.write({ permissions: { allow: seed, deny: [] } });
+    const settingsPath = path.join(env.tempHome, '.claude', 'settings.json');
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(settingsPath, 'utf8')).permissions.allow, seed,
+      'precondition: the list under test is on disk and has NOT been collapsed yet');
+
+    const before = app.passes.count;
+    await app.commands.get('permission-wildcarding.runNow')();
+    await settle();
+
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(settingsPath, 'utf8')).permissions.allow,
+      ['Bash(git status *)'],
+      'precondition: THIS call is the one that collapsed the list');
+    assert.equal(app.passes.count - before, 2,
+      'the unlocked probe plus the authoritative in-lock recompute; reusing the probe '
+      + 'result is the data-loss shape the lock exists to prevent');
+  } finally {
+    await app.dispose();
+  }
+});
+
 test('a prune whose settings write fails keeps its backup cover', async (t) => {
   const env = setup(t);
   env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(rg *)'], deny: [] } });

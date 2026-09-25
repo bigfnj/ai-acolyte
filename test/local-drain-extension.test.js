@@ -22,6 +22,22 @@ const BEGIN = '<!-- BEGIN permission-wildcarding: shell style (managed) -->';
 
 function disposable() { return { dispose() {} }; }
 
+// The purge below is a STATEMENT, not a guarantee, and deleting it turns nothing red:
+// the next harness silently re-uses the previous one's `os` stub, a precondition stops
+// being reachable, and the assertion behind it passes on an input that never arrived.
+// So the CONDITION is asserted at the load site, separately from the purge, where a
+// dropped purge fails instead of going quiet.
+function assertFreshProjectCache(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  const stale = Object.keys(require.cache)
+    .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+    .map((key) => path.basename(key))
+    .sort();
+  assert.deepEqual(stale, [],
+    'project modules are still cached from before this harness installed its mocks, so they '
+    + `will resolve an earlier home: ${stale.join(', ')}`);
+}
+
 function harness(tempHome, { guidance = true, localDrain = true } = {}) {
   const commands = new Map();
   const messages = [];
@@ -98,10 +114,15 @@ function harness(tempHome, { guidance = true, localDrain = true } = {}) {
   // Drop every cached shared module as well as the extension, so each one is
   // re-required under the mocked `os` above. A module that captured the real
   // homedir at first load would send this test's writes to the real ~/.claude.
-  delete require.cache[extensionPath];
+  // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:10, :47).
+  const extensionDir = path.dirname(extensionPath) + path.sep;
   for (const cached of Object.keys(require.cache)) {
-    if (cached.startsWith(rootSrc + path.sep)) delete require.cache[cached];
+    if (cached.startsWith(rootSrc + path.sep) || cached.startsWith(extensionDir)) {
+      delete require.cache[cached];
+    }
   }
+  assertFreshProjectCache(extensionPath, rootSrc);
   const extension = require(extensionPath);
   extension.activate({ subscriptions: [] });
   return {

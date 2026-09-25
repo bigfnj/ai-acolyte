@@ -289,8 +289,32 @@ if (-not (Test-Path $py)) {
 } elseif (-not (Test-Path $recall)) {
     Check 'recall.py present' $false $recall
 } else {
-    $lint = (& $py $recall --lint) -join "`n"
-    Check 'lint reports the index clean' ($lint -match 'clean:') ''
+    # Judge the RUN before judging the text, and capture STDERR while doing it. Five checks
+    # used to hang off one `& $py $recall --lint` with nothing asserting it had produced
+    # anything at all. Four of them are NEGATIVE -- `-not ($lint -match 'over budget')` and
+    # friends -- so all four PASS against empty output: a lint that died on a traceback
+    # printed exactly the board of a lint that found nothing, and printed it in green. Same
+    # idiom as the `--gates refresh` capture above: merge STDERR so a failure arrives as data
+    # rather than going to the console, and read $LASTEXITCODE before anything else runs.
+    $lintOut = (& $py $recall --lint 2>&1) | Out-String
+    $lintCode = $LASTEXITCODE
+    if ($null -eq $lintOut) { $lintOut = '' }
+    $lint = $lintOut.Trim()
+    Check 'recall.py --lint ran and produced output' `
+        (($lintCode -eq 0) -and ($lint.Length -gt 0)) "exit $lintCode, $($lint.Length) chars"
+
+    # The positive check the four negatives rest on, and it replaces one that could not hold.
+    #
+    # `clean:` prints only when the corpus has NO finding of ANY kind (memory/recall.py:967):
+    # not over budget, not over the entry ceiling, no over-long index line, no broken link, no
+    # unresolved [[link]], no unscoped feedback, no gate edited without a recompile. A corpus
+    # carrying one long index line is perfectly releasable and still never prints it, so on
+    # this box the one positive check failed on every single run -- which is how a check gets
+    # read as noise and then ignored. These two lines are printed UNCONDITIONALLY by _lint
+    # (memory/recall.py:779 and :804) before any finding is evaluated, so they are what a
+    # healthy run actually looks like, and empty or truncated output cannot satisfy them.
+    Check 'lint reported its index census' `
+        (($lint -match 'MEMORY\.md: \d+ bytes') -and ($lint -match '\d+ resident index entries')) ''
     Check 'index is within its byte budget' (-not ($lint -match 'over budget')) ''
     Check 'resident entries within the ceiling' (-not ($lint -match 'over the attention ceiling')) ''
     Check 'every standing order is compiled' (-not ($lint -match 'not compiled')) ''
@@ -303,6 +327,16 @@ if (-not (Test-Path $py)) {
     if ($bytes.Success -and $ents.Success) {
         Note 'index size' "$($bytes.Groups[1].Value) bytes, $($ents.Groups[1].Value) resident entries"
     }
+
+    # The `clean:` verdict is REPORTED, not asserted, because it answers a stricter question
+    # than a release cares about. Every finding recall.py flags with a leading `!` is listed
+    # beside it, so a board that passes the five checks above still says what lint saw.
+    $flagged = @([regex]::Matches($lint, '(?m)^\s*!\s*(.+?)\s*$') |
+        ForEach-Object { $_.Groups[1].Value })
+    $verdict = if ($lint -match 'clean:') { 'clean -- no finding of any kind' }
+               elseif ($flagged.Count -gt 0) { "not clean: " + ($flagged -join '; ') }
+               else { 'not clean, and no `!` finding -- see the lint output for the reason' }
+    Note 'lint verdict' $verdict
 
     # Retrieval has to still work, because the index diet moved ~40 memories behind it.
     # Proper nouns, which is what the trigger table now tells the agent to use.

@@ -34,6 +34,21 @@ function purgeProjectModules(extensionPath, rootSrc) {
   }
 }
 
+// And a SEPARATE assertion, at the load site, that the purge really ran before it. The
+// purge is a statement: delete it and nothing goes red, because the next harness simply
+// re-uses the previous one's stub and keeps passing on inputs that no longer reach the
+// code under test. Two statements, so the condition is falsifiable on its own.
+function assertFreshProjectCache(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  const stale = Object.keys(require.cache)
+    .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+    .map((key) => path.basename(key))
+    .sort();
+  assert.deepEqual(stale, [],
+    'project modules are still cached from before this harness installed its mocks, so they '
+    + `will resolve an earlier home: ${stale.join(', ')}`);
+}
+
 function harness(tempHome) {
   const commands = new Map();
   const shown = { info: [], warning: [], error: [], status: [] };
@@ -98,6 +113,7 @@ function harness(tempHome) {
   };
 
   purgeProjectModules(extensionPath, rootSrc);
+  assertFreshProjectCache(extensionPath, rootSrc);
   const extension = require(extensionPath);
   extension.activate({ subscriptions: [] });
   return {

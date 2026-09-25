@@ -35,6 +35,21 @@ function purgeProjectModules(extensionPath, rootSrc) {
   }
 }
 
+// And a SEPARATE assertion, at the load site, that the purge really ran before it. The
+// purge is a statement: delete it and nothing goes red, because the next harness simply
+// re-uses the previous one's stub and keeps passing on inputs that no longer reach the
+// code under test. Two statements, so the condition is falsifiable on its own.
+function assertFreshProjectCache(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  const stale = Object.keys(require.cache)
+    .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+    .map((key) => path.basename(key))
+    .sort();
+  assert.deepEqual(stale, [],
+    'project modules are still cached from before this harness installed its mocks, so they '
+    + `will resolve an earlier home: ${stale.join(', ')}`);
+}
+
 test('extension activates with mocked VS Code and deactivates without live policy access', async () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-extension-'));
   const commands = new Map();
@@ -129,6 +144,7 @@ test('extension activates with mocked VS Code and deactivates without live polic
   let extension;
   try {
     purgeProjectModules(extensionPath, rootSrc);
+    assertFreshProjectCache(extensionPath, rootSrc);
     extension = require(extensionPath);
     const context = { subscriptions: [] };
     extension.activate(context);
@@ -290,6 +306,7 @@ test('activation does not leak channels, watchers or timers', async () => {
   let extension;
   try {
     purgeProjectModules(extensionPath, rootSrc);
+    assertFreshProjectCache(extensionPath, rootSrc);
     extension = require(extensionPath);
     const context = { subscriptions: [] };
     extension.activate(context);

@@ -17,6 +17,36 @@ const { createAutoLearnManager } = require('../src/auto-learn-manager');
 
 function disposable() { return { dispose() {} }; }
 
+// Purge extension.js AND every src/ module it pulls in, then assert the purge ran.
+//
+// `delete require.cache[extensionPath]` alone was all this file did, and it is not
+// isolation. The top-level require above caches src/auto-learn-manager.js holding the
+// REAL `os` (src/auto-learn-manager.js:9), and its home default is read at CALL time
+// (`:998`), so the extension loaded underneath the mock was handed a manager that
+// resolves the developer's own ~/.claude for any call that omits `options.home`. Same
+// implementation as test/extension-activation.test.js and test/policy-backup.test.js.
+function purgeProjectModules(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  for (const key of Object.keys(require.cache)) {
+    if (key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir)) {
+      delete require.cache[key];
+    }
+  }
+}
+
+// And a SEPARATE assertion, at the load site, that the purge really ran before it — the
+// purge is a statement, and deleting it turns nothing red on its own.
+function assertFreshProjectCache(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  const stale = Object.keys(require.cache)
+    .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+    .map((key) => path.basename(key))
+    .sort();
+  assert.deepEqual(stale, [],
+    'project modules are still cached from before this harness installed its mocks, so they '
+    + `will resolve an earlier home: ${stale.join(', ')}`);
+}
+
 const MANAGED = {
   permissions: {
     ask: ['Bash(curl:*)', 'Bash(git push:*)'],
@@ -142,7 +172,8 @@ test('the Review command names families a managed rule blocks, and offers the de
 
   let extension;
   try {
-    delete require.cache[extensionPath];
+    purgeProjectModules(extensionPath, rootSrc);
+    assertFreshProjectCache(extensionPath, rootSrc);
     extension = require(extensionPath);
     extension.activate({ subscriptions: [] });
     await commands.get('permission-wildcarding.autoLearnReview')();
@@ -202,7 +233,7 @@ test('the Review command names families a managed rule blocks, and offers the de
     // failure, which is the worst way for CI to report a broken build.
     try { await extension?.deactivate(); } catch {}
     Module._load = originalLoad;
-    delete require.cache[extensionPath];
+    purgeProjectModules(extensionPath, rootSrc);
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
 });

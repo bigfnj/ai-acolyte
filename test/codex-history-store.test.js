@@ -268,3 +268,119 @@ test('a healthy corpus scan says so, and the detector cannot fail the scan', (t)
   assert.match(thrown.codexHistoryNotes.join('\n'), /probe exploded/);
   assert.match(thrown.codexHistoryNotes.join('\n'), /staleness is unknown/);
 });
+
+// ── the runtime every user actually has ───────────────────────────────────────
+//
+// THIS SUITE COULD NOT REACH THE ONLY CONFIGURATION THAT SHIPS. `node:sqlite`
+// exists on the Node 24 this repo is developed against and on nothing the
+// product runs inside: the VS Code extension host is Node 20 or 22, where the
+// require above fails. So every `exactTier` fixture here exercised a tier no
+// user has, and the tier every user DOES have — sqlite absent — was never
+// driven at all.
+//
+// What it produced when driven: `inspected: 'partial'`, a pushed note, and
+// through `scanTrouble` a permanent `scan degraded` on the Auto Learn row that
+// outranked the review count and could never be cleared.
+//
+// `unavailable` is now its own state, and the three tests below pin the three
+// things that have to be true about it: it is NOT `partial`, the real finding
+// still fires underneath it, and it survives the trip through the state file.
+const NodeModule = require('node:module');
+function withoutNodeSqlite(fn) {
+  const original = NodeModule._load;
+  NodeModule._load = function maskedLoad(request, ...rest) {
+    if (request === 'node:sqlite' || request === 'sqlite') {
+      const error = new Error("Cannot find module 'node:sqlite'");
+      error.code = 'MODULE_NOT_FOUND';
+      throw error;
+    }
+    return original.call(this, request, ...rest);
+  };
+  try { return fn(); } finally { NodeModule._load = original; }
+}
+
+// The mask has to actually mask, or all three tests below are green over a
+// runtime that still has the module and prove nothing. Asserted rather than
+// assumed, and asserted in the direction that fails loudly on Node 24.
+test('witness: the sqlite mask is what a Node 20 extension host looks like', () => {
+  const masked = withoutNodeSqlite(() => {
+    try { require('node:sqlite'); return 'loaded'; }
+    catch (error) { return error.code; }
+  });
+  assert.equal(masked, 'MODULE_NOT_FOUND',
+    'witness:sqlite-unavailable -- the Module._load hook did not intercept the require, so '
+    + 'every assertion below is measuring the developer runtime instead of the shipped one');
+});
+
+test('a runtime with no node:sqlite is unavailable, which is not degraded', (t) => {
+  const home = codexHome(t, 'no-sqlite');
+  for (const id of THREADS) rollout(home, id);
+  // A store FILE is present — that is what makes the probe attempt to run. Its
+  // contents never matter here, because the require fails before the open.
+  fs.writeFileSync(path.join(home, '.codex', 'thread_history_1.sqlite'), 'unopened');
+
+  const state = withoutNodeSqlite(() => codexHistoryStoreState({ home }));
+
+  assert.equal(state.inspected, 'unavailable',
+    'witness:sqlite-unavailable -- a probe the runtime cannot host is inapplicable, not degraded. '
+    + `got ${state.inspected}`);
+  assert.equal(state.stale, false);
+  // The wording matters as much as the state: "treat this as unknown, not
+  // healthy" is the sentence that belongs to a check that RAN and failed.
+  assert.doesNotMatch(state.notes.join('\n'), /treat this as unknown, not healthy/,
+    'witness:sqlite-unavailable -- the degraded-check wording was reused for a check that was '
+    + 'never applicable');
+  assert.match(state.notes.join('\n'), /cannot run on this Node runtime/);
+  // And the control, on the same corpus: a store file that IS openable and is
+  // garbage is still `partial`. Without this, returning 'unavailable' for every
+  // failure would pass the assertion above.
+  if (exactTier) {
+    assert.equal(codexHistoryStoreState({ home }).inspected, 'partial',
+      'witness:sqlite-unavailable -- a store that could be opened and was not a database must '
+      + 'still be a degraded check');
+  }
+});
+
+test('the real finding still fires loudly with no sqlite at all', (t) => {
+  // The whole risk of introducing a not-trouble state: quieting the check that
+  // matters along with the noise. `stale` is computed from the session index and
+  // the migration directory, neither of which needs sqlite, so it must survive.
+  const home = codexHome(t, 'no-sqlite-stale');
+  rollout(home, THREADS[0]);
+  fs.writeFileSync(path.join(home, '.codex', 'thread_history_1.sqlite'), 'unopened');
+  fs.writeFileSync(path.join(home, '.codex', 'session_index.jsonl'), [
+    JSON.stringify({ id: THREADS[0] }),
+    JSON.stringify({ id: THREADS[1] }),
+  ].join('\n'));
+
+  const state = withoutNodeSqlite(() => codexHistoryStoreState({ home }));
+  assert.equal(state.inspected, 'unavailable');
+  assert.equal(state.stale, true,
+    'witness:sqlite-unavailable -- a thread with no transcript is still a stale rollout directory');
+  assert.deepEqual(state.orphans, [THREADS[1]]);
+  assert.match(state.reasons.join('\n'), /no rollout file/);
+});
+
+test('unavailable survives the state file instead of decaying to skipped', (t) => {
+  const home = codexHome(t, 'no-sqlite-scan');
+  const sessions = path.join(home, '.codex', 'sessions');
+  rollout(home, THREADS[0]);
+  fs.writeFileSync(path.join(home, '.codex', 'thread_history_1.sqlite'), 'unopened');
+
+  const manager = createAutoLearnManager({
+    home, codexRoots: [sessions], claudeRoots: [path.join(home, '.claude', 'projects')],
+  });
+  const result = withoutNodeSqlite(() => manager.scan());
+  assert.equal(result.codexHistoryInspected, 'unavailable');
+  assert.equal(result.codexHistoryStale, false);
+
+  // The reload. `scanStats` whitelists the states it will accept and rewrites
+  // anything else to 'skipped', which is how a fourth state silently becomes a
+  // third one on the next window.
+  const reloaded = createAutoLearnManager({
+    home, codexRoots: [sessions], claudeRoots: [path.join(home, '.claude', 'projects')],
+  }).status().lastScanStats;
+  assert.equal(reloaded.codexHistoryInspected, 'unavailable',
+    'witness:sqlite-unavailable -- the persisted state was not in the reader whitelist, so a '
+    + 'reload turned it back into a value the badge cannot distinguish');
+});

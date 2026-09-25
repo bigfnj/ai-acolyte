@@ -126,8 +126,17 @@ function policyTargetLabel(value) {
 // dismiss both. Lives here, beside codexRestartSuffix, because the wording is the part
 // worth testing and extension.js is not unit-reachable.
 function backupPruneSuffix(summary) {
-  const failed = Number(summary?.backupsUnremovable) || 0;
-  if (!Number.isFinite(failed) || failed <= 0) return '';
+  // The finiteness test USED to sit in the guard below, after a `|| 0` that had
+  // already turned NaN and undefined into zero — so `!Number.isFinite(failed)`
+  // was left deciding one input, Infinity, which a count of failed unlinks
+  // cannot produce. A condition that cannot fire is not a second line of
+  // defence; it reads as one and is not.
+  //
+  // Moved into the normalisation, where it decides something on every call, and
+  // the guard is now the single question this function actually asks.
+  const raw = Number(summary?.backupsUnremovable);
+  const failed = Number.isFinite(raw) ? Math.trunc(raw) : 0;
+  if (failed <= 0) return '';
   return ' — ' + failed + ' old policy backup' + (failed === 1 ? '' : 's')
     + ' could not be removed (locked or read-only); the next apply retries them.';
 }

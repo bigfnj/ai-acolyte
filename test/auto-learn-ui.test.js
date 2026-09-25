@@ -154,6 +154,18 @@ test('a prune that could not delete a backup says so, and only then', () => {
   assert.equal(backupPruneSuffix(null), '');
   assert.equal(backupPruneSuffix({ backupsUnremovable: 'lots' }), '',
     'junk reads as nothing to report, never as NaN in a user-facing sentence');
+  // The one input the old `|| 0` did NOT flatten, and therefore the only input
+  // the separate `!Number.isFinite(failed)` guard ever decided. That guard has
+  // moved into the normalisation, where it decides on every call rather than on
+  // one value a count of failed unlinks cannot produce; this pins that the move
+  // kept the answer.
+  //
+  // THE MUTATION: normalise with `Number(...) || 0` again and drop the
+  // finiteness test. This then reads "Infinity old policy backups".
+  assert.equal(backupPruneSuffix({ backupsUnremovable: Infinity }), '',
+    'witness:backup-prune-suffix -- a non-finite count reached the sentence');
+  assert.equal(backupPruneSuffix({ backupsUnremovable: -3 }), '',
+    'a negative count is junk too, and says nothing');
 
   const one = backupPruneSuffix({ backupsUnremovable: 1 });
   assert.match(one, /1 old policy backup could not be removed/,

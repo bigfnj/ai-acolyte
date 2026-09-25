@@ -278,3 +278,117 @@ test('the environment can override the deadline when no option is passed',
       else process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS = previous;
     }
   });
+
+// ── the reap ───────────────────────────────────────────────────────────────────
+//
+// "Reaped at teardown" is unbounded between reloads. The only `workers.delete`
+// lived inside the 'exit' handler, and the case the deadline was written for — a
+// thread blocked in a synchronous fs call — emits no 'exit', so a timed-out
+// worker was never removed and never terminated. With a 300 s deadline against a
+// 5-minute reconcile that is roughly one orphaned V8 isolate and OS thread every
+// five minutes, for the life of the window.
+//
+// THE KILLING MUTATION, for whoever touches this next: delete the `reap =
+// setTimeout(...)` block inside the deadline handler. The first test below then
+// fails with the worker still live and still tracked long after its grace, and
+// the last one fails with deactivate() hanging.
+async function until(predicate, ms = 3000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return false;
+}
+
+test('a timed-out worker is reaped on its own clock, not left for teardown',
+  TEST_TIMEOUT, async () => {
+    const worker = new SilentWorker();
+    const runner = createAutoLearnWorkerRunner({
+      workerPath: 'worker.js',
+      timeoutMs: 40,
+      reapGraceMs: 60,
+      workerFactory: () => worker,
+    });
+
+    assert.match(await outcomeWithin(runner.run('scan')), /did not answer within 40ms/);
+    // The no-kill window is still honoured: at the instant the job fails, the
+    // thread may be between two policy writes and its rollback has to survive.
+    assert.equal(worker.terminated, false,
+      'witness:worker-reap -- the deadline killed a worker that may be mid-apply');
+    assert.equal(runner.stats().workers, 1);
+
+    const reaped = await until(() => worker.terminated && runner.stats().workers === 0);
+    assert.ok(reaped,
+      'witness:worker-reap -- the grace expired and nothing reaped the wedged thread. '
+      + `terminated=${worker.terminated} workers=${runner.stats().workers}. This is one live `
+      + 'OS thread per occurrence until the window reloads.');
+
+    await runner.deactivate();
+  });
+
+test('a worker that answers inside the grace is not terminated', TEST_TIMEOUT, async () => {
+  // The control, and it is what stops the reap being a blanket kill: a thread
+  // that comes back late still gets to finish and exit on its own.
+  const worker = new SilentWorker();
+  const runner = createAutoLearnWorkerRunner({
+    workerPath: 'worker.js',
+    timeoutMs: 40,
+    reapGraceMs: 400,
+    workerFactory: () => worker,
+  });
+
+  assert.match(await outcomeWithin(runner.run('scan')), /did not answer within 40ms/);
+  worker.emit('message', { ok: true, result: 'late' });
+  worker.emit('exit', 0);
+  assert.equal(runner.stats().workers, 0, 'the exit handler is what removes it');
+
+  // Past the grace. Nothing may call terminate() on a thread that has exited.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(worker.terminated, false,
+    'witness:worker-reap -- the reap timer fired against a worker that had already exited');
+  await runner.deactivate();
+});
+
+// A thread inside a synchronous libuv call cannot be interrupted until that
+// syscall returns, so `terminate()` — which resolves on THREAD EXIT — can hang.
+// The reap pass awaited it with no deadline of its own, which reproduced, during
+// the host's teardown, exactly the hang the drain deadline was added to remove.
+class UnkillableWorker extends EventEmitter {
+  constructor() {
+    super();
+    this.terminateCalls = 0;
+  }
+
+  terminate() {
+    this.terminateCalls += 1;
+    // Never settles. Exactly what a thread wedged in a blocking syscall gives
+    // you: the request is queued and the answer never comes.
+    return new Promise(() => {});
+  }
+}
+
+test('teardown does not wait forever for a thread that cannot be interrupted',
+  TEST_TIMEOUT, async () => {
+    const worker = new UnkillableWorker();
+    const runner = createAutoLearnWorkerRunner({
+      workerPath: 'worker.js',
+      timeoutMs: 40,
+      // Long enough that the reap has NOT fired: the terminate under test is the
+      // one deactivate() issues, not the reap's.
+      reapGraceMs: 60000,
+      terminateDeadlineMs: 120,
+      workerFactory: () => worker,
+    });
+
+    assert.match(await outcomeWithin(runner.run('scan')), /did not answer within 40ms/);
+    assert.equal(runner.stats().workers, 1, 'precondition: teardown has something to reap');
+
+    const drained = await outcomeWithin(runner.deactivate(), 3000);
+    assert.equal(drained, 'resolved: undefined',
+      'witness:worker-reap -- deactivate() never resolved: the reap pass awaits a terminate() '
+      + `that cannot be honoured — got "${drained}"`);
+    assert.equal(worker.terminateCalls, 1,
+      'witness:worker-reap -- giving up on the answer is not the same as not asking');
+    assert.deepEqual(runner.stats(), { deactivating: true, jobs: 0, workers: 0 });
+  });

@@ -174,23 +174,140 @@ test('auto-safe mode writes no grant a re-read manufactured', (t) => {
     `witness:evidence-cap -- the six-run family should have been granted: ${JSON.stringify(allow)}`);
 });
 
-// The cap can be asked to hold more than it is allowed to evict, and when that
-// happens it has to say so. A cap that quietly stops capping is the shape this
-// repo keeps finding, so the overflow is a reported number rather than a silence.
-test('a cap that cannot evict reports the overflow instead of absorbing it', (t) => {
-  const env = fixture(t, 'evidence-cap-degraded');
-  // One slot, and the below-threshold family alone needs two.
-  const learn = build(env.home, { observationHashLimit: 1 });
+// ── the ceiling the protected set did not have ────────────────────────────────
+//
+// REPORTING A BREACH IS NOT BOUNDING IT. The test that used to sit here asserted
+// the map was allowed to stay OVER its limit as long as it said so, and that was
+// the defect rather than the contract: `decisive` asks only about
+// `counts.success` while `counts.failed` only ever grows, so a family that fails
+// for ever is below the threshold for ever and retained one hash per observation
+// with nothing able to evict it. On a 5-minute interval over a file that is read
+// and rewritten whole, that is unbounded I/O, not just unbounded disk.
+//
+// `limit` is a hard ceiling now, in two tiers, and the three tests below pin the
+// three claims that make the second tier safe: it gets under the cap, it cannot
+// inflate a count while doing so, and it never touches a family a human decided
+// about.
+
+// One big below-threshold family and two small ones. FAILED runs throughout,
+// because a failure is what keeps a family below the success threshold for ever
+// and is therefore what makes the protected set grow without bound. Measured
+// shapes, not guessed: `bash:curl` 6 hashes, `bash:npm` 2, `bash:docker ps` 2.
+function failingFixture(t, prefix) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), `permission-wildcarding-${prefix}-`));
+  t.after(() => { try { fs.rmSync(home, { recursive: true, force: true }); } catch {} });
+  const project = path.join(home, '.claude', 'projects', 'p');
+  fs.mkdirSync(project, { recursive: true });
+  const records = [{ type: 'session_meta', payload: { id: 'v', cwd: 'D:\\work' } }];
+  let n = 0;
+  const add = (command, count) => {
+    for (let i = 0; i < count; i += 1) {
+      const id = `x${n += 1}`;
+      records.push(call(id, command), {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content: 'boom' }],
+        },
+      });
+    }
+  };
+  add('curl -sS https://a.example/thing', 6);
+  add('npm ls --depth 0', 2);
+  add('docker ps -a', 2);
+  fs.writeFileSync(path.join(project, 'a.jsonl'), jsonl(...records));
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
+    `${JSON.stringify({ permissions: { allow: [] } }, null, 2)}\n`);
+  return { home, statePath: path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json') };
+}
+function heldPerFamily(statePath) {
+  const perFamily = {};
+  for (const value of Object.values(readState(statePath).observationHashes)) {
+    perFamily[value.key] = (perFamily[value.key] || 0) + 1;
+  }
+  return perFamily;
+}
+
+test('the protected set is bounded, and what it evicts leaves a tombstone', (t) => {
+  const env = failingFixture(t, 'evidence-ceiling');
+  // Ten protected hashes against five slots, so the second tier has to fire.
+  const learn = createAutoLearnManager({
+    home: env.home, threshold: 3, codexRulesPath: null, observationHashLimit: 5,
+  });
 
   const scanned = learn.scan({ platform: 'win32' });
-  const held = Object.keys(readState(env.statePath).observationHashes).length;
+  assert.equal(scanned.observations, 10, 'witness:evidence-ceiling -- the fixture was read');
 
-  assert.ok(held > 1,
-    `witness:evidence-cap -- the protected entries are over the cap of 1; got ${held}`);
-  assert.equal(scanned.retainedObservations, held - 1,
-    'witness:evidence-cap -- and the scan reports exactly how far over it is');
-  assert.equal(readState(env.statePath).lastScanStats.retainedObservations, held - 1,
-    'witness:evidence-cap -- the writer writes it, so a reload can still see the degradation');
-  assert.equal(build(env.home).status().lastScanStats.retainedObservations, held - 1,
-    'witness:evidence-cap -- and the reader keeps it, which is where these fields go to die');
+  const held = Object.keys(readState(env.statePath).observationHashes).length;
+  assert.ok(held <= 5,
+    `witness:evidence-ceiling -- the map is over its own hard ceiling; held ${held} against 5`);
+  assert.equal(scanned.retainedObservations, 0,
+    'witness:evidence-ceiling -- nothing is protected here, so nothing may overflow');
+
+  // Not thrown away silently. The family that paid leaves the same record
+  // `pruneCandidates` leaves, so "this family was observed, N times" survives.
+  const state = readState(env.statePath);
+  assert.equal(state.candidates['bash:curl'], undefined,
+    'witness:evidence-ceiling -- the evicted family is still a live candidate');
+  assert.equal(state.prunedCandidates['bash:curl'], 6,
+    'witness:evidence-ceiling -- the eviction left no tombstone, so the run total is lost');
+  assert.ok(scanned.prunedCandidates >= 1,
+    `witness:evidence-ceiling -- a family left the state and the scan reported 0; got ${scanned.prunedCandidates}`);
+});
+
+test('the family that pays is the one holding the most hashes', (t) => {
+  // THE EVICTION ORDER, and it is the opposite of `pruneCandidates`'s. That cap
+  // is one entry per family, so every eviction frees the same amount and the
+  // cheapest evidence should go. This one is per HASH: one pathological family
+  // can hold thousands while a thousand ordinary ones hold two each, so evicting
+  // cheapest-first would delete a thousand families to free what one frees.
+  const env = failingFixture(t, 'evidence-ceiling-order');
+  createAutoLearnManager({
+    home: env.home, threshold: 3, codexRulesPath: null, observationHashLimit: 5,
+  }).scan({ platform: 'win32' });
+
+  const perFamily = heldPerFamily(env.statePath);
+  assert.deepEqual(perFamily, { 'bash:npm': 2, 'bash:docker ps': 2 },
+    'witness:evidence-ceiling -- evicting the 6-hash family alone gets under the cap of 5. '
+    + `Cheapest-first takes both small families first and still has to take the big one: ${JSON.stringify(perFamily)}`);
+  const state = readState(env.statePath);
+  assert.ok(state.candidates['bash:npm'] && state.candidates['bash:docker ps'],
+    'witness:evidence-ceiling -- the small families were evicted to free space one eviction '
+    + 'of the large one would have freed');
+});
+
+test('a family a human decided about is never the one evicted', (t) => {
+  // The residue, and the only thing `retainedObservations` can still report. A
+  // grant is a human decision, `pruneCandidates` already refuses to evict one,
+  // and this cap has to refuse too -- otherwise it could orphan a grant key that
+  // `pruneGrantKeys` reconciled on the line above it.
+  const env = failingFixture(t, 'evidence-ceiling-granted');
+  createAutoLearnManager({
+    home: env.home, threshold: 3, codexRulesPath: null, observationHashLimit: 100000,
+  }).scan({ platform: 'win32' });
+
+  const seeded = readState(env.statePath);
+  assert.equal(seeded.candidates['bash:curl'].counts.failed, 6,
+    'witness:evidence-ceiling -- precondition: the family to be granted is the big one');
+  seeded.reviewed = { claude: ['bash:curl'], codex: [] };
+  fs.writeFileSync(env.statePath, `${JSON.stringify(seeded, null, 2)}\n`);
+
+  const scanned = createAutoLearnManager({
+    home: env.home, threshold: 3, codexRulesPath: null, observationHashLimit: 5,
+  }).scan({ platform: 'win32' });
+
+  const perFamily = heldPerFamily(env.statePath);
+  assert.equal(perFamily['bash:curl'], 6,
+    `witness:evidence-ceiling -- the reviewed family was evicted: ${JSON.stringify(perFamily)}`);
+  assert.equal(readState(env.statePath).candidates['bash:curl'].counts.failed, 6,
+    'witness:evidence-ceiling -- and its evidence is intact');
+  // It cannot get under the cap without touching that family, so it says so
+  // rather than pretending. This is the one reachable path left to the number.
+  assert.equal(scanned.retainedObservations, 1,
+    'witness:evidence-ceiling -- six protected hashes against a cap of five is an overflow of '
+    + `one, and the scan has to report it; got ${scanned.retainedObservations}`);
+  assert.equal(readState(env.statePath).lastScanStats.retainedObservations, 1,
+    'witness:evidence-ceiling -- the writer writes it, so a reload can still see the degradation');
+  assert.equal(build(env.home).status().lastScanStats.retainedObservations, 1,
+    'witness:evidence-ceiling -- and the reader keeps it, which is where these fields go to die');
 });

@@ -768,27 +768,32 @@ function mergeGeneratedCodexRules(existingText, generatedText) {
 // Returns `changed: false` with a reason for every shape it will not touch. A
 // cleanup that silently did nothing and a cleanup that silently did the wrong
 // thing look identical to the caller otherwise.
+// `remaining` and `markers` are gone from the shape. `remaining` was a
+// byte-identical duplicate of `text` on every one of the four returns, and
+// `markers` was a count nothing anywhere read. Two names for one string invites
+// a caller to believe they differ, which is a worse failure than the keystrokes
+// it saved.
 function removeGeneratedCodexRules(existingText) {
   const existing = String(existingText == null ? '' : existingText);
   const begins = markerMatches(existing, CODEX_BEGIN_MARKER);
   const ends = markerMatches(existing, CODEX_END_MARKER);
   if (!begins.length && !ends.length) {
-    return { changed: false, text: existing, remaining: existing, markers: 0, reason: 'no generated block' };
+    return { changed: false, text: existing, reason: 'no generated block' };
   }
   if (begins.length !== ends.length || begins.length > 1) {
     return {
-      changed: false, text: existing, remaining: existing, markers: begins.length,
+      changed: false, text: existing,
       reason: 'unbalanced or duplicate generated markers',
     };
   }
   if (begins[0].start >= ends[0].start) {
     return {
-      changed: false, text: existing, remaining: existing, markers: 1,
+      changed: false, text: existing,
       reason: 'generated markers are out of order',
     };
   }
   const remaining = existing.slice(0, begins[0].start) + existing.slice(ends[0].end);
-  return { changed: true, text: remaining, remaining, markers: 1, empty: remaining.trim() === '' };
+  return { changed: true, text: remaining, empty: remaining.trim() === '' };
 }
 
 module.exports = {

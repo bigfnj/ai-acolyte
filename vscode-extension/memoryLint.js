@@ -21,7 +21,7 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:248-214), and the pattern _compile_gates_text
+// recall.py's gate markers (recall.py:248-249), and the pattern _compile_gates_text
 // actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one

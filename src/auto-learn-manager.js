@@ -648,7 +648,12 @@ function scanStats(value) {
     // `partial` means the comparison could not be made, which is not the same
     // answer as `false`.
     codexHistoryStale: value.codexHistoryStale === true,
-    codexHistoryInspected: ['exact', 'partial', 'skipped'].includes(value.codexHistoryInspected)
+    // `unavailable` is a FOURTH state and not a spelling of `partial`: the probe
+    // needs `node:sqlite`, no shipping VS Code has it, and a check that cannot
+    // run on the runtime the product ships on is inapplicable rather than
+    // degraded. Omitting it here is what would quietly turn it back into
+    // `skipped` on the first reload and lose the distinction again.
+    codexHistoryInspected: ['exact', 'unavailable', 'partial', 'skipped'].includes(value.codexHistoryInspected)
       ? value.codexHistoryInspected : 'skipped',
     codexHistoryReasons: Array.isArray(value.codexHistoryReasons)
       ? value.codexHistoryReasons.slice(0, 8).map((entry) => clean(entry, 400)).filter(Boolean) : [],
@@ -787,19 +792,85 @@ function changeOutcome(item, before, after) {
 // families that cleared the old bar and have since had their hashes trimmed.
 // Both are reporting errors, not policy writes.
 //
-// The protected set is not itself bounded, so a very high threshold can hold
-// more entries than the cap allows. That is the deliberate trade -- dropping
-// them is the inflation this exists to stop -- and the overflow is REPORTED as
-// `retainedObservations` on every scan rather than absorbed in silence.
-function pruneObservationHashes(state, limit) {
+// THE PROTECTED SET NEEDED A CEILING OF ITS OWN, and for a while it had none.
+// This block used to say the overflow was "the deliberate trade" and pointed at
+// `retainedObservations` as the answer. Reporting a breach is not bounding it.
+// `counts.failed` only ever grows and `decisive` asks only about
+// `counts.success`, so a family that fails -- or answers `unknown` -- for ever
+// stays below the threshold for ever and retains ONE HASH PER OBSERVATION with
+// nothing able to evict it. The file is read and rewritten in full on a
+// five-minute interval plus a 20 s debounce, so that is I/O on the hot path and
+// not merely disk. The live map was already pinned at 20,000 of 20,000 before
+// the protection was added, which is what that measurement was taken from.
+//
+// SO THERE ARE TWO TIERS NOW, and `limit` is a hard ceiling rather than an
+// aspiration:
+//
+//   tier 1  trim non-decisive entries oldest first, exactly as before.
+//   tier 2  only if the protected entries ALONE still exceed the limit: evict
+//           whole FAMILIES, largest hash-holder first, ties broken on the key.
+//
+// LARGEST FIRST, not oldest and not cheapest-evidence-first the way
+// `pruneCandidates` orders its own eviction. The two caps are on different
+// resources and the difference matters: candidates are one entry per family, so
+// every eviction there frees the same amount and the cheapest evidence should go
+// first. Here a single pathological family can hold thousands of hashes while a
+// thousand ordinary ones hold two each, and evicting the ordinary ones first
+// would delete a thousand families' evidence to free what one eviction frees.
+// The family consuming the most of a shared budget is the one that pays for it.
+//
+// WHOLE FAMILY, INCLUDING ITS CANDIDATE, and that is the part that keeps the
+// original guarantee intact. Dropping SOME of a below-threshold family's hashes
+// is the inflation this protection exists to stop: a cursor-less re-read
+// re-counts every observation whose hash is gone, straight into the
+// `counts.success` an auto-safe write is gated on. Dropping ALL of them together
+// with the candidate does not, because `mergeCandidate` starts a family it has
+// never seen from zero -- the same argument `pruneCandidates` already makes, and
+// it leaves the same `prunedCandidates` tombstone, so "this family was observed,
+// N times" survives the eviction.
+//
+// A family carrying a human decision is never evictable, so this can never
+// orphan a grant key that `pruneGrantKeys` has already reconciled above it.
+// `retainedObservations` therefore now reports only that residue, and on any
+// ordinary corpus it is zero.
+function pruneObservationHashes(state, limit, protectedKeys = new Set()) {
   const entries = Object.entries(state.observationHashes);
-  const live = entries.filter(([, value]) => state.candidates[value.key]);
   // Read from the state rather than from the candidate: `scan()` has just
   // refreshed every candidate against `state.threshold`, and a stored
   // `candidate.threshold` from a run with a different setting would make two
   // entries of the same family disagree about whether they are protected.
   const threshold = positive(state.threshold, 3);
+  const alive = ([, value]) => Boolean(state.candidates[value.key]);
   const decisive = ([, value]) => state.candidates[value.key].counts.success < threshold;
+
+  let prunedFamilies = 0;
+  if (limit > 0) {
+    const perFamily = new Map();
+    for (const entry of entries) {
+      if (!alive(entry) || !decisive(entry)) continue;
+      perFamily.set(entry[1].key, (perFamily.get(entry[1].key) || 0) + 1);
+    }
+    let heldCount = 0;
+    for (const count of perFamily.values()) heldCount += count;
+    if (heldCount > limit) {
+      const ranked = [...perFamily]
+        .filter(([key]) => !protectedKeys.has(key))
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      for (const [key, count] of ranked) {
+        if (heldCount <= limit) break;
+        state.prunedCandidates[key] = Math.max(state.prunedCandidates[key] || 0,
+          state.candidates[key].counts.total);
+        delete state.candidates[key];
+        heldCount -= count;
+        prunedFamilies += 1;
+      }
+      if (prunedFamilies) state.prunedCandidates = prunedCandidates(state.prunedCandidates);
+    }
+  }
+
+  // Recomputed AFTER the family eviction: an entry whose candidate just went is
+  // no longer live, and falls out here rather than needing its own pass.
+  const live = entries.filter(alive);
   let kept = live;
   let overCap = 0;
   if (limit > 0 && live.length > limit) {
@@ -811,9 +882,9 @@ function pruneObservationHashes(state, limit) {
     kept = live.filter((entry) => decisive(entry) || survivors.has(entry[0]));
     overCap = Math.max(0, kept.length - limit);
   }
-  if (kept.length === entries.length) return { pruned: 0, overCap };
+  if (kept.length === entries.length) return { pruned: 0, overCap, prunedFamilies };
   state.observationHashes = Object.fromEntries(kept);
-  return { pruned: entries.length - kept.length, overCap };
+  return { pruned: entries.length - kept.length, overCap, prunedFamilies };
 }
 // Cursors used to be pruned only as a side effect of `scan()` replacing the map
 // wholesale. The blind-scan guard suspends that replacement, and it fires for a
@@ -877,6 +948,14 @@ const CANDIDATE_LIMIT = 1000;
 // 1.2 a day, in the one directory where `managedHits` (200), `prunedCandidates`
 // (2000), `candidates` (1000), `cursors` (5000) and `observationHashes` (20000)
 // are all explicitly capped.
+//
+// THAT LAST ONE STOPPED BEING TRUE and is true again. Between the evidence-cap
+// fix and this one, `observationHashes` had a limit that the protected set was
+// allowed to exceed without bound -- so this inventory named a cap that did not
+// hold, in a comment whose whole job is to say what is bounded here. It is a
+// hard ceiling again, in two tiers; see `pruneObservationHashes` above for the
+// eviction order the second tier uses. If a cap named in this list ever becomes
+// advisory again, this sentence is the one that has to change with it.
 //
 // 200 files is roughly five months at that rate and a couple of megabytes. A
 // FILE count rather than a byte budget, because how big a settings.json is is
@@ -994,7 +1073,12 @@ function defaultCodexValidator(text, context) {
     // The temp file stands IN PLACE OF the file being replaced, never beside it.
     // Adding it as an extra leaves the old copy visible too, which is a state no
     // write ever produces and which would let a stale duplicate mask a conflict.
-    const ruleSet = context.ruleSet || codexRuleFileSet({
+    // Built here, never supplied. `context.ruleSet ||` used to lead this line and
+    // the only invocation of this validator builds a context without that key, so
+    // the left branch could not be taken. An override nobody can reach is not an
+    // extension point, it is a second way for the check and the write to disagree
+    // about which files are visible.
+    const ruleSet = codexRuleFileSet({
       home: context.home, target: context.path, substitute: temp,
     });
     const rulesArgs = codexRulesArguments(
@@ -1037,13 +1121,15 @@ function defaultCodexValidator(text, context) {
     if (context.command && decision !== 'allow') throw new Error(
       `codex execpolicy check did not allow generated prefix: ${command.join(' ')}${checked}`,
     );
+    // TWO FIELDS, not six. `ruleFiles`, `checkedFiles`, `ruleSetFailures` and
+    // `blindSpots` were returned here and read by nothing -- not production, not
+    // a test. All four describe the rule set this check evaluated, and that
+    // information does reach the user: `ruleSetDescription` renders it into the
+    // message of every rejection above, which is where a reader needs it. A
+    // second copy on the success path is a contract nobody exercises.
     return {
       valid: true,
       decision: context.command ? decision : undefined,
-      ruleFiles: ruleSet.files.slice(),
-      checkedFiles: (ruleSet.effective || []).map((file) => (file === temp ? context.path : file)),
-      ruleSetFailures: ruleSet.failures || [],
-      blindSpots: ruleSet.blindSpots || [],
     };
   } finally {
     try { fs.unlinkSync(temp); } catch {}
@@ -1095,7 +1181,16 @@ function createAutoLearnManager(options = {}) {
   // the developer's real `~/.codex` while the fixture sat unread.
   const historyStoreProbe = typeof options.codexHistoryStore === 'function'
     ? options.codexHistoryStore : codexHistoryStoreState;
-  const RANK = { exact: 0, partial: 1, skipped: 2 };
+  // Worst LAST. `unavailable` sits between `exact` and `partial` on purpose: it
+  // is a property of the interpreter rather than of the corpus, so it must not
+  // mask a root that genuinely failed to read, and it must not be rounded up
+  // into one either. `skipped` stays the worst, because "no input at all" is
+  // less of an answer than "one half of the comparison could not run".
+  const RANK = { exact: 0, unavailable: 1, partial: 2, skipped: 3 };
+  // Takes no arguments, and used to be CALLED with `{ home, codexRoots }`. Both
+  // are closed over from the enclosing manager, so the object was built and
+  // silently discarded on every scan -- and had the parameter ever been added,
+  // the two would have disagreed about which roots to probe.
   function codexHistoryStore() {
     const roots = codexRoots.length ? codexRoots : [path.join(home, '.codex', 'sessions')];
     let stale = false;
@@ -1499,7 +1594,8 @@ function createAutoLearnManager(options = {}) {
   function status() {
     return statusFrom(load());
   }
-  function statusFrom(state) {    const all = Object.values(state.candidates);
+  function statusFrom(state) {
+    const all = Object.values(state.candidates);
     const appliedKeys = [...new Set([...state.applied.claude, ...state.applied.codex])].sort();
     return {
       version: VERSION, mode: state.mode, threshold: state.threshold,
@@ -2116,9 +2212,19 @@ function createAutoLearnManager(options = {}) {
       ]);
       const prunedCandidateCount = pruneCandidates(state, candidateLimit, grantedKeys);
       const prunedGrants = pruneGrantKeys(state);
-      const observationPrune = pruneObservationHashes(state, observationHashLimit);
+      // `grantedKeys` again, and it is not decoration: the observation cap can
+      // now evict a whole family to get under its ceiling, and a family carrying
+      // a human decision must not be one of them. Passing it here is also what
+      // stops this pass orphaning a grant key that `pruneGrantKeys` reconciled on
+      // the line above.
+      const observationPrune = pruneObservationHashes(state, observationHashLimit, grantedKeys);
       const prunedObservations = observationPrune.pruned;
       const retainedObservations = observationPrune.overCap;
+      // A family the observation cap evicted is a pruned candidate like any
+      // other -- same tombstone, same meaning -- so it is counted in the same
+      // number. Reporting it separately would mean a reader had to add two
+      // fields to learn how many families left this scan.
+      const prunedCandidatesTotal = prunedCandidateCount + observationPrune.prunedFamilies;
       // A scan that enumerated NO FILES AT ALL does not get to speak for the
       // cursor map. `findJsonlFiles` cannot read a root it has no access to --
       // EACCES from antivirus, a disconnected profile share -- and it reports
@@ -2172,7 +2278,7 @@ function createAutoLearnManager(options = {}) {
       // otherwise healthy-looking result; taking the result down with it would
       // be a worse outcome than the blindness it reports.
       let codexHistory = { stale: false, inspected: 'skipped', reasons: [], notes: [] };
-      try { codexHistory = codexHistoryStore({ home, codexRoots }); }
+      try { codexHistory = codexHistoryStore(); }
       catch (error) {
         codexHistory = {
           stale: false, inspected: 'partial', reasons: [],
@@ -2191,7 +2297,7 @@ function createAutoLearnManager(options = {}) {
         prunedObservations,
         retainedObservations,
         prunedCursors: prunedCursorCount,
-        prunedCandidates: prunedCandidateCount,
+        prunedCandidates: prunedCandidatesTotal,
         prunedGrants,
         // "The cursor map was preserved because nothing was enumerated." The
         // error count already says a root failed; it does not say the scan was
@@ -2218,7 +2324,7 @@ function createAutoLearnManager(options = {}) {
         partial: state.lastScanStats.partial,
         unmatchedResults: state.lastScanStats.unmatchedResults,
         prunedObservations, retainedObservations,
-        prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidateCount, prunedGrants,
+        prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidatesTotal, prunedGrants,
         blindScan,
         codexHistoryStale: state.lastScanStats.codexHistoryStale,
         codexHistoryInspected: state.lastScanStats.codexHistoryInspected,

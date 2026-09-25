@@ -171,4 +171,26 @@ test('CLI --guidance off also sweeps an accepted derived block', (t) => {
   // MUTATION: delete the `if (cmd === 'off')` derived sweep from guidance() in
   // bin/wildcard-perms and this fails on the first assertion, with the derived
   // block still fenced in CLAUDE.md after guidance is off.
+
+  // WHERE THE SAFETY COPY LANDS, and it has to be one place. `setDerivedGuidance`
+  // writes `<name>.pre-derived` before it rewrites the user's instruction file,
+  // and the two callers used to disagree about the directory: `decideDerived`
+  // passes the learner's `~/.claude/wildcarding/backups`, while this verb passed
+  // nothing and fell through to `~/.claude/backups`. So which verb removed the
+  // block decided where the only pre-change copy of the user's CLAUDE.md went,
+  // and the one `off` wrote landed where nothing looks for it.
+  //
+  // MUTATION: restore `backupDir = path.join(os.homedir(), '.claude', 'backups')`
+  // as the default in src/derived-guidance.js. The first assertion then fails
+  // with no file in the learner's directory at all.
+  const learnerBackups = path.join(home, '.claude', 'wildcarding', 'backups');
+  assert.ok(fs.existsSync(path.join(learnerBackups, 'CLAUDE.md.pre-derived')),
+    'witness:pre-derived -- the pre-change copy is not where decideDerived puts it. '
+    + `${learnerBackups} holds ${JSON.stringify(fs.existsSync(learnerBackups) ? fs.readdirSync(learnerBackups) : null)}`);
+  // The control: it went to ONE place, so the old directory did not also gain a
+  // copy. Without this, writing to both would satisfy the assertion above.
+  const strayDir = path.join(home, '.claude', 'backups');
+  const stray = fs.existsSync(strayDir) ? fs.readdirSync(strayDir) : [];
+  assert.deepEqual(stray.filter((name) => name.endsWith('.pre-derived')), [],
+    `witness:pre-derived -- a second copy was left in ${strayDir}: ${JSON.stringify(stray)}`);
 });

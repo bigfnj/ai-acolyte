@@ -84,6 +84,44 @@ Also outstanding: no `icon` is declared and the Marketplace listing needs one; t
 screenshots under `img/` have never been eyeballed for legible paths or window titles, and
 the repo's own privacy gate is text-only so nothing automated will ever check them.
 
+## Phase 5, the local checkout directory: BLOCKED, and the script is written
+
+Renaming `D:\.ai-work\projects\permission-wildcarding` to `...\ai-acolyte` could not be
+done on 2026-09-25. **VS Code holds directory handles on `<checkout>\.git` and
+`<checkout>\scripts`**, so `rename` returns `EBUSY`, then `EPERM`. Turning off
+`git.enabled`, `git.autoRepositoryDetection` and `npm.autoDetect` live did not release
+them across 31 attempts over 45 s — the Git extension holds `.git` until the window
+reloads, and reloading kills the extension host the migrating session runs in.
+
+The migration is therefore packaged as one script, to be run **with VS Code closed**:
+
+    %LOCALAPPDATA%\DevToolbox\scripts\migrate-acolyte-checkout.cmd
+
+It lives outside every git repo, because it hard-codes this machine's absolute paths and
+this is a public repository. `--check` runs read-only and works with the editor open;
+`--go` refuses while `Code.exe` is running. Both directions were exercised rather than
+assumed: with VS Code open, `--check` completes green and `--go` exits 1 having moved
+nothing.
+
+**Why the rename and the `settings.json` rewrite must be one operation.** Between them the
+live `PostToolUse` hook names a path that no longer exists, and every Claude Code tool call
+in that window fires it. There were **14** path references in `~/.claude/settings.json`, not
+the 5 visible by eye — one hook command plus stored approval strings that would otherwise
+have silently stopped matching and re-prompted forever.
+
+Two risks that sound serious are closed by measurement, not by hope:
+
+| Risk | Finding |
+|---|---|
+| Auto Learn starts a new, empty partition | **No.** State is keyed on a hash of the VS Code workspace **folder**, which here is the parent `D:\.ai-work` → `auto-learn-state.4a20f158639aa72c.json` (621 candidates). All four candidate roots were hashed; only the parent resolves to a file that exists. The checkout is a subdirectory, so its name is not an input. |
+| The fixed-point cache is invalidated | **No.** `fixedPointKey` is `version:codeStamp:byteLength:hash`, and `codeStamp` hashes `mtimeMs:size` of the code files — never their path. A same-volume rename preserves both. |
+
+The script asserts both afterwards anyway, along with the one that would be silent and
+unrecoverable: **the managed-block marker count in `~/.claude/CLAUDE.md`,
+`~/.claude/NOTES.md` and `~/.codex/AGENTS.md` must not change** (4 / 2 / 4). Its patch
+regex only matches the name where it follows `projects/`, which no marker does — the same
+discrimination that the near-miss above turned on, applied a second time.
+
 ## Phase 3, the CLI name, not started
 
 `wildcard-perms` still prints `wildcard-perms:` and is unchanged. If a second name is

@@ -33,6 +33,24 @@ function disposable() { return { dispose() {} }; }
 // ones the test arms to wait on, which is the distinction this line draws.
 const realSetTimeout = global.setTimeout;
 
+// The purge below is a STATEMENT, not a guarantee, and deleting it turns nothing red.
+// The next harness silently re-uses the previous one's `os` stub and scripted `fs`, a
+// precondition stops being reachable, and the assertion behind it passes on an input
+// that never arrived. That is not hypothetical: when the rebasing writer moved into
+// src/settings-write.js this file's scripted 'corrupt' read stopped reaching it, and the
+// assertion after it went vacuous without going red. So the CONDITION is asserted at the
+// load site, separately from the purge, where a dropped purge fails instead of going quiet.
+function assertFreshProjectCache(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  const stale = Object.keys(require.cache)
+    .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+    .map((key) => path.basename(key))
+    .sort();
+  assert.deepEqual(stale, [],
+    'project modules are still cached from before this harness installed its mocks, so they '
+    + `will resolve an earlier home: ${stale.join(', ')}`);
+}
+
 // Longer than DASHBOARD_BOUNCE_MS: refresh() is debounced like every other
 // handler in the extension, so a push lands on the next tick, not this one.
 function settle(ms = 140) {
@@ -244,10 +262,17 @@ function harness(tempHome, opts = {}) {
   // silently stopped reaching writeAllow's re-read once that moved into src/,
   // leaving the failure this test exists to check unable to happen.
   // local-drain-extension.test.js already does this, for the same reason.
-  delete require.cache[extensionPath];
+  //
+  // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:10, :47), so
+  // leaving them cached leaves a second harness holding the first one's instances.
+  const extensionDir = path.dirname(extensionPath) + path.sep;
   for (const cached of Object.keys(require.cache)) {
-    if (cached.startsWith(rootSrc + path.sep)) delete require.cache[cached];
+    if (cached.startsWith(rootSrc + path.sep) || cached.startsWith(extensionDir)) {
+      delete require.cache[cached];
+    }
   }
+  assertFreshProjectCache(extensionPath, rootSrc);
   // Recorded, and unref'd. Unref matters: the contention tests arm 1500 ms
   // retries deliberately and must not keep `node --test` alive waiting for them.
   const originalSetTimeout = global.setTimeout;
@@ -412,9 +437,40 @@ test('every dashboard message reaches its command, and nothing else does', async
 
     // A route added to the switch without a row above would otherwise ship
     // untested — the panel's buttons are the only way most of these are reached.
+    //
+    // The census is over CASE LABELS, not over `case 'x': vscode.commands.executeCommand(`.
+    // That older regex asked whether a label and a dispatch sat on one line, which three
+    // real shapes sidestep: a braced body (`case 'x': { ... }`), a dispatch through a
+    // variable (`executeCommand(COMMANDS[msg.type])`), and any label carrying a digit,
+    // which `[A-Za-z]+` cannot match at all. Enumerating the labels inside the switch and
+    // reconciling the whole SET against the table above cannot be dodged by how a body is
+    // written, and it catches a route being removed as well as one being added.
     const source = fs.readFileSync(require.resolve('../vscode-extension/extension'), 'utf8');
-    const cases = source.match(/case '[A-Za-z]+':\s*vscode\.commands\.executeCommand\(/g) || [];
-    assert.equal(cases.length, routes.length, 'every executeCommand case in the switch is covered');
+    const switchAt = source.indexOf('switch (msg?.type)');
+    assert.ok(switchAt > 0,
+      'the dashboard message switch was renamed or restructured, so this census scans nothing');
+    const bodyStart = source.indexOf('{', switchAt);
+    let depth = 0;
+    let bodyEnd = -1;
+    for (let i = bodyStart; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) { bodyEnd = i; break; }
+      }
+    }
+    assert.ok(bodyEnd > bodyStart, 'the message switch never closes; the brace scan found no body');
+    const body = source.slice(bodyStart, bodyEnd);
+    const labels = (body.match(/case\s+'([^']*)'\s*:/g) || [])
+      .map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'")));
+    assert.ok(labels.length > 0, 'precondition: the switch body yielded no case labels at all');
+    // The two handled in-process are NAMED rather than skipped: a third in-process case
+    // added quietly is the same defect as a third dispatching one.
+    assert.deepEqual(
+      labels.slice().sort(),
+      routes.map(([type]) => type).concat(['refresh', 'remove']).sort(),
+      'the dashboard switch handles a message type this test does not exercise, or has '
+      + 'stopped handling one it does');
 
     // The two that are handled in-process rather than dispatched.
     app.executed.length = 0;

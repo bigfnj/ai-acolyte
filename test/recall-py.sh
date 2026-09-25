@@ -89,15 +89,42 @@ echo "$ERR" | grep -q 'recall_index.json' || fail "the warning does not name the
 [ "$RC" = "0" ] || fail "a corrupt cache must not exit non-zero: extension.js reads that as sync failure"
 echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 
-# ---------------------------------------------------------------- B2: no temp residue
+# ---------------------------------------------------------------- B2: the write is ATOMIC
+# Mutation: replace save_index's body (memory/recall.py:373-384) with a plain in-place
+# `json.dump(idx, open(INDEX_PATH, "w"))`. The file-identity assertion below fails; nothing
+# else in this suite does.
+#
+# The residue check underneath used to be the only guard here, and it was vacuous twice over.
+# It globbed for `recall_index.json.tmp`, but save_index names its temp file with the writing
+# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:381) -- so the literal path it tested
+# has never existed on any run, broken or not. And even spelled correctly it only fires for
+# "wrote a tmp, forgot os.replace": revert to an in-place json.dump and there is no temp file
+# to leave behind, so it passes on the state it exists to forbid. Between it and the
+# source-text pin, NOTHING failed when the write stopped being atomic.
+#
+# What separates the two implementations observably is file IDENTITY. os.replace swaps a new
+# file into the name, so the NTFS file index changes; `open(path, "w")` truncates the existing
+# file and keeps it. st_ino carries that index on Windows, which is where this suite runs.
+file_id() {
+  "$PY" -c "import os,sys; print(os.stat(sys.argv[1]).st_ino)" "$1"
+}
 printf -- '---\nname: d\ndescription: delta\n---\ndelta body\n' > "$MEM/d.md"
 printf -- '---\nname: e\ndescription: echo\n---\necho body\n' > "$MEM/e.md"
 seed_index
+ID_BEFORE="$(file_id "$MEM/recall_index.json")"
+[ -n "$ID_BEFORE" ] || fail "precondition: could not read the index file id, so atomicity is untestable"
 rm "$MEM/e.md"
 "$PY" "$RECALL" --list >/dev/null 2>&1
-[ -e "$MEM/recall_index.json.tmp" ] && fail "a successful write left recall_index.json.tmp behind"
 [ "$(count_index)" = "1" ] || fail "expected 1 entry after the deletion, got $(count_index)"
-echo "ok: the atomic write leaves no .tmp residue"
+ID_AFTER="$(file_id "$MEM/recall_index.json")"
+[ "$ID_BEFORE" != "$ID_AFTER" ] \
+  || fail "the index was rewritten IN PLACE (file id $ID_AFTER unchanged): save_index is no longer atomic, so an interrupted write truncates the real cache"
+# Correctly spelled this time, and still worth keeping: it is the other failure mode, where
+# the tmp is written and the os.replace is dropped or throws.
+for residue in "$MEM"/recall_index.json.*.tmp; do
+  [ -e "$residue" ] && fail "a successful write left $residue behind"
+done
+echo "ok: the index write replaces the file rather than truncating it, and leaves no .tmp residue"
 
 # ---------------------------------------------------------------- B3: frontmatter past 400 chars
 # Mutation: revert _fm to text[:400]. `scope: global` sits past the boundary here, so the gate
@@ -348,18 +375,53 @@ printf 'A forward link to nothing: [[no-such-memory]]\n' >> "$MEM/MEMORY.md"
 check_axis unresolved 'unresolved \[\[links\]\]'
 echo "ok: the clean verdict tests every finding it prints, not five of eight"
 
-# ---------------------------------------------------------------- gates compile is idempotent
-# gates-stale.sh covers drift-detected and drift-cleared. Nothing covered stability, and an
-# unstable compile would make --lint report STALE forever.
+# ---------------------------------------------------------------- gates compile is ORDERED
+# Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
+# memory/recall.py:1017. The order assertion below fails; the two-compiles assertion does not.
+#
+# This block used to hold one gate memory and compile it twice. With ONE file there is no
+# order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
+# directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1009 promises
+# "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
+# half of that sentence, which is the half the second one rests on: two machines, or one
+# machine after a restore, agree on the sha only because the walk is sorted.
+#
+# The fixture is eight memories whose NTFS directory order is NOT their sorted order. NTFS
+# collates case-insensitively and puts `_` after the letters, so `A2 a5 b1 B4 c3 C6 z8 _7`
+# comes back from os.listdir where sorted() gives `A2 B4 C6 _7 a5 b1 c3 z8`. Each gate body
+# names its own file, so the compiled output can be read back as a sequence.
 rm -f "$MEM"/*.md
-printf -- '---\nname: g\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Stable.** Pass: same sha twice.\n<!-- /gate -->\n' > "$MEM/g.md"
+GATE_STEMS='A2 B4 C6 _7 a5 b1 c3 z8'
+for stem in $GATE_STEMS; do
+  printf -- '---\nname: %s\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Gate from %s.**\n<!-- /gate -->\n' \
+    "$stem" "$stem" > "$MEM/$stem.md"
+done
 printf -- '# Memory Index\n' > "$MEM/MEMORY.md"
+
+# The axis has to be non-degenerate or the order assertion proves nothing, and a control that
+# can run degraded must say so rather than skip in silence.
+DISK_ORDER="$("$PY" -c "import os,sys; print(' '.join(n[:-3] for n in os.listdir(sys.argv[1]) if n.endswith('.md') and n != 'MEMORY.md'))" "$MEM")"
+SORTED_ORDER="$("$PY" -c "import os,sys; print(' '.join(sorted(n[:-3] for n in os.listdir(sys.argv[1]) if n.endswith('.md') and n != 'MEMORY.md')))" "$MEM")"
+
 "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
 ONE="$(head -1 "$TMP/.claude/gates.generated.md")"
+COMPILED_ORDER="$(grep -o 'Gate from [A-Za-z0-9_]*' "$TMP/.claude/gates.generated.md" | sed 's/Gate from //' | tr '\n' ' ' | sed 's/ $//')"
+[ -n "$COMPILED_ORDER" ] || fail "precondition: the compiled file names no gate, so there is no order to read"
+
+if [ "$DISK_ORDER" = "$SORTED_ORDER" ]; then
+  echo "DEGRADED: this filesystem returns directory entries already sorted ($DISK_ORDER), so the"
+  echo "          order assertion below cannot tell a sorted walk from an unsorted one. The"
+  echo "          two-compiles check still runs; the ordering guarantee does NOT."
+else
+  [ "$COMPILED_ORDER" = "$SORTED_ORDER" ] \
+    || fail "the gate compile is not sorted by filename: compiled '$COMPILED_ORDER', sorted '$SORTED_ORDER', on-disk '$DISK_ORDER'"
+fi
+
 "$PY" "$RECALL" --gates-compile >/dev/null 2>&1
 TWO="$(head -1 "$TMP/.claude/gates.generated.md")"
 [ "$ONE" = "$TWO" ] || fail "compiling twice over an unchanged corpus produced a different sha"
-echo "ok: compiling an unchanged corpus twice yields the same sha"
+echo "ok: the gate compile walks the corpus in filename order, and two runs yield the same sha"
 
 # ---------------------------------------------------------------- a gateless corpus cannot empty it
 # Runs here because the block above leaves a real, non-empty compile on disk, which is the only

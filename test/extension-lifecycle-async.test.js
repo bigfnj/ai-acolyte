@@ -385,6 +385,20 @@ function harness(tempHome, options = {}) {
   };
 
   purge();
+  // A SEPARATE statement from the purge, on purpose. `purge()` above is a statement:
+  // delete it and nothing goes red, because the next of this file's 27 harnesses simply
+  // re-uses the previous one's `os` stub and keeps passing against a home that no longer
+  // exists. Asserting the condition here is what makes a dropped purge fail.
+  {
+    const extensionDir = path.dirname(extensionPath) + path.sep;
+    const stale = Object.keys(require.cache)
+      .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+      .map((key) => path.basename(key))
+      .sort();
+    assert.deepEqual(stale, [],
+      'project modules are still cached from before this harness installed its mocks, so they '
+      + `will resolve an earlier home: ${stale.join(', ')}`);
+  }
   const extension = require(extensionPath);
   extension.activate({ subscriptions });
   return {
@@ -632,12 +646,71 @@ test('a python child that outlives the extension is killed, and says nothing aft
 
 // The behavioural test above covers one of the four sites. This covers the other
 // three cheaply, and fails when a fifth spawn is added without retaining it.
-test('every execFile in the extension hands its child over to be killable', () => {
+//
+// Rewritten because the old pair was narrower than its own name. `(?<![\w.])execFile\(`
+// excluded `.execFile(` BY CONSTRUCTION, so a fifth site written `cp.execFile(` passed in
+// silence, and neither half said anything at all about `spawn`, `fork` or `exec`. The
+// `trackChild(execFile(` half was a scan for one literal spelling: a correct
+// `const child = execFile(...); trackChild(child);` FAILED it, while a `spawn()` walked
+// straight past. Two questions now, each falsifiable on its own.
+test('every child process the extension starts is handed over to be killable', () => {
   const source = fs.readFileSync(extensionPath, 'utf8');
-  const spawns = source.match(/(?<![\w.])execFile\(/g) || [];
-  const tracked = source.match(/trackChild\(execFile\(/g) || [];
-  assert.equal(spawns.length, 4, 'the four known spawn sites');
-  assert.equal(tracked.length, 4, 'each one retained via trackChild, or deactivate cannot kill it');
+
+  // 1. Nothing can spawn that was never imported. This is what closes the `spawn()` hole:
+  //    a new spawner has to come through child_process, and the destructure is pinned.
+  const requires = source.match(/require\(\s*['"](?:node:)?child_process['"]\s*\)/g) || [];
+  assert.equal(requires.length, 1,
+    'child_process is imported more than once, or not at all — the spawner census below '
+    + 'only judges the import it knows about');
+  const destructured = source.match(
+    /(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\)/);
+  assert.ok(destructured,
+    'child_process is no longer imported by destructuring, so this test cannot tell which '
+    + 'spawners are in scope');
+  assert.deepEqual(
+    destructured[1].split(',').map((name) => name.split(':')[0].trim()).filter(Boolean).sort(),
+    ['execFile'],
+    'a second child_process spawner is in scope. Every child has to reach trackChild, and '
+    + 'the site census below only knows how to follow execFile');
+
+  // 2. Every execFile call — member form included — reaches trackChild. Two shapes are
+  //    accepted because both are correct: wrapped in place, or assigned and handed over.
+  const sites = [];
+  const call = /(?:[\w$]+\s*\.\s*)?\bexecFile\s*\(/g;
+  let hit;
+  while ((hit = call.exec(source)) !== null) {
+    const lineStart = source.lastIndexOf('\n', hit.index) + 1;
+    const lineEnd = source.indexOf('\n', hit.index);
+    sites.push({
+      index: hit.index,
+      line: source.slice(0, hit.index).split('\n').length,
+      text: source.slice(lineStart, lineEnd === -1 ? source.length : lineEnd),
+    });
+  }
+  assert.equal(sites.length, 4, `the four known spawn sites, found ${sites.length}`);
+
+  const untracked = [];
+  let wrapped = 0;
+  let assigned = 0;
+  for (const site of sites) {
+    if (/trackChild\(\s*(?:[\w$]+\s*\.\s*)?execFile\s*\(/.test(site.text)) { wrapped += 1; continue; }
+    const binding = site.text.match(
+      /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w$]+\s*\.\s*)?execFile\s*\(/);
+    if (binding
+      && new RegExp(String.raw`trackChild\(\s*${binding[1]}\s*[,)]`).test(source.slice(site.index))) {
+      assigned += 1;
+      continue;
+    }
+    untracked.push(`extension.js:${site.line}  ${site.text.trim()}`);
+  }
+  assert.deepEqual(untracked, [],
+    'an execFile child is never handed to trackChild, so deactivate cannot kill it:\n  '
+    + untracked.join('\n  '));
+  // Witness, so a regex that stopped matching anything cannot report a clean sweep: the
+  // classification has to have actually recognised every site it passed.
+  assert.equal(wrapped + assigned, sites.length,
+    `every site must be classified; recognised ${wrapped} wrapped + ${assigned} assigned `
+    + `of ${sites.length}`);
 });
 
 // memoryLint.cfg() is the single enumeration of the permissionWildcarding.memory.* keys.

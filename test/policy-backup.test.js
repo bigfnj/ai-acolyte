@@ -30,6 +30,21 @@ function purgeProjectModules(extensionPath, rootSrc) {
   }
 }
 
+// And a SEPARATE assertion, at the load site, that the purge really ran before it. The
+// purge is a statement: delete it and nothing goes red, because the next harness simply
+// re-uses the previous one's stub and keeps passing on inputs that no longer reach the
+// code under test. Two statements, so the condition is falsifiable on its own.
+function assertFreshProjectCache(extensionPath, rootSrc) {
+  const extensionDir = path.dirname(extensionPath) + path.sep;
+  const stale = Object.keys(require.cache)
+    .filter((key) => key.startsWith(rootSrc + path.sep) || key.startsWith(extensionDir))
+    .map((key) => path.basename(key))
+    .sort();
+  assert.deepEqual(stale, [],
+    'project modules are still cached from before this harness installed its mocks, so they '
+    + `will resolve an earlier home: ${stale.join(', ')}`);
+}
+
 // `options.settings` overrides configuration keys by name. Nothing in this file
 // needed one until the mirror path itself became configurable evidence: every
 // other test here relies on the DEFAULT mirror location, so the map is empty for
@@ -105,6 +120,7 @@ function harness(tempHome, options = {}) {
   };
 
   purgeProjectModules(extensionPath, rootSrc);
+  assertFreshProjectCache(extensionPath, rootSrc);
   const extension = require(extensionPath);
   extension.activate({ subscriptions: [] });
   return {
@@ -613,4 +629,53 @@ test('legacy cleanup preserves MCP blankets for servers introduced after MAX', a
   } finally {
     await app.dispose();
   }
+});
+
+// The high-water backup belongs to the EXTENSION and to nothing else. src/settings-write.js
+// fires `onWrite(allow, deny)` after a successful write, and only the caller that supplies
+// it takes a backup; the CLI deliberately supplies none, because giving the hook path one
+// would be a behaviour change smuggled in beside a correctness fix
+// (bin/wildcard-perms:297-300 says exactly that).
+//
+// Until now that sentence was the only thing holding the arrangement up. Nothing asserted
+// the CLI writer had no `onWrite`, so "deliberate rather than dropped" rested on a comment,
+// and the reverse \u2014 the EXTENSION losing its hook, which silently stops every backup \u2014
+// was unasserted too. Both directions, in one place, so neither can drift quietly.
+//
+// A source check, and it asserts the CONDITION rather than the presence of a guarded
+// statement: it reads the options object of each construction site and judges what is in it.
+test('the high-water backup hook is the extension\u2019s alone, by construction', () => {
+  const repoRoot = path.resolve(__dirname, '..');
+  const optionsAt = (file, text) => {
+    const at = text.indexOf('createSettingsWriter({');
+    assert.ok(at > 0, `${file} no longer constructs a settings writer, so this test judges nothing`);
+    const open = text.indexOf('{', at);
+    let depth = 0;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return text.slice(open, i + 1);
+      }
+    }
+    assert.fail(`${file}: the createSettingsWriter options object never closes`);
+    return '';
+  };
+
+  const cli = optionsAt('bin/wildcard-perms',
+    fs.readFileSync(path.join(repoRoot, 'bin', 'wildcard-perms'), 'utf8'));
+  const ext = optionsAt('vscode-extension/extension.js',
+    fs.readFileSync(path.join(repoRoot, 'vscode-extension', 'extension.js'), 'utf8'));
+
+  // Precondition: both sites were really parsed, not silently reduced to ''.
+  assert.match(cli, /settingsPath/, 'precondition: the CLI options object was not read');
+  assert.match(ext, /settingsPath/, 'precondition: the extension options object was not read');
+
+  assert.equal(/\bonWrite\b/.test(cli), false,
+    'bin/wildcard-perms now passes onWrite, so the CLI takes the high-water backup too. That '
+    + 'is a behaviour change, not a fix \u2014 src/settings-write.js:139-141 records the CLI having '
+    + 'none as deliberate.');
+  assert.equal(/\bonWrite\b/.test(ext), true,
+    'vscode-extension/extension.js no longer passes onWrite, so no write takes a high-water '
+    + 'backup any more and every restore test in this file is guarding an empty promise.');
 });

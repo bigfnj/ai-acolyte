@@ -101,12 +101,23 @@ test('the exporter and the learner agree on what one spelling of a rule is', () 
   // The exporter takes no dependency on the learner, so it carries its own
   // copy, the same way it carries its own root tables. This is the drift test
   // for that copy.
+  let normalisationApplied = 0;
   for (const rule of [
     'Bash(git.exe status *)', 'Bash(git status *)', 'PowerShell(WHERE.EXE *)',
     'Bash(x.exe *)', 'Bash(.exe *)', 'WebFetch(domain:host.exe.com)', 'WebSearch', '',
   ]) {
-    assert.equal(exporterNormalize(rule), normalizePermissionSpelling(rule), rule);
+    const normalised = exporterNormalize(rule);
+    assert.equal(normalised, normalizePermissionSpelling(rule), rule);
+    if (normalised !== rule) normalisationApplied += 1;
   }
+  // A differential test is only as strong as the axes its cases vary, and this one has an
+  // axis that can go degenerate without anything noticing: two implementations that BOTH
+  // became the identity function agree perfectly, and so does a case list trimmed down to
+  // rules the normaliser leaves alone. At least one case has to be a rule the normalisation
+  // actually rewrites, or the comparison above is between two copies of `x => x`.
+  assert.ok(normalisationApplied >= 2,
+    `only ${normalisationApplied} case(s) were changed by the normaliser, so this compares `
+    + 'two implementations on inputs neither of them touches');
 });
 
 test('a family split across spellings reaches the threshold and both rules are written', (t) => {

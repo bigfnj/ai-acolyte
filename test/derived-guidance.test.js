@@ -357,13 +357,22 @@ test('the rule length cap holds after escaping, not just before it', () => {
   // 200-character cut lands at a different point inside the entity for each
   // offset; with only one offset the trailing-entity strip is never exercised
   // and its mutation survives.
+  //
+  // `{0,3}`, not `{1,3}`, and that zero is the whole point. Production strips
+  // `/&[a-z]{0,3}$/i` (src/derived-guidance.js:68), so a cut that leaves a BARE
+  // trailing `&` — no letters after it — is stripped too, and an assertion
+  // written `{1,3}` cannot see that case. It is reachable: pad 3 puts the
+  // second 200-character cut one character into `&lt;!--`, leaving exactly `&`.
+  // With `{1,3}` here, narrowing production to `{1,3}` survived.
+  const SPLIT_ENTITY = /&[a-z]{0,3}$/i;
   let sawSplitEntity = false;
+  let sawBareAmpersand = false;
   for (let pad = 0; pad < 7; pad += 1) {
     const raw = 'x'.repeat(pad) + '<!--'.repeat(100);
     const rule = cleanRule(raw);
     assert.ok(rule.length <= 200,
       `an escaped rule must still fit the documented cap (pad ${pad}, got ${rule.length})`);
-    assert.ok(!/&[a-z]{1,3}$/i.test(rule),
+    assert.ok(!SPLIT_ENTITY.test(rule),
       `must not end in half an HTML entity (pad ${pad}, tail ${JSON.stringify(rule.slice(-6))})`);
     assert.ok(rule.includes('&lt;!--'),
       `precondition: the escaping really happened at pad ${pad}`);
@@ -371,9 +380,16 @@ test('the rule length cap holds after escaping, not just before it', () => {
     // strip exists for, and at least one offset must reach it.
     const naive = raw.slice(0, 200).replace(/`/g, '')
       .replace(/<!--/g, '&lt;!--').replace(/-->/g, '--&gt;').slice(0, 200);
-    if (/&[a-z]{1,3}$/i.test(naive)) sawSplitEntity = true;
+    if (SPLIT_ENTITY.test(naive)) sawSplitEntity = true;
+    if (/&$/.test(naive)) sawBareAmpersand = true;
   }
   assert.ok(sawSplitEntity,
     'precondition: at least one offset really did split an entity, or this '
     + 'test is not exercising the strip at all');
+  // The zero-letter axis specifically. Without an offset that reaches it, the
+  // `{0,3}` above is indistinguishable from `{1,3}` and the assertion is only
+  // as strong as the narrower one.
+  assert.ok(sawBareAmpersand,
+    'precondition: no offset left a bare trailing `&`, so the zero-letter half '
+    + 'of the strip is not exercised and narrowing it to {1,3} would survive');
 });

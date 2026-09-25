@@ -122,6 +122,30 @@ function bodyResponse() {
   };
 }
 
+// The same 200, but it keeps what the download registered on it. Two things need
+// that and neither is reachable through the inert version above: firing the
+// RESPONSE stream's 'error' — one of the four independent channels that reach
+// `fail` — and getting hold of the write stream, which is the only way to drive
+// a transfer to 'finish' and reach the rename. `bytes` is counted, never
+// allocated: the extension only reads `chunk.length`, so a 6MB chunk costs
+// nothing and still clears the 5MB "this is not an HTML error page" floor.
+function liveBodyResponse() {
+  const handlers = {};
+  const res = {
+    statusCode: 200,
+    headers: { 'content-length': String(32 * 1024 * 1024) },
+    dest: null,
+    resume() {},
+    on(event, cb) { handlers[event] = cb; return res; },
+    pipe(dest) { res.dest = dest; return dest; },
+    emit(event, argument) { handlers[event]?.(argument); },
+    deliver(bytes) { handlers.data?.({ length: bytes }); },
+    // What a completed pipe does: end the write stream so it emits 'finish'.
+    finish() { res.dest?.end(); },
+  };
+  return res;
+}
+
 function harness(tempHome, options = {}) {
   const commands = new Map();
   const watchers = [];
@@ -269,6 +293,13 @@ function harness(tempHome, options = {}) {
       return {
         createAutoLearnWorkerRunner: (runnerOptions) => real.createAutoLearnWorkerRunner({
           ...runnerOptions,
+          // The production deadline is 300000 ms, chosen against the manager's
+          // own 180000 ms execFile timeouts. A test cannot wait that out, so it
+          // says how long it is prepared to wait; omitted, the runner's real
+          // default applies and every existing test here keeps its old
+          // behaviour. `timeoutMs: 0` would disable it, which is NOT what an
+          // unset option means — hence the explicit undefined.
+          timeoutMs: options.workerTimeoutMs,
           workerFactory: () => {
             const worker = options.wedgeWorker ? new WedgedWorker() : new FakeWorker();
             workers.push(worker);
@@ -491,6 +522,19 @@ let recallModelHidden = null;
 // which is how this shipped in the first place. Asserting the ORDER fails everywhere.
 let tmpUnlinkObserved = null;
 
+// HOW MANY TIMES the .tmp was unlinked, which the single-slot observable above
+// cannot say. `fail` is reachable from five call sites across four channels and
+// had no once-guard, so one destroyed socket cleaned up twice — the second
+// unlink throwing ENOENT into a swallowing catch, which is why nothing ever
+// noticed. Reset when a fresh .tmp stream opens.
+let tmpUnlinkCount = 0;
+
+// When set, fs.renameSync throws it. The publish step runs inside out.close()'s
+// callback, long after the Promise executor returned, so an unwrapped throw
+// there is an uncaught exception AND a promise that never settles. EXDEV and an
+// antivirus EPERM both reach it on a real box.
+let renameFailure = null;
+
 function fsHidingRecallModel(realFs) {
   let tmpStreamClosed = false;
   return {
@@ -500,6 +544,7 @@ function fsHidingRecallModel(realFs) {
       if (String(target).endsWith('.tmp')) {
         tmpStreamClosed = false;
         tmpUnlinkObserved = null;
+        tmpUnlinkCount = 0;
         const realClose = stream.close.bind(stream);
         // Always pass a callback, even when the caller gave none, so the flag flips on the
         // same tick node would have called the caller's own callback on.
@@ -507,8 +552,15 @@ function fsHidingRecallModel(realFs) {
       }
       return stream;
     },
+    renameSync(from, to) {
+      if (renameFailure) throw renameFailure;
+      return realFs.renameSync(from, to);
+    },
     unlinkSync(target) {
-      if (String(target).endsWith('.tmp')) tmpUnlinkObserved = { closedFirst: tmpStreamClosed };
+      if (String(target).endsWith('.tmp')) {
+        tmpUnlinkObserved = { closedFirst: tmpStreamClosed };
+        tmpUnlinkCount += 1;
+      }
       return realFs.unlinkSync(target);
     },
     existsSync(target) {
@@ -736,6 +788,40 @@ test('a reconcile after teardown builds nothing, and the disposer drains what is
     await app.dispose();
   }
 });
+
+test('the local-settings watchers have exactly one drain disposer, and it is the live one',
+  TEST_TIMEOUT, async (t) => {
+    // registerLocalWatchers registered TWO disposers, byte for byte identical and
+    // closing over the same `watchers` array. Whichever ran first emptied it, so
+    // the other was a no-op over an empty array for the life of the window: two
+    // entries in context.subscriptions that between them could only ever do one
+    // thing.
+    //
+    // Runtime cannot tell a dead duplicate from a live one — that is exactly why
+    // it survived — so the count is taken over the REGISTERED closures rather
+    // than over an effect. The assertion below then disposes the one it counted,
+    // which is what stops the count from measuring the wrong thing if the drain
+    // is ever rewritten.
+    const home = tempHome(t);
+    const app = harness(home);
+    try {
+      const local = app.watcherFor('.claude/settings.local.json');
+      assert.equal(local.disposed, false, 'precondition: the local-settings watcher is live');
+
+      const drains = app.subscriptions.filter((entry) =>
+        typeof entry?.dispose === 'function' && /watchers\.pop\(\)/.test(String(entry.dispose)));
+      assert.equal(drains.length, 1,
+        `${drains.length} watcher-drain disposers are registered. All but the first are dead `
+        + 'code: the first to run empties the array they all share');
+
+      drains[0].dispose();
+      assert.equal(local.disposed, true,
+        'the disposer this test counted does not drain the local-settings watchers, so the '
+        + 'count above was measuring something else');
+    } finally {
+      await app.dispose();
+    }
+  });
 
 test('a gate refresh cannot rewrite the instruction files after deactivate', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
@@ -1209,6 +1295,62 @@ test('a wedged predecessor does not steal the successor\u2019s worker runner', T
   }
 });
 
+test('a worker still wedged at teardown is failed on its deadline and then reaped',
+  TEST_TIMEOUT, async (t) => {
+    // The leak the two tests above had to work AROUND. Both of them end by calling
+    // release() on every worker, because without that the drain never finishes —
+    // and a suite that has to un-wedge its own fixture to reach teardown cannot
+    // then say anything about what teardown does to a worker that stays wedged.
+    //
+    // Nothing did. `WedgedWorker.terminated` was written at both of its sites and
+    // read by no assertion, so the one thing the flag exists to prove was never
+    // proved: a thread blocked in a synchronous fs call (statSync against a dead
+    // network mount) emits no 'message', no 'error' and no 'exit', its job promise
+    // stayed pending, deactivate()'s Promise.allSettled over those jobs never
+    // resolved, and the terminate pass AFTER that drain never ran. One live thread
+    // per reload, plus a `context.subscriptions` that never drains.
+    //
+    // Terminating earlier is not the fix and is not what this asserts. The
+    // drain-before-terminate order is deliberate (autoLearnWorkerRunner.js:130-133):
+    // a worker between two policy writes must reach its own result or the
+    // manager's JS rollback is lost. The deadline settles the JOB as a failure,
+    // which is all the drain needs, and leaves the reaping exactly where it was.
+    //
+    // The sibling test above is right that terminate() is the wrong observable for
+    // a CLEAN exit — a worker that exits by itself is never terminated by design.
+    // This is the other case, and here it is the only observable there is.
+    const home = tempHome(t);
+    const app = harness(home, {
+      settings: { 'autoLearn.enabled': true },
+      wedgeWorker: true,
+      workerTimeoutMs: 150,
+    });
+    try {
+      const wedged = app.commands.get('permission-wildcarding.autoLearnScan')();
+      await tick(50);
+      assert.equal(app.workers.length, 1, 'precondition: a worker was built and never answered');
+      assert.equal(app.workers[0].terminated, false,
+        'precondition: nothing has reaped it yet, so a later true means teardown did it');
+
+      let drained = false;
+      const teardown = app.extension.deactivate().then(() => { drained = true; });
+      // Deliberately NOT awaited. With no deadline this never resolves, and an
+      // await here would spend the file timeout instead of failing by name.
+      await tick(1500);
+
+      assert.equal(drained, true,
+        'deactivate() never resolved: its drain awaits a job promise that cannot settle, so '
+        + 'context.subscriptions never drains either');
+      assert.equal(app.workers[0].terminated, true,
+        'the wedged thread survived the extension host — one more live worker per reload');
+
+      await Promise.allSettled([wedged, teardown]);
+    } finally {
+      for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+      await app.dispose();
+    }
+  });
+
 // Cancel on the 32MB model download was a no-op on every real download, and the shape of
 // httpsGetFollow is why. It followed redirects itself and returned the req it had just
 // built, so the caller retained the FIRST hop's request. The comment above the function
@@ -1287,3 +1429,156 @@ test('a cancel between redirect hops stops the next hop instead of starting it',
     await app.dispose();
   }
 });
+
+// Cancel was the only way to stop this transfer, and Cancel is a button the user
+// presses. The three below are the failures nobody presses a button for.
+
+test('teardown cancels the 32MB download instead of letting it publish a model',
+  TEST_TIMEOUT, async (t) => {
+    // deactivate() kills four execFile children by name and then awaits the Auto
+    // Learn drain. It did nothing at all about this one, because `liveChildren`
+    // holds ChildProcess handles and a download is a request handle plus two
+    // streams, all closure-local. So a reload during the transfer left it
+    // running to completion and renameSync-ing bge-small.onnx into ~/.claude on
+    // behalf of a host that no longer existed — the same class of defect as the
+    // gate compile rewriting CLAUDE.md after teardown, and the last member of it.
+    const { app, home, rebuild } = await startModelDownload(t);
+    try {
+      app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+      const body = liveBodyResponse();
+      app.httpsRequests[1].respond(body);
+      assert.equal(app.httpsRequests[1].destroyed, false, 'precondition: the body is transferring');
+      app.errors.length = 0;
+
+      const teardown = app.extension.deactivate();
+
+      assert.equal(app.httpsRequests[1].destroyed, true,
+        'teardown left the 32MB transfer running against a torn-down extension host');
+      const outcome = await Promise.race([
+        rebuild.then(() => 'settled'),
+        tick(2000).then(() => 'still pending after 2000ms'),
+      ]);
+      assert.equal(outcome, 'settled',
+        `the aborted download never settled its progress notification — got "${outcome}"`);
+
+      const dest = path.join(home, '.claude', 'wildcarding', 'models', 'bge-small.onnx');
+      assert.equal(fs.existsSync(dest), false,
+        'a torn-down host published a recall model into ~/.claude');
+      assert.deepEqual(
+        app.errors.filter((m) => m.includes('download failed')), [],
+        'teardown raised an error toast from an extension that is going away — the user did '
+        + 'not cancel anything, they reloaded');
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('a transfer that completes during teardown does not publish the model',
+  TEST_TIMEOUT, async (t) => {
+    // Aborting the handle is not enough on its own, and this is the window it
+    // misses: the body has already been fully received, so destroying the
+    // request emits nothing — there is no live socket left to error — while the
+    // write stream's 'finish' is already queued. The close callback then runs
+    // against a torn-down host and renames bge-small.onnx into ~/.claude anyway.
+    //
+    // Same reasoning as every execFile callback in this file carrying its own
+    // `deactivated` check rather than trusting the kill.
+    const { app, home, rebuild } = await startModelDownload(t);
+    try {
+      app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+      const body = liveBodyResponse();
+      const carrier = app.httpsRequests[1];
+      carrier.respond(body);
+      body.deliver(6 * 1024 * 1024);
+      // A request whose response is already complete: destroy() marks it and
+      // fires nothing, because there is nothing left to interrupt.
+      carrier.destroy = () => { carrier.destroyed = true; };
+
+      await app.extension.deactivate();
+      assert.equal(carrier.destroyed, true, 'precondition: teardown still reached the handle');
+      body.finish();
+
+      const outcome = await Promise.race([
+        rebuild.then(() => 'settled'),
+        tick(2000).then(() => 'still pending after 2000ms'),
+      ]);
+      assert.equal(outcome, 'settled', `the download never settled — got "${outcome}"`);
+      const dest = path.join(home, '.claude', 'wildcarding', 'models', 'bge-small.onnx');
+      assert.equal(fs.existsSync(dest), false,
+        'a completed transfer published a recall model into ~/.claude on behalf of an '
+        + 'extension host that had already gone');
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('one socket error fails the download once, not once per channel', TEST_TIMEOUT, async (t) => {
+  // `fail` had no once-guard and is reachable from five call sites across four
+  // independent channels: httpsGetFollow's error, a non-200, the response
+  // stream's 'error', the short-file check, and the write stream's 'error'. A
+  // destroyed socket fires more than one of them — the request errors and the
+  // response it was feeding errors too — so a single failure showed the user two
+  // identical error toasts and unlinked the .tmp twice, the second throwing
+  // ENOENT into the swallowing catch where nothing could see it.
+  const { app, rebuild, cancel } = await startModelDownload(t);
+  try {
+    app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+    const body = liveBodyResponse();
+    app.httpsRequests[1].respond(body);
+    app.errors.length = 0;
+
+    // Channel 1: the request is destroyed, which fires its 'error' handler and
+    // reaches fail() through httpsGetFollow's callback.
+    cancel();
+    // Channel 2: the response stream feeding the pipe errors out from the same
+    // dead socket. On a real box these arrive microseconds apart.
+    body.emit('error', new Error('socket hang up'));
+    await rebuild;
+
+    const reported = app.errors.filter((m) => m.includes('download failed'));
+    assert.equal(reported.length, 1,
+      `one failure produced ${reported.length} error toasts: ${reported.join(' | ')}`);
+    assert.equal(tmpUnlinkCount, 1,
+      `one failure unlinked the .tmp ${tmpUnlinkCount} times; the extra ENOENT is swallowed, `
+      + 'so the double-cleanup is invisible from outside');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a rename that throws fails the download instead of hanging the notification',
+  TEST_TIMEOUT, async (t) => {
+    // fs.renameSync sits inside out.close()'s callback, which runs long after the
+    // Promise executor returned. Unwrapped, a throw there is not a rejection —
+    // it is an uncaught exception, and the promise it was meant to settle stays
+    // pending, so the progress notification spins for the life of the window with
+    // no way to dismiss it and no error anywhere. EXDEV (RECALL_MODEL_DIR on
+    // another volume) and an antivirus EPERM both reach it.
+    renameFailure = Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+    t.after(() => { renameFailure = null; });
+    const { app, home, rebuild } = await startModelDownload(t);
+    try {
+      app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+      const body = liveBodyResponse();
+      app.httpsRequests[1].respond(body);
+      // Past the 5MB "this is not an HTML error page" floor, so the publish step
+      // is actually reached rather than short-circuiting into the size check.
+      body.deliver(6 * 1024 * 1024);
+      app.errors.length = 0;
+      body.finish();
+
+      const outcome = await Promise.race([
+        rebuild.then(() => 'settled'),
+        tick(2000).then(() => 'still pending after 2000ms'),
+      ]);
+      assert.equal(outcome, 'settled',
+        `a failed rename left the progress notification spinning forever — got "${outcome}"`);
+      assert.ok(app.errors.some((m) => m.includes('EXDEV')),
+        `the rename failure was never reported: ${JSON.stringify(app.errors)}`);
+      const models = path.join(home, '.claude', 'wildcarding', 'models');
+      assert.deepEqual(fs.readdirSync(models).filter((f) => f.endsWith('.tmp')), [],
+        'a failed publish left its partial file behind, which reads as "model present"');
+    } finally {
+      await app.dispose();
+    }
+  });

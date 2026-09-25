@@ -204,9 +204,31 @@ function mirrorBackupPath() {
   } catch { configured = ''; }
   if (typeof configured !== 'string' || !configured.trim()) return MIRROR_BACKUP_DEFAULT;
   const raw = configured.trim();
-  return raw.startsWith('~')
-    ? path.join(os.homedir(), raw.slice(1).replace(/^[\\/]+/, ''))
-    : raw;
+  if (!raw.startsWith('~')) return raw;
+  const rest = raw.slice(1).replace(/^[\\/]+/, '');
+  // `~`, `~/` and `~\` name the home DIRECTORY, and path.join(home, '') is that
+  // directory. This setting names a FILE, so the mirror write then failed EISDIR
+  // into writeBackupCopies' best-effort catch and the off-tree copy silently
+  // stopped existing — the one copy that survives losing all of ~/.claude, which
+  // is not hypothetical here (2026-09-09). Every other `~`-prefixed value was
+  // already handled; this was the one that resolved to a directory.
+  if (!rest) {
+    warnOnce(`permission-wildcarding: backupMirrorPath "${raw}" is the home directory, not a `
+      + `file — using the default ${MIRROR_BACKUP_DEFAULT}`);
+    return MIRROR_BACKUP_DEFAULT;
+  }
+  return path.join(os.homedir(), rest);
+}
+
+// console.error is the house channel for "this ran degraded", but this one is on
+// the path of every policy write, so saying it on every write would be noise the
+// user learns to scroll past. Once per distinct message, per activation.
+const warnedOnce = new Set();
+
+function warnOnce(message) {
+  if (warnedOnce.has(message)) return;
+  warnedOnce.add(message);
+  console.error(message);
 }
 
 function readOneBackup(file) {
@@ -659,6 +681,22 @@ function httpsGetFollow(url, onResponse, redirectsLeft = 5, handle = { req: null
   return handle;
 }
 
+// Every in-flight model download, the way `liveChildren` holds every in-flight
+// execFile child. It needs its own set because it is not one: `liveChildren`
+// holds ChildProcess handles, and a 32MB https transfer is a request handle, a
+// response stream and a write stream, all three of them closure-local. That made
+// it the single in-flight job deactivate() could not cancel — the reload killed
+// four python children and then let a 32MB download run to completion and
+// renameSync into ~/.claude from a torn-down host.
+const liveTransfers = new Set();
+
+function abortLiveTransfers() {
+  for (const transfer of [...liveTransfers]) {
+    try { transfer.destroy(new Error('extension deactivated')); } catch { /* already gone */ }
+  }
+  liveTransfers.clear();
+}
+
 // Downloads to `<dest>.tmp` and renames on success so a cancelled/failed run never
 // leaves a half-written bge-small.onnx that would falsely read as "model present".
 function downloadRecallModel() {
@@ -671,6 +709,11 @@ function downloadRecallModel() {
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'permission-wildcarding: downloading recall model (bge-small, ~32MB)…', cancellable: true },
     (progress, token) => new Promise((resolve) => {
+      // The same guard every execFile callback carries, and the only one of the
+      // extension's long jobs that did not have it. Refusing to START is
+      // strictly better than cancelling later: nothing opens a socket, nothing
+      // writes a .tmp, and there is nothing for teardown to clean up.
+      if (deactivated) { resolve(false); return; }
       fs.mkdirSync(modelDir, { recursive: true });
 
       // Seed the vocab first: the model cannot load without it, and failing before a
@@ -691,11 +734,33 @@ function downloadRecallModel() {
 
       const out = fs.createWriteStream(tmp);
       let received = 0, total = 0, reported = 0, transfer = null;   // the redirect-following handle, not one request
+      // ONE settlement, whichever of the six call sites gets here first.
+      // `fail` alone is reachable from five, across four independent channels
+      // (the follower's error, a non-200, the response stream, the short-file
+      // check and the write stream) — and one destroyed socket fires several of
+      // them. Unguarded that showed the user two error toasts for one failure,
+      // unlinked the .tmp twice, and called resolve() on an already-settled
+      // promise, which is silent and hides the double-report.
+      let settled = false;
+
+      const claim = () => {
+        if (settled) return false;
+        settled = true;
+        if (transfer) liveTransfers.delete(transfer);
+        return true;
+      };
 
       const fail = (err) => {
+        if (!claim()) return;
+        // Silent when the host is going down: a toast raised from a torn-down
+        // extension either lands on the successor's window or on nothing, and
+        // "the download you did not cancel failed" is not a thing to tell
+        // somebody who just reloaded. The cleanup still runs.
+        if (!deactivated) {
+          vscode.window.showErrorMessage(`permission-wildcarding: recall model download failed — ${err.message || err}`);
+        }
         // Unlink INSIDE close()'s callback and resolve only after it: close() is async, so
         // unlinking beside it raced the open handle, which on Windows is a swallowed EPERM.
-        vscode.window.showErrorMessage(`permission-wildcarding: recall model download failed — ${err.message || err}`);
         out.close(() => { try { fs.unlinkSync(tmp); } catch { /* already gone */ } resolve(false); });
       };
 
@@ -717,12 +782,31 @@ function downloadRecallModel() {
         out.on('finish', () => {
           out.close(() => {
             if (received < RECALL_MODEL_MIN_BYTES) { fail(new Error(`only received ${received} bytes — expected a ~32MB file`)); return; }
-            fs.renameSync(tmp, dest);
+            // A reload that landed during the transfer must not be finished off
+            // by its own completion. This is the last moment before the file
+            // becomes real, and renaming it here would publish a model into
+            // ~/.claude on behalf of a host that no longer exists.
+            if (deactivated) { fail(new Error('extension deactivated')); return; }
+            // try/catch, because this runs inside out.close()'s callback — long
+            // after the Promise executor returned. A throw here is not a
+            // rejection, it is an UNCAUGHT exception, and the promise it was
+            // supposed to settle stays pending, so the progress notification
+            // spins for the life of the window. EXDEV (tmp and dest on
+            // different volumes, which RECALL_MODEL_DIR can arrange) and EPERM
+            // from an antivirus scanner both reach it.
+            try { fs.renameSync(tmp, dest); }
+            catch (renameError) { fail(renameError); return; }
+            if (!claim()) return;
             resolve(true);
           });
         });
         out.on('error', fail);
       });
+      // AFTER the call, and only if nothing has settled yet: httpsGetFollow can
+      // report a synchronous failure through its callback before it returns, and
+      // registering a handle that is already dead would leave teardown
+      // destroying it a second time.
+      if (!settled) liveTransfers.add(transfer);
     })
   );
 }
@@ -1074,6 +1158,41 @@ function autoLearnEvidence(cfg) {
   return data;
 }
 
+// What the last scan could not read, taken from the manager's persisted
+// `lastScanStats` rather than from a scan() return value — so it survives a
+// window reload and is answerable on any refresh, not only in the seconds after
+// a scan.
+//
+// `autoLearnLastError` is a DIFFERENT thing: it is the message of an exception
+// that escaped, i.e. a scan that never returned. These are the failures of a scan
+// that DID return, reporting that part of the corpus was unreadable, and they
+// were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
+// every one of them. That is the exact shape of the defect that sat unnoticed for
+// eight days (src/auto-learn-manager.js:1904-1906: "`errors` was computed here
+// all along and then not returned, so a file that failed every scan for eight
+// days was invisible"). Surfacing it in the CLI and not in the panel most users
+// live in only moves where it hides.
+function autoLearnScanHealth(stats) {
+  if (!stats || typeof stats !== 'object') return null;
+  const count = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  return {
+    files: count(stats.files),
+    observations: count(stats.observations),
+    errors: count(stats.errors),
+    partial: count(stats.partial),
+    unmatchedResults: count(stats.unmatchedResults),
+    // One number, because the four prune counters are one housekeeping fact from
+    // the card's point of view and four stats tiles it does not have room for.
+    pruned: count(stats.prunedObservations) + count(stats.prunedCursors)
+      + count(stats.prunedCandidates) + count(stats.prunedGrants),
+    // "The cursor map was preserved because nothing was enumerated." Distinct
+    // from `errors`, which says a root failed but not that the scan was therefore
+    // unable to look at anything — and indistinguishable, on the numbers alone,
+    // from an ordinary quiet scan.
+    blindScan: stats.blindScan === true,
+  };
+}
+
 function autoLearnCardData() {
   const cfg = autoLearnConfig();
   let status = {};
@@ -1092,6 +1211,7 @@ function autoLearnCardData() {
     counts: countAutoLearnCandidates(
       candidates, status, cfg.codexRulesPath ? ['claude', 'codex'] : ['claude'], cfg.mode, readSettings(),
     ),
+    scan: autoLearnScanHealth(status.lastScanStats),
     canUndo: Boolean(status.canUndo || status.lastApplication),
   };
 }
@@ -1793,9 +1913,12 @@ function registerLocalWatchers(context) {
       }
     }));
   }
-  context.subscriptions.push({
-    dispose() { while (watchers.length) { try { watchers.pop().dispose(); } catch { /* already gone */ } } },
-  });
+  // No second drain disposer here. There used to be one, byte-identical to the
+  // one registered above and closing over the same `watchers` array, so whichever
+  // ran first emptied the list and the other was a no-op over an empty array
+  // forever — two entries in context.subscriptions that could only ever do one
+  // thing between them. Removing the DUPLICATE is not the same as removing the
+  // drain: the one above is registered before attach() and is the one under test.
 }
 
 // Created on first use and disposed with the extension. Lazy rather than built
@@ -3415,6 +3538,7 @@ class WildcardingViewProvider {
           <div class="stat"><div class="n" id="alreview">–</div><div class="l">review</div></div>
           <div class="stat"><div class="n" id="alobserve">–</div><div class="l">observing</div></div>
         </div>
+        <div class="memissues" id="alScanHealth"></div>
         <div class="buttonrow">
           <button class="restore" id="alScan">Scan now</button>
           <button class="restore" id="alReview">Review</button>
@@ -3556,6 +3680,11 @@ class WildcardingViewProvider {
     if (!a.enabled) setState('stAutoLearn', 'disabled');
     else if (a.busy) setState('stAutoLearn', 'scanning…');
     else if (a.error) setState('stAutoLearn', 'error', 'hot');
+    // Above "N to review", deliberately. A scan that could not read the corpus
+    // makes every count under it a statement about a fraction of the evidence,
+    // so a row that reads "3 to review" over a blind scan is worse than one that
+    // says nothing: it asserts a number it cannot support.
+    else if (scanTrouble(a.scan).length) setState('stAutoLearn', 'scan degraded', 'warn');
     else if (counts.review) setState('stAutoLearn', counts.review + ' to review', 'warn');
     else if (counts.safe) setState('stAutoLearn', counts.safe + ' safe to apply', 'warn');
     else setState('stAutoLearn', String(a.mode || 'recommend'));
@@ -3632,6 +3761,42 @@ class WildcardingViewProvider {
     for (const id of ['alScan', 'alWhy']) $(id).disabled = !!a.busy;
     $('alReview').disabled = !active || !!a.busy || a.mode === 'observe';
     $('alReview').textContent = (counts.review > 0) ? 'Review (' + counts.review + ')' : 'Review';
+
+    // What the last scan could not read. Never collapsed into a.error, which is
+    // the message of an exception that ESCAPED — a scan that returned while
+    // failing to read half the corpus sets that to null and used to leave the
+    // card reading perfectly healthy.
+    const health = $('alScanHealth');
+    const s = a.scan;
+    if (!s) { health.textContent = ''; health.className = 'memissues'; return; }
+    const trouble = scanTrouble(s);
+    if (trouble.length) {
+      health.className = 'memissues';
+      health.style.color = 'var(--vscode-charts-yellow, #d29922)';
+      health.textContent = '⚠ last scan: ' + trouble.join(' · ');
+    } else {
+      health.className = 'memissues muted';
+      health.style.color = '';
+      health.textContent = '✓ last scan read ' + s.files + ' file' + (s.files === 1 ? '' : 's')
+        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '');
+    }
+  }
+
+  // Shared by the card body and the collapsed row badge, so the two can never
+  // disagree the way the memory card's badge and body once did.
+  function scanTrouble(s) {
+    if (!s) return [];
+    const trouble = [];
+    // First: it subsumes the rest. "Nothing was enumerated" is not the same
+    // statement as "a root errored", and on the numbers alone it is
+    // indistinguishable from an ordinary quiet scan.
+    if (s.blindScan) trouble.push('nothing enumerated — cursor map preserved');
+    if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
+    if (s.partial) trouble.push(s.partial + ' partly read');
+    if (s.unmatchedResults) {
+      trouble.push(s.unmatchedResults + ' unmatched result' + (s.unmatchedResults === 1 ? '' : 's'));
+    }
+    return trouble;
   }
 
   function fmtK(n) {
@@ -3908,6 +4073,11 @@ async function deactivate() {
   // nothing retained them, so a reload left up to a 180s python child running
   // against a torn-down host — and the gate compile's callback wrote policy.
   killLiveChildren();
+  // The fifth in-flight job, and the one this pair of calls used to miss: the
+  // 32MB recall-model download is not a ChildProcess, so `liveChildren` never
+  // held it and nothing here could stop it. It ran to completion and renamed a
+  // model into ~/.claude on behalf of a host that had already gone.
+  abortLiveTransfers();
   if (outputChannel) { try { outputChannel.dispose(); } catch { /* already gone */ } }
   outputChannel = null;
   // The retainers, dropped BEFORE the await, not after.

@@ -45,7 +45,12 @@ function harness(tempHome, opts = {}) {
   // but BEFORE the guarded work — i.e. inside the read-to-write window. Nothing
   // in the suite could observe either before this: no test asserted the
   // extension took the lock, and none counted acquisitions.
-  const locks = { count: 0, insideLock: null };
+  //
+  // `contended`, set by a test, makes every acquisition fail the way it fails in
+  // production: Auto Learn holds the lock, so createPolicyLock throws with
+  // code AUTO_LEARN_LOCKED. That is the only branch that spends the retry budget,
+  // and nothing in the suite could reach it.
+  const locks = { count: 0, insideLock: null, contended: false, refused: 0 };
   const settingsPath = path.join(tempHome, '.claude', 'settings.json');
   // One directive per read of settings.json, consumed in order, then
   // pass-through. Armed by a test via app.arm(); empty for every other test, so
@@ -55,6 +60,17 @@ function harness(tempHome, opts = {}) {
   // hands back to modal ones. See the window stub below.
   const shown = [];
   const answers = [];
+  // Every status-bar message, which used to be thrown away. "already optimal" is
+  // only ever said there, so a path that must NOT claim it — an absent or
+  // half-written settings.json — was unobservable.
+  const statuses = [];
+  // Every timer the extension arms, with its delay. The 1500 ms one is
+  // runWildcarding's lock-contention backoff and the only observable the retry
+  // BUDGET has: `lockedRetries` is module-private and its whole effect is whether
+  // a retry gets scheduled at all. Nothing else in this harness arms 1500 ms —
+  // schedulePolicyCheck uses the same figure but is reachable only from a watcher
+  // event, and the watchers here are inert stubs.
+  const timers = [];
   let provider = null;
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -71,7 +87,7 @@ function harness(tempHome, opts = {}) {
     window: {
       createStatusBarItem() { return { hide() {}, show() {}, dispose() {} }; },
       registerWebviewViewProvider(_viewId, instance) { provider = instance; return disposable(); },
-      setStatusBarMessage() {},
+      setStatusBarMessage(message) { statuses.push(String(message)); },
       showErrorMessage(message) { shown.push({ level: 'error', message, options: null, actions: [] }); },
       showInformationMessage(message) {
         shown.push({ level: 'info', message, options: null, actions: [] });
@@ -96,8 +112,13 @@ function harness(tempHome, opts = {}) {
       },
       getConfiguration() {
         return {
-          // Auto Learn off: this is about the panel, not the learner.
-          get: (key, fallback) => (key === 'autoLearn.enabled' ? false : fallback),
+          // Auto Learn off: this is about the panel, not the learner. `opts.settings`
+          // overrides by key, for the one test that needs the learner's own card
+          // populated; empty for every other, so the default below is unchanged.
+          get: (key, fallback) => {
+            if (opts.settings && key in opts.settings) return opts.settings[key];
+            return key === 'autoLearn.enabled' ? false : fallback;
+          },
           inspect: () => ({}),
           update: async () => {},
         };
@@ -159,14 +180,25 @@ function harness(tempHome, opts = {}) {
           const lock = real.createPolicyLock(...args);
           return {
             ...lock,
-            locked: (fn) => lock.locked(() => {
-              locks.count += 1;
-              // The injection point. A settings.json write landing here is
-              // exactly the interleaving writeAllow's delta replay cannot
-              // survive unless the guarded work re-reads.
-              if (locks.insideLock) locks.insideLock();
-              return fn();
-            }),
+            locked: (fn) => {
+              // What production does when Auto Learn already holds it: throw with
+              // code AUTO_LEARN_LOCKED. That is the only branch that spends the
+              // retry budget, and nothing in the suite could reach it.
+              if (locks.contended) {
+                locks.refused += 1;
+                const busy = new Error('Auto Learn is holding the policy lock');
+                busy.code = real.POLICY_LOCK_CODE;
+                throw busy;
+              }
+              return lock.locked(() => {
+                locks.count += 1;
+                // The injection point. A settings.json write landing here is
+                // exactly the interleaving writeAllow's delta replay cannot
+                // survive unless the guarded work re-reads.
+                if (locks.insideLock) locks.insideLock();
+                return fn();
+              });
+            },
           };
         },
       };
@@ -204,6 +236,15 @@ function harness(tempHome, opts = {}) {
   for (const cached of Object.keys(require.cache)) {
     if (cached.startsWith(rootSrc + path.sep)) delete require.cache[cached];
   }
+  // Recorded, and unref'd. Unref matters: the contention tests arm 1500 ms
+  // retries deliberately and must not keep `node --test` alive waiting for them.
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, ms, ...rest) => {
+    const handle = originalSetTimeout(fn, ms, ...rest);
+    if (typeof handle?.unref === 'function') handle.unref();
+    timers.push({ ms, handle });
+    return handle;
+  };
   const extension = require(extensionPath);
   extension.activate({ subscriptions: [] });
   return {
@@ -214,11 +255,21 @@ function harness(tempHome, opts = {}) {
     passes,
     locks,
     shown,
+    statuses,
+    // How many lock-contention retries were scheduled. See `timers` above for
+    // why 1500 ms identifies them uniquely under this harness.
+    retriesScheduled() { return timers.filter((entry) => entry.ms === 1500).length; },
     answer(...values) { answers.push(...values); },
     arm(plan) { reads.length = 0; reads.push(...plan); },
+    // How many armed read directives are still unconsumed. A test that scripts a
+    // corrupt read has to prove the read HAPPENED, or it is asserting against an
+    // ordinary successful one.
+    armsLeft() { return reads.length; },
     get provider() { return provider; },
     async dispose() {
       await extension.deactivate();
+      for (const entry of timers) clearTimeout(entry.handle);
+      global.setTimeout = originalSetTimeout;
       Module._load = originalLoad;
       // Purge the whole tree, not just the entry. Every src/ module that
       // defaults a home resolves it against its OWN `os` binding, frozen at
@@ -1092,3 +1143,432 @@ test('a view that is alive but not visible gets no push and no work-up', async (
     await app.dispose();
   }
 });
+
+// ── runWildcarding: five branches nothing was holding ─────────────────────────
+//
+// All five are CORRECT at HEAD. Each was found by mutating it and watching the
+// whole suite stay green, which is the only way a branch with no test is
+// distinguishable from one with a passing test.
+
+const NON_OPTIMAL = ['Bash(git status)', 'Bash(git status --short)'];   // -> Bash(git status *)
+const OTHER_NON_OPTIMAL = ['Bash(git diff)', 'Bash(git diff --stat)', 'Bash(git diff --cached)'];
+
+test('a backup deleted under us is rebuilt when someone else generalized the list first',
+  async (t) => {
+    // The post-lock already-optimal path, reached when another writer generalizes
+    // between the unlocked probe and the lock. It calls the same
+    // reportAlreadyOptimal as the probe's early return, and that call is the ONLY
+    // thing in this extension that rebuilds a DELETED backup — not hypothetical:
+    // on 2026-09-09 every directory under ~/.claude was recreated and this is
+    // what restored the mirror.
+    //
+    // Replacing the branch with `if (false)` left the suite green. Nothing wrote
+    // to the backup on this path, and nothing looked.
+    const env = setup(t);
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });   // quiet activation
+    const app = harness(env.tempHome);
+    try {
+      await settle();
+      const backupPath = path.join(env.tempHome, '.claude', 'backups', 'allow-list.latest.json');
+      assert.ok(fs.existsSync(backupPath), 'precondition: activation captured a backup');
+
+      // The wipe this path exists to recover from. BOTH copies: the backup is a
+      // high-water-mark union and readBackupRaw falls back to the off-tree
+      // mirror, so leaving the mirror in place makes the rebuilt file hold
+      // yesterday's list too and the assertion below reads the wrong thing.
+      fs.rmSync(path.join(env.tempHome, '.claude', 'backups'), { recursive: true, force: true });
+      fs.rmSync(path.join(env.tempHome, '.permission-wildcarding'), { recursive: true, force: true });
+      env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+
+      // Somebody else generalizes it while we are waiting for the lock, so the
+      // in-lock read finds a fixed point and no write is due after all.
+      let injected = false;
+      app.locks.insideLock = () => {
+        if (injected) return;
+        injected = true;
+        fs.writeFileSync(env.settingsPath, JSON.stringify(
+          { permissions: { allow: ['Bash(git status *)'], deny: [] } }, null, 2) + '\n');
+      };
+
+      await app.commands.get('permission-wildcarding.runNow')();
+      await settle();
+
+      assert.ok(injected, 'precondition: the lock was taken, so the race was actually run');
+      assert.ok(fs.existsSync(backupPath),
+        'the post-lock already-optimal path did not rebuild the backup, which is the one '
+        + 'property it exists for');
+      assert.deepEqual(JSON.parse(fs.readFileSync(backupPath, 'utf8')).allow,
+        ['Bash(git status *)'],
+        'the rebuilt backup must hold what the LOCKED read saw, not the probe’s stale list');
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('the change toast counts what the locked read changed, not what the probe guessed',
+  async (t) => {
+    // The probe's snapshot is discarded and everything recomputed inside the lock,
+    // precisely because another writer can land in between. The report has to come
+    // from the same read the write rebased onto, or it describes a change that
+    // never happened.
+    //
+    // Reverting the two filters to the probe's `before`/`after` left the suite
+    // green: no test made the two reads differ while both were still non-optimal.
+    const env = setup(t);
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+    const app = harness(env.tempHome);
+    try {
+      await settle();
+      env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });   // probe: +1 -2
+
+      let injected = false;
+      app.locks.insideLock = () => {
+        if (injected) return;
+        injected = true;
+        // A different, also-ungeneralized list: +1 -3 rather than +1 -2.
+        fs.writeFileSync(env.settingsPath, JSON.stringify(
+          { permissions: { allow: OTHER_NON_OPTIMAL, deny: [] } }, null, 2) + '\n');
+      };
+
+      app.shown.length = 0;
+      await app.commands.get('permission-wildcarding.runNow')();
+      await settle();
+
+      assert.ok(injected, 'precondition: the lock was taken, so the race was actually run');
+      assert.deepEqual(env.read().permissions.allow, ['Bash(git diff *)'],
+        'precondition: the write rebased onto the concurrent list, not the probe’s');
+      const toast = app.shown.find((entry) => /wildcarded/.test(entry.message));
+      assert.ok(toast, `no change was announced: ${JSON.stringify(app.shown)}`);
+      assert.match(toast.message, /pruned 3/,
+        `the toast reported the probe’s delta, describing a change that never happened: `
+        + `"${toast.message}"`);
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('a write under the lock records when it happened', async (t) => {
+  // `lastRun` is the dashboard's "last wildcarded" line. Deleting the assignment
+  // left the suite green, and the panel then said nothing had ever run.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.equal(ui.posted.at(-1).lastRun, null,
+      'precondition: an optimal list writes nothing, so nothing has stamped lastRun yet — '
+      + 'without this the assertion below could be satisfied by any earlier write');
+
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    await settle();
+
+    assert.deepEqual(env.read().permissions.allow, ['Bash(git status *)'],
+      'precondition: a write really happened');
+    assert.equal(typeof ui.posted.at(-1).lastRun, 'number',
+      'the panel cannot say when the list was last wildcarded, because the write did not '
+      + 'record it');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('an unreadable settings.json is never reported as "already optimal"', async (t) => {
+  // The probe's `if (!settings)` guard. Delete it and `before` collapses to `[]`,
+  // `after` is `[]` too, the lists compare equal — and a manual run cheerfully
+  // tells the user their policy is already optimal when the extension could not
+  // read it at all. Claude Code rewrites settings.json in place on every
+  // approval, /model and /effort, so landing inside a write is routine.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    app.statuses.length = 0;
+    app.arm(['corrupt']);
+    await app.commands.get('permission-wildcarding.runNow')();
+
+    assert.equal(app.armsLeft(), 0,
+      'precondition: the scripted half-written read was never taken, so this test is '
+      + 'asserting against an ordinary successful read');
+    assert.deepEqual(app.statuses.filter((m) => /already optimal/.test(m)), [],
+      'a settings.json the extension could not read was reported to the user as an '
+      + 'already-optimal policy');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The retry budget. `lockedRetries` is module-private and its only effect is
+// whether a contended run schedules another attempt, so the observable is the
+// 1500 ms backoff timer. Both early returns reset it, and deleting EITHER left
+// the suite green: 20 contended runs in one window then permanently disabled the
+// retry, so a settings.json change that lost the race with an Auto Learn scan was
+// simply never re-attempted.
+async function exhaustRetryBudget(app, env) {
+  app.locks.contended = true;
+  env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+  for (let i = 0; i < 20; i += 1) await app.commands.get('permission-wildcarding.runNow')();
+  assert.equal(app.retriesScheduled(), 20,
+    `precondition: the budget is 20 and was spent, got ${app.retriesScheduled()}`);
+  await app.commands.get('permission-wildcarding.runNow')();
+  assert.equal(app.retriesScheduled(), 20,
+    'precondition: a 21st contended run must schedule nothing, or the budget is not spent '
+    + 'and the resets below prove nothing');
+}
+
+test('an already-optimal run gives the lock-contention budget back', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    await exhaustRetryBudget(app, env);
+
+    // The reset under test: the probe finds a fixed point and returns before the
+    // lock, so the window of contention it was spending budget on is over.
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.retriesScheduled(), 21,
+      'the budget was never given back, so every later contended write is abandoned for the '
+      + 'life of the window');
+  } finally {
+    app.locks.contended = false;
+    await app.dispose();
+  }
+});
+
+test('an unreadable settings.json gives the lock-contention budget back', async (t) => {
+  // The second site, and the one its own commit message got wrong: "the budget is
+  // now also reset on the early return" was true for the already-optimal return
+  // and not for this one until it was added. An absent or half-written
+  // settings.json is the routine case, not the exotic one.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    await exhaustRetryBudget(app, env);
+
+    app.arm(['corrupt']);
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.armsLeft(), 0, 'precondition: the half-written read was taken');
+
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.retriesScheduled(), 21,
+      'a settings.json that was mid-write when we looked left the retry budget spent, so '
+      + 'every later contended write is abandoned for the life of the window');
+  } finally {
+    app.locks.contended = false;
+    await app.dispose();
+  }
+});
+
+// ── what the last scan could not read ─────────────────────────────────────────
+//
+// autoLearnCardData copied eleven fields out of the manager's status and not one
+// of them was `lastScanStats`, so `errors`, `partial`, `unmatchedResults`,
+// `blindScan` and the four prune counters existed in the state file, were printed
+// in full by `wildcard-perms --learn scan`, and appeared nowhere in the panel
+// that is the only UI most users of this extension ever open.
+//
+// `error` on the card is not the same thing: it is the message of an EXCEPTION
+// that escaped. A scan that returns while failing to read half the corpus leaves
+// it null, so the card read perfectly healthy. That is exactly the shape of the
+// defect src/auto-learn-manager.js:1904-1906 records — a file that failed every
+// scan for eight days, invisible because a computed number was not passed on.
+
+// Writes the manager's state file wherever the manager would look for it, which
+// depends on a hash of the workspace root. Required lazily and INSIDE the
+// harness's Module._load hook rather than at the top of this file, so the copy it
+// resolves is the one the extension is already using, bound to the mocked `os`.
+function seedAutoLearnState(tempHome, lastScanStats) {
+  // eslint-disable-next-line global-require
+  const { createAutoLearnManager } = require('../src/auto-learn-manager');
+  const statePath = createAutoLearnManager({
+    home: tempHome,
+    workspaceRoot: path.join(tempHome, 'workspace'),
+  }).status().paths.state;
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 1, sourceVersion: 1, mode: 'recommend', threshold: 3,
+    candidates: {}, observationHashes: {}, cursors: {},
+    applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
+    codexTargets: {}, managedClaude: {}, managedHits: {}, managedHitsAt: null,
+    derivedGuidance: { accepted: [], declined: [] }, prunedCandidates: {},
+    lastScanAt: Date.now(), lastScanStats, lastApplication: null,
+  }, null, 2) + '\n');
+  return statePath;
+}
+
+test('the dashboard reports what the last scan could not read', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      files: 12, observations: 40, errors: 3, partial: 1, unmatchedResults: 7,
+      prunedObservations: 2, prunedCursors: 1, prunedCandidates: 0, prunedGrants: 4,
+      blindScan: false,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const scan = ui.posted.at(-1).autoLearn.scan;
+    assert.ok(scan, 'the payload carries no per-scan health at all, so the panel cannot '
+      + 'show a scan that failed to read files');
+    assert.equal(scan.errors, 3, 'the unreadable-file count never reached the panel');
+    assert.equal(scan.partial, 1, 'the partly-read count never reached the panel');
+    assert.equal(scan.unmatchedResults, 7);
+    assert.equal(scan.blindScan, false);
+    assert.equal(scan.files, 12);
+    // Four counters, one number: the card has no room for four tiles and they are
+    // one housekeeping fact from its point of view.
+    assert.equal(scan.pruned, 7, 'the prune counters were dropped rather than summed');
+    // And the thing that made this invisible in the first place: the exception
+    // channel says nothing about a scan that RETURNED.
+    assert.equal(ui.posted.at(-1).autoLearn.error, null,
+      'precondition: no exception escaped, so `error` cannot be the field that carries this');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a blind scan is reported even though every count reads clean', async (t) => {
+  // The nastiest case, and the reason blindScan exists as its own flag: zero
+  // errors, zero partials, zero observations — numerically identical to a quiet
+  // scan of a corpus with nothing new in it. The only difference is that nothing
+  // was enumerated at all.
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      files: 0, observations: 0, errors: 0, partial: 0, unmatchedResults: 0,
+      prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
+      blindScan: true,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.blindScan, true,
+      'a scan that enumerated nothing is indistinguishable from a quiet one on the numbers, '
+      + 'and the flag that separates them did not reach the panel');
+
+    // The renderer half, run for real rather than assumed: the panel document is
+    // the only place the payload becomes something a user can see, and a field
+    // that arrives and is never drawn is still invisible.
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /nothing enumerated/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.equal(rendered.stAutoLearn, 'scan degraded',
+      `the collapsed row said "${rendered.stAutoLearn}", so a user who has not expanded the `
+      + 'card sees nothing wrong');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a clean scan says so rather than going quiet', async (t) => {
+  // The other side, and the one that keeps the warning meaningful: if the line
+  // only ever appears when something is wrong, its absence is ambiguous between
+  // "clean" and "never scanned".
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      files: 9, observations: 21, errors: 0, partial: 0, unmatchedResults: 0,
+      prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
+      blindScan: false,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /read 9 files cleanly/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.notEqual(rendered.stAutoLearn, 'scan degraded',
+      'a clean scan was badged as degraded');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// Runs the panel's OWN script against the payload, in a DOM small enough to be
+// read in one screen. Without this the renderer is unreachable: _html() returns a
+// string, VS Code evaluates it, and nothing in this suite ever did — so a field
+// added to the payload and never drawn would pass every assertion above.
+//
+// Only the ids the Auto Learn card touches are stubbed. An element the renderer
+// reaches for and does not find shows up here as a TypeError naming the id,
+// which is the failure mode wanted: silently ignoring unknown ids would let the
+// renderer be rewritten out from under the test.
+function renderDashboard(provider, data) {
+  // The tag carries a per-render nonce, so it is matched rather than searched for
+  // literally. One <script> in the document today; the assertion below is what
+  // notices if that stops being true.
+  const html = provider._html();
+  const open = html.match(/<script\b[^>]*>/);
+  assert.ok(open, 'the panel document has no script element');
+  const start = open.index + open[0].length;
+  const script = html.slice(start, html.indexOf('</script>', start));
+  assert.ok(script.includes('function renderAutoLearn'),
+    'the panel script was not extracted — this test would prove nothing');
+
+  const nodes = new Map();
+  const node = (id) => {
+    if (!nodes.has(id)) {
+      const classes = new Set();
+      nodes.set(id, {
+        id, textContent: '', className: '', title: '', disabled: false,
+        innerHTML: '', style: {}, hidden: false, value: '',
+        classList: {
+          add: (name) => classes.add(name),
+          remove: (name) => classes.delete(name),
+          toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)),
+          contains: (name) => classes.has(name),
+        },
+        addEventListener() {}, appendChild() {}, removeChild() {},
+        querySelector: () => null, querySelectorAll: () => [],
+      });
+    }
+    return nodes.get(id);
+  };
+  const detached = (tag) => ({
+    tag, className: '', textContent: '', innerHTML: '', title: '', style: {},
+    dataset: {}, children: [],
+    addEventListener() {}, appendChild(child) { this.children.push(child); return child; },
+  });
+  const document = {
+    getElementById: (id) => node(id),
+    querySelectorAll: () => [],
+    createElement: detached,
+    createTextNode: (text) => ({ textContent: text }),
+    addEventListener() {},
+  };
+  const window = { addEventListener() {} };
+  const acquireVsCodeApi = () => ({ postMessage() {}, getState() {}, setState() {} });
+
+  // eslint-disable-next-line no-new-func
+  const run = new Function('document', 'window', 'acquireVsCodeApi', 'console',
+    `${script}\nreturn { render };`);
+  const api = run(document, window, acquireVsCodeApi, console);
+  api.render(data);
+  const text = (id) => node(id).textContent;
+  return { alScanHealth: text('alScanHealth'), stAutoLearn: text('stAutoLearn'), node };
+}

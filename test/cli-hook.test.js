@@ -854,3 +854,86 @@ test('a hook event over the cap says so and skips the drain instead of truncatin
   // `run(input)`) and it fails the same way it would in production — silently, on
   // the stderr assertion only, with the drain skipped and nothing saying why.
 });
+
+// ── the diagnostic describes the write, not the intent ────────────────────────
+//
+// wildcardUnderLock computed its +added/-removed/total from its OWN pre-write
+// snapshot while writeAllow, which re-reads and rebases inside itself, was
+// already returning the real counts. The two agree until a concurrent settings
+// write lands between the caller's read and the writer's — which is the only
+// case where anyone reads the line, because it is the case where something
+// surprising happened. src/settings-write.js:212-214 names the failure: a caller
+// reporting its own intent announced "+299 restored" over a file that already
+// had them.
+//
+// Deterministic here rather than raced: a `--require` preload patches
+// fs.readFileSync and rewrites settings.json after the caller's read, so
+// writeAllow's re-read sees a file the caller never saw. That is the interleaving
+// Claude Code produces by itself on every /model, /effort and approval.
+function runHookWithSettingsRace(home, { afterRead, replacement }) {
+  const shim = path.join(home, 'race-shim.js');
+  fs.writeFileSync(shim, [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    'const target = path.resolve(process.env.PW_RACE_TARGET);',
+    'const at = Number(process.env.PW_RACE_AFTER);',
+    'const body = process.env.PW_RACE_BODY;',
+    'let reads = 0;',
+    'const real = fs.readFileSync;',
+    'fs.readFileSync = function (file, ...rest) {',
+    '  const out = real.call(this, file, ...rest);',
+    '  if (typeof file === "string" && path.resolve(file) === target) {',
+    '    reads += 1;',
+    '    if (reads === at) real.call(fs, target) && fs.writeFileSync(target, body);',
+    '  }',
+    '  return out;',
+    '};',
+  ].join('\n') + '\n');
+
+  const root = path.parse(home).root;
+  return spawnSync(process.execPath, ['--require', shim, CLI], {
+    cwd: home, encoding: 'utf8', windowsHide: true,
+    input: JSON.stringify({ tool_name: 'Bash' }),
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home,
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+      PW_RACE_TARGET: path.join(home, '.claude', 'settings.json'),
+      PW_RACE_AFTER: String(afterRead),
+      PW_RACE_BODY: JSON.stringify(replacement, null, 2) + '\n',
+    },
+  });
+}
+
+test('the hook diagnostic counts what landed, not what the pass meant to do', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } });
+
+  // Read 1 is run()'s byte read, read 2 is wildcardUnderLock's readSettingsState,
+  // read 3 is writeAllow's own. Rewrite after read 2: a neighbour dropped
+  // Bash(git diff) and added Bash(zzz *) while this pass was thinking.
+  const run = runHookWithSettingsRace(home, {
+    afterRead: 2,
+    replacement: { permissions: { allow: ['Bash(git status)', 'Bash(zzz *)'] } },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  const allow = settingsOf(home).permissions.allow;
+
+  // First: the race really happened, or this test is pinning the easy case where
+  // both implementations agree and it proves nothing.
+  assert.ok(allow.includes('Bash(zzz *)'),
+    'precondition: the concurrent write must have survived the rebase, or no read '
+    + 'disagreed with any other and the diagnostic had nothing to get wrong');
+  assert.deepEqual(allow, ['Bash(zzz *)', 'Bash(git status *)', 'Bash(git diff *)']);
+
+  // And now the line. The total is the one a reader checks against the file.
+  assert.match(run.stderr, /^wildcard-perms: \+2 -1 → 3 entries$/m,
+    `the diagnostic must describe the file that exists; got ${JSON.stringify(run.stderr)}`);
+  const reported = /→ (\d+) entries/.exec(run.stderr);
+  assert.equal(Number(reported[1]), allow.length,
+    'the reported total and the real entry count are the same number or the line is fiction');
+
+  // MUTATION: restore the pre-write snapshot arithmetic in wildcardUnderLock —
+  // `after.filter(p => !before.includes(p))` / `before.filter(p => !after.includes(p))`
+  // over `after.length` — and this fails with "+2 -2 → 2 entries" written over a
+  // file holding 3.
+});

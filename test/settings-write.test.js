@@ -133,6 +133,39 @@ test('the injected write hook receives what actually landed', (t) => {
     'what the hook records and what is on disk cannot disagree');
 });
 
+test('the returned counts are measured against the file, not the caller snapshot', (t) => {
+  // `addedAllow` was already measured against the rebased read. `removedAllow`
+  // did not exist, so a caller wanting a removal count had nowhere honest to get
+  // one — and bin/wildcard-perms' hook diagnostic duly computed it from its own
+  // pre-write snapshot, which is the anti-pattern the note beside this return
+  // value warns about ("+299 restored" over a file that already had them).
+  const snapshot = { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } };
+  const env = tempSettings(t, snapshot);
+
+  // A neighbour writes between the caller's read and this one: Bash(git diff) is
+  // gone and Bash(zzz *) has appeared. The caller knows nothing about either.
+  fs.writeFileSync(env.file, JSON.stringify({
+    permissions: { allow: ['Bash(git status)', 'Bash(zzz *)'] },
+  }, null, 2) + '\n');
+
+  const out = env.writer().writeAllow(snapshot, ['Bash(git status *)', 'Bash(git diff *)']);
+
+  // Non-degeneracy: the caller's own arithmetic over `snapshot` says two entries
+  // were removed. Only one of them was still there to remove.
+  assert.deepEqual(env.read().permissions.allow,
+    ['Bash(zzz *)', 'Bash(git status *)', 'Bash(git diff *)']);
+  assert.equal(out.removedAllow, 1,
+    'Bash(git diff) was already gone when this write read the file, so removing it '
+    + 'is not something this write did');
+  assert.equal(out.addedAllow, 2, 'Bash(zzz *) was already there and is not an addition');
+  assert.equal(out.allow.length, env.read().permissions.allow.length,
+    'the returned list is the list on disk');
+
+  // MUTATION: compute removedAllow from `originalAllow` (the caller's snapshot)
+  // instead of `latestAllow` and this fails with removedAllow 2 against a file
+  // that only ever lost one entry.
+});
+
 
 // ── writeTransform ───────────────────────────────────────────────────────────
 //

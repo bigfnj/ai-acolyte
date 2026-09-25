@@ -469,11 +469,18 @@ function wildcardUnderLock() {
   if (JSON.stringify(before) === JSON.stringify(after)) return; // someone got there first
 
   try {
-    writer.writeAllow(fresh, after);
-    const added   = after.filter(p => !before.includes(p));
-    const removed = before.filter(p => !after.includes(p));
+    // Reported from what the WRITER returns, never from this function's own
+    // snapshot. writeAllow re-reads and rebases inside itself, so its counts are
+    // measured against the file the write actually landed on; `before`/`after`
+    // here are what this pass intended against a read taken earlier. They agree
+    // in the common case and diverge exactly when a concurrent Claude Code write
+    // lands in between — the case a diagnostic exists to describe. The anti-
+    // pattern is spelled out at src/settings-write.js:212-214, where it produced
+    // "+299 restored" over a file that already had them.
+    const written = writer.writeAllow(fresh, after);
     process.stderr.write(
-      `wildcard-perms: +${added.length} -${removed.length} → ${after.length} entries\n`
+      `wildcard-perms: +${written.addedAllow} -${written.removedAllow} → `
+      + `${written.allow.length} entries\n`
     );
   } catch (err) {
     // SETTINGS_UNREADABLE is "come back in a moment", not a failure to shout

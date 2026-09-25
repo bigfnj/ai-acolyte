@@ -216,6 +216,13 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
       allow: rebasedAllow,
       deny: rebasedDeny,
       addedAllow: rebasedAllow.filter((entry) => !latestAllow.includes(entry)).length,
+      // The other half of the same measurement, and it was missing. A caller
+      // reporting a REMOVAL count had nowhere to get an honest one, so the
+      // wildcarding pass computed it from its own pre-write snapshot — the exact
+      // thing the note above tells callers not to do. Computed here against
+      // `latestAllow` for the same reason addedAllow is: that is the file this
+      // write actually rebased onto.
+      removedAllow: latestAllow.filter((entry) => !rebasedAllow.includes(entry)).length,
       // Zero for a malformed deny: nothing was added, and saying otherwise is
       // what made the restore toast a lie.
       addedDeny: Array.isArray(rebasedDeny)

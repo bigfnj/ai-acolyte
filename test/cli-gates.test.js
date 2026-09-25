@@ -124,3 +124,51 @@ test('CLI --gates off leaves a coexisting guidance block byte-identical', (t) =>
   assert.match(claudeMd(home), /BEGIN permission-wildcarding: memory gates/,
     'gates survived a guidance off');
 });
+
+// The third block that can be in this file, and the one nothing swept.
+//
+// An accepted derived mitigation installs its own marker-fenced block.
+// `--guidance off` removed only the shell-style one; `--guidance decline <id>`
+// removes a single id and only while the learner still derives it; and
+// install.sh, install.ps1 and both uninstallers never touch instruction files at
+// all. So an accepted block outlived the uninstall of the tool that wrote it,
+// with no command anywhere that could remove it.
+test('CLI --guidance off also sweeps an accepted derived block', (t) => {
+  const home = tempHome(t);
+  const file = path.join(home, '.claude', 'CLAUDE.md');
+
+  // Installed through the module's own reconcile, so the markers are the real
+  // ones rather than a string this test invented.
+  const { reconcileDerived } = require('../src/derived-guidance');
+  runCli(home, ['--guidance', 'on']);
+  runCli(home, ['--gates', 'on']);
+  const seeded = reconcileDerived(
+    fs.readFileSync(file, 'utf8'),
+    [{ id: 'batch-file-edits', title: 'Editing a gated path', body: 'One edit per file.' }],
+    { accepted: ['batch-file-edits'] },
+  );
+  assert.equal(seeded.changed, true, 'precondition: a derived block really was installed');
+  fs.writeFileSync(file, seeded.text);
+  assert.match(claudeMd(home), /BEGIN permission-wildcarding: batch-file-edits \(derived\)/);
+
+  const off = runCli(home, ['--guidance', 'off']);
+
+  assert.equal(off.status, 0, off.stderr);
+  assert.doesNotMatch(claudeMd(home), /batch-file-edits \(derived\)/,
+    'an accepted derived block survived the only command that claims to turn guidance off');
+  assert.doesNotMatch(claudeMd(home), /BEGIN permission-wildcarding: shell style/,
+    'and the shell-style block still goes, which is what it always did');
+  assert.match(off.stdout, /removed 1 derived block \(batch-file-edits\)/,
+    'silently removing text from the user’s own instruction file is not acceptable '
+    + 'either — say which blocks went');
+
+  // Targeted, not a blanket wipe: the gates block has its own switch, and the
+  // user's own text is not ours to touch.
+  assert.match(claudeMd(home), /BEGIN permission-wildcarding: memory gates/,
+    'gates have a separate switch and must survive');
+  assert.match(claudeMd(home), /^# Mine$/m, 'the user’s own first line is still there');
+
+  // MUTATION: delete the `if (cmd === 'off')` derived sweep from guidance() in
+  // bin/wildcard-perms and this fails on the first assertion, with the derived
+  // block still fenced in CLAUDE.md after guidance is off.
+});

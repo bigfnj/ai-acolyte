@@ -694,6 +694,43 @@ function guidance(args) {
   if (cmd === 'on' && results.some((result) => result.changed)) {
     process.stdout.write('  loaded in every session of every project from the next session on.\n');
   }
+
+  // `off` has to leave nothing of ours behind, and the shell-style block was not
+  // the only thing this tool writes into an instruction file. An ACCEPTED derived
+  // mitigation installs its own marker-fenced block, and no verb swept those:
+  // `--guidance decline <id>` removes one at a time and only while the learner
+  // still derives that id, while install.sh, install.ps1 and both uninstallers do
+  // not touch instruction files at all. So an accepted block outlived the
+  // uninstall of the tool that wrote it, with no command anywhere that removed it.
+  //
+  // Reconciling against an empty wanted-set is the removal path `decline` already
+  // uses; removal reads only the markers, so a block this version no longer knows
+  // how to derive still comes out.
+  //
+  // The learner's accepted/declined RECORD is deliberately left alone. Nothing
+  // re-installs a block on its own — setDerivedGuidance has exactly one caller,
+  // decideDerived — so the record is inert until a human decides again, and
+  // erasing someone's decisions is not what "off" was asked to do.
+  if (cmd === 'off') {
+    const { setDerivedGuidance } = require('../src/derived-guidance');
+    for (const target of setDerivedGuidance([], [])) {
+      if (target.error) {
+        process.stderr.write(
+          `wildcard-perms --guidance off [${target.agent}]: derived blocks were left in `
+          + `place — ${target.error}\n`
+        );
+        process.exitCode = 1;
+        continue;
+      }
+      if (!target.removed.length) continue;
+      process.stdout.write(
+        `wildcard-perms guidance [${target.agent}]: removed `
+        + `${target.removed.length} derived `
+        + `${target.removed.length === 1 ? 'block' : 'blocks'} `
+        + `(${target.removed.join(', ')}) — ${target.path}\n`
+      );
+    }
+  }
 }
 
 // The compiled memory gates. Same install plumbing as --guidance, separate markers and

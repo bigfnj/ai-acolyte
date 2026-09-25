@@ -269,6 +269,13 @@ function harness(tempHome, options = {}) {
       return {
         createAutoLearnWorkerRunner: (runnerOptions) => real.createAutoLearnWorkerRunner({
           ...runnerOptions,
+          // The production deadline is 300000 ms, chosen against the manager's
+          // own 180000 ms execFile timeouts. A test cannot wait that out, so it
+          // says how long it is prepared to wait; omitted, the runner's real
+          // default applies and every existing test here keeps its old
+          // behaviour. `timeoutMs: 0` would disable it, which is NOT what an
+          // unset option means — hence the explicit undefined.
+          timeoutMs: options.workerTimeoutMs,
           workerFactory: () => {
             const worker = options.wedgeWorker ? new WedgedWorker() : new FakeWorker();
             workers.push(worker);
@@ -1208,6 +1215,62 @@ test('a wedged predecessor does not steal the successor\u2019s worker runner', T
     await app.dispose();
   }
 });
+
+test('a worker still wedged at teardown is failed on its deadline and then reaped',
+  TEST_TIMEOUT, async (t) => {
+    // The leak the two tests above had to work AROUND. Both of them end by calling
+    // release() on every worker, because without that the drain never finishes —
+    // and a suite that has to un-wedge its own fixture to reach teardown cannot
+    // then say anything about what teardown does to a worker that stays wedged.
+    //
+    // Nothing did. `WedgedWorker.terminated` was written at both of its sites and
+    // read by no assertion, so the one thing the flag exists to prove was never
+    // proved: a thread blocked in a synchronous fs call (statSync against a dead
+    // network mount) emits no 'message', no 'error' and no 'exit', its job promise
+    // stayed pending, deactivate()'s Promise.allSettled over those jobs never
+    // resolved, and the terminate pass AFTER that drain never ran. One live thread
+    // per reload, plus a `context.subscriptions` that never drains.
+    //
+    // Terminating earlier is not the fix and is not what this asserts. The
+    // drain-before-terminate order is deliberate (autoLearnWorkerRunner.js:75-78):
+    // a worker between two policy writes must reach its own result or the
+    // manager's JS rollback is lost. The deadline settles the JOB as a failure,
+    // which is all the drain needs, and leaves the reaping exactly where it was.
+    //
+    // The sibling test above is right that terminate() is the wrong observable for
+    // a CLEAN exit — a worker that exits by itself is never terminated by design.
+    // This is the other case, and here it is the only observable there is.
+    const home = tempHome(t);
+    const app = harness(home, {
+      settings: { 'autoLearn.enabled': true },
+      wedgeWorker: true,
+      workerTimeoutMs: 150,
+    });
+    try {
+      const wedged = app.commands.get('permission-wildcarding.autoLearnScan')();
+      await tick(50);
+      assert.equal(app.workers.length, 1, 'precondition: a worker was built and never answered');
+      assert.equal(app.workers[0].terminated, false,
+        'precondition: nothing has reaped it yet, so a later true means teardown did it');
+
+      let drained = false;
+      const teardown = app.extension.deactivate().then(() => { drained = true; });
+      // Deliberately NOT awaited. With no deadline this never resolves, and an
+      // await here would spend the file timeout instead of failing by name.
+      await tick(1500);
+
+      assert.equal(drained, true,
+        'deactivate() never resolved: its drain awaits a job promise that cannot settle, so '
+        + 'context.subscriptions never drains either');
+      assert.equal(app.workers[0].terminated, true,
+        'the wedged thread survived the extension host — one more live worker per reload');
+
+      await Promise.allSettled([wedged, teardown]);
+    } finally {
+      for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+      await app.dispose();
+    }
+  });
 
 // Cancel on the 32MB model download was a no-op on every real download, and the shape of
 // httpsGetFollow is why. It followed redirects itself and returned the req it had just

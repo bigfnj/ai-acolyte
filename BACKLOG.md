@@ -410,7 +410,7 @@ what was deliberately left.
 `return manager.getStatus();` at `vscode-extension/extension.js:1025` follows a
   `manager.status` check, and `src/auto-learn-manager.js:2022` exports
   `getStatus: status`. `manager.getCandidates(options)` at
-  `vscode-extension/extension.js:1116` follows a `manager.listCandidates` check, and
+  `vscode-extension/extension.js:1145` follows a `manager.listCandidates` check, and
   `src/auto-learn-manager.js:2331` exports `getCandidates: listCandidates`.
   Re-verified 2026-09-14. A correction pass read this entry as closed because it also
   named `list()`: that alias IS still exported on the same line as `getCandidates`, but

@@ -563,9 +563,11 @@ already a fixed point, which is the only state in which it must fire zero times.
   backwards: deriving `turningOn = !isMaxOn(latest)` from the same `latest` is
   exactly what makes it un-reachable. 65 shapes of `latest` enumerated (5 allow
   sets x 3 hook states x 4 modes, plus `{}`, `null`, non-array allow, bare
-  `hooks`): **0 yielded `changed: false`**. `extension.js:2393`'s wording also
-  reads backwards: "MAX is already ${turningOn ? 'OFF' : 'ON'}" answers a click
-  asking for ON with "already OFF".
+  `hooks`): **0 yielded `changed: false`**. The same function's wording also read
+  backwards: "MAX is already ${turningOn ? 'OFF' : 'ON'}" answered a click asking
+  for ON with "already OFF". Both are historical: the whole `toggleMax`
+  implementation was DELETED on 2026-09-24, so there is no line to cite and Git
+  holds the code this paragraph describes.
 - **The version badge's degradation claim is false for the case it names.** For a
   **malformed** manifest the catch never runs: Node refuses to load
   `extension.js` at all (`ERR_INVALID_PACKAGE_CONFIG` at

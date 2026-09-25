@@ -962,12 +962,23 @@ function memoryCardData(precomputed = null) {
   let out = null;
   try {
     const { conf, dir, report } = precomputed || memoryReport();
-    // `conf.enabled` is honoured here, not just discovered. memoryLint.activate()
-    // returns early when memory.enabled is false and so never registers
-    // `permission-wildcarding.lintMemory`, while this card gated on `dir &&
-    // report` alone — so with the feature switched off the card still rendered
-    // and its link posted a command that does not exist, which VS Code reports
-    // as "command not found". Same key, two components, one of them ignoring it.
+    // `conf.enabled` is honoured here, not just discovered — but NOT for the reason
+    // this comment carried until 2026-09-25. It said memoryLint.activate() "returns
+    // early when memory.enabled is false and so never registers
+    // `permission-wildcarding.lintMemory`", so the card's link posted a command that
+    // did not exist and VS Code answered "command not found". That justification
+    // outlived its truth: memoryLint.js:352-360 registers the command
+    // UNCONDITIONALLY, above the enabled check, showReport() answers for the disabled
+    // case itself (memoryLint.js:649-655), and test/memory-lint-watchers.test.js:388
+    // pins it there. The stated failure mode has not been reachable since.
+    //
+    // The gate is still correct, for the reason that outlasted it. With the lint off
+    // memoryLint clears its diagnostics and disposes its watchers
+    // (memoryLint.js:580) and refresh() never runs again, so nothing maintains what
+    // this card draws. Rendering it would show a token count, an issue list and an
+    // index status frozen at whatever the last enabled tick left behind — live-looking
+    // data from an inert linter, which is worse than no card. Same key, two
+    // components, and they have to agree about whether the feature is on.
     if (conf.enabled !== false && dir && report) {
       const st = recallStatus();
       // embedded/indexable both exclude MEMORY.md, so a complete cache reads N of N

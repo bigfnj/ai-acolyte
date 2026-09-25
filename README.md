@@ -307,7 +307,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2105`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2208`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine

@@ -190,9 +190,13 @@ previous 23 fallback entries were star-free. Cold `processAllowList` measured
 The residual cost is O(n x fallback), because a rule with a glob INSIDE a token
 (`Bash(g* *)`, `Bash(mkfs* *)`) cannot be found by a literal-prefix lookup. That
 class is still quadratic — measured n=1600 at 238.5 ms — but it **cannot grow from
-this tool's own operation**: `generalizePermission`/`mineWildcard` only emit
-`Tool(root *)` with root matching `/^[A-Za-z][\w.-]*$/`, so no `*` can land inside
-a token. The live count is 3, all `mcp__*__*`.
+this tool's own operation**: `generalizePermission` only emits `Tool(root *)` with
+root matching `/^[A-Za-z][\w.-]*$/`, so no `*` can land inside a token. This
+sentence also named `mineWildcard`, which was deleted on 2026-09-24 as dead code
+with no consumer anywhere including its own file; the substance is unchanged,
+because `generalizePermission` and `promotionFor` carry the same constraint.
+Re-measured 2026-09-24: live count 5 against a trigger of ~25, so the trigger below
+still has not fired.
 
 So the old "revisit if the fallback share passes ~20%" trigger is retired: the
 number that could actually grow was the star-free count, and it is gone.
@@ -303,19 +307,25 @@ Worth keeping because both were wrong here for a while:
   observations, 28 of them failures, and no candidate changed disposition. Count
   the thing the code counts, not the thing that looks like it.
 
-### A single transcript will eventually exceed the 512 MB string limit
+### RETIRED 2026-09-24: "a single transcript will eventually exceed the 512 MB string limit"
 
-`parseHistorySlice` does `buffer.toString('utf8')` on a whole file, which throws
-`ERR_STRING_TOO_LONG` past `MAX_STRING_LENGTH` (536,870,888 on Node 24). Largest
-transcript measured is 70.4 MB and a session file only grows. Peak RSS is roughly
-4x file size (286 MB while scanning that one file; 508 MB for a full-corpus
-pass), because the code holds the Buffer, then the whole string, then a split
-array of every line. An `onObservation` callback instead of one returned array
-would cap the retained half; streaming by line would cap the transient half.
+**This entry guarded a door that no longer exists, and its trigger could never fire.**
+Kept as a correction rather than deleted, because the mechanism it described is the
+kind a later session would re-derive.
 
-**Trigger: revisit when any single transcript passes 200 MB.** Largest is
-70.4 MB today, so there is roughly 7x headroom, and the fix is a rewrite of the
-code path every other feature depends on.
+It said `parseHistorySlice` does `buffer.toString('utf8')` on a whole file and throws
+`ERR_STRING_TOO_LONG` past `MAX_STRING_LENGTH`, with "revisit when any single
+transcript passes 200 MB". Both halves are now wrong. `parseJsonlRecords` decodes PER
+LINE, so there is no whole-file decode left on that path; the only whole-buffer decode
+remaining is inside the 1 MiB-capped `codexHeadSeed`. And the 64 MiB per-file ingest
+cap added on 2026-09-22 means no single read reaches 200 MB in the first place, so the
+trigger was unreachable as well as unnecessary.
+
+**What replaced the risk, and it is on a different axis.** The pressure is not bytes in
+one transcript, it is total observations per scan across the whole corpus: 764 files on
+this box today, against 660 two and a half months earlier. Nothing is written against
+that axis. The honest trigger is a per-scan observation count, not a per-file size, and
+it does not exist yet.
 
 ### Inert bookkeeping candidates
 

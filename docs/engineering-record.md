@@ -1182,3 +1182,37 @@ than a refresh.
 **`memory/recall.py` has no hot-path issue.** `build_or_update` already gates
 re-embedding on `mtime` plus size, so the expensive work does not run on an unchanged
 corpus.
+
+**`fastLint`'s `existsSync` probes, answered from the listing. DECLINED AS A TIMING
+CLAIM, kept on the syscall count. 2026-09-24.** The backlog row read "saves 1.07 min /
+1.23 p50 ms per push, real `~/.claude`, warm, n=61". **It did not reproduce.** Measured
+three ways against a purpose-built arm with the change removed: on `_push()` end to end,
+p50 +0.64 / +1.25 / +0.62 ms with min −1.17 / +0.51 / −0.79 ms, so the sign flips at the
+minimum; on `memoryReport()` alone, the regime the original figure used, min −0.134 /
++0.412 / +0.223 and p50 1.064 / 0.618 / 1.075 across n=61, n=81, n=41. The p50 is in the
+right neighbourhood and the minimum is not stable. The change shipped anyway, on the
+DETERMINISTIC count (`memoryReport()` goes 10 `existsSync` to 1), which is the same basis
+the `refresh()` item used. **Do not restore the timing figure.**
+
+**Threading the selection listing into `fullReport`. ZERO saving on this box.** There is
+currently one store with a `MEMORY.md`, so selection short-circuits before listing
+anything and `readdirSync` per report is back at 2, not the 4 the backlog recorded. It
+removes one `readdirSync` per report only with two or more stores, which is what its test
+asserts. Kept for that case; claimed for nothing today.
+
+**Stale figures corrected 2026-09-24, all of them by large factors.** The memory corpus is
+**137 files, not 17**. `recall_index.json` is **1.20 MB, not 157 KB or 122 KB**.
+`recallIndexStatus` does **~136 `statSync`, not 19** — the refutation above still holds,
+only the number moved. `fullReport` at "0.56 ms" is from the 17-file era. Re-measure
+anything keyed to those numbers before citing it.
+
+**What DID clear the bar, for contrast: memoising the `recall_index.json` parse.** Read
+plus parse is 4.62 min / 6.14 p50 ms against 0.035 / 0.045 ms for a `statSync` of the same
+file, so it is the largest single fs term in a push. Cold, fresh process per sample, arms
+interleaved and rotated: **4.11 / 7.07, 6.62 / 6.90, 5.23 / 5.88 ms saved** off a 43-46 ms
+steady push across three runs, roughly 13-15%. The first push in a fresh process is inside
+the noise, necessarily, because nothing is memoised yet. NTFS mtime granularity here is
+~0.5 ms (191 distinct stamps over 200 back-to-back same-size rewrites), so `mtimeNs` buys
+no extra resolution and `{ bigint: true }` was not added. What is cached is a projection,
+not the parse: the full parse retains 486 KB, the projection 16 KB, because `vec` is 384
+floats per memory and no caller reads it.

@@ -33,24 +33,48 @@ const SETTINGS  = path.join(os.homedir(), '.claude', 'settings.json');
 const PACK_PATH = path.join(__dirname, '..', 'patterns', 'starter-pack.json');
 const LEARN_USAGE = 'usage: wildcard-perms --learn scan|status|apply|undo|hits ' +
   '[--mode observe|recommend|auto-safe] [--workspace <path>] ' +
-  '[--codex-scope user|workspace|off] [--threshold <count>] ' +
+  '[--codex-scope user|off] [--threshold <count>] ' +
   '[--codex-executable <path>]\n';
+// Codex workspace scope is WITHDRAWN. Three different trust notions were in
+// play and none of them was the one that mattered: VS Code's
+// `workspace.isTrusted` (which says the EDITOR may run code from this folder),
+// this flag (which was unguarded and asked nothing), and Codex's own project
+// trust (which is what actually decides whether Codex loads a workspace rule
+// file at all). Writing an allow rule into a repository on the strength of the
+// first two is a capability whose trust model could not be stated, so it was
+// removed rather than certified. See docs/codex-certification.md.
+//
+// The flag VALUE stays parseable so an existing script reaches this message
+// instead of silently landing in user scope and writing rules to a different
+// file than it asked for.
+const WORKSPACE_SCOPE_WITHDRAWN =
+  'wildcard-perms --codex-scope workspace: withdrawn. Workspace-scoped Codex rules were ' +
+  'removed because their trust model could not be stated: VS Code workspace trust, this ' +
+  'flag and Codex\'s own project trust are three different decisions, and only the third ' +
+  'governs whether Codex loads a workspace rule file. Nothing was changed. Use ' +
+  '--codex-scope user, or --codex-scope off. To remove rules an older release already ' +
+  'wrote into a repository, run: wildcard-perms --codex-workspace-rules remove ' +
+  '[--workspace <path>]\n';
+const WORKSPACE_RULES_USAGE =
+  'usage: wildcard-perms --codex-workspace-rules status|remove [--workspace <path>]\n';
 const DRAIN_USAGE = 'usage: wildcard-perms --drain [--workspace <path>] [--dry-run]\n';
 const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
   '       wildcard-perms --guidance derived\n' +
   '       wildcard-perms --guidance accept|decline|reset <id>\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n';
 
-// Every active verb plus the two retired MAX flags. Keeping the retired flags in
-// dispatch is a safety boundary: an old invocation must reach a read-only or
-// cleanup handler, never fall through to hook mode and rewrite settings.json.
+// Every active verb, the two retired MAX flags, and the one-way cleanup for
+// withdrawn Codex workspace rules. Keeping the retired flags in dispatch is a
+// safety boundary: an old invocation must reach a read-only or cleanup handler,
+// never fall through to hook mode and rewrite settings.json.
 const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
-  '--codex-max', '--max', '--bypass'];
+  '--codex-max', '--max', '--bypass', '--codex-workspace-rules'];
 const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex permissions\n\n' +
   'Run with NO arguments to act as a PostToolUse hook (reads a JSON event on stdin).\n\n' +
   LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
   'usage: wildcard-perms --seed\n' +
   'usage: wildcard-perms --bypass on|off|status\n' +
+  WORKSPACE_RULES_USAGE +
   'usage: wildcard-perms --help | --version\n';
 
 const argv = process.argv.slice(2);
@@ -87,6 +111,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
   legacyClaudeMax(argv);
 } else if (argv.includes('--bypass')) {
   bypass(argv);
+} else if (argv.includes('--codex-workspace-rules')) {
+  codexWorkspaceRules(argv);
 } else {
   // Hook mode. Claude Code sends a JSON context on stdin, and one field of it
   // matters: `cwd` names the project whose settings.local.json may have just
@@ -237,15 +263,22 @@ function learn(args) {
       process.exitCode = 1;
       return;
     }
+    // WITHDRAWN, not removed from the parser. Same shape as the retired MAX
+    // flags above: an existing invocation must reach a handler that refuses and
+    // explains, never fall through to a different scope and write rules
+    // somewhere the caller did not ask for.
+    if (codexScope === 'workspace') {
+      process.stderr.write(WORKSPACE_SCOPE_WITHDRAWN);
+      process.exitCode = 1;
+      return;
+    }
     const thresholdValue = learnOption(args, '--threshold', null);
     const threshold = thresholdValue === null ? null : Number(thresholdValue);
     if (threshold !== null && (!Number.isInteger(threshold) || threshold < 1)) {
       throw new Error('--threshold must be a positive integer');
     }
     const codexRulesPath = codexScope === 'off' ? null
-      : codexScope === 'workspace'
-        ? path.join(workspaceRoot, '.codex', 'rules', 'permission-wildcarding.rules')
-        : path.join(os.homedir(), '.codex', 'rules', 'permission-wildcarding.rules');
+      : path.join(os.homedir(), '.codex', 'rules', 'permission-wildcarding.rules');
     const manager = createAutoLearnManager({
       workspaceRoot,
       codexRulesPath,
@@ -939,6 +972,103 @@ function bypass(args) {
       process.stdout.write('  deny rules and hard circuit breakers still apply.\n');
     }
   });
+}
+
+// One-way cleanup for the withdrawn Codex WORKSPACE scope. Inspect or remove the
+// rules file an older release wrote into a repository; there is deliberately no
+// path that writes one.
+//
+// Ownership is proved by this tool's own marker pair and by nothing else. A
+// `.codex/rules/permission-wildcarding.rules` with no markers is somebody's hand
+// written file that happens to share the name, and it is left byte-for-byte
+// alone — the same rule, for the same reason, as the retired MAX cleanup below.
+function codexWorkspaceRules(args) {
+  const { removeGeneratedCodexRules } = require('../src/policy-exporters');
+  const cmd = String(args[args.indexOf('--codex-workspace-rules') + 1] || 'status').toLowerCase();
+  if (cmd !== 'status' && cmd !== 'remove') {
+    process.stderr.write(WORKSPACE_RULES_USAGE);
+    process.exitCode = 1;
+    return;
+  }
+  const root = path.resolve(learnOption(args, '--workspace', process.cwd()));
+  const target = path.join(root, '.codex', 'rules', 'permission-wildcarding.rules');
+
+  let text = null;
+  try { text = fs.readFileSync(target, 'utf8'); }
+  catch (err) {
+    if (err?.code !== 'ENOENT') {
+      process.stderr.write(`wildcard-perms --codex-workspace-rules: read error: ${err.message}\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  if (text === null) {
+    process.stdout.write(
+      `wildcard-perms --codex-workspace-rules ${cmd}: no workspace Codex rules at ${target}. ` +
+      'Workspace scope is withdrawn; nothing to clean up.\n'
+    );
+    return;
+  }
+
+  const result = removeGeneratedCodexRules(text);
+  if (cmd === 'status') {
+    process.stdout.write(
+      `wildcard-perms --codex-workspace-rules status: ${target} exists, ` +
+      `${result.changed ? 'and carries a generated block this tool can remove'
+        : `and this tool will NOT touch it (${result.reason})`}.\n`
+    );
+    return;
+  }
+
+  if (!result.changed) {
+    process.stderr.write(
+      `wildcard-perms --codex-workspace-rules remove: refused — ${result.reason}. ` +
+      `${target} is unchanged. Only a block between this tool's own markers is removable.\n`
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    // Read again before writing so an edit that landed since the read is not
+    // overwritten by a cleanup path.
+    const current = fs.readFileSync(target, 'utf8');
+    if (current !== text) {
+      process.stderr.write(
+        'wildcard-perms --codex-workspace-rules remove: the file changed during cleanup; ' +
+        'nothing was written.\n'
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (result.empty) {
+      fs.unlinkSync(target);
+      process.stdout.write(
+        `wildcard-perms --codex-workspace-rules remove: removed ${target} — it held nothing ` +
+        'but this tool\'s generated block. Restart Codex to apply.\n'
+      );
+      return;
+    }
+    const { writeFileAtomicSync } = require('../src/permissions');
+    writeFileAtomicSync(target, result.text);
+    const verified = fs.readFileSync(target, 'utf8');
+    if (removeGeneratedCodexRules(verified).changed) {
+      process.stderr.write(
+        'wildcard-perms --codex-workspace-rules remove: the generated block is still present ' +
+        'after the write. Nothing further was attempted.\n'
+      );
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(
+      `wildcard-perms --codex-workspace-rules remove: removed the generated block from ${target} ` +
+      'and kept the rest of the file. Restart Codex to apply.\n'
+    );
+  } catch (err) {
+    process.stderr.write(`wildcard-perms --codex-workspace-rules remove: write error: ${err.message}\n`);
+    process.exitCode = 1;
+  }
 }
 
 // Hidden compatibility handler for the retired Codex MAX flag. It can inspect

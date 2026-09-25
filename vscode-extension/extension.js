@@ -19,7 +19,8 @@ const {
   createPolicyLock, POLICY_LOCK_CODE, POLICY_LOCK_PATH, POLICY_LOCK_BUSY_MESSAGE,
 } = require('./src/policy-lock');
 const {
-  readEnterpriseBundle, allowedApprovalPolicies, enterpriseDecisionFor,
+  readEnterpriseBundle, allowedApprovalPolicies, enterprisePolicyAssessment,
+  codexRuleFileSet,
 } = require('./src/codex-policy');
 const {
   CODEX_CONFIG, LEGACY_CLAUDE_STATE_FILE, LEGACY_CODEX_STATE_FILE,
@@ -66,6 +67,15 @@ const LATEST_BACKUP = path.join(BACKUP_DIR, 'allow-list.latest.json');
 const MIRROR_BACKUP_DEFAULT = path.join(os.homedir(), '.permission-wildcarding', 'allow-list.latest.json');
 const PROJECTS_DIR  = path.join(os.homedir(), '.claude', 'projects');
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
+// Codex WORKSPACE scope is withdrawn; see the note in autoLearnConfig() and
+// docs/codex-certification.md. Held as a constant because the dashboard card,
+// the scope warning and the settings description must all say the same thing.
+const WORKSPACE_SCOPE_WITHDRAWN_NOTE =
+  'Codex workspace scope is withdrawn: its trust model could not be stated, because VS Code ' +
+  'workspace trust, this setting and Codex\'s own project trust are three different decisions ' +
+  'and only the last one governs whether Codex loads a workspace rule file. Codex rule export ' +
+  'is OFF while this setting says "workspace". Set it to "user" or "off". To remove rules an ' +
+  'older release wrote into a repository, run: wildcard-perms --codex-workspace-rules remove';
 // Auto Learn, this wildcarding pass, the legacy cleanup, and the CLI bypass
 // toggle are all writers of one settings.json. They take the same lock
 // (POLICY_LOCK_PATH, defined once in src/policy-lock.js) so none can land
@@ -996,17 +1006,23 @@ function autoLearnConfig() {
   const mode = cfg.get('autoLearn.mode', 'recommend');
   const codexScope = cfg.get('autoLearn.codexScope', 'user');
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const trustedWorkspaceRoot = vscode.workspace.isTrusted ? workspaceRoot : null;
   let codexRulesPath = path.join(os.homedir(), '.codex', 'rules', 'permission-wildcarding.rules');
   let scopeWarning = '';
   if (codexScope === 'off') codexRulesPath = null;
   else if (codexScope === 'workspace') {
-    if (!trustedWorkspaceRoot) {
-      codexRulesPath = null;
-      scopeWarning = 'Workspace Codex rules require an open trusted workspace.';
-    } else {
-      codexRulesPath = path.join(trustedWorkspaceRoot, '.codex', 'rules', 'permission-wildcarding.rules');
-    }
+    // WITHDRAWN. Not silently upgraded to user scope either: a setting that
+    // asked for a rules file inside the repository must not start writing one
+    // into the home directory instead. Codex export is simply off until the
+    // setting is changed, and the card says why.
+    //
+    // Three different trust notions were in play and none of them was the one
+    // that decides: `vscode.workspace.isTrusted` says the EDITOR may run code
+    // from this folder, the CLI flag asked nothing at all, and Codex's own
+    // project trust is what actually governs whether a workspace rule file is
+    // loaded. The value stays accepted so an existing settings.json reaches this
+    // explanation rather than a schema error.
+    codexRulesPath = null;
+    scopeWarning = WORKSPACE_SCOPE_WITHDRAWN_NOTE;
   }
   return {
     enabled: cfg.get('autoLearn.enabled', true),
@@ -1018,11 +1034,11 @@ function autoLearnConfig() {
     codexRulesPath,
     codexExecutable: cfg.get('autoLearn.codexExecutable', 'codex') || 'codex',
     scopeWarning,
-    // Evidence/state is partitioned and cwd-filtered by the open workspace
-    // independently of where generated Codex policy is exported. Trust is
-    // required only before writing or evaluating workspace-owned rules.
+    // Evidence/state is still partitioned and cwd-filtered by the open
+    // workspace. That is independent of scope: it decides which observations
+    // count, not where a rule is written, and user-scope export has always used
+    // it. `codexWorkspaceRoot` is gone with the capability it served.
     workspaceRoot,
-    codexWorkspaceRoot: trustedWorkspaceRoot,
   };
 }
 
@@ -1190,6 +1206,13 @@ function autoLearnScanHealth(stats) {
     // unable to look at anything — and indistinguishable, on the numbers alone,
     // from an ordinary quiet scan.
     blindScan: stats.blindScan === true,
+    // "The Codex rollout directory this scan read may no longer be where Codex
+    // writes." A migrated backend leaves `~/.codex/sessions` frozen, and a scan
+    // of a frozen directory reports exactly the numbers a quiet week reports.
+    // `codexHistoryInspected: 'partial'` is the other half: the comparison could
+    // not be made, which is not an answer of `false`.
+    codexHistoryStale: stats.codexHistoryStale === true,
+    codexHistoryInspected: stats.codexHistoryInspected || 'skipped',
   };
 }
 
@@ -1514,21 +1537,16 @@ function execFileCaptured(executable, args) {
   });
 }
 
+// One definition of "the set Codex evaluates", shared with the validator that
+// runs before a write (src/codex-policy.js). The diagnostic and the write have
+// to answer the same question or "Why did this prompt?" names a cause the write
+// never checked.
+function codexRuleFileSetFor(cfg) {
+  return codexRuleFileSet({ home: os.homedir(), target: cfg.codexRulesPath || null });
+}
+
 function codexRuleFiles(cfg) {
-  const directories = [path.join(os.homedir(), '.codex', 'rules')];
-  if (cfg.codexWorkspaceRoot) directories.push(path.join(cfg.codexWorkspaceRoot, '.codex', 'rules'));
-  const files = [];
-  for (const directory of directories) {
-    let entries = [];
-    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.toLowerCase().endsWith('.rules')) {
-        files.push(path.join(directory, entry.name));
-      }
-    }
-  }
-  if (cfg.codexRulesPath && fs.existsSync(cfg.codexRulesPath)) files.push(cfg.codexRulesPath);
-  return [...new Set(files.map((file) => path.resolve(file)))].sort();
+  return codexRuleFileSetFor(cfg).files;
 }
 
 function learnedCandidateExplanation(invocation, learned, target, threshold) {
@@ -1720,9 +1738,20 @@ async function explainAutoLearnPrompt() {
   // "no local rule allows this" for a command the org forces a prompt on names
   // the wrong cause, and the fix it implies (write a rule) cannot work.
   const bundle = readEnterpriseBundle();
-  const enterprise = invocations
-    .map((invocation) => ({ invocation, rule: enterpriseDecisionFor(bundle, invocation.argv) }))
-    .filter((entry) => entry.rule);
+  const assessments = invocations
+    .map((invocation) => ({ invocation, assessment: enterprisePolicyAssessment(bundle, invocation.argv) }));
+  const enterprise = assessments.filter((entry) => entry.assessment.match);
+  // A block the parser could not read is named on every managed verdict, match
+  // or no match. "No managed rule governs this" is a claim about the whole
+  // policy, and a parser that skipped a rule is not entitled to make it.
+  const managedDegraded = assessments
+    .flatMap((entry) => entry.assessment.health.unsupported)
+    .map((entry) => `  requirements.toml line ${entry.line}: ${entry.reason}`);
+  const degradedNote = managedDegraded.length
+    ? '\n\nDEGRADED: this tool could not parse every managed prefix rule, so the verdict above ' +
+      'is incomplete and a rule it skipped may be the real cause:\n' +
+      [...new Set(managedDegraded)].join('\n')
+    : '';
   if (enterprise.length) {
     const allowed = allowedApprovalPolicies(bundle);
     vscode.window.showInformationMessage('Codex enterprise policy', {
@@ -1731,24 +1760,40 @@ async function explainAutoLearnPrompt() {
         'Your organization\'s Codex policy governs this command directly, and it outranks any ' +
         'rule Auto Learn can write:',
         '',
+        // The MOST RESTRICTIVE match, which is the one Codex applies. Reporting
+        // the first rule in file order answered `gh repo delete` with the broad
+        // `gh` prompt rule while the narrow forbidden rule below it was the real
+        // decision.
         ...enterprise.map((entry) =>
-          `  ${entry.rule.root} — decision "${entry.rule.decision}"\n    ${entry.rule.justification}`),
+          `  ${entry.assessment.match.root} — decision "${entry.assessment.match.decision}"\n` +
+          `    ${entry.assessment.match.justification}` +
+          (entry.assessment.matches.length > 1
+            ? `\n    (${entry.assessment.matches.length} managed rules match; the most restrictive is shown)`
+            : '')),
         '',
         allowed
           ? `Approval policy is also capped: the org allows only [${allowed.join(', ')}].`
           : 'No approval-policy cap was found.',
         '',
         'A user rule cannot override this. The prompt is the policy working as configured.',
-      ].join('\n'),
+        ...(assessments[0]?.assessment.blindSpots || []),
+      ].join('\n') + degradedNote,
     });
     return;
   }
 
-  const rules = codexRuleFiles(cfg);
+  const ruleSet = codexRuleFileSetFor(cfg);
+  const rules = ruleSet.files;
+  const unreadable = ruleSet.failures.length
+    ? `\n\nDEGRADED: ${ruleSet.failures.map((f) => `${f.path} (${f.code})`).join(', ')} could not be ` +
+      'listed, so a rule file may have been missed.'
+    : '';
   if (!rules.length) {
     vscode.window.showInformationMessage('Codex execpolicy analysis', {
       modal: true,
-      detail: 'No enterprise rule governs this command, and no user or trusted-workspace .rules files are currently visible, so Codex has no local prefix rule to allow it. This check cannot see session approval state or sandbox restrictions.',
+      detail: 'No enterprise rule governs this command, and no user-scope .rules files are ' +
+        'currently visible, so Codex has no local prefix rule to allow it. ' +
+        ruleSet.blindSpots.join(' ') + unreadable + degradedNote,
     });
     return;
   }
@@ -1776,9 +1821,14 @@ async function explainAutoLearnPrompt() {
     ));
     vscode.window.showInformationMessage('Codex execpolicy analysis', {
       modal: true,
-      detail: `Rules checked:\n${rules.map((file) => `- ${file.replace(os.homedir(), '~')}`).join('\n')}` +
+      // Every rule file, passed to one `codex execpolicy check` as repeated
+      // `--rules`. Checking them one at a time, or checking only ours, answers a
+      // question Codex never asks: it evaluates the whole visible set and
+      // resolves a conflict toward the MORE RESTRICTIVE decision, so an `allow`
+      // proved in isolation can be a `forbidden` in situ.
+      detail: `Rules checked together (${rules.length}):\n${rules.map((file) => `- ${file.replace(os.homedir(), '~')}`).join('\n')}` +
         `\n\n${checks.join('\n\n')}\n\nLearner:\n${learned.join('\n')}` +
-        '\n\nScope limitation: only visible user and trusted-workspace rule files were checked; managed/system policy, session approval state, and sandbox restrictions may still prompt.',
+        `\n\n${ruleSet.blindSpots.join(' ')}` + unreadable + degradedNote,
     });
   } catch (error) {
     // The rejection may be our own teardown: deactivate kills the child, which
@@ -3791,6 +3841,10 @@ class WildcardingViewProvider {
     // statement as "a root errored", and on the numbers alone it is
     // indistinguishable from an ordinary quiet scan.
     if (s.blindScan) trouble.push('nothing enumerated — cursor map preserved');
+    // Second, for the same reason: a scan of a directory Codex has stopped
+    // writing to looks healthy on every other number here.
+    if (s.codexHistoryStale) trouble.push('Codex history store has moved — rollout directory is stale');
+    else if (s.codexHistoryInspected === 'partial') trouble.push('Codex history-store check ran degraded');
     if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
     if (s.partial) trouble.push(s.partial + ' partly read');
     if (s.unmatchedResults) {

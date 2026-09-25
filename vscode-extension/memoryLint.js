@@ -73,6 +73,26 @@ function cfg() {
 }
 
 // Every dir that holds a MEMORY.md (explicit config dir, else auto-discovered).
+//
+// `memory.enabled` is deliberately NOT consulted here, and that is contractual rather
+// than an oversight — see test/memory-lint-watchers.test.js, 'discoverDirs answers "which
+// stores EXIST"'. This function answers "which stores exist on disk"; `memory.enabled`
+// answers "is the LINT on". Its two non-lint callers are extension.js's memoryCardWatchers
+// and gatesCorpusWatchers, and the *.md one is one of only two callers of compileGates —
+// so honouring `enabled` here would switch automatic gate recompilation off whenever
+// somebody hid the status-bar gauge, coupling two unrelated features through one key. That
+// exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
+// record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
+// (extension.js:2161) overrides `dir` before it calls this.
+// The lint half honours the key where it belongs: refresh() hides the gauge, clears
+// the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
+// memoryCardData refuses to render the card. So the feature really is off; what stays alive
+// is only the watching.
+//
+// Only `conf.dir` is read. `enabled`, `lineBudget`, `totalBudget` and `maxLines` are inert
+// in every call. The parameter stays an object because extension.js passes a whole
+// `memoryConf()` with `dir` overridden, and enumerating the memory.* keys in one place is
+// the point of that call.
 function discoverDirs(conf) {
   if (conf.dir) return fs.existsSync(path.join(conf.dir, 'MEMORY.md')) ? [conf.dir] : [];
   const out = [];
@@ -92,10 +112,28 @@ function norm(s) {
 
 // Fast lint of one dir's MEMORY.md: size + over-budget hook lines + broken file links.
 // Cheap enough to run on every save (reads one file, no sibling scan).
-function fastLint(dir, conf) {
+//
+// `names` is the dir's `.md` listing when the caller already has one (fullReport does),
+// and answers the broken-link probes from memory instead of one existsSync per link.
+// It is a HINT, never an override: a name the set does not carry still falls through to
+// existsSync. That is not belt-and-braces, it is required for correctness on two axes —
+// NTFS matches filenames case-insensitively while a Set does not, so `[x](Foo.md)` against
+// a `foo.md` on disk would flip from resolved to broken; and a link can carry a path
+// segment (`sub/x.md`), which a flat listing of this dir cannot answer at all. Resolving
+// links are the common case, so the fallback costs a syscall only where the lint is about
+// to report a fault anyway.
+//
+// `text` is MEMORY.md's body when the caller already holds it. fullReport does: MEMORY.md
+// is one of the .md files its corpus loop reads, so without this the index — the one file
+// this whole feature is about — was read twice per dashboard push. null means "read it",
+// and an empty index is '' rather than null, so a store with an empty MEMORY.md still
+// takes exactly one read.
+function fastLint(dir, conf, names = null, text = null) {
+  const known = names ? new Set(names) : null;
   const memPath = path.join(dir, 'MEMORY.md');
-  let text;
-  try { text = fs.readFileSync(memPath, 'utf8'); } catch { return null; }
+  if (text == null) {
+    try { text = fs.readFileSync(memPath, 'utf8'); } catch { return null; }
+  }
   const bytes = Buffer.byteLength(text, 'utf8');
   const tokens = Math.round(bytes / 4);
   const lines = text.split(/\r?\n/);
@@ -121,6 +159,7 @@ function fastLint(dir, conf) {
     let m;
     linkRe.lastIndex = 0;
     while ((m = linkRe.exec(ln)) !== null) {
+      if (known?.has(m[1])) continue;
       if (!fs.existsSync(path.join(dir, m[1]))) {
         broken.push({ line: i, col: m.index, target: m[1] });
       }
@@ -160,12 +199,28 @@ function fastLint(dir, conf) {
 // Residual, deliberate difference from Python: on an exact count tie recall.py takes the
 // first os.listdir entry and this takes the newest MEMORY.md. Unobservable for anything the
 // extension spawns, because the pin decides; visible only to a bare CLI run.
+//
+// Returns `{ dir, files }`: the winning store, and the `.md` listing the selection
+// already had to take to count it. `files` is null when no listing was made — the
+// no-store case, and the single-store short-circuit, which is most installs and is
+// kept at zero syscalls. memoryReport() hands `files` on to fullReport so the primary
+// dir is scanned once per report instead of twice.
+function pickPrimary(dirs) {
+  if (!dirs.length) return { dir: null, files: null };
+  if (dirs.length === 1) return { dir: dirs[0], files: null };
+  const best = dirs
+    .map((d) => {
+      const files = mdFiles(d);
+      return { d, files, n: files ? files.length : 0, t: memoryMtime(d) };
+    })
+    .sort((a, b) => b.n - a.n || b.t - a.t)[0];
+  return { dir: best.d, files: best.files };
+}
+
+// Just the dir, for the two callers that have nothing to do with the listing: refresh()'s
+// gauge, and the two tests that pin the selection rule itself.
 function pickPrimaryDir(dirs) {
-  if (!dirs.length) return null;
-  if (dirs.length === 1) return dirs[0];
-  return dirs
-    .map((d) => ({ d, n: mdCount(d), t: memoryMtime(d) }))
-    .sort((a, b) => b.n - a.n || b.t - a.t)[0].d;
+  return pickPrimary(dirs).dir;
 }
 
 // Literally recall.py's expression: os.listdir filtered on .md, MEMORY.md INCLUDED. Do not
@@ -179,16 +234,23 @@ function pickPrimaryDir(dirs) {
 // prevent. Demonstrated with an injected EMFILE. So it says so: a control that can run degraded
 // must never do it in silence.
 //
-// It still returns 0 and still loses the comparison. Choosing well when a directory is
+// It still scores 0 and still loses the comparison. Choosing well when a directory is
 // unreadable is a real design question (mtime alone? keep the previous answer?) and is in
 // BACKLOG.md; being loud about it is the part that was free.
-function mdCount(dir) {
+//
+// Returns the LIST rather than the count it is compared on, because the winner's list is
+// exactly the listing fullReport would otherwise take a second readdirSync to get. null,
+// not [], on a read failure: an empty dir is impossible here (discoverDirs only returns a
+// dir once it has seen a MEMORY.md in it), so `[]` would be indistinguishable from the
+// error, and threading it onward would hand fullReport a corpus of nothing as if that were
+// the answer.
+function mdFiles(dir) {
   try {
-    return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length;
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.md'));
   } catch (err) {
     console.error(`permission-wildcarding: cannot read memory store ${dir}, so it cannot win `
       + `primary selection —`, err);
-    return 0;
+    return null;
   }
 }
 
@@ -208,14 +270,22 @@ function stripCode(text) {
 
 // Full report: fast lint + unresolved [[wikilinks]] across the whole dir (report-only —
 // forward-links to not-yet-written memories are legitimate, so they never become squiggles).
-function fullReport(dir, conf) {
-  const fast = fastLint(dir, conf);
-  if (!fast) return null;
-  let files;
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { files = []; }
-
+// `known` is pickPrimary()'s listing of the same dir when the caller has one. The scan is
+// taken here only when it is absent, so a two-store install lists the primary once per
+// report instead of twice. A single-store install short-circuits selection before it lists
+// anything, so it arrives here with null and the scan below is its first and only one.
+function fullReport(dir, conf, known = null) {
+  let files = known;
+  if (files == null) {
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { files = []; }
+  }
   const valid = new Set();
   let all = '';
+  // MEMORY.md is a .md file in this dir, so the loop below reads it like any other — and
+  // fastLint then read it a SECOND time for the gauge. Its body is kept here and handed
+  // down instead. The cost of getting this wrong is not the one read: the dashboard pushes
+  // a report on every refresh, and this is the file the whole feature is about.
+  let indexText = null;
   // How many memories the gates compiler could actually take. Counted HERE
   // because this loop already reads every body, so it costs nothing extra, and
   // because the alternative was a UI that offers "Compile gates" on a corpus
@@ -238,6 +308,7 @@ function fullReport(dir, conf) {
   for (const f of files) {
     let raw;
     try { raw = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
+    if (f === MEMORY_INDEX) indexText = raw;
     all += '\n' + raw;
     valid.add(norm(f.slice(0, -3)));
     const nm = raw.slice(0, 400).match(/^\s*name:\s*(.+)$/m);
@@ -246,6 +317,14 @@ function fullReport(dir, conf) {
       gateSources += 1;
     }
   }
+  // AFTER the corpus pass, not before it, so `indexText` and `files` are both available:
+  // the listing answers the broken-link probes that were one existsSync each, and the body
+  // saves the second read of MEMORY.md. The order costs one thing and it is worth stating
+  // — when MEMORY.md is the file that cannot be read, this returns null having already
+  // read the corpus for nothing. That is the EISDIR / permissions path, it ends in an
+  // error message either way, and it is not the path that runs every five minutes.
+  const fast = fastLint(dir, conf, files, indexText);
+  if (!fast) return null;
   const unresolved = [...new Set(
     [...stripCode(all).matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]).filter((l) => !valid.has(norm(l)))
   )].sort();
@@ -503,14 +582,25 @@ class MemoryLint {
     this.syncWatchers(dirs);
 
     // Diagnostics for every discovered MEMORY.md (squiggles show when the file is open).
+    //
+    // The result is kept, not discarded: the primary is one of `dirs`, so the gauge below
+    // used to re-run fastLint over a file this loop had just read — a second readFileSync
+    // of MEMORY.md and a second existsSync per index link, on a function that runs every
+    // five minutes, on every MEMORY.md save, on every editor activation of one, and 300 ms
+    // after every external write.
     this.diags.clear();
+    const lints = new Map();
     for (const dir of dirs) {
       const r = fastLint(dir, conf);
-      if (r) this.diags.set(vscode.Uri.file(r.memPath), this.toDiagnostics(r, conf));
+      if (!r) continue;
+      lints.set(dir, r);
+      this.diags.set(vscode.Uri.file(r.memPath), this.toDiagnostics(r, conf));
     }
 
     const primary = this.primaryDir(dirs);
-    const r = primary && fastLint(primary, conf);
+    // `lints` only holds the dirs fastLint could read, so a primary whose MEMORY.md threw
+    // is absent here and lands on the same hide() the second call's null used to reach.
+    const r = primary ? lints.get(primary) : null;
     if (!r) { this.status.hide(); return; }
     const issues = r.over.length + r.broken.length;
     const tok = r.tokens >= 1000 ? (r.tokens / 1000).toFixed(1) + 'k' : String(r.tokens);
@@ -565,12 +655,12 @@ class MemoryLint {
       return;
     }
     const dirs = discoverDirs(conf);
-    const dir = this.primaryDir(dirs);
+    const { dir, files } = pickPrimary(dirs);
     if (!dir) {
       vscode.window.showInformationMessage('permission-wildcarding: no MEMORY.md found under ~/.claude/projects/*/memory.');
       return;
     }
-    const r = fullReport(dir, conf);
+    const r = fullReport(dir, conf, files);
     // The same guard refresh() has at its own fastLint call. fullReport returns null
     // whenever fastLint does, and fastLint returns null on any readFileSync throw --
     // MEMORY.md existing as a DIRECTORY is enough, because discoverDirs only tests
@@ -635,8 +725,11 @@ class MemoryLint {
 // there is no MEMORY.md to look at). Pure Node — no python, no model.
 function memoryReport() {
   const conf = cfg();
-  const dir = pickPrimaryDir(discoverDirs(conf));
-  return { conf, dir, report: dir ? fullReport(dir, conf) : null };
+  // pickPrimary, not pickPrimaryDir: the selection already listed the winner's .md files
+  // whenever it had to compare two stores, and fullReport's own scan is the same call
+  // against the same dir. See pickPrimary.
+  const { dir, files } = pickPrimary(discoverDirs(conf));
+  return { conf, dir, report: dir ? fullReport(dir, conf, files) : null };
 }
 
 // `fullReport` is deliberately NOT exported: its only callers are showReport() and

@@ -83,9 +83,24 @@ function harness(tempHome, overrides = {}) {
   const originalLoad = Module._load;
   const intervals = [];
   const originalSetInterval = global.setInterval;
+  // Every fs call memoryLint.js itself makes, by name and by argument. Counted rather
+  // than timed, because these are the deterministic half of the duplicate-work
+  // properties: "MEMORY.md is read once per refresh" and "the primary dir is listed once
+  // per report" are syscall facts, and a timing claim on a sub-millisecond difference is
+  // unmeasurable noise. Only memoryLint's own `fs` is wrapped — the tests' own fixture
+  // writes go to the real module and are not counted.
+  const calls = { readFileSync: [], existsSync: [], readdirSync: [], statSync: [] };
+  const countingFs = { ...fs };
+  for (const name of Object.keys(calls)) {
+    countingFs[name] = (target, ...rest) => {
+      calls[name].push(String(target));
+      return fs[name](target, ...rest);
+    };
+  }
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
+    if (request === 'fs' && parent?.filename === modulePath) return countingFs;
     return originalLoad.call(this, request, parent, isMain);
   };
   global.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return { unref() {} }; };
@@ -96,7 +111,14 @@ function harness(tempHome, overrides = {}) {
     global.setInterval = originalSetInterval;
     delete require.cache[modulePath];
   };
-  return { loaded, created, statusText, intervals, registered, info, errors, restore };
+  // How many of `kind` touched a path ending in `suffix`. Suffix, not equality, so a
+  // caller names 'MEMORY.md' rather than rebuilding the join.
+  const countsFor = (kind, suffix) => calls[kind].filter((p) => p.endsWith(suffix)).length;
+  const resetCalls = () => { for (const k of Object.keys(calls)) calls[k].length = 0; };
+  return {
+    loaded, created, statusText, intervals, registered, info, errors, restore,
+    calls, countsFor, resetCalls,
+  };
 }
 
 function writeStore(dir, indexBody) {
@@ -777,6 +799,350 @@ test('a throwing reconcile subscriber is reported, and does not stop the refresh
       `the failure has to be recorded, not swallowed; saw: ${JSON.stringify(logged)}`);
   } finally {
     console.error = originalError;
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// ── fullReport ────────────────────────────────────────────────────────────────
+//
+// fullReport had NO direct test of any kind. Seven test files stub `memoryReport` to a
+// zero-arg function returning `{ conf: {}, dir: null, report: null }`, and this file was
+// the only one that required the real module at all — for watcher behaviour. So the
+// function that reads EVERY file in the memory corpus on every dashboard push, and whose
+// `gateSources` decides whether the Gates card offers to compile, was covered by exactly
+// one assertion (the gate count above) and nothing else.
+//
+// Driven through memoryReport() rather than an export, because that IS the production
+// path: extension.js calls it once per _push and feeds the result to both the Memory card
+// and the Gates card. fullReport is deliberately not exported and this keeps it that way.
+
+// A corpus in a discoverable slug, plus a writer for its files.
+function makeCorpus(tempHome, slug) {
+  const dir = path.join(tempHome, '.claude', 'projects', slug, 'memory');
+  fs.mkdirSync(dir, { recursive: true });
+  return {
+    dir,
+    write(name, body) { fs.writeFileSync(path.join(dir, name), body, 'utf8'); },
+  };
+}
+
+test('the report counts the .md corpus and carries the fast lint through unchanged', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-full-count-'));
+  const c = makeCorpus(tempHome, 'd---full');
+  // One over-budget hook line (budget overridden to 40), one link to a file that is
+  // there, one to a file that is not.
+  c.write('MEMORY.md', '# Memory Index\n\n'
+    + '- [present](present.md) — ' + 'y'.repeat(60) + '\n'
+    + '- [gone](gone.md) — short\n');
+  c.write('present.md', 'body\n');
+  c.write('second.md', 'body\n');
+  // NOT a memory: the corpus is .md only, and fileCount is what the card prints.
+  c.write('notes.txt', 'body\n');
+  // Nor is a subdirectory that merely sits in the store.
+  fs.mkdirSync(path.join(c.dir, 'archive'));
+
+  const h = harness(tempHome, { 'memory.lineBudget': 40 });
+  try {
+    const { report } = h.loaded.memoryReport();
+    assert.equal(report.fileCount, 3, 'MEMORY.md + present.md + second.md, and nothing else');
+    // The fastLint half, spread into the same object. If the spread ever stops happening
+    // the Memory card loses every number it prints, so it is asserted here rather than
+    // assumed.
+    assert.equal(report.lineCount, 4);
+    assert.equal(report.bytes, Buffer.byteLength(
+      fs.readFileSync(path.join(c.dir, 'MEMORY.md'), 'utf8'), 'utf8'));
+    assert.equal(report.tokens, Math.round(report.bytes / 4));
+    assert.equal(report.memPath, path.join(c.dir, 'MEMORY.md'));
+    assert.equal(report.over.length, 1, 'the 60-y hook line is past the 40-char budget');
+    assert.equal(report.over[0].line, 2);
+    assert.deepEqual(report.broken.map((b) => b.target), ['gone.md']);
+    assert.equal(report.totalOver, false);
+    assert.equal(report.linesOver, false);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('an unresolved [[link]] is one no filename and no frontmatter name answers', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-full-links-'));
+  const c = makeCorpus(tempHome, 'd---links');
+  c.write('MEMORY.md', '# Memory Index\n\n'
+    // Resolved by filename, exactly.
+    + '- [[plain-hook]]\n'
+    // Resolved by filename after norm(): case folded and - mapped to _.
+    + '- [[Plain_Hook]]\n'
+    // Resolved by the `name:` frontmatter of a file called something else.
+    + '- [[the declared name]]\n'
+    // Not resolved by anything. Listed twice, to pin the dedupe.
+    + '- [[never-written]] and again [[never-written]]\n'
+    + '- [[also-missing]]\n');
+  c.write('plain-hook.md', 'body\n');
+  c.write('renamed-on-disk.md', '---\nname: "the declared name"\n---\n\nbody\n');
+
+  const h = harness(tempHome);
+  try {
+    const { report } = h.loaded.memoryReport();
+    // Sorted and deduped: the card prints this list, and 'never-written' appears twice
+    // in the source.
+    assert.deepEqual(report.unresolved, ['also-missing', 'never-written']);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('a [[link]] written inside code is an example, not an unresolved link', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-full-code-'));
+  const c = makeCorpus(tempHome, 'd---code');
+  c.write('MEMORY.md', '# Memory Index\n\n- [one](one.md) — hook\n');
+  // All four span forms stripCode blanks, each carrying a link that exists nowhere. A
+  // memory that DOCUMENTS the syntax is not a memory with four broken links.
+  c.write('one.md', 'Fenced:\n\n```\n[[fenced-example]]\n```\n\n'
+    + 'Tilde:\n\n~~~\n[[tilde-example]]\n~~~\n\n'
+    + 'Inline: `[[inline-example]]`, and doubled: ``[[doubled-example]]``.\n\n'
+    + 'But this one is real prose: [[genuinely-missing]].\n');
+
+  const h = harness(tempHome);
+  try {
+    const { report } = h.loaded.memoryReport();
+    assert.deepEqual(report.unresolved, ['genuinely-missing'],
+      'only the link outside every code span counts');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('a .md entry the report cannot read is skipped, and answers no link', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-full-unreadable-'));
+  const c = makeCorpus(tempHome, 'd---unreadable');
+  c.write('MEMORY.md', '# Memory Index\n\n- [[ghost]] and [[real]]\n');
+  c.write('real.md', 'body\n');
+  // A DIRECTORY called ghost.md. readdirSync has no withFileTypes here, so it is in the
+  // listing and readFileSync then throws EISDIR. The name must NOT resolve [[ghost]]:
+  // the loop adds a name to the valid set only after it has read the body, so a `continue`
+  // that was moved, or a catch that recorded an empty body, would change this answer.
+  fs.mkdirSync(path.join(c.dir, 'ghost.md'));
+
+  const h = harness(tempHome);
+  try {
+    const { report } = h.loaded.memoryReport();
+    assert.deepEqual(report.unresolved, ['ghost'],
+      'an entry that could not be read resolves nothing, and does not abort the report');
+    assert.equal(report.fileCount, 3, 'it is still in the listing the card counts');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('the report is null, with the dir still named, when MEMORY.md cannot be read', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-full-null-'));
+  const c = makeCorpus(tempHome, 'd---null');
+  // MEMORY.md as a directory again: discovered by existsSync, unreadable by readFileSync.
+  fs.mkdirSync(path.join(c.dir, 'MEMORY.md'));
+
+  const h = harness(tempHome);
+  try {
+    const out = h.loaded.memoryReport();
+    assert.equal(out.dir, c.dir, 'the store was discovered, so the null is the REPORT');
+    assert.equal(out.report, null,
+      'memoryCardData gates on `dir && report`; a truthy half-report would render a card of undefineds');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// ── discoverDirs and memory.enabled ───────────────────────────────────────────
+//
+// This was an open question, not a bug: `discoverDirs` reads only `conf.dir` while
+// `memoryCardData` honours `conf.enabled`, and the note in BACKLOG.md said teaching
+// discoverDirs about `enabled` "would be a behaviour change". Decided, and this test is
+// where the decision lives: it STAYS enabled-agnostic.
+//
+// The reason is its two non-lint callers. extension.js's memoryCardWatchers and
+// gatesCorpusWatchers ask "which stores EXIST", and the *.md one is one of only two
+// callers of compileGates — so honouring `enabled` here would switch automatic gate
+// recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
+// watchers, gates silently never recompiled, nothing logged) already happened once on
+// this repo, from the pinned-`memory.dir` bug, and is why `memoryStoreDirs`
+// (extension.js:2161) overrides `dir` before calling this.
+test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');
+  writeStore(dir, '# Memory Index\n\n- [one](one.md) — hook\n');
+  fs.writeFileSync(path.join(dir, 'one.md'), 'body\n', 'utf8');
+
+  const h = harness(tempHome, { 'memory.enabled': false });
+  try {
+    assert.equal(h.loaded.cfg().enabled, false, 'precondition: the lint really is off');
+    assert.deepEqual(h.loaded.discoverDirs(h.loaded.cfg()), [dir],
+      'the store still has to be discoverable, or the gates corpus watcher is never built');
+
+    // The other half of the contract, so this is not read as "enabled is ignored
+    // everywhere". The LINT honours it, in the one place a user can see.
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    assert.equal(lint.watchers.size, 0, 'the linter builds none of its OWN watchers');
+    assert.equal(lint.diags, null, 'and no diagnostics');
+    assert.equal(h.statusText.length, 0, 'and no gauge');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// ── duplicate work, counted rather than timed ─────────────────────────────────
+//
+// Every assertion below is a syscall count. These are deterministic, unlike a
+// sub-millisecond timing, and they are the property: the cost of this module is what it
+// asks the filesystem for, repeated on a function that runs every five minutes, on every
+// MEMORY.md save, on every editor activation of one, and 300 ms after every external
+// write.
+
+test('one refresh reads each MEMORY.md once and probes each index link once', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-refresh-once-'));
+  // TWO stores, so the primary is genuinely one of the dirs the diagnostics loop already
+  // walked. With one store the property holds for a weaker reason.
+  const { big } = twoStores(tempHome, ['a.md', 'b.md', 'c.md'], ['z.md']);
+  const bigIndex = path.join(big, 'MEMORY.md');
+  fs.writeFileSync(bigIndex, '# Memory Index\n\n- [a](a.md) — hook\n- [b](b.md) — hook\n', 'utf8');
+
+  const h = harness(tempHome);
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    assert.ok(h.statusText.length > 0, 'precondition: activation painted the gauge');
+
+    h.resetCalls();
+    lint.refresh();
+    assert.ok(h.statusText.length > 0, 'precondition: the refresh under test actually ran');
+
+    assert.equal(h.countsFor('readFileSync', bigIndex), 1,
+      'the gauge must reuse the lint the diagnostics loop already took for this dir');
+    // The link probes ride on the same duplicated call: two links, probed twice each.
+    assert.equal(h.countsFor('existsSync', path.sep + 'a.md'), 1);
+    assert.equal(h.countsFor('existsSync', path.sep + 'b.md'), 1);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('a report lists the primary store once, not once to pick it and once to read it', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-scan-once-'));
+  // Two stores again, because that is the only shape in which selection lists anything:
+  // one store short-circuits before it counts, which is most installs and already free.
+  const { big, small } = twoStores(tempHome, ['a.md', 'b.md', 'c.md'], ['z.md']);
+
+  const h = harness(tempHome);
+  try {
+    h.resetCalls();
+    const out = h.loaded.memoryReport();
+    assert.equal(out.dir, big, 'precondition: the bigger store won, so its listing is the one reused');
+    assert.equal(out.report.fileCount, 4, 'precondition: the report really did read a corpus');
+
+    assert.equal(h.countsFor('readdirSync', big), 1,
+      'the listing selection took to count this dir is the listing the report needs');
+    // The loser is listed once and never read, which is the whole of what selection costs.
+    assert.equal(h.countsFor('readdirSync', small), 1);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// The whole syscall budget of one report on the shape most installs have: one project
+// slug, one store, two files. A budget rather than a single count on purpose — the
+// per-dir assertion above cannot fail for a single store (selection short-circuits
+// before it lists, so threading the listing changes nothing there), and a test that
+// cannot fail for the thing it names must not ship. Every duplicate this branch removed
+// is visible in one of the four numbers below, and so is any new one.
+test('a report on a one-store install costs four filesystem calls, and no more', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-scan-single-'));
+  const c = makeCorpus(tempHome, 'd---solo');
+  c.write('MEMORY.md', '# Memory Index\n\n- [one](one.md) — hook\n');
+  c.write('one.md', 'body\n');
+
+  const h = harness(tempHome);
+  try {
+    h.resetCalls();
+    const out = h.loaded.memoryReport();
+    assert.equal(out.report.fileCount, 2, 'precondition: the report ran');
+    assert.equal(out.report.broken.length, 0, 'precondition: the index link resolves');
+
+    assert.equal(h.calls.readdirSync.length, 2,
+      'one scan of ~/.claude/projects to discover, one of the store to read it');
+    assert.equal(h.countsFor('readdirSync', c.dir), 1,
+      'and the store scan is the one the report needs, not a second one');
+    assert.equal(h.calls.readFileSync.length, 2,
+      'MEMORY.md once and one.md once — the index is not read twice');
+    assert.equal(h.calls.existsSync.length, 1,
+      'the one MEMORY.md probe discovery makes; the index link is answered from the listing');
+    assert.equal(h.calls.statSync.length, 0,
+      'nothing stats anything: the mtime tie-break belongs to multi-store selection');
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+test('the index link probes are answered from the listing the report already has', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-link-probes-'));
+  const c = makeCorpus(tempHome, 'd---probes');
+  const names = ['one.md', 'two.md', 'three.md', 'four.md', 'five.md'];
+  c.write('MEMORY.md', '# Memory Index\n\n'
+    + names.map((n) => `- [${n}](${n}) — hook`).join('\n') + '\n');
+  for (const n of names) c.write(n, 'body\n');
+
+  const h = harness(tempHome);
+  try {
+    h.resetCalls();
+    const { report } = h.loaded.memoryReport();
+    assert.equal(report.broken.length, 0, 'precondition: every link resolves');
+    assert.equal(report.fileCount, 6, 'precondition: the listing really was taken');
+
+    for (const n of names) {
+      assert.equal(h.countsFor('existsSync', path.sep + n), 0,
+        `${n} is in the listing the report just took; probing the filesystem for it is the duplicate`);
+    }
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// The listing is a HINT. It is flat and case-sensitive; existsSync is neither, and the
+// broken-link verdict is a squiggle in the user's editor. Both axes below would flip a
+// resolving link to "broken" under a listing-only lookup.
+test('a link the listing cannot answer still falls through to the filesystem', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-link-fallback-'));
+  const c = makeCorpus(tempHome, 'd---fallback');
+  fs.mkdirSync(path.join(c.dir, 'sub'));
+  fs.writeFileSync(path.join(c.dir, 'sub', 'nested.md'), 'body\n', 'utf8');
+  c.write('one.md', 'body\n');
+  c.write('MEMORY.md', '# Memory Index\n\n'
+    // A path segment: no flat listing of this dir can ever answer it.
+    + '- [nested](sub/nested.md) — hook\n'
+    // A case difference against one.md. Whether this resolves is a property of the
+    // filesystem, not of this module, and the lint has to give the filesystem's answer.
+    + '- [shouty](ONE.md) — hook\n');
+
+  const h = harness(tempHome);
+  try {
+    const { report } = h.loaded.memoryReport();
+    const broken = report.broken.map((b) => b.target);
+    assert.equal(broken.includes('sub/nested.md'), false,
+      'a link into a subdirectory is not broken merely because this dir listing lacks it');
+
+    const caseInsensitive = fs.existsSync(path.join(c.dir, 'ONE.md'));
+    assert.equal(broken.includes('ONE.md'), !caseInsensitive,
+      `existsSync('ONE.md') is ${caseInsensitive} on this filesystem, so the lint must say `
+      + `${caseInsensitive ? 'resolved' : 'broken'}; a Set lookup always says broken`);
+  } finally {
     h.restore();
     fs.rmSync(tempHome, { recursive: true, force: true });
   }

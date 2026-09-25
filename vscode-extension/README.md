@@ -234,7 +234,7 @@ Python does run unattended in two other places, both gated on your having opted 
 `autoSyncRecallIfStale` (`extension.js:794`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
-`entryMatchesFile` (`src/recall-index.js:88`) — plus the embed identity, and never a bare
+`entryMatchesFile` (`src/recall-index.js:104`) — plus the embed identity, and never a bare
 count. The index file itself is excluded, because it is the index and is never embedded.
 A 15-minute cooldown prevents back-to-back runs; a status-bar message confirms each sync,
 and a failure is logged to the extension host console without a notification.

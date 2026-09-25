@@ -21,10 +21,22 @@ const Module = require('node:module');
 
 function disposable() { return { dispose() {} }; }
 
+// Captured at module load, BEFORE any harness installs its unref'ing override of
+// global.setTimeout. Without this, `settle()` schedules through that override, its
+// timer is unref'd, and nothing is left holding the event loop open while a test
+// awaits it. Node then drains and node:test reports every test in the file as
+// "Promise resolution is still pending but the event loop has already resolved".
+//
+// It reproduced only on CI. Node 24 kept the loop alive on other pending work and
+// the whole file passed locally; node 20 and 22 failed all 30 tests on both
+// platforms. Unref is right for the timers the EXTENSION arms and wrong for the
+// ones the test arms to wait on, which is the distinction this line draws.
+const realSetTimeout = global.setTimeout;
+
 // Longer than DASHBOARD_BOUNCE_MS: refresh() is debounced like every other
 // handler in the extension, so a push lands on the next tick, not this one.
 function settle(ms = 140) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => realSetTimeout(resolve, ms));
 }
 
 // Copied from test/policy-backup.test.js rather than shared. That is a standing

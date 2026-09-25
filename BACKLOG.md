@@ -914,7 +914,7 @@ Every one was read against its target during the pass. Three known-good categori
   WRONGLY said to live and then corrects it. Making it verifiable would destroy the point.
 - Three references to code that was DELETED rather than moved, so there is no line to point at:
   the two dead webview switch arms, whose removal the comment naming `autoLearnApply` at
-  `test/dashboard-view.test.js:369` records, and `readAllow`, which no longer exists anywhere
+  `test/dashboard-view.test.js:381` records, and `readAllow`, which no longer exists anywhere
   in the extension.
 
 What is genuinely open:

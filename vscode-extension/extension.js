@@ -659,6 +659,22 @@ function httpsGetFollow(url, onResponse, redirectsLeft = 5, handle = { req: null
   return handle;
 }
 
+// Every in-flight model download, the way `liveChildren` holds every in-flight
+// execFile child. It needs its own set because it is not one: `liveChildren`
+// holds ChildProcess handles, and a 32MB https transfer is a request handle, a
+// response stream and a write stream, all three of them closure-local. That made
+// it the single in-flight job deactivate() could not cancel — the reload killed
+// four python children and then let a 32MB download run to completion and
+// renameSync into ~/.claude from a torn-down host.
+const liveTransfers = new Set();
+
+function abortLiveTransfers() {
+  for (const transfer of [...liveTransfers]) {
+    try { transfer.destroy(new Error('extension deactivated')); } catch { /* already gone */ }
+  }
+  liveTransfers.clear();
+}
+
 // Downloads to `<dest>.tmp` and renames on success so a cancelled/failed run never
 // leaves a half-written bge-small.onnx that would falsely read as "model present".
 function downloadRecallModel() {
@@ -671,6 +687,11 @@ function downloadRecallModel() {
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'permission-wildcarding: downloading recall model (bge-small, ~32MB)…', cancellable: true },
     (progress, token) => new Promise((resolve) => {
+      // The same guard every execFile callback carries, and the only one of the
+      // extension's long jobs that did not have it. Refusing to START is
+      // strictly better than cancelling later: nothing opens a socket, nothing
+      // writes a .tmp, and there is nothing for teardown to clean up.
+      if (deactivated) { resolve(false); return; }
       fs.mkdirSync(modelDir, { recursive: true });
 
       // Seed the vocab first: the model cannot load without it, and failing before a
@@ -691,11 +712,33 @@ function downloadRecallModel() {
 
       const out = fs.createWriteStream(tmp);
       let received = 0, total = 0, reported = 0, transfer = null;   // the redirect-following handle, not one request
+      // ONE settlement, whichever of the six call sites gets here first.
+      // `fail` alone is reachable from five, across four independent channels
+      // (the follower's error, a non-200, the response stream, the short-file
+      // check and the write stream) — and one destroyed socket fires several of
+      // them. Unguarded that showed the user two error toasts for one failure,
+      // unlinked the .tmp twice, and called resolve() on an already-settled
+      // promise, which is silent and hides the double-report.
+      let settled = false;
+
+      const claim = () => {
+        if (settled) return false;
+        settled = true;
+        if (transfer) liveTransfers.delete(transfer);
+        return true;
+      };
 
       const fail = (err) => {
+        if (!claim()) return;
+        // Silent when the host is going down: a toast raised from a torn-down
+        // extension either lands on the successor's window or on nothing, and
+        // "the download you did not cancel failed" is not a thing to tell
+        // somebody who just reloaded. The cleanup still runs.
+        if (!deactivated) {
+          vscode.window.showErrorMessage(`permission-wildcarding: recall model download failed — ${err.message || err}`);
+        }
         // Unlink INSIDE close()'s callback and resolve only after it: close() is async, so
         // unlinking beside it raced the open handle, which on Windows is a swallowed EPERM.
-        vscode.window.showErrorMessage(`permission-wildcarding: recall model download failed — ${err.message || err}`);
         out.close(() => { try { fs.unlinkSync(tmp); } catch { /* already gone */ } resolve(false); });
       };
 
@@ -717,12 +760,31 @@ function downloadRecallModel() {
         out.on('finish', () => {
           out.close(() => {
             if (received < RECALL_MODEL_MIN_BYTES) { fail(new Error(`only received ${received} bytes — expected a ~32MB file`)); return; }
-            fs.renameSync(tmp, dest);
+            // A reload that landed during the transfer must not be finished off
+            // by its own completion. This is the last moment before the file
+            // becomes real, and renaming it here would publish a model into
+            // ~/.claude on behalf of a host that no longer exists.
+            if (deactivated) { fail(new Error('extension deactivated')); return; }
+            // try/catch, because this runs inside out.close()'s callback — long
+            // after the Promise executor returned. A throw here is not a
+            // rejection, it is an UNCAUGHT exception, and the promise it was
+            // supposed to settle stays pending, so the progress notification
+            // spins for the life of the window. EXDEV (tmp and dest on
+            // different volumes, which RECALL_MODEL_DIR can arrange) and EPERM
+            // from an antivirus scanner both reach it.
+            try { fs.renameSync(tmp, dest); }
+            catch (renameError) { fail(renameError); return; }
+            if (!claim()) return;
             resolve(true);
           });
         });
         out.on('error', fail);
       });
+      // AFTER the call, and only if nothing has settled yet: httpsGetFollow can
+      // report a synchronous failure through its callback before it returns, and
+      // registering a handle that is already dead would leave teardown
+      // destroying it a second time.
+      if (!settled) liveTransfers.add(transfer);
     })
   );
 }
@@ -3908,6 +3970,11 @@ async function deactivate() {
   // nothing retained them, so a reload left up to a 180s python child running
   // against a torn-down host — and the gate compile's callback wrote policy.
   killLiveChildren();
+  // The fifth in-flight job, and the one this pair of calls used to miss: the
+  // 32MB recall-model download is not a ChildProcess, so `liveChildren` never
+  // held it and nothing here could stop it. It ran to completion and renamed a
+  // model into ~/.claude on behalf of a host that had already gone.
+  abortLiveTransfers();
   if (outputChannel) { try { outputChannel.dispose(); } catch { /* already gone */ } }
   outputChannel = null;
   // The retainers, dropped BEFORE the await, not after.

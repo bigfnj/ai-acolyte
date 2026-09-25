@@ -292,11 +292,24 @@ function codexTargets(value) {
   }
   return result;
 }
+// The key here is a PERMISSION, not a candidate key -- `applyUnlocked` re-keys
+// the map by permission because one family can carry more than one spelling --
+// so it has to be cleaned to a permission's length. It used to be cleaned to
+// 512, the candidate-key length, while the value beside it kept 768: a
+// permission longer than 512 characters was stored under a TRUNCATED key, and
+// two permissions sharing a 512-character prefix collapsed onto that one key,
+// so the second silently replaced the first and its grant was dropped from the
+// claims registry and from what `undo()` restores.
+//
+// 512 is still right for `applied`, `reviewed` and `codexTargets`, whose keys
+// really are candidate keys (`candidate()` cleans those to 512 as well). This
+// map is the odd one out, and matching the value's own limit is what makes the
+// key a lossless spelling of it.
 function managedClaude(value) {
   const result = {};
   if (!object(value)) return result;
   for (const [key, permission] of Object.entries(value)) {
-    const safeKey = clean(key, 512);
+    const safeKey = clean(key, 768);
     const safePermission = clean(permission, 768);
     if (safeKey && safePermission) result[safeKey] = safePermission;
   }
@@ -842,6 +855,26 @@ function pruneCursors(state, limit) {
 // candidate from zero. Re-counting from an old total would double-count,
 // because `pruneObservationHashes` drops the hashes of a family that is gone.
 const CANDIDATE_LIMIT = 1000;
+// Policy backups were the one structure in this directory with no bound at all.
+// `backup()` writes a uniquely named `.bak` per changed target per apply, and
+// `undo()` reads only the most recent application's set, so every earlier file
+// is unreachable by any code path in the repo -- no reader, no pruner, no
+// deleter. Measured on the machine this was found on: 44 files, 562 KB, about
+// 1.2 a day, in the one directory where `managedHits` (200), `prunedCandidates`
+// (2000), `candidates` (1000), `cursors` (5000) and `observationHashes` (20000)
+// are all explicitly capped.
+//
+// 200 files is roughly five months at that rate and a couple of megabytes. A
+// FILE count rather than a byte budget, because how big a settings.json is is
+// not this module's business, and a count is the thing a reader can check
+// against `ls`.
+const BACKUP_LIMIT = 200;
+// The names `backup()` writes, and nothing else. `setDerivedGuidance` writes
+// `<name>.pre-derived` into the SAME directory, so a pruner that swept it by
+// age would eventually delete the pre-derived copy of the user's CLAUDE.md.
+// Anchored on the kinds `lastApplication` accepts, so a file this module did
+// not write cannot match by accident.
+const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-(?:claude|claude-claims|codex)-[0-9a-f]{8}\.bak$/;
 function pruneCandidates(state, limit, protectedKeys) {
   const keys = Object.keys(state.candidates);
   if (!(limit > 0) || keys.length <= limit) return 0;
@@ -907,8 +940,19 @@ function defaultCodexValidator(text, context) {
   fs.mkdirSync(path.dirname(context.path), { recursive: true });
   const temp = path.join(path.dirname(context.path),
     `.permission-wildcarding-validate.${process.pid}.${crypto.randomBytes(6).toString('hex')}.rules`);
-  fs.writeFileSync(temp, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  // INSIDE the try, not above it. `writeFileSync` opens the file and then
+  // writes, so a failure part way through -- ENOSPC, a quota stop, an
+  // interrupted write -- leaves the temp on disk with the throw escaping over
+  // the `finally` that exists to remove it. The file is created with `wx`, so
+  // the orphan also makes the NEXT validation with the same pid and random
+  // suffix fail EEXIST. `atomicWrite` in this file and `writeFileAtomicSync`
+  // in permissions.js have the same shape; this was the third copy of it.
+  //
+  // The `finally` tolerates the file never existing, which is the other half of
+  // moving the write in: an `unlinkSync` of a path that was never created is
+  // ENOENT and is already swallowed.
   try {
+    fs.writeFileSync(temp, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     const command = Array.isArray(context.command) && context.command.length
       ? context.command.map(String) : ['__claude_wildcarding_validation__'];
     // Fails closed on purpose: no reachable codex means no validation, and an
@@ -1001,6 +1045,8 @@ function createAutoLearnManager(options = {}) {
     ? Math.max(0, Math.floor(options.cursorLimit)) : CURSOR_LIMIT;
   const candidateLimit = Number.isFinite(options.candidateLimit)
     ? Math.max(0, Math.floor(options.candidateLimit)) : CANDIDATE_LIMIT;
+  const backupLimit = Number.isFinite(options.backupLimit)
+    ? Math.max(0, Math.floor(options.backupLimit)) : BACKUP_LIMIT;
   // Cached, because the policy is a client-refreshed cache and re-reading it per
   // candidate would only add I/O to a listing — but keyed on a cheap stat rather
   // than held for the manager's lifetime. Nothing watches the policy file, and
@@ -1455,6 +1501,45 @@ function createAutoLearnManager(options = {}) {
       existed: before.exists,
     };
   }
+  // Keeps the newest `backupLimit` `.bak` files, plus every backup the state
+  // still names, whatever its age.
+  //
+  // The second half is what keeps `undo()` correct. Undo restores from
+  // `lastApplication.targets[].backupPath` and refuses outright when one is
+  // missing or altered, so a pruner going by age alone would eventually delete
+  // the files that make the last apply reversible -- and with a limit of 0 it
+  // would do it on the very first apply. Protecting by NAME rather than by
+  // position is deliberate: the recorded paths are absolute and always inside
+  // this directory, and comparing basenames cannot be defeated by a separator
+  // or a case difference on Windows.
+  //
+  // Names sort chronologically on their own, because `backup()` builds them
+  // from an ISO timestamp with `:` and `.` rewritten to `-`, which is fixed
+  // width. No stat per file, and no dependence on an mtime that a copy, a
+  // restore or a backup tool can rewrite.
+  //
+  // Failures are counted rather than thrown. By the time this runs the policy
+  // has already been written and the state saved; turning a locked or
+  // read-only `.bak` into a failed apply would be a strictly worse outcome
+  // than leaving the file. The count is returned so a degraded run says so
+  // instead of reporting a clean prune.
+  function pruneBackups(keepPaths) {
+    let names;
+    try { names = fs.readdirSync(backupDir); }
+    catch { return { removed: 0, kept: 0, failed: 0 }; }
+    const keep = new Set((Array.isArray(keepPaths) ? keepPaths : [])
+      .map((item) => path.basename(String(item || ''))).filter(Boolean));
+    const mine = names.filter((name) => BACKUP_NAME.test(name)).sort();
+    const excess = Math.max(0, mine.length - backupLimit);
+    let removed = 0;
+    let failed = 0;
+    for (const name of mine.slice(0, excess)) {
+      if (keep.has(name)) continue;
+      try { fs.unlinkSync(path.join(backupDir, name)); removed += 1; }
+      catch (error) { if (error.code !== 'ENOENT') failed += 1; }
+    }
+    return { removed, kept: mine.length - removed, failed };
+  }
   function rollback(written) {
     const conflicts = [];
     for (const change of written.slice().reverse()) try {
@@ -1735,12 +1820,23 @@ function createAutoLearnManager(options = {}) {
       if (conflicts.length) error.rollbackConflicts = conflicts;
       throw error;
     }
+    // After the save, so the protected set is the application this apply just
+    // recorded. Pruning earlier would protect the PREVIOUS application's
+    // backups, and a rollback would then leave that application un-undoable
+    // having deleted its files for a write that never landed.
+    const backupsPruned = pruneBackups((state.lastApplication?.targets || [])
+      .map((target) => target.backupPath));
     const appliedKeys = [...new Set([...newly.claude, ...newly.codex])].sort();
     const changedTargets = [...new Set(changes.map((item) =>
       item.kind === 'claude-claims' ? 'claude' : item.kind))];
     return {
       changed: changes.length > 0, changedTargets,
       applied: newly, appliedKeys, appliedCount: appliedKeys.length,
+      // Reported on every apply, not only when something was removed: a prune
+      // that could not delete a file is the case worth seeing, and a field that
+      // only appears on the interesting run is a field nobody notices.
+      backupsPruned: backupsPruned.removed, backupsKept: backupsPruned.kept,
+      backupsUnremovable: backupsPruned.failed,
       skippedCount: Math.max(0, (keys || Object.keys(state.candidates)).length - selected.length),
       // Each entry names the managed rule that beat it, because a verdict alone
       // sends the reader hunting through a few hundred managed entries.
@@ -2120,7 +2216,11 @@ function createAutoLearnManager(options = {}) {
     },
     scan, status, getStatus: status, overview, explainManaged, rebuildManagedHits,
     derivedReview, decideDerived,
-    listCandidates, list: listCandidates, getCandidates: listCandidates,
+    // `list` was a third alias of the same function with no consumer anywhere,
+    // production or test. `getCandidates` is NOT one of those: it is the
+    // fallback leg the extension takes at vscode-extension/extension.js:1032
+    // when `listCandidates` is absent, so it stays.
+    listCandidates, getCandidates: listCandidates,
     setMode, apply: applyPolicy, applyClaude, applyCodex, undo,
   };
 }

@@ -1037,7 +1037,9 @@ function autoLearnConfig() {
     // Evidence/state is still partitioned and cwd-filtered by the open
     // workspace. That is independent of scope: it decides which observations
     // count, not where a rule is written, and user-scope export has always used
-    // it. `codexWorkspaceRoot` is gone with the capability it served.
+    // it. The trusted-workspace rule ROOT is gone with the capability it served,
+    // and test/codex-workspace-scope.test.js fails the build if either of its
+    // two symbols comes back into the packaged extension.
     workspaceRoot,
   };
 }

@@ -27,6 +27,19 @@ FPCACHE="${PW_FPCACHE:-$HOME/.claude/wildcarding/fixed-point.json}"
 fail=0
 pass=0
 
+# Captured BEFORE the first CLI invocation, because the very first hook call is what
+# damages it. The fixed-point key is stamped with a hash of the CLI's own code files,
+# so running this script from a git worktree mints a key for the WORKTREE's src/ and
+# writes it into the real ~/.claude/wildcarding/fixed-point.json. The installed hook
+# then misses on every tool call until something rewrites it. Observed twice on
+# 2026-09-24 during a worktree-based change.
+#
+# An earlier version read this just before the cold-cache section, which is AFTER the
+# warm hook run — so it faithfully restored an already-replaced key and its own
+# restore assertion passed while the live cache stayed wrong.
+FP_ORIGINAL=""
+[ -f "$FPCACHE" ] && FP_ORIGINAL="$(cat "$FPCACHE")"
+
 check() { # name, expected-ERE, output
   if printf '%s' "$3" | grep -Eq "$2"; then
     pass=$((pass+1)); echo "  PASS  $1"
@@ -98,9 +111,10 @@ fi
 # The cache is pure: deleting the key costs one slow hook call and nothing else,
 # which is why it is safe for a gate to remove it.
 echo "== hook entry point again, with the fixed-point cache forced to miss"
-FP_SAVED=""
+# FP_ORIGINAL was captured at the top, before the FIRST hook call. Capturing it here
+# would be too late: that first call has already replaced the key if this checkout is
+# not the one the installed hook runs.
 if [ -f "$FPCACHE" ]; then
-  FP_SAVED="$(cat "$FPCACHE")"
   rm -f "$FPCACHE"
 fi
 
@@ -207,6 +221,15 @@ NEWEST_STATE=$(node -e '
 
 if [ -z "$NEWEST_STATE" ]; then
   echo "  INFO  no scanned Auto Learn state on this box yet, so there is nothing to diverge from"
+elif [ -f "$REPO/.git" ]; then
+  # A git worktree has `.git` as a FILE pointing at the real gitdir, not a directory.
+  # The workspace default walks UP from cwd to the nearest ancestor owning a state
+  # file, so from a worktree parked outside the tree the installed extension's state
+  # is legitimately unreachable and a mismatch says nothing about the product. This
+  # is INFO rather than a pass: it reports that the check did not run, instead of
+  # claiming a green it did not earn. Every agent working in a worktree hits this.
+  echo "  INFO  running from a git worktree, so the state-file agreement check is not meaningful here"
+  echo "        CLI reads $(basename "${CLI_STATE:-<none>}"), newest scanned is $(basename "$NEWEST_STATE")"
 elif [ "$CLI_STATE" = "$NEWEST_STATE" ]; then
   ok "the CLI and the extension agree on the state file" "$(basename "$CLI_STATE")"
 else
@@ -230,11 +253,30 @@ else
   no "the last Auto Learn scan recorded no errors" "$SCAN_ERRORS file(s) failed to read"
 fi
 
-# Leave the machine as we found it. The run above re-earns the key on its own,
-# so this only matters when the cold run failed to write one.
-if [ -n "$FP_SAVED" ] && [ ! -s "$FPCACHE" ]; then
+# Leave the machine as we found it — UNCONDITIONALLY.
+#
+# This used to restore only when the cold run had failed to write a key, on the
+# reasoning that a successful run re-earns its own. That reasoning is wrong the
+# moment this script is run from anywhere but the checkout the live hook points at.
+# The key is stamped with a hash of the CLI's own code files, so a run from a git
+# worktree mints a key for the WORKTREE's src/ and leaves it in the real
+# ~/.claude/wildcarding/fixed-point.json. The installed hook then misses on every
+# tool call until something rewrites it. Observed twice on 2026-09-24, a
+# worktree-stamped key replacing the installed checkout's.
+#
+# Restoring the saved bytes always costs nothing when they are already correct and
+# fixes the case where they are not. The cold-run assertions above have already read
+# what they needed by this point.
+if [ -n "$FP_ORIGINAL" ]; then
   mkdir -p "$(dirname "$FPCACHE")"
-  printf '%s\n' "$FP_SAVED" > "$FPCACHE"
+  printf '%s\n' "$FP_ORIGINAL" > "$FPCACHE"
+  RESTORED="$(cat "$FPCACHE")"
+  if [ "$RESTORED" = "$FP_ORIGINAL" ]; then
+    ok "the fixed-point cache is back to the key this run found" "$FP_ORIGINAL"
+  else
+    no "the fixed-point cache is back to the key this run found" \
+       "wanted $FP_ORIGINAL, on disk $RESTORED"
+  fi
 fi
 
 echo ""

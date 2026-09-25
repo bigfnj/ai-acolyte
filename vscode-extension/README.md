@@ -93,8 +93,8 @@ candidate that the current deny or ask policy would override.
 
 The extension scans at startup, watches both agents' JSONL history, and reconciles every five
 minutes by default. Incremental reconciliation, stable observation IDs and deduplication are
-designed to prevent double counting. A known eviction defect at the observation-hash cap still
-blocks Codex certification and is recorded in `BACKLOG.md`. A scan will not always finish a file: one tick ingests a bounded amount
+designed to prevent double counting. The eviction defect that once let a re-read inflate
+a family past its threshold is fixed, and pinned by `test/auto-learn-evidence-cap.test.js`. A scan will not always finish a file: one tick ingests a bounded amount
 per transcript, and what it could not reach is REPORTED rather than papered over, as `partial`,
 `unreadable` and `unmatchedResults`. The cursor records what was consumed, so the next tick
 resumes exactly where it stopped. Workspace-partitioned state stays under the user profile at
@@ -131,8 +131,9 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 ### Review and policy output
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
-those are also the only four message arms the webview host handles (`autoLearnScan`,
-`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:1961-1927`).
+they post four of the **fourteen** message arms the webview host handles; the switch is at
+`vscode-extension/extension.js:3289`. This sentence twice claimed four was the total, and the
+second time cited a DESCENDING line range, which is not a range at all.
 **Apply safe candidates** and **Cycle mode** are Command Palette only — see the command
 list at the end of this file. Apply keeps a recoverable snapshot; Undo restores the most
 recent Auto Learn application. The repository CLI uses the same service:
@@ -146,17 +147,25 @@ bin/wildcard-perms --learn undo
 
 The CLI uses its current directory as the workspace partition and user Codex rules by
 default. Run it from the same workspace as VS Code, or pass `--workspace <path>` plus
-`--codex-scope user|workspace|off`, `--threshold <count>`, `--mode`, and
-`--codex-executable` to mirror the extension settings. Workspace Codex scope is not
-certified: the CLI does not currently establish Codex's own project-trust decision.
+`--codex-scope user|off`, `--threshold <count>`, `--mode`, and `--codex-executable` to
+mirror the extension settings. **Workspace Codex scope was WITHDRAWN, not merely left
+uncertified.** Three different trust notions were in play (VS Code workspace trust, the CLI
+accepting the flag unguarded, and Codex project trust, which is neither), so the capability
+was removed rather than shipped with a trust model nobody could state. `--codex-scope
+workspace` now parses, refuses, names the reason and changes nothing;
+`wildcard-perms --codex-workspace-rules status|remove` is the one-way cleanup.
 
 Codex rules default to `~/.codex/rules/permission-wildcarding.rules`. The
-`permissionWildcarding.autoLearn.codexScope` setting can target the trusted workspace's
-`.codex/rules/permission-wildcarding.rules`, or be `off` to learn without exporting Codex policy.
+`permissionWildcarding.autoLearn.codexScope` setting is `user` or `off`; `off` learns without
+exporting Codex policy. The `workspace` value was withdrawn and the manifest enum no longer
+offers it. Setting it by hand turns Codex export OFF and says so, and never falls back to user
+scope silently.
 Auto Learn never overwrites `default.rules`. Every generated rule must pass an
 isolated `codex execpolicy check` before a write; validation failure leaves active rules unchanged.
-That check does not yet prove the decision after every other visible rule file is loaded, which is
-one of the certification blockers.
+That check now evaluates every visible rule file together, not just the generated one: `--rules`
+is repeatable and Codex resolves a conflict toward the MORE restrictive decision, measured
+order-independently against codex-cli 0.145.0. A neighbouring file that forbids the prefix blocks
+the write, which `test/codex-contract.test.js` proves end to end against the real binary.
 Claude and Codex applications use separate snapshots and output targets. Restart Codex after
 applying or undoing Codex rules because it loads them at startup.
 
@@ -355,7 +364,7 @@ All 17 keys under `permissionWildcarding.*`, with the defaults the manifest decl
 | `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies |
 | `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |
 | `autoLearn.debounceSeconds` | `20` | Quiet window a watcher-driven scan waits out |
-| `autoLearn.codexScope` | `"user"` | `user` / `workspace` / `off` — where generated Codex rules land |
+| `autoLearn.codexScope` | `"user"` | `user` / `off` — where generated Codex rules land. `workspace` was withdrawn |
 | `autoLearn.codexExecutable` | `"codex"` | Binary used for `codex execpolicy check` |
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation |

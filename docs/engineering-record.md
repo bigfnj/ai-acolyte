@@ -1002,7 +1002,7 @@ installing an equal version over an existing one is a silent no-op, which presen
 "in-place upgrades do not work". Bumped to 1.4.5 on 2026-09-14.
 
 Bump `vscode-extension/package.json` and the root `package.json` together.
-`test/installers.test.js:465` — "the two package manifests report the same version" —
+`test/installers.test.js:511` — "the two package manifests report the same version" —
 asserts they agree, and the extension manifest is authoritative because `release.yml`
 defaults its version input to it.
 

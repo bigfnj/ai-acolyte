@@ -205,21 +205,32 @@ CLI_STATE=$(node "$CLI" --learn status 2>/dev/null | node -e '
   let s = ""; process.stdin.on("data", (d) => { s += d; })
     .on("end", () => { try { process.stdout.write(JSON.parse(s).paths.state); } catch {} });
 ')
-NEWEST_STATE=$(node -e '
+# Skipping an unparseable state file is right — a half-written one is not the newest —
+# but swallowing the fact is not. If every candidate fails to parse, "no scanned state"
+# and "every state on this box is corrupt" are the same output, and only one of them is
+# benign. The count is emitted alongside so the caller can tell them apart.
+NEWEST_SCAN=$(node -e '
   const fs = require("fs"), path = require("path");
   const dir = process.argv[1];
-  let best = null;
-  for (const name of fs.readdirSync(dir)) {
+  let best = null; let unreadable = 0;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { process.stdout.write("0\n"); process.exit(0); }
+  for (const name of names) {
     if (!/^auto-learn-state.*\.json$/.test(name)) continue;
     try {
       const at = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")).lastScanAt;
       if (at && (!best || at > best.at)) best = { at, file: path.join(dir, name) };
-    } catch { /* a half-written state is not the newest */ }
+    } catch { unreadable += 1; }
   }
-  if (best) process.stdout.write(best.file);
+  process.stdout.write(`${unreadable}\n${best ? best.file : ""}`);
 ' "$STATE_DIR" 2>/dev/null)
+UNREADABLE_STATES=$(printf '%s' "$NEWEST_SCAN" | head -1)
+NEWEST_STATE=$(printf '%s' "$NEWEST_SCAN" | tail -n +2)
 
-if [ -z "$NEWEST_STATE" ]; then
+if [ -z "$NEWEST_STATE" ] && [ "${UNREADABLE_STATES:-0}" != "0" ]; then
+  no "the Auto Learn state files parse" \
+     "$UNREADABLE_STATES state file(s) in $STATE_DIR are unparseable and none is readable"
+elif [ -z "$NEWEST_STATE" ]; then
   echo "  INFO  no scanned Auto Learn state on this box yet, so there is nothing to diverge from"
 elif [ -f "$REPO/.git" ]; then
   # A git worktree has `.git` as a FILE pointing at the real gitdir, not a directory.
@@ -240,18 +251,36 @@ fi
 # And that state must not be carrying scan errors. This is the check that would have
 # caught the 2.27 GB rollout defect, which sat unreadable for eight days while every
 # other gate stayed green.
+#
+# ⚠ THIS CHECK COULD NOT FAIL, and an audit caught it three lines below two INFO arms
+# that decline to claim exactly this. When $NEWEST_STATE was empty — no scanned state,
+# which the block above has JUST detected and deliberately reported as INFO rather than
+# "claiming a green it did not earn" — readFileSync(undefined) threw, the catch wrote
+# "0", and this printed PASS over evidence that does not exist. The same catch also
+# swallowed a corrupt or unreadable state file and reported zero errors.
+#
+# It reports three outcomes now: a real count, "no state to read" as INFO, and an
+# unreadable state as a FAILURE, because a state file that will not parse is a worse
+# result than one carrying errors, not a better one.
 SCAN_ERRORS=$(node -e '
   const fs = require("fs");
+  const file = process.argv[1];
+  if (!file) { process.stdout.write("absent"); process.exit(0); }
   try {
-    const stats = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).lastScanStats;
+    const stats = JSON.parse(fs.readFileSync(file, "utf8")).lastScanStats;
     process.stdout.write(String(stats && stats.errors ? stats.errors : 0));
-  } catch { process.stdout.write("0"); }
+  } catch (error) { process.stdout.write("unreadable:" + error.code); }
 ' "$NEWEST_STATE" 2>/dev/null)
-if [ "${SCAN_ERRORS:-0}" = "0" ]; then
-  ok "the last Auto Learn scan recorded no errors"
-else
-  no "the last Auto Learn scan recorded no errors" "$SCAN_ERRORS file(s) failed to read"
-fi
+case "${SCAN_ERRORS:-unreadable:empty}" in
+  absent)
+    echo "  INFO  no scanned state to check for scan errors" ;;
+  0)
+    ok "the last Auto Learn scan recorded no errors" ;;
+  unreadable:*)
+    no "the Auto Learn state is readable" "$NEWEST_STATE -> ${SCAN_ERRORS#unreadable:}" ;;
+  *)
+    no "the last Auto Learn scan recorded no errors" "$SCAN_ERRORS file(s) failed to read" ;;
+esac
 
 # Leave the machine as we found it — UNCONDITIONALLY.
 #

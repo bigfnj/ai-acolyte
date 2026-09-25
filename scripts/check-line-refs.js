@@ -613,6 +613,23 @@ function checkBounds() {
       broken.push({ ...ref, reason: `unreadable: ${res.rel}`, where });
       continue;
     }
+    // A DESCENDING range is not a stale citation, it is not a range at all, and no
+    // amount of re-anchoring makes `1961-1927` mean anything. It is also the exact
+    // signature of a bulk repoint that updated the first number and left the second:
+    // three shipped in one commit on 2026-09-25 and every other check passed them,
+    // because both endpoints existed and neither landed on a vacuous line.
+    //
+    // Free to assert, cannot false-positive, and it would have caught all three.
+    if (ref.end < ref.start) {
+      broken.push({
+        ...ref,
+        resolved: res.rel,
+        reason: `cites a DESCENDING range ${ref.start}-${ref.end}. Usually a repoint that `
+          + 'moved the start and left the end behind; re-derive both.',
+        where
+      });
+      continue;
+    }
     const count = lines.length && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
     if (ref.start < 1 || ref.start > count || ref.end > count) {
       broken.push({

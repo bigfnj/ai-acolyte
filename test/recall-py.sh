@@ -90,7 +90,7 @@ echo "$ERR" | grep -q 'recall_index.json' || fail "the warning does not name the
 echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 
 # ---------------------------------------------------------------- B2: the write is ATOMIC
-# Mutation: replace save_index's body (memory/recall.py:408-384) with a plain in-place
+# Mutation: replace save_index's body (memory/recall.py:408-419) with a plain in-place
 # `json.dump(idx, open(INDEX_PATH, "w"))`. The file-identity assertion below fails; nothing
 # else in this suite does.
 #

@@ -7,7 +7,7 @@
 // Why this exists as a separate step rather than another assertion in `npm test`:
 // .github/workflows/release.yml runs the tests first and packages second, so every
 // guard inside `npm test` is blind to whatever the packaging step does to the
-// manifests. test/installers.test.js:465 — "the two package manifests report the
+// manifests. test/installers.test.js:511 — "the two package manifests report the
 // same version" — still could not catch the release path pulling them apart. This
 // runs on the far side of that step, against the artefact about to be uploaded.
 //

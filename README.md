@@ -7,9 +7,9 @@ belongs to, so one decision covers the whole family from then on.
 
 It is a VS Code extension plus a CLI. The Claude Code path watches and rewrites
 `~/.claude/settings.json`; cross-agent Auto Learn reads Claude Code and Codex
-history and emits policy in each agent's native format. The Codex path is useful,
-but is not yet compatibility-certified; the remaining proof is tracked at the top
-of [BACKLOG.md](BACKLOG.md).
+history and emits policy in each agent's native format. The Codex path is
+**conditionally certified** for `codex-cli` 0.145.0 on Windows; what is proven and
+what is not are in [`docs/codex-certification.md`](docs/codex-certification.md).
 
 ![Wildcarding status card](img/01-wildcarding.png)
 
@@ -66,7 +66,8 @@ dashboard is not a shared mechanism.
 |---|---|---|
 | Wildcard generalization of the allow list | yes | no equivalent |
 | Project-local approvals promoted to user scope | yes | no equivalent |
-| Policy backup before every write, with undo | yes | no equivalent |
+| Auto Learn backup before every apply, with undo | yes | yes |
+| High-water allow/deny backup with restore-from-backup | yes | no equivalent |
 | Tracked-wildcard inventory | yes | no equivalent |
 | `PostToolUse` hook | yes | no equivalent |
 | Auto Learn over session history | yes | yes |
@@ -387,7 +388,7 @@ association. Neither uninstaller touches the allow list. Cutting a GitHub Releas
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:
 `syncVersion`'s `MANIFESTS` list (`scripts/sync-version.mjs:21`) covers both
 `vscode-extension/package.json`, which drives the sidebar badge, and the root `package.json`,
-which `wildcard-perms --version` prints. `test/installers.test.js:465` asserts they agree, and the
+which `wildcard-perms --version` prints. `test/installers.test.js:511` asserts they agree, and the
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
@@ -395,8 +396,14 @@ node --test                         # 710 tests; `npm test` runs the same thing
 npm run smoke                       # scripts/smoke.sh, against the LIVE ~/.claude
 node scripts/drive-installed.js     # activates the INSTALLED VSIX and drives it
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN
+bash test/recall-py.sh              # the Python half; NOT part of node --test
 python memory/recall.py --lint      # index clean, gates not stale against source
 ```
+
+`test/recall-py.sh` is listed because nothing else invokes it. It is not in `node --test`
+(it needs the toolbox Python, which CI has no way to provide) and it was not in this
+checklist either, so three real repairs made to it were exercised only if somebody
+remembered. It exits 0 with `skip:` when the interpreter is absent.
 
 `npm run smoke` is the only gate that drives the hook the way Claude Code does, against this
 machine's real `settings.json` rather than a fixture, so it catches what a suite of mocked homes

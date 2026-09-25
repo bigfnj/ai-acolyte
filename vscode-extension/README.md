@@ -1,4 +1,4 @@
-# Permission Wildcarding (VS Code extension)
+# Acolyte (VS Code extension)
 
 Watches `~/.claude/settings.json` and live-generalizes approved Claude Code
 permissions to depth-aware wildcards. Adds an Activity Bar dashboard: a hero card
@@ -26,7 +26,7 @@ On every write it also saves a high-water-mark backup of the allow list **and th
 deny list** to `~/.claude/backups/allow-list.latest.json`, so a managed-settings
 refresh that resets `settings.json` can't lose your accumulated wildcards or your
 safety boundary. Recover both with **Restore prunes from backup** (dashboard
-button, title-bar `history` icon, or the `Permission Wildcarding: Restore prunes from
+button, title-bar `history` icon, or the `Acolyte: Restore prunes from
 backup` command).
 
 deny is restored alongside allow deliberately: every other feature here ends its
@@ -211,7 +211,7 @@ works under a managed policy.
   on external edits, and can be pinned or tuned via the `permissionWildcarding.memory.*`
   settings (`enabled`, `dir`, `lineBudget` for one hook's width, `maxLines` for how many lines
   Claude Code actually loads, `totalBudget`, `recallScript`). Command:
-  `Permission Wildcarding: Lint memory index`.
+  `Acolyte: Lint memory index`.
 
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
@@ -333,7 +333,7 @@ cycles between one useful mode and two that do nothing there.
 ## Every command
 
 All 17, as registered in `contributes.commands`. Each is prefixed
-`Permission Wildcarding:` in the Command Palette. Selected commands also appear as
+`Acolyte:` in the Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
 | Command | What it does |

@@ -248,7 +248,7 @@ function mdFiles(dir) {
   try {
     return fs.readdirSync(dir).filter((f) => f.endsWith('.md'));
   } catch (err) {
-    console.error(`permission-wildcarding: cannot read memory store ${dir}, so it cannot win `
+    console.error(`acolyte: cannot read memory store ${dir}, so it cannot win `
       + `primary selection —`, err);
     return null;
   }
@@ -541,7 +541,7 @@ class MemoryLint {
       try {
         fn();
       } catch (err) {
-        console.error('permission-wildcarding: a memory reconcile subscriber failed —', err);
+        console.error('acolyte: a memory reconcile subscriber failed —', err);
       }
     }
   }
@@ -650,14 +650,14 @@ class MemoryLint {
     // activate() never created on that path.
     if (!conf.enabled) {
       vscode.window.showInformationMessage(
-        'permission-wildcarding: memory lint is off — set permissionWildcarding.memory.enabled to true.'
+        'acolyte: memory lint is off — set permissionWildcarding.memory.enabled to true.'
       );
       return;
     }
     const dirs = discoverDirs(conf);
     const { dir, files } = pickPrimary(dirs);
     if (!dir) {
-      vscode.window.showInformationMessage('permission-wildcarding: no MEMORY.md found under ~/.claude/projects/*/memory.');
+      vscode.window.showInformationMessage('acolyte: no MEMORY.md found under ~/.claude/projects/*/memory.');
       return;
     }
     const r = fullReport(dir, conf, files);
@@ -670,7 +670,7 @@ class MemoryLint {
     // who clicked the gauge will look.
     if (!r) {
       vscode.window.showErrorMessage(
-        `permission-wildcarding: ${path.join(dir, MEMORY_INDEX)} exists but could not be read `
+        `acolyte: ${path.join(dir, MEMORY_INDEX)} exists but could not be read `
         + '(a directory of that name, a permissions error, or a sharing violation).'
       );
       return;

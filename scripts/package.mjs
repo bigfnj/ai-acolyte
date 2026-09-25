@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Build the Permission Wildcarding VSIX reproducibly (used by CI and locally).
+// Build the Acolyte VSIX reproducibly (used by CI and locally).
 //
 //   node scripts/package.mjs            # version from vscode-extension/package.json
 //   node scripts/package.mjs 1.2.0      # override version (e.g. from a release tag)

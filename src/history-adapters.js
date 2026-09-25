@@ -1021,7 +1021,16 @@ function readRange(file, start, length, chunk = READ_CHUNK_BYTES) {
     }
     return total === length ? buffer : buffer.subarray(0, total);
   } finally {
-    fs.closeSync(descriptor);
+    // A throwing `closeSync` in a `finally` REPLACES the in-flight error, and
+    // the in-flight error is the only diagnostic a caller ever gets for an
+    // unreadable stretch: `scanHistoryFiles`' per-file catch records
+    // `error.message` into `files[].error` and nothing else survives. A close
+    // failure (EBADF after an interrupted read, EIO on a disconnected share)
+    // would land there instead of the EACCES or ERR_OUT_OF_RANGE that says what
+    // actually went wrong, and the descriptor is already unusable either way.
+    // `src/policy-lock.js:143` and `atomicWrite` in auto-learn-manager.js wrap
+    // theirs for the same reason; this was the one that did not.
+    try { fs.closeSync(descriptor); } catch {}
   }
 }
 

@@ -2323,10 +2323,6 @@ function createAutoLearnManager(options = {}) {
       codexRules: codexRulesPath,
     },
     scan, status, getStatus: status, overview, explainManaged, rebuildManagedHits,
-    // The one definition of "which rule files does Codex see", shared with the
-    // validator so the diagnostic and the write can never disagree about what
-    // was evaluated. Callers print `blindSpots` beside the verdict.
-    codexRuleSet: () => codexRuleFileSet({ home, target: codexRulesPath }),
     derivedReview, decideDerived,
     // `list` was a third alias of the same function with no consumer anywhere,
     // production or test. `getCandidates` is NOT one of those: it is the

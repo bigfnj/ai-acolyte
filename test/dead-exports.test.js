@@ -111,7 +111,12 @@ const TEST_ONLY = {
   'src/auto-learn-manager.js': ['migrateStateTo'],
   'src/auto-learn-worker.js': ['run'],
   'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'classifyInvocation', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
-  'src/codex-policy.js': ['allowedSandboxModes', 'enterprisePrefixRules', 'enterpriseRequirements'],
+  // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
+  // consumer when the managed-requirements parser was rewritten on 2026-09-24:
+  // production now asks enterprisePolicyAssessment, which answers with the degraded
+  // state as well as the decision. Both are kept as a stable surface and both are
+  // exercised; this census is what noticed, on the merge.
+  'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRuleHealth', 'enterprisePrefixRules', 'enterpriseRequirements'],
   'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'markersFor', 'reconcileDerived', 'renderMitigation'],
   'src/exec-resolve.js': ['quoteForCommandProcessor', 'resolveExecutable'],
   'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
@@ -122,7 +127,12 @@ const TEST_ONLY = {
   'src/managed-policy.js': ['coversPrefix', 'hookEventAllowed', 'rulePrefix'],
   'src/permission-match.js': ['MATCH_CACHE_LIMIT', 'matchCacheStats'],
   'src/permissions.js': ['coverIndexKeyCacheStats', 'coverKeyCacheStats'],
-  'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
+  // CODEX_BEGIN_MARKER joined this list on 2026-09-24 when removeGeneratedCodexRules
+  // moved into this module: the marker's only production reader is now its own file,
+  // and the workspace-rules cleanup in bin/wildcard-perms asks that function rather
+  // than matching the marker itself. That is the right direction -- ownership is
+  // proved in one place -- but it does leave the constant test-only.
+  'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'CODEX_BEGIN_MARKER', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
   'vscode-extension/autoLearnUi.js': ['permissionMatches'],

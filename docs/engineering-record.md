@@ -50,7 +50,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1121`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1272`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 

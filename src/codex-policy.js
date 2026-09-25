@@ -442,20 +442,22 @@ function codexRulesArguments(files) {
   return (Array.isArray(files) ? files : []).flatMap((file) => ['--rules', String(file)]);
 }
 
+// CODEX_RULE_EXTENSION, MANAGED_POLICY_BLIND_SPOTS, codexRuleDirectories and
+// parseEnterprisePrefixRules were exported when this parser was rewritten and never
+// consumed from outside this module, including by tests. Unexported rather than
+// deleted: every one of them is called internally, and MANAGED_POLICY_BLIND_SPOTS
+// reaches the user through enterprisePolicyAssessment's verdict rather than directly.
+// test/dead-exports.test.js is what caught them, on the merge.
 module.exports = {
   CODEX_BUNDLE_CACHE,
-  CODEX_RULE_EXTENSION,
-  MANAGED_POLICY_BLIND_SPOTS,
   readEnterpriseBundle,
   enterpriseRequirements,
   allowedApprovalPolicies,
   allowedSandboxModes,
-  parseEnterprisePrefixRules,
   enterprisePrefixRules,
   enterprisePrefixRuleHealth,
   enterprisePolicyAssessment,
   enterpriseDecisionFor,
-  codexRuleDirectories,
   codexRuleFileSet,
   codexRulesArguments,
 };

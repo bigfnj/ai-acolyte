@@ -162,7 +162,7 @@ where every sibling structure is explicitly capped.
 
 **Smaller, each confirmed:**
 
-- Path probes poison the rule-match cache. `src/auto-learn-manager.js:952`
+- Path probes poison the rule-match cache. `src/auto-learn-manager.js:1180`
   feeds `coversPermission` a freshly synthesized `Tool(<path>)` per
   observation, and `permission-match.js` caches each one. Memory is bounded by
   a wholesale `clear()` at 5,000, so this is thrash rather than a leak: the
@@ -282,7 +282,7 @@ nobody calls with an object third argument) and `:691-694` (that third parameter
 is vestigial in production; only a test passes a function).
 
 Two corrections to this file's own claims:
-`list: listCandidates` at `auto-learn-manager.js:2024` has **zero** consumers
+`list: listCandidates` at `auto-learn-manager.js:2331` has **zero** consumers
 anywhere, so it is dead on
 both sides rather than merely an unreachable fallback; and "verdicts.unknown can
 no longer be non-zero" is **half wrong** — the `!policy.present` path is provably
@@ -302,13 +302,13 @@ exactly one file because `const workspaceRoot = vscode.workspace.workspaceFolder
 at `vscode-extension/extension.js:998` takes the FIRST workspace folder. That line is real but it
 is **not on the drain path**: it belongs to `autoLearnConfig()` and governs Auto Learn's state
 partitioning and Codex scope. The drain enumerates EVERY folder, at
-`vscode-extension/extension.js:2596`. The blind spot is caused solely by
+`vscode-extension/extension.js:2646`. The blind spot is caused solely by
 `return path.join(workspaceRoot, LOCAL_RELATIVE);` at `src/local-settings.js:45`, a single join
 with no recursion, so the extension drains one file PER OPEN FOLDER and never a subdirectory.
 A fix aimed at `workspaceFolders?.[0]` would change Auto Learn's state identity and cwd filter
 and would not touch the drain at all.
 
-The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:327`
+The CLI drains a different one. `const cwd = hookCwd(input);` at `bin/wildcard-perms:458`
 takes the Claude Code session's own directory, and `:332-333` tests
 `<cwd>/.claude/settings.local.json` on every tool call.
 
@@ -411,7 +411,7 @@ what was deliberately left.
   `manager.status` check, and `src/auto-learn-manager.js:2022` exports
   `getStatus: status`. `manager.getCandidates(options)` at
   `vscode-extension/extension.js:1116` follows a `manager.listCandidates` check, and
-  `src/auto-learn-manager.js:2024` exports `getCandidates: listCandidates`.
+  `src/auto-learn-manager.js:2331` exports `getCandidates: listCandidates`.
   Re-verified 2026-09-14. A correction pass read this entry as closed because it also
   named `list()`: that alias IS still exported on the same line as `getCandidates`, but
   it is not part of either fallback chain, so naming it here was the imprecision that
@@ -422,7 +422,7 @@ what was deliberately left.
   scripts never touch instruction files, so an accepted derived block is orphaned
   after an uninstall with no command that removes it.
 - The Codex validator's temp file is created before the `try` whose `finally` unlinks it:
-  `.permission-wildcarding-validate` at `src/auto-learn-manager.js:813`, so a failed
+  `.permission-wildcarding-validate` at `src/auto-learn-manager.js:969`, so a failed
   write orphans it.
 - `policyCache` has no invalidation path from the managed-policy watcher, so
   `status()` reports a stale verdict between a policy change and the next scan.
@@ -435,27 +435,6 @@ confirmed as a REGRESSION was fixed the same day and is not listed here. What
 follows is what was confirmed and left. Note two of them independently found the
 same two Tier-1 defects (the installers and the coverage index), which is worth
 knowing when deciding how much to trust a single agent's report.
-
-### Assertions whose guarantee is narrower than their comment claims
-
-None is vacuous — each has a nameable killing mutation — but the stated guarantee
-is wider than the check:
-
-- `test/dashboard-view.test.js:353` counts webview routes with
-  `/case '[A-Za-z]+':\s*vscode\.commands\.executeCommand\(/g`. A route written
-  as `case 'x': { ... }`, dispatched via a variable, or named with a digit is not
-  counted, so "fails if a route is added untested" holds only for the current
-  spelling.
-- `test/extension-lifecycle-async.test.js:585` uses `/(?<![\w.])execFile\(/g`,
-  which excludes `.execFile(` — a fifth spawn written `cp.execFile(` passes
-  silently.
-- Half of the `onWrite` gap is closed: a write that throws is now asserted NOT
-  to fire the high-water hook, and the ordering mutation kills it. What remains
-  is that nothing asserts the CLI writer has no `onWrite` at all, so the
-  "deliberate rather than dropped" half still rests on a comment.
-- `test/extension-lifecycle-async.test.js`'s `trackChild` check is a source-text
-  scan for `trackChild(execFile(`, so a correct `const c = execFile(...);
-  trackChild(c);` would fail it and a `spawn()` would slip past.
 
 ### Dead exports and unreachable options, re-measured
 
@@ -493,7 +472,7 @@ VSIX gap.
 Re-verified 2026-09-14 against the tree. Four of the original seven are gone: the
 zero-byte `policy-lock` orphan is FIXED (`honourFor` in `src/policy-lock.js`), `run()` now
 reads `if (!settings || typeof settings !== 'object') return finish(input, false);` at
-`bin/wildcard-perms:288` so the missing `return` is CLOSED, and the junction-breadth and
+`bin/wildcard-perms:409` so the missing `return` is CLOSED, and the junction-breadth and
 `/cygdrive` items were argued out rather than fixed (text proposed for
 `docs/engineering-record.md`). What is left needs files this pass was not allowed to touch.
 

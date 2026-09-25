@@ -48,10 +48,16 @@ from collections import Counter
 # Re-run under the venv python via subprocess (NOT os.execv -- Windows detaches the
 # execv'd process from the parent's stdio, so its output would be lost). ---
 def _ensure_runtime():
+    # AVAILABILITY, not import. This used to be `import onnxruntime, numpy`, which is a
+    # very expensive way to ask a yes/no question: it paid the full module
+    # initialisation of both on every invocation, including --lint, --lexical-only,
+    # --gates-compile and --list, none of which reach either library. find_spec walks
+    # the path and executes no module code.
+    from importlib.util import find_spec
     try:
-        import onnxruntime, numpy  # noqa: F401
-        return
-    except ImportError:
+        if find_spec("onnxruntime") is not None and find_spec("numpy") is not None:
+            return
+    except (ImportError, ValueError):
         pass
     if os.environ.get("RECALL_REEXEC") == "1":
         sys.exit("[recall] needs onnxruntime + numpy. In the DevToolbox venv:\n"
@@ -66,8 +72,37 @@ def _ensure_runtime():
 
 
 _ensure_runtime()
-import numpy as np
-import onnxruntime as ort
+
+
+# Imported on first ATTRIBUTE ACCESS, not at module scope.
+#
+# onnxruntime is touched at exactly one line in this file (Bge.__init__, the
+# InferenceSession) and numpy only inside the embedder, the cosine matmul and
+# --selftest. `--lint`, `--lexical-only`, `--gates-compile` and `--list` reach none of
+# them and were paying both import costs anyway, and --gates-compile is on the VS Code
+# extension's corpus-watcher path, so it runs whenever a memory file is saved.
+#
+# A proxy rather than a `global np` loader called from each function: there are ten use
+# sites and a loader you can forget to call at one of them fails with a confusing
+# AttributeError on None. This cannot be forgotten, because there is nothing to call.
+# Every use in this file is an attribute access (np.array, np.linalg.norm,
+# ort.InferenceSession); nothing passes the module itself anywhere.
+class _LazyModule:
+    def __init__(self, name):
+        self._lazy_name = name
+        self._lazy_mod = None
+
+    def __getattr__(self, attr):
+        mod = self._lazy_mod
+        if mod is None:
+            import importlib
+            mod = importlib.import_module(self._lazy_name)
+            object.__setattr__(self, "_lazy_mod", mod)
+        return getattr(mod, attr)
+
+
+np = _LazyModule("numpy")
+ort = _LazyModule("onnxruntime")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -1092,7 +1127,7 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: extension.js:2977 slices this stderr at 300 chars before
+            # Kept short on purpose: extension.js:3013 slices this stderr at 300 chars before
             # showing it. Re-measured 2026-09-14 after MEMORY_DIR was normpath'd and `installed`
             # became a real byte count: 226 here, and 228 for the sibling refusal above. Both
             # still fit, and both still name GATES_OUT and MEMORY_DIR inside the slice.

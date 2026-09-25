@@ -64,9 +64,14 @@ const HELD = {
 
 // Found with no consumer at all by this census on 2026-09-24, when it was widened past its
 // original three modules. Each is a dead EXPORT over a live function — every one of them is
-// called from inside its own module, which is why nothing else noticed. The fix is to delete
-// the entry from the module.exports list and keep the function; that edit belongs to the
-// owner of src/ and vscode-extension/, so they are parked here rather than silently passed.
+// called from inside its own module, which is why nothing else noticed.
+//
+// THE FIX IS NOT ALWAYS THE DELETION, and finding that out costs one suite run per name.
+// Break the FUNCTION and see whether anything dies. If something does, the export was the
+// only surplus and it goes, function intact. If nothing does, the name is not dead weight
+// at all — it is a behaviour with no test, and deleting the export removes the last seam
+// anyone could write one through. See the record below this list for the thirteen names
+// that went through exactly that on 2026-09-25, and the two that came back.
 //
 // This list is DEBT, not an allowlist. It is separate from HELD so that it reads as one, and
 // so that emptying it is a visible event. A name here that gains a consumer must leave it:
@@ -76,30 +81,26 @@ const PENDING_REMOVAL = {
     CODEX_BUNDLE_CACHE: 'src/codex-policy.js:71 — used only as the default argument of '
       + 'readEnterpriseBundle at :12.',
   },
-  'src/legacy-max-cleanup.js': {
-    LEGACY_ALLOW_MARKERS: 'src/legacy-max-cleanup.js:373 — read only at :59.',
-    LEGACY_APPROVE_MARKER: 'src/legacy-max-cleanup.js:372 — internal only.',
-    LEGACY_APPROVE_SCRIPT: 'src/legacy-max-cleanup.js:371 — the default argument at :92, '
-      + ':109, :159 and :342. The same NAME in two tests is a local const read off a '
-      + 'fixture file, not an import of this one.',
-    detectMcpServers: 'src/legacy-max-cleanup.js:375 — called only at :70.',
-    legacyAllowActive: 'src/legacy-max-cleanup.js:377 — internal only.',
-    legacyApproveHookActive: 'src/legacy-max-cleanup.js:381 — called only at :127 and :157.',
-    legacyApproveHookLike: 'src/legacy-max-cleanup.js:382 — internal only.',
-    topLevelBound: 'src/legacy-max-cleanup.js:389 — called only at :265.',
-  },
-  'src/permissions.js': {
-    prunePermissions: 'src/permissions.js:567 — called only at :488, inside processAllowList.',
-    readBypassState: 'src/permissions.js:569 — called only at :554. Its own comment at :561 '
-      + 'claims it is "exported and how callers reach it", which is the shape of a HELD '
-      + 'reason that outlived its truth.',
-  },
-  'vscode-extension/autoLearnUi.js': {
-    candidateAppliedTargets: 'vscode-extension/autoLearnUi.js — internal only.',
-    candidateEligibleTargets: 'vscode-extension/autoLearnUi.js — internal only.',
-    unwrapApplication: 'vscode-extension/autoLearnUi.js:356 — called only at :70.',
-  },
 };
+
+// WHAT HAPPENED TO THE OTHER THIRTEEN, 2026-09-25. They were not swept. Each one was
+// mutated in place and the whole suite run against it, because "no importer" and "no
+// coverage" are different findings and only one of them is fixed by a deletion.
+//
+// ELEVEN DIED, so the export was the only thing keeping them visible and the export
+// went: LEGACY_ALLOW_MARKERS (4 tests), LEGACY_APPROVE_MARKER (1), LEGACY_APPROVE_SCRIPT
+// (2), detectMcpServers (3), legacyAllowActive (4), legacyApproveHookActive (2),
+// legacyApproveHookLike (1), topLevelBound (1), prunePermissions (4),
+// candidateAppliedTargets (1), unwrapApplication (1). Functions kept, doors closed.
+//
+// TWO SURVIVED, and a survivor is a coverage gap. `readBypassState` mutated to
+// `return {}` left 696/694 green, because nothing in the repository ever turned the
+// bypass toggle OFF; `candidateEligibleTargets` mutated to ignore the candidate
+// entirely did the same, because every fixture that reaches it carries a
+// `pendingTargets` array that short-circuits the branch. Both now have a test and both
+// moved to TEST_ONLY below. That is the second and third time this week the answer to a
+// "dead" name was a test rather than a deletion, which is why the mutation step is not
+// optional before emptying a line of this list.
 
 // Exports whose only consumers are under test/. Not a defect — a test-only export is
 // usually the seam that makes a unit assertion able to fail — but enumerated, so that
@@ -126,7 +127,10 @@ const TEST_ONLY = {
   'src/local-settings.js': ['localBackupPath', 'partitionLocal', 'planPromotions', 'promotionFor', 'redundantUnder'],
   'src/managed-policy.js': ['coversPrefix', 'hookEventAllowed', 'rulePrefix'],
   'src/permission-match.js': ['MATCH_CACHE_LIMIT', 'matchCacheStats'],
-  'src/permissions.js': ['coverIndexKeyCacheStats', 'coverKeyCacheStats'],
+  // readBypassState joined on 2026-09-25 off PENDING_REMOVAL: see the note above that
+  // list. test/bypass-round-trip.test.js is the only caller and is the whole reason the
+  // `--bypass off` restore can fail a build.
+  'src/permissions.js': ['coverIndexKeyCacheStats', 'coverKeyCacheStats', 'readBypassState'],
   // CODEX_BEGIN_MARKER joined this list on 2026-09-24 when removeGeneratedCodexRules
   // moved into this module: the marker's only production reader is now its own file,
   // and the workspace-rules cleanup in bin/wildcard-perms asks that function rather
@@ -135,7 +139,7 @@ const TEST_ONLY = {
   'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'CODEX_BEGIN_MARKER', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
-  'vscode-extension/autoLearnUi.js': ['permissionMatches'],
+  'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
 };
 
 // Every file that could plausibly consume one of these modules.

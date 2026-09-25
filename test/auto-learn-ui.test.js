@@ -2,8 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
-  applicationSummary, candidatePendingTargets, claudeDecisionExplanation,
+  applicationSummary, backupPruneSuffix, candidateEligibleTargets, candidatePendingTargets,
+  claudeDecisionExplanation,
   claudePermissionDecision, codexCheckVariants, codexExecpolicyArgs, codexRestartSuffix,
   isCandidateComplete, managedBlockedDetail, managedBlockedNote, managedPromptExplanation,
   policyTargetLabel, reviewableCandidates,
@@ -51,6 +54,46 @@ test('candidate completion honors manager eligible and pending targets', () => {
   }, {}, ['claude', 'codex']), ['claude']);
 });
 
+// candidateEligibleTargets, pinned directly, because nothing could reach the branch
+// that matters through candidatePendingTargets. MEASURED on 2026-09-25: replacing its
+// body with `return uniqueTargets(enabledTargets)` -- i.e. dropping the intersection
+// with the candidate's own eligibility -- left all 696 tests green. It was on
+// test/dead-exports.test.js's PENDING_REMOVAL list at the time, and that survival is
+// what took it off: a name whose mutation nothing notices is a coverage gap, not dead
+// weight. Eleven of the thirteen names on that list died under the same treatment and
+// were deleted; this one and readBypassState earned a test instead.
+//
+// Why the existing tests above cannot see it: every one of them hands over a candidate
+// that already carries `pendingTargets`, and that array short-circuits the fallback
+// path. The intersection only decides an outcome when pendingTargets is absent, or
+// when it names a target the candidate is not eligible for — both of which are
+// exactly what a candidate from an older state file or a half-updated worker looks
+// like, which is why the helper is defensive in the first place.
+//
+// THE RULE: enablement never WIDENS eligibility. A Claude-only family must not become
+// pending for Codex just because the Codex target is switched on.
+test('enabling a target never makes a candidate eligible for it', () => {
+  // Eligible for Claude alone, both targets enabled, nothing applied yet.
+  const claudeOnly = { key: 'tokei\0.', eligibleTargets: ['claude'] };
+  assert.deepEqual(candidateEligibleTargets(claudeOnly, ['claude', 'codex']), ['claude'],
+    'witness:eligible-intersection -- the candidate was widened to a target it is not eligible for');
+  assert.deepEqual(candidatePendingTargets(claudeOnly, {}, ['claude', 'codex']), ['claude'],
+    'a Claude-only family was left pending for Codex, so it can never read as complete');
+
+  // The other direction: a pendingTargets array that names a target the candidate is
+  // NOT eligible for. A stale state file can carry this; it must not survive.
+  const stale = { key: 'tokei\0.', eligibleTargets: ['claude'], pendingTargets: ['claude', 'codex'] };
+  assert.deepEqual(candidatePendingTargets(stale, {}, ['claude', 'codex']), ['claude']);
+
+  // And the narrowing direction still holds: a candidate eligible for both, with only
+  // Claude enabled, is pending for Claude alone.
+  const both = { key: 'tokei\0.', eligibleTargets: ['claude', 'codex'] };
+  assert.deepEqual(candidateEligibleTargets(both, ['claude']), ['claude']);
+  // An empty eligibility list is a real manager output (auto-learn-manager.test.js:888)
+  // and means "nowhere", not "anywhere".
+  assert.deepEqual(candidateEligibleTargets({ key: 'x', eligibleTargets: [] }, ['claude', 'codex']), []);
+});
+
 test('candidate completion falls back to per-target applied state', () => {
   const candidate = { key: 'rg\0--files' };
   const status = { applied: { claude: ['rg\0--files'], codex: [] } };
@@ -65,9 +108,88 @@ test('application summary includes scan auto-application and later apply', () =>
     appliedCount: 2,
     appliedKeys: ['git\0status', 'rg\0--files'],
     changedTargets: ['claude', 'codex'],
+    backupsUnremovable: 0,
   });
 });
 
+// A backup the pruner could not delete is the one outcome of backup pruning worth
+// saying out loud, and it is the reason the manager counts the failures instead of
+// throwing after a policy write that already succeeded. It was returned on every apply
+// and on nothing else: no reader in the extension, none in the CLI beyond the raw JSON
+// dump, none anywhere. Summed HERE because one user action can produce two prunes — a
+// scan that auto-applies and then an explicit apply behind it fold into one toast, and
+// reporting whichever came last would under-count.
+//
+// THE MUTATION: return the summary without `backupsUnremovable`, or take it from the
+// last result instead of summing. Both fail the 5 below.
+test('a backup the pruner could not delete is counted across every result folded in', () => {
+  const summary = applicationSummary(
+    { application: { appliedKeys: ['git\0status'], changedTargets: ['claude'], backupsUnremovable: 2 } },
+    { appliedKeys: ['rg\0--files'], changedTargets: ['codex'], backupsUnremovable: 3 },
+  );
+  assert.equal(summary.backupsUnremovable, 5,
+    'witness:backup-prune-failures -- two prunes, one toast, and the count has to be both');
+
+  // Junk and absence both read as zero rather than as NaN in a user-facing string.
+  assert.equal(applicationSummary({ changed: true }).backupsUnremovable, 0);
+  assert.equal(applicationSummary({ changed: true, backupsUnremovable: 'lots' }).backupsUnremovable, 0);
+  assert.equal(applicationSummary({ changed: true, backupsUnremovable: -4 }).backupsUnremovable, 0);
+});
+
+// And what the reader is actually told when it happens.
+//
+// The suffix is silent on the overwhelmingly common zero, because a housekeeping line
+// printed on every apply is a line nobody reads by the third one. That makes the
+// non-zero case the whole test: a control that can run degraded has to SAY so, and the
+// only thing standing between "counted rather than thrown" and "swallowed" is this
+// string reaching a toast.
+//
+// THE MUTATION: return '' unconditionally from backupPruneSuffix, or drop the
+// `+ backupPruneSuffix(...)` from autoLearnApplicationMessage. The first fails here;
+// the second fails the source check below it.
+test('a prune that could not delete a backup says so, and only then', () => {
+  assert.equal(backupPruneSuffix({ backupsUnremovable: 0 }), '',
+    'a clean prune is the normal case and must not add a word');
+  assert.equal(backupPruneSuffix({}), '');
+  assert.equal(backupPruneSuffix(null), '');
+  assert.equal(backupPruneSuffix({ backupsUnremovable: 'lots' }), '',
+    'junk reads as nothing to report, never as NaN in a user-facing sentence');
+
+  const one = backupPruneSuffix({ backupsUnremovable: 1 });
+  assert.match(one, /1 old policy backup could not be removed/,
+    `witness:backup-prune-suffix -- the degraded prune said "${one}"`);
+  assert.match(one, /locked or read-only/, 'and it says what to look for');
+  assert.match(one, /next apply retries them/, 'and that it is not permanent');
+  assert.match(backupPruneSuffix({ backupsUnremovable: 4 }), /4 old policy backups could/,
+    'the plural is not hard-coded singular');
+
+  // It has to reach a sentence, not just exist. autoLearnApplicationMessage is the
+  // shared builder behind the apply toast and every one of its four return paths.
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'vscode-extension', 'extension.js'), 'utf8');
+  const builder = source.slice(
+    source.indexOf('function autoLearnApplicationMessage('),
+    source.indexOf('async function runAutoLearnScan('));
+  assert.ok(builder.includes('function autoLearnApplicationMessage('),
+    'witness:backup-prune-suffix -- the builder was not located, so the count below is 0 '
+    + 'for the wrong reason');
+  // EVERY return, individually. Counting mentions is not enough and was measured not to
+  // be: dropping `+ housekeeping` from one of the three paths leaves the total unchanged,
+  // because the `const housekeeping = ...` declaration is itself one of the mentions.
+  const returns = builder.split(/\breturn\b/).slice(1)
+    // Cut at a semicolon that ENDS A LINE, not the first one: the first return path
+    // carries a template literal whose own prose contains "; no policy file changed",
+    // and cutting there truncated the expression before the suffix, failing against
+    // correct code.
+    .map((tail) => { const at = tail.search(/;[^\S\r\n]*[\r\n]/); return at < 0 ? tail : tail.slice(0, at); });
+  assert.ok(returns.length >= 3,
+    `only ${returns.length} return paths found in the message builder; it was not parsed`);
+  const bare = returns.filter((expression) => !/housekeeping|backupPruneSuffix/.test(expression));
+  assert.deepEqual(bare, [],
+    `${bare.length} of ${returns.length} return paths in autoLearnApplicationMessage drop the `
+    + 'housekeeping suffix, so a user on that path is told the apply was clean when a backup '
+    + `could not be removed: ${bare.map((e) => e.trim().slice(0, 60)).join(' | ')}`);
+});
 test('Claude permission analysis reports deny then ask then allow precedence', () => {
   const settings = { permissions: {
     allow: ['Bash(git *)'], ask: ['Bash(git push *)'], deny: ['Bash(git push --force *)'],

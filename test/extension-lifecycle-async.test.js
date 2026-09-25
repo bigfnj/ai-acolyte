@@ -1368,6 +1368,70 @@ test('a wedged predecessor does not steal the successor\u2019s worker runner', T
   }
 });
 
+// The busy latch's half of the same generation test, which nothing could make fail.
+//
+// Found on 2026-09-25 while proving the runner half above: deleting
+// `generation === activationGeneration &&` from the LATCH line left the whole suite
+// green, while deleting it from the RUNNER line one statement earlier killed the test
+// above. Two guards, written together, commented as a pair (— "Same generation test
+// as the busy latch below") and only one of them falsifiable.
+//
+// What the missing half costs: the predecessor's continuation clears a latch the
+// SUCCESSOR's in-flight scan is holding, so the "already running" refusal stops
+// refusing and a second worker is dispatched against a scan that has not finished.
+// The manager serialises the policy WRITE behind its own file lock, so this is not a
+// corruption; it is the concurrency guard the extension advertises, silently off.
+//
+// TWO MUTATIONS, and this kills both, because the rule needs both halves. Drop the
+// generation test from runAutoLearnScan’s own `finally`, or from deactivate’s copy of
+// it, and the assertion below fails with the message it carries. The extension fix
+// landed with this test on 2026-09-25; before it, only the RUNNER half of the pair
+// could be made to fail at all.
+test('a wedged predecessor does not release the successor\u2019s busy latch', TEST_TIMEOUT, async (t) => {
+  const home = tempHome(t);
+  const app = harness(home, { settings: { 'autoLearn.enabled': true }, wedgeWorker: true });
+  try {
+    const wedged = app.commands.get('permission-wildcarding.autoLearnScan')();
+    await tick(200);
+    assert.equal(app.workers.length, 1, 'precondition: the predecessor really is scanning');
+    const predecessorWorker = app.workers[0];
+
+    const teardown = app.extension.deactivate();
+    app.reactivate();
+
+    const second = app.commands.get('permission-wildcarding.autoLearnScan')();
+    await tick(200);
+    assert.equal(app.workers.length, 2,
+      'witness:busy-latch-generation -- the successor started a scan of its own');
+
+    // The wedged job answers, the predecessor's drain completes, and its continuation
+    // resumes into a realm the successor now owns.
+    predecessorWorker.release();
+    await Promise.allSettled([wedged, teardown]);
+    await tick(200);
+
+    // The successor's scan is STILL wedged, so its latch must still be set.
+    app.statuses.length = 0;
+    const settled = [];
+    const third = app.commands.get('permission-wildcarding.autoLearnScan')();
+    third.then((value) => settled.push(value), (error) => settled.push(error));
+    await tick(200);
+
+    assert.ok(app.statuses.some((message) => message.includes('already running')),
+      'the predecessor\u2019s continuation released the successor\u2019s busy latch, so a third '
+      + 'scan was let past one still in flight');
+    assert.equal(app.workers.length, 2,
+      'and it was refused rather than started: no third worker was built');
+    assert.deepEqual(settled, [null], 'the refusal resolved null');
+
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await Promise.allSettled([second, third]);
+  } finally {
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
 test('a worker still wedged at teardown is failed on its deadline and then reaped',
   TEST_TIMEOUT, async (t) => {
     // The leak the two tests above had to work AROUND. Both of them end by calling

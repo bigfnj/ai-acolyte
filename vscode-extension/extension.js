@@ -39,7 +39,7 @@ const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, readCompiled, compiledPath } = require('./src/agent-gates');
 const {
-  applicationSummary, candidatePendingTargets, claudeDecisionExplanation,
+  applicationSummary, backupPruneSuffix, candidatePendingTargets, claudeDecisionExplanation,
   claudePermissionDecision, codexCheckVariants, codexExecpolicyArgs, codexRestartSuffix,
   derivedGuidanceItems, derivedGuidanceSummary,
   isCandidateComplete, managedBlockedDetail, managedBlockedNote, managedPromptExplanation,
@@ -1133,16 +1133,26 @@ function runAutoLearnWorker(operation, ...args) {
   return getAutoLearnWorkerRunner().run(operation, ...args);
 }
 
+// Both of these used to carry a second leg: status -> getStatus, listCandidates ->
+// getCandidates. Neither could ever run. The alternative name was an ALIAS on the
+// same object src/auto-learn-manager.js returns, so it was present exactly when the
+// first name was and absent exactly when it was not, and the `typeof` test above it
+// decided nothing. Removed 2026-09-25, together with the aliases themselves; the
+// manager now refuses to carry two names for one function and a test says so.
+//
+// The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is
+// nulled for the whole of deactivate() (:4220), so a refresh racing a teardown
+// really can arrive here with nothing.
 function managerStatus(manager) {
-  if (typeof manager?.status === 'function') return manager.status();
-  if (typeof manager?.getStatus === 'function') return manager.getStatus();
-  return {};
+  return typeof manager?.status === 'function' ? manager.status() : {};
 }
 
+// The shape normalisation below is a different question and is load-bearing: a
+// worker result arrives as `{ candidates: [...] }` while a direct call returns the
+// array itself.
 function managerCandidates(manager, options) {
   const value = typeof manager?.listCandidates === 'function'
-    ? manager.listCandidates(options)
-    : (typeof manager?.getCandidates === 'function' ? manager.getCandidates(options) : []);
+    ? manager.listCandidates(options) : [];
   return Array.isArray(value) ? value : (Array.isArray(value?.candidates) ? value.candidates : []);
 }
 
@@ -1197,7 +1207,7 @@ function autoLearnEvidence(cfg) {
 // that DID return, reporting that part of the corpus was unreadable, and they
 // were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
 // every one of them. That is the exact shape of the defect that sat unnoticed for
-// eight days (src/auto-learn-manager.js:1904-1906: "`errors` was computed here
+// eight days (src/auto-learn-manager.js:2214-2216: "`errors` was computed here
 // all along and then not returned, so a file that failed every scan for eight
 // days was invisible"). Surfacing it in the CLI and not in the panel most users
 // live in only moves where it hides.
@@ -1214,6 +1224,15 @@ function autoLearnScanHealth(stats) {
     // the card's point of view and four stats tiles it does not have room for.
     pruned: count(stats.prunedObservations) + count(stats.prunedCursors)
       + count(stats.prunedCandidates) + count(stats.prunedGrants),
+    // NOT part of that sum, and the reason it is its own field: the other four say
+    // housekeeping ran. This one says housekeeping could not finish. The observation
+    // cap holds every entry for a family below the success threshold, on purpose
+    // (src/auto-learn-manager.js:790-793) — the protected set is not itself bounded,
+    // so a high `threshold` can hold more entries than the cap allows and the map
+    // grows past its limit anyway. This is the only number that says it happened, and
+    // it had no reader at all: computed, persisted in lastScanStats, printed by the
+    // CLI, and never once shown in the panel.
+    retainedObservations: count(stats.retainedObservations),
     // "The cursor map was preserved because nothing was enumerated." Distinct
     // from `errors`, which says a root failed but not that the scan was therefore
     // unable to look at anything — and indistinguishable, on the numbers alone,
@@ -1255,18 +1274,25 @@ function autoLearnCardData() {
 function autoLearnApplicationMessage(summary, verb = 'applied') {
   const count = summary?.appliedCount || 0;
   const targets = uniqueTargets(summary?.changedTargets);
+  const housekeeping = backupPruneSuffix(summary);
   if (!targets.length) {
-    return count
+    return (count
       ? `Auto Learn recorded ${count} already-covered command ${count === 1 ? 'family' : 'families'}; no policy file changed.`
-      : 'Auto Learn did not change a policy file.';
+      : 'Auto Learn did not change a policy file.') + housekeeping;
   }
   const scope = policyTargetLabel(targets);
-  if (!count) return `Auto Learn reconciled ${scope} policy.` + codexRestartSuffix(targets);
+  if (!count) {
+    return `Auto Learn reconciled ${scope} policy.` + codexRestartSuffix(targets) + housekeeping;
+  }
   return `Auto Learn ${verb} ${count} command ${count === 1 ? 'family' : 'families'} in ${scope}.` +
-    codexRestartSuffix(targets);
+    codexRestartSuffix(targets) + housekeeping;
 }
 
 async function runAutoLearnScan(manual = false, suppressApplicationNotice = false) {
+  // Which activation owns this scan. Read BEFORE the first await, for the same
+  // reason deactivate() reads it before its drain: everything after the await is
+  // racing a possible re-activate. See the `finally` at the bottom of this function.
+  const generation = activationGeneration;
   const cfg = autoLearnConfig();
   if (!cfg.enabled && !manual) return null;
   if (!manual && Date.now() < autoLearnNextRetryAt) return null;
@@ -1301,7 +1327,7 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
         message += `; reconciled ${policyTargetLabel(summary.changedTargets)} policy`;
       }
       vscode.window.showInformationMessage(
-        message + '.' + codexRestartSuffix(summary.changedTargets)
+        message + '.' + codexRestartSuffix(summary.changedTargets) + backupPruneSuffix(summary)
       );
     } else if ((applied || summary.changedTargets.length) && !suppressApplicationNotice) {
       vscode.window.showInformationMessage(autoLearnApplicationMessage(summary, 'safely applied'));
@@ -1320,7 +1346,17 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     else console.error('permission-wildcarding: Auto Learn scan failed —', error);
     return null;
   } finally {
-    autoLearnBusy = false;
+    // Only if this scan still owns the latch. deactivate() guards its own clear the
+    // same way (:4240) and that guard was UNFALSIFIABLE until this one existed —
+    // deleting it left the suite green, because this line cleared the latch for it
+    // on every path. Both halves are needed and the pair is one rule.
+    //
+    // The hole: two scans really can overlap, because activate() releases the latch
+    // unconditionally so that a wedged predecessor cannot strand it (:2058). One
+    // boolean cannot track two, so whichever settles FIRST used to clear it, and a
+    // predecessor settling after a re-activate opened "already running" for a scan
+    // that was still running. A second worker was then dispatched against it.
+    if (generation === activationGeneration) autoLearnBusy = false;
     dashboard?.refresh();
   }
 }
@@ -1498,7 +1534,7 @@ async function undoAutoLearn() {
       const targets = uniqueTargets(result?.restoredTargets);
       vscode.window.showInformationMessage(
         `Auto Learn restored ${policyTargetLabel(targets)} from before its last application.` +
-        codexRestartSuffix(targets)
+        codexRestartSuffix(targets) + backupPruneSuffix(result)
       );
     }
   } catch (error) {
@@ -3859,6 +3895,14 @@ class WildcardingViewProvider {
     if (s.codexHistoryStale) trouble.push('Codex history store has moved — rollout directory is stale');
     else if (s.codexHistoryInspected === 'partial') trouble.push('Codex history-store check ran degraded');
     if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
+    // "The evidence cap is over its limit and cannot get back under it." Distinct
+    // from the pruned count, which is what came OUT: this is what would not go. No
+    // backtick in this comment on purpose - it lives inside the webview template
+    // literal, and one would end the string.
+    if (s.retainedObservations) {
+      trouble.push(s.retainedObservations + ' observation hash'
+        + (s.retainedObservations === 1 ? '' : 'es') + ' held over the cap');
+    }
     if (s.partial) trouble.push(s.partial + ' partly read');
     if (s.unmatchedResults) {
       trouble.push(s.unmatchedResults + ' unmatched result' + (s.unmatchedResults === 1 ? '' : 's'));

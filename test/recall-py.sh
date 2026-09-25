@@ -90,13 +90,13 @@ echo "$ERR" | grep -q 'recall_index.json' || fail "the warning does not name the
 echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 
 # ---------------------------------------------------------------- B2: the write is ATOMIC
-# Mutation: replace save_index's body (memory/recall.py:373-384) with a plain in-place
+# Mutation: replace save_index's body (memory/recall.py:408-384) with a plain in-place
 # `json.dump(idx, open(INDEX_PATH, "w"))`. The file-identity assertion below fails; nothing
 # else in this suite does.
 #
 # The residue check underneath used to be the only guard here, and it was vacuous twice over.
 # It globbed for `recall_index.json.tmp`, but save_index names its temp file with the writing
-# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:381) -- so the literal path it tested
+# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:416) -- so the literal path it tested
 # has never existed on any run, broken or not. And even spelled correctly it only fires for
 # "wrote a tmp, forgot os.replace": revert to an in-place json.dump and there is no temp file
 # to leave behind, so it passes on the state it exists to forbid. Between it and the
@@ -377,12 +377,12 @@ echo "ok: the clean verdict tests every finding it prints, not five of eight"
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# memory/recall.py:1017. The order assertion below fails; the two-compiles assertion does not.
+# memory/recall.py:1052. The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1009 promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1044 promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.
@@ -688,4 +688,33 @@ echo "$ERR" | grep -q 'RAISED' || fail "an unknown ranking mode did not raise: $
 echo "$ERR" | grep -q 'hybird' || fail "the error does not name the bad mode"
 echo "ok: an unrecognised ranking mode raises instead of scoring everything zero"
 
+
+# ---------------------------------------------------------------- the heavy imports stay lazy
+# numpy and onnxruntime used to be imported at module scope, and _ensure_runtime imported both
+# again just to ask whether they were installed. onnxruntime is reached at exactly one line in
+# the file (the InferenceSession) and numpy only in the embedder, the cosine matmul and
+# --selftest, so --lint, --gates-compile, --lexical-only and --list paid for two libraries they
+# never touch. Measured 2026-09-25, 30 interleaved process pairs per verb, toolbox python:
+#   --lint          eager min 321.9 / p50 331.9 ms   lazy min 117.3 / p50 121.1 ms
+#   --gates-compile eager min 326.2 / p50 339.5 ms   lazy min 117.7 / p50 122.2 ms
+# and a real query, which does reach both, was unchanged (p50 575.3 -> 570.8, n=12).
+# --gates-compile is on the VS Code extension corpus-watcher path, so it runs on every save.
+#
+# -X importtime rather than a timing assertion: a wall-clock threshold on a shared box is a
+# flake, and it answers a different question anyway. This asks the question the change was
+# about -- was the module loaded at all -- and it cannot pass for an unrelated reason.
+#
+# MUTATION: put `import numpy as np` back at module scope in memory/recall.py. This fails with
+# "numpy was imported by --lint".
+IMPORTS="$("$PY" -X importtime "$RECALL" --lint 2>&1 >/dev/null)"
+RC=$?
+[ "$RC" = "0" ] || fail "--lint under -X importtime exited $RC"
+# The witness: prove the log was captured before reading it for absences. Four of the
+# assertions in this file used to be negative greps with nothing asserting the text existed,
+# and an empty capture satisfies every negative.
+echo "$IMPORTS" | grep -q "^import time:" || fail "no -X importtime log was captured at all"
+echo "$IMPORTS" | grep -q "argparse" || fail "the importtime log does not even show argparse; it is not recall.py's"
+echo "$IMPORTS" | grep -qE "[| ]numpy$" && fail "numpy was imported by --lint, which never touches it"
+echo "$IMPORTS" | grep -qE "[| ]onnxruntime$" && fail "onnxruntime was imported by --lint, which never touches it"
+echo "ok: --lint loads neither numpy nor onnxruntime"
 echo "ALL PASS"

@@ -557,14 +557,21 @@ function applyBypass(settings, on) {
 }
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
-// Both are internal to the four bypass functions below them — currentMode,
-// isBypassOn, applyBypass and readBypassState — which are exported and are how
-// the CLI, the extension and the tests have always reached the behaviour. A test
-// importing the mode string to compare it against itself would pin nothing that
-// applyBypass's own round trip does not already pin.
+// Both are internal to the four bypass functions below them, and so is
+// prunePermissions, whose only caller is processAllowList at :488.
+//
+// readBypassState is the one this comment got WRONG, and the correction is worth
+// the space. It used to be named here as one of the functions "the CLI, the
+// extension and the tests have always reached the behaviour" through. Nothing
+// reached it, in any of the three: it is called at :554 and nowhere else in the
+// repository. The claim then argued AGAINST its own test — "applyBypass's own
+// round trip does not already pin" was false, because no test ever turned bypass
+// OFF. Mutating this function to `return {}` left all 696 tests green. It is
+// exported for test/bypass-round-trip.test.js, which is what makes that mutation
+// fail now.
 module.exports = {
   generalizePermission, BASH_SCRIPT_KEYWORDS,
-  isCoveredBy, createCoverIndex, prunePermissions, processAllowList, writeFileAtomicSync,
+  isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   currentMode, isBypassOn, applyBypass, readBypassState,
 };

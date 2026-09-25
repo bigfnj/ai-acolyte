@@ -333,6 +333,44 @@ test('a root that could not be enumerated does not get to erase the cursor map',
     'a scan that could not read a directory has not looked at any file');
 });
 
+// One name per function on the manager surface.
+//
+// This exists because an alias made a caller's guard unfalsifiable. The extension
+// asked `typeof manager.listCandidates === 'function'` and fell back to
+// `manager.getCandidates`, and a comment on the export defended the alias by naming
+// that fallback as its consumer — but both names came off this one object, so the
+// second was present exactly when the first was and the fallback branch could not be
+// reached by any input. `status` / `getStatus` was the same pair. A third, `list`, had
+// already been removed for having no consumer at all.
+//
+// Identity, not name shape: a rule about names beginning with `get` would have missed
+// `list` and would pass the moment someone spelled the next alias differently. Two
+// keys holding the SAME function object is the thing that makes a caller-side guard
+// undecidable, and it is what this counts.
+//
+// THE MUTATION: add `getStatus: status,` back to the returned object in
+// src/auto-learn-manager.js. This fails with `status and getStatus are the same
+// function`.
+test('the manager exposes no two names for one function', (t) => {
+  const home = tempHome(t);
+  const learn = manager(home, scannerFeed([observed('1', 'git status')]), { codexRulesPath: null });
+  const entries = Object.entries(learn)
+    .filter(([, value]) => typeof value === 'function');
+  assert.ok(entries.length >= 12,
+    `witness:manager-aliases -- only ${entries.length} methods found; the surface moved`);
+
+  const byFunction = new Map();
+  for (const [name, fn] of entries) {
+    if (!byFunction.has(fn)) byFunction.set(fn, []);
+    byFunction.get(fn).push(name);
+  }
+  const aliased = [...byFunction.values()].filter((names) => names.length > 1);
+  assert.deepEqual(aliased, [],
+    aliased.map((names) => `${names.join(' and ')} are the same function`).join('; ')
+    + '. An alias makes every caller-side `typeof manager.x === "function"` guard '
+    + 'undecidable: the other name is there exactly when this one is.');
+});
+
 test('reviewed apply requires a current fingerprint and rejects a risk change after selection', (t) => {
   const home = tempHome(t);
   const successes = [
@@ -348,6 +386,71 @@ test('reviewed apply requires a current fingerprint and rejects a risk change af
     keys: [picked.key], includeReviewed: true,
     expectedFingerprints: { [picked.key]: picked.fingerprint },
   }), /changed after review/);
+});
+
+// A SECOND SPELLING IS A SECOND ALLOW ENTRY, so the review that approved one spelling did
+// not approve two. candidateFingerprint carries `permissions` for exactly that, and
+// nothing could make it matter: deleting the line on 2026-09-25 left 696/694 green. Every
+// other test that moves a fingerprint moves `counts` at the same time (feeding one more
+// observation is how they do it), and counts is in the digest too, so the guard above it
+// was never the reason any of them passed.
+//
+// This one moves `permissions` and NOTHING else, by editing the persisted state between the
+// review and the apply. `Bash(git.exe status *)` normalises to the same identity as
+// `Bash(git status *)` (src/auto-learn.js:703 strips a `.exe` root), so
+// permissionSpellings keeps it (src/auto-learn-manager.js:233) and the family really does
+// render two allow entries where the reviewer saw one.
+//
+// THE MUTATION THIS KILLS: drop `permissions: item.permissions` from candidateFingerprint
+// (src/auto-learn-manager.js:155). Without it the digest is unchanged, the apply is
+// accepted, and a grant the human never saw is written.
+test('a family that gained a second spelling is not the grant that was reviewed', (t) => {
+  const home = tempHome(t);
+  const successes = [
+    observed('1', 'git status'), observed('2', 'git status'), observed('3', 'git status'),
+  ];
+  const learn = manager(home, scannerFeed(successes), { codexRulesPath: null, threshold: 3 });
+  learn.scan();
+  const picked = learn.listCandidates()[0];
+  assert.deepEqual(picked.permissions, ['Bash(git status *)'],
+    'witness:fingerprint-spellings -- the reviewer saw exactly one allow entry');
+
+  const statePath = learn.paths.state;
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const stored = state.candidates[picked.key];
+  const countsBefore = JSON.stringify(stored.counts);
+  stored.permissions = [...stored.permissions, 'Bash(git.exe status *)'];
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+
+  const after = learn.listCandidates()[0];
+  assert.deepEqual(after.permissions.slice().sort(),
+    ['Bash(git status *)', 'Bash(git.exe status *)'],
+    'the second spelling did not survive sanitizeState, so this test proves nothing');
+  assert.equal(JSON.stringify(after.counts), countsBefore,
+    'counts moved as well, so a fingerprint change would not isolate `permissions`');
+  assert.equal(after.claudePermission, picked.claudePermission,
+    'claudePermission moved as well, and it is in the digest in its own right');
+  assert.equal(after.risk, picked.risk);
+  assert.deepEqual(after.reasons, picked.reasons);
+
+  assert.throws(() => learn.apply({
+    keys: [picked.key], includeReviewed: true,
+    expectedFingerprints: { [picked.key]: picked.fingerprint },
+  }), /changed after review/,
+  'a family that gained a second allow entry was applied on a review of the first');
+
+  // And the grant really is wider than what was reviewed, which is why the refusal
+  // matters rather than being a digest nicety.
+  const fresh = learn.listCandidates()[0];
+  const applied = learn.apply({
+    keys: [fresh.key], includeReviewed: true,
+    expectedFingerprints: { [fresh.key]: fresh.fingerprint },
+  });
+  assert.equal(applied.appliedCount, 1);
+  const allow = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'))
+    .permissions.allow;
+  assert.ok(allow.some((entry) => entry.includes('git.exe')),
+    'the second spelling reached settings.json, so re-review was the right answer');
 });
 
 test('auto provenance revokes a downgraded managed permission but preserves a pre-existing manual permission', (t) => {
@@ -789,6 +892,74 @@ test('a stored complex flag is re-derived from the reasons that justify it', (t)
 // the merge step refuses text its own validator rejects. A bare `curl` prefix
 // renders fine and is unwritable, so offering it failed the whole atomic
 // application and applied nothing, including the rows that were valid.
+// THE EMPTY codexTargets MAP IS LOAD-BEARING, and nothing said so.
+//
+// `state.codexTargets` is the one axis of the state file with no eviction: a record is
+// added per Codex rules-file target and nothing ever deletes one, while candidates,
+// pruned keys, cursors, observation hashes and managed hits are all capped. The obvious
+// fix is to drop a record whose `applied` and `reviewed` both emptied, and it is not
+// safe, because `load()` treats an EMPTY MAP as "this install has never had a Codex
+// target" and adopts the legacy flat `state.applied.codex` into the first one it sees.
+// That is a one-time migration. Evicting the last surviving record puts the map back to
+// empty and re-arms it, so the next target seen takes the migration path instead of
+// starting clean. Eviction is therefore only safe PAIRED with a separate "migration
+// already ran" marker, and at roughly 50 bytes per abandoned target that is not a trade
+// worth making: the key is a hash of the configured rules path, so the map grows when
+// someone RECONFIGURES, not when they work. Declined 2026-09-25, and this is the test
+// that makes the decline checkable instead of a paragraph.
+//
+// Because the premise was not checkable. Replacing the condition with `false` on
+// 2026-09-25 left all 708 tests passing, so the migration this reasoning protects could
+// have been deleted by anyone, in either direction, with a green board.
+//
+// THE MUTATION: `Object.keys(state.codexTargets).length === 0` -> `false` at
+// src/auto-learn-manager.js:1200. The first assertion below fails: the grant the flat
+// field carried is silently not adopted, the family reads as un-applied for Codex, and
+// a re-apply rewrites a rule the user already has.
+test('the first Codex target adopts the pre-split grants, and only the first', (t) => {
+  const home = tempHome(t);
+  const rules = path.join(home, '.codex', 'rules', 'permission-wildcarding.rules');
+  const statePath = path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json');
+  const family = {
+    key: 'bash:git status', tool: 'Bash', kind: 'shell', shell: 'bash',
+    root: 'git', prefix: ['git', 'status'], claudePermission: 'Bash(git status *)',
+    risk: 'read-only', baseAutoSafe: true, complex: false,
+    reasons: ['known-read-only-git-operation'], sources: ['claude'],
+    counts: { success: 5, failed: 0, unknown: 0, total: 5 },
+  };
+  const seed = (codexTargets) => {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, `${JSON.stringify({
+      version: 1, sourceVersion: 1, mode: 'recommend', threshold: 3,
+      candidates: { 'bash:git status': family },
+      observationHashes: {}, cursors: {},
+      // The pre-split shape: one flat list, no per-target record.
+      applied: { claude: [], codex: ['bash:git status'] },
+      reviewed: { claude: [], codex: [] },
+      codexTargets, managedClaude: {}, lastScanAt: null, lastScanStats: null,
+      lastApplication: null,
+    }, null, 2)}\n`);
+  };
+
+  // 1. Empty map: the migration runs and the flat grant becomes this target’s.
+  seed({});
+  const first = createAutoLearnManager({ home, threshold: 3, codexRulesPath: rules })
+    .listCandidates().find((item) => item.key === 'bash:git status');
+  assert.ok(first, 'witness:codex-target-seeding -- the candidate survived sanitizeState');
+  assert.deepEqual(first.appliedTo, ['codex'],
+    'the first Codex target did not adopt the pre-split applied.codex, so a grant the user '
+    + 'already has reads as un-applied and the next apply rewrites it');
+
+  // 2. A map that already holds SOME target: a new one starts clean rather than
+  //    inheriting another target’s grants. This is the leg that makes the branch a
+  //    one-time migration rather than a permanent adoption, and it is why evicting the
+  //    last record would re-arm it.
+  seed({ ['a'.repeat(16)]: { applied: ['bash:git status'], reviewed: [] } });
+  const later = createAutoLearnManager({ home, threshold: 3, codexRulesPath: rules })
+    .listCandidates().find((item) => item.key === 'bash:git status');
+  assert.deepEqual(later.appliedTo, [],
+    'a second Codex target inherited a grant that belongs to a different rules file');
+});
 test('a candidate the Codex writer would refuse is never offered as eligible', (t) => {
   const home = tempHome(t);
   const statePath = path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json');

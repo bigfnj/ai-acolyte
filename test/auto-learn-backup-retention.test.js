@@ -150,3 +150,41 @@ test('undo survives a prune that would otherwise take its own backup', (t) => {
   assert.deepEqual(JSON.parse(fs.readFileSync(env.settings, 'utf8')).permissions.allow, [],
     'witness:backup-retention -- and the undo really restored the file');
 });
+
+test('an undo sweeps the backups it has just stopped protecting', (t) => {
+  // The asymmetry: `apply()` pruned and `undo()` did not, so the files an apply held
+  // past the cap BECAUSE they made it reversible stayed held after the thing they made
+  // reversible was reversed. Nothing swept them until the next apply happened to run,
+  // and the directory sat over its cap in the meantime — by the number of targets the
+  // undone application touched, which is two here and can be three with Codex.
+  //
+  // Safe because undo is single level: `lastApplication` is null by this point, the
+  // manager refuses a second undo, and the bytes in those `.bak` files are exactly what
+  // the restore has just written back into the live files.
+  //
+  // THE MUTATION: delete `const backupsPruned = pruneBackups([]);` from undo() in
+  // src/auto-learn-manager.js. This fails with 2 surviving files against 0.
+  const env = fixture(t, 'backup-undo-prune');
+  const learn = build(env.home, { backupLimit: 0 });
+  learn.scan({ platform: 'win32' });
+  const applied = learn.apply();
+  assert.ok(applied.changed, 'witness:backup-retention -- there has to be something to undo');
+
+  const held = backups(env.backupDir);
+  assert.ok(held.length > 0,
+    'witness:backup-retention -- the apply is holding its own backups past a cap of zero');
+
+  const undone = learn.undo();
+  assert.equal(undone.undone, true);
+  assert.equal(undone.backupsUnremovable, 0,
+    'witness:backup-retention -- and the sweep did not run degraded');
+  assert.equal(undone.backupsPruned, held.length,
+    `the undo reported ${undone.backupsPruned} removals against ${held.length} held files`);
+  assert.deepEqual(backups(env.backupDir), [],
+    'the undone application\u2019s backups are still protected by a lastApplication that no '
+    + 'longer exists, so the directory sits over its cap until the next apply');
+  assert.equal(undone.backupsKept, 0);
+
+  // The sibling structure is still not this cap's to delete, on the undo path either.
+  assert.equal(fs.existsSync(path.join(env.backupDir, SIBLING)), true);
+});

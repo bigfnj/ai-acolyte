@@ -56,6 +56,29 @@ inspect or remove old state, and `on` always fails without writing.
 Seven things, each with its own card on the dashboard. Every screenshot below is the
 real UI.
 
+"Works with Claude Code and Codex" is true of the product and false of most of its
+features, so here is the split. The two agents do not share a policy mechanism: Claude
+Code has an allow list this tool generalizes in place, Codex has execpolicy rule files
+this tool generates and then asks `codex execpolicy check` to validate. A shared
+dashboard is not a shared mechanism.
+
+| Capability | Claude Code | Codex |
+|---|---|---|
+| Wildcard generalization of the allow list | yes | no equivalent |
+| Project-local approvals promoted to user scope | yes | no equivalent |
+| Policy backup before every write, with undo | yes | no equivalent |
+| Tracked-wildcard inventory | yes | no equivalent |
+| `PostToolUse` hook | yes | no equivalent |
+| Auto Learn over session history | yes | yes |
+| Reviewed and auto-safe policy output | allow-list entries | validated execpolicy rules |
+| Wildcardable shell style in the instruction file | `CLAUDE.md` | `AGENTS.md` |
+| Memory gates | yes | yes |
+| "Why did this prompt?" diagnostics | yes | yes |
+
+Codex rule export is **experimental**. Its certification status, the Codex versions it
+has actually been exercised against, and what remains unproven are in
+[`docs/codex-certification.md`](docs/codex-certification.md).
+
 ## 1. Wildcarding (Claude Code)
 
 The core, and the card at the top of this page. Every time you approve a command,

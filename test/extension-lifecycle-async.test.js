@@ -789,6 +789,40 @@ test('a reconcile after teardown builds nothing, and the disposer drains what is
   }
 });
 
+test('the local-settings watchers have exactly one drain disposer, and it is the live one',
+  TEST_TIMEOUT, async (t) => {
+    // registerLocalWatchers registered TWO disposers, byte for byte identical and
+    // closing over the same `watchers` array. Whichever ran first emptied it, so
+    // the other was a no-op over an empty array for the life of the window: two
+    // entries in context.subscriptions that between them could only ever do one
+    // thing.
+    //
+    // Runtime cannot tell a dead duplicate from a live one — that is exactly why
+    // it survived — so the count is taken over the REGISTERED closures rather
+    // than over an effect. The assertion below then disposes the one it counted,
+    // which is what stops the count from measuring the wrong thing if the drain
+    // is ever rewritten.
+    const home = tempHome(t);
+    const app = harness(home);
+    try {
+      const local = app.watcherFor('.claude/settings.local.json');
+      assert.equal(local.disposed, false, 'precondition: the local-settings watcher is live');
+
+      const drains = app.subscriptions.filter((entry) =>
+        typeof entry?.dispose === 'function' && /watchers\.pop\(\)/.test(String(entry.dispose)));
+      assert.equal(drains.length, 1,
+        `${drains.length} watcher-drain disposers are registered. All but the first are dead `
+        + 'code: the first to run empties the array they all share');
+
+      drains[0].dispose();
+      assert.equal(local.disposed, true,
+        'the disposer this test counted does not drain the local-settings watchers, so the '
+        + 'count above was measuring something else');
+    } finally {
+      await app.dispose();
+    }
+  });
+
 test('a gate refresh cannot rewrite the instruction files after deactivate', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const userText = '# My global instructions\n\nAlways use the toolbox python.\n';

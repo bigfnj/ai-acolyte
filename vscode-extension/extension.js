@@ -1855,9 +1855,12 @@ function registerLocalWatchers(context) {
       }
     }));
   }
-  context.subscriptions.push({
-    dispose() { while (watchers.length) { try { watchers.pop().dispose(); } catch { /* already gone */ } } },
-  });
+  // No second drain disposer here. There used to be one, byte-identical to the
+  // one registered above and closing over the same `watchers` array, so whichever
+  // ran first emptied the list and the other was a no-op over an empty array
+  // forever — two entries in context.subscriptions that could only ever do one
+  // thing between them. Removing the DUPLICATE is not the same as removing the
+  // drain: the one above is registered before attach() and is the one under test.
 }
 
 // Created on first use and disposed with the extension. Lazy rather than built

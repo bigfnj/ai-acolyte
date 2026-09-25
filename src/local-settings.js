@@ -270,8 +270,13 @@ function drainLocalSettings({
   };
 }
 
+// `PROMOTABLE` and `grantedBy` are used only inside this module, which makes the
+// EXPORTS dead and neither of them dead code. PROMOTABLE is the portability test
+// promotionFor applies, and promotionFor is exported and tested directly;
+// grantedBy is the coverage test redundantUnder, partitionLocal and
+// drainLocalSettings all route through, and all three are exported and tested.
 module.exports = {
-  LOCAL_RELATIVE, PROMOTABLE,
-  localSettingsPath, localBackupPath, promotionFor, grantedBy, redundantUnder,
+  LOCAL_RELATIVE,
+  localSettingsPath, localBackupPath, promotionFor, redundantUnder,
   planPromotions, partitionLocal, drainLocalSettings,
 };

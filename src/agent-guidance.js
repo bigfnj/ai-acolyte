@@ -348,11 +348,19 @@ function setGuidanceAll(on, { home = os.homedir(), backupDir } = {}) {
   }));
 }
 
+// Three names came off this list, and none of their bodies went with them.
+// `guidancePath` and `codexGuidancePath` are the default arguments of
+// guidanceTargets, guidanceStatus and setGuidance, all of which ARE exported and
+// tested; `SHELL_BLOCK` is already reachable from outside through the four
+// delegates below it (guidanceBlock, hasGuidance, isCurrent, applyGuidance),
+// which is how every caller and every test has always reached it. Nothing
+// outside this file destructured any of the three or touched them through a
+// namespace require.
 module.exports = {
   BEGIN, END, GUIDANCE_BODY,
-  guidancePath, codexGuidancePath, guidanceTargets, installedGuidanceTargets,
+  guidanceTargets, installedGuidanceTargets,
   guidanceBlock, hasGuidance, isCurrent, applyGuidance,
   guidanceStatus, setGuidance, guidanceStatusAll, setGuidanceAll,
-  createManagedBlock, escapeMarker, SHELL_BLOCK,
+  createManagedBlock, escapeMarker,
   instructionLockPath, withInstructionLock,
 };

@@ -99,7 +99,12 @@ function setGatesAll(on, { home = os.homedir(), backupDir } = {}) {
   }));
 }
 
+// `gatesStatus` is NOT exported: its only caller is gatesStatusAll, two lines
+// below it, and no file outside this module ever destructured it or reached it
+// through a namespace require. The function stays — removing the export is free,
+// removing a function is not, and test/agent-gates.test.js exercises this one
+// through gatesStatusAll.
 module.exports = {
   GATES_BEGIN, GATES_END, makeGatesBlock,
-  compiledPath, readCompiled, gatesStatus, gatesStatusAll, setGatesAll,
+  compiledPath, readCompiled, gatesStatusAll, setGatesAll,
 };

@@ -133,6 +133,23 @@ test('the injected write hook receives what actually landed', (t) => {
     'what the hook records and what is on disk cannot disagree');
 });
 
+test('a writer with no target refuses to be built', () => {
+  // What this replaces: `settingsPath || defaultSettingsPath()`, where
+  // defaultSettingsPath() is the developer's REAL ~/.claude/settings.json. Every
+  // one of the three callers passes settingsPath, so the leg never ran — but the
+  // day one of them stopped, the writer would have silently retargeted itself at
+  // the most dangerous file on the machine, and a test harness that forgot the
+  // option would have rewritten the permission policy of whoever ran it.
+  assert.throws(() => createSettingsWriter({}), /requires a settingsPath/);
+  assert.throws(() => createSettingsWriter({ onWrite: () => {} }), /requires a settingsPath/);
+  // The `= {}` parameter default went too, so a bare call is a TypeError rather
+  // than a writer pointed at a default nobody chose.
+  assert.throws(() => createSettingsWriter(), TypeError);
+
+  // MUTATION: put `|| defaultSettingsPath()` back (with the function restored)
+  // and the first two fail, having built a writer aimed at ~/.claude/settings.json.
+});
+
 test('the returned counts are measured against the file, not the caller snapshot', (t) => {
   // `addedAllow` was already measured against the rebased read. `removedAllow`
   // did not exist, so a caller wanting a removal count had nowhere honest to get

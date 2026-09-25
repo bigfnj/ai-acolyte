@@ -181,10 +181,15 @@ function honourFor(stat, staleMs) {
   return stat.size === 0 ? Math.min(staleMs, ZERO_BYTE_GRACE_MS) : staleMs;
 }
 
+// DEFAULT_POLICY_LOCK_STALE_MS was exported here and imported nowhere. The test
+// it looked like it existed for did not exist either; that gap is now closed
+// behaviourally in test/policy-lock.test.js, which reclaims a nine-minute-old
+// ownerless lock and an eleven-minute-old one through the DEFAULT window. An
+// alias asserting "the constant is the constant" would have survived every
+// change to how the constant is used.
 module.exports = {
   createPolicyLock,
   POLICY_LOCK_CODE,
   POLICY_LOCK_PATH,
   POLICY_LOCK_BUSY_MESSAGE,
-  DEFAULT_POLICY_LOCK_STALE_MS: DEFAULT_STALE_MS,
 };

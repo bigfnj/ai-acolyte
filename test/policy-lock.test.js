@@ -77,6 +77,40 @@ test('an ownerless lock is only reclaimed once it is stale', (t) => {
   assert.equal(impatient.locked(() => 'reclaimed'), 'reclaimed');
 });
 
+// The DEFAULT window, which nothing pinned. Every other case here passes `staleMs`
+// explicitly — including the one above, which writes `10 * 60 * 1000` into the test
+// rather than asking what the default is — so the constant itself had no observer
+// at all. A typo turning `10 * 60 * 1000` into `10 * 60` makes every ownerless lock
+// on the machine reclaimable after 600 ms, and the whole suite stays green.
+//
+// This is the test that the exported alias DEFAULT_POLICY_LOCK_STALE_MS looked like
+// it existed for and never got. Written against the BEHAVIOUR rather than the
+// constant, because "the number equals the number" would pass under a change to how
+// the number is used, and this is a window a live writer is inside.
+test('the default stale window is ten minutes, not some other order of magnitude', (t) => {
+  const lockPath = tempLock(t);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  // Ownerless AND non-empty, which is the shape that waits the full window; a
+  // zero-byte lock has its own five-second grace, tested below.
+  const atAge = (ms) => {
+    fs.writeFileSync(lockPath, 'not json\n');
+    const when = new Date(Date.now() - ms);
+    fs.utimesSync(lockPath, when, when);
+  };
+
+  atAge(9 * 60 * 1000);
+  assert.throws(() => createPolicyLock({ lockPath }).locked(() => {}),
+    (error) => error.code === POLICY_LOCK_CODE,
+    'a nine-minute-old lock is still somebody else’s');
+
+  atAge(11 * 60 * 1000);
+  assert.equal(createPolicyLock({ lockPath }).locked(() => 'reclaimed'), 'reclaimed',
+    'and an eleven-minute-old one is not, or a dead owner blocks every writer forever');
+
+  // MUTATION: change DEFAULT_STALE_MS in src/policy-lock.js from 10 * 60 * 1000 to
+  // 10 * 60 and the first assertion fails — the nine-minute lock is stolen.
+});
+
 // The orphan `locked()` leaves behind if it dies mid-acquire: `openSync(..., 'wx')`
 // creates the file and the metadata is written as a SECOND step, so a crash in between
 // leaves a lock with no pid to probe. `recoverLock` then falls to the age test, which

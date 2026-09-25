@@ -368,9 +368,12 @@ function setDerivedGuidance(mitigations, accepted, {
     added: [], updated: [], removed: [], installed: [] })));
 }
 
+// `mitigationBlock` is not exported: reconcileDerived is its only caller, and
+// reconcileDerived is exported and directly tested, including the removal path
+// that drives mitigationBlock with a title and body this module no longer has.
 module.exports = {
   deriveMitigations, markersFor, renderMitigation, cleanRule,
-  mitigationBlock, installedDerivedIds, reconcileDerived,
+  installedDerivedIds, reconcileDerived,
   derivedStatus, setDerivedGuidance,
   DEFAULT_THRESHOLD, DEFAULT_LIMIT,
 };

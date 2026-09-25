@@ -178,46 +178,26 @@ function generalizePermission(perm) {
     : generalizeCommandArg(arg, tool);
 }
 
-// ── legacy history-mining compatibility helper ──────────────────────────────────
-//
-// Convert a command string already verified by the caller into a clean root
-// wildcard. This helper does not read transcripts or prove that a command ran.
-// Cross-agent Auto Learn performs request/result correlation, outcome tracking,
-// risk classification, and policy export in the dedicated auto-learn modules.
-// Returns `Tool(root *)` for a clean single-command root, or null for shell
-// keywords, paths, quoted programs, env-var prefixes, call forms, and scripts.
-
 // Bash reserved words / shell grammar that can begin a line but are not commands
 // to wildcard (`for i in …` must not seed `Bash(for *)`). PowerShell's equivalents
 // are already handled by generalizePowerShellArg via PS_SCRIPT_KEYWORDS.
+//
+// Exported for src/local-settings.js, which applies the same test when deciding
+// whether a project-local approval is portable enough to promote. That is now
+// the only consumer. `mineWildcard` used to sit directly below this set and
+// apply it too — a "legacy history-mining compatibility helper" that turned a
+// command string into `Tool(root *)` for a caller that no longer exists. It is
+// deleted rather than merely unexported, because nothing in src/, bin/,
+// vscode-extension/, scripts/ or test/ referenced it at all: not a destructure,
+// not a namespace member access, not even inside this file. Cross-agent Auto
+// Learn does that job in its own modules, and `promotionFor` in
+// local-settings.js is the live version of the same idea, portability bar and
+// all.
 const BASH_SCRIPT_KEYWORDS = new Set([
   'for', 'while', 'until', 'do', 'done', 'if', 'then', 'elif', 'else', 'fi',
   'case', 'esac', 'select', 'function', 'time', 'coproc', 'in',
   'declare', 'typeset', 'local', 'set', 'unset', 'eval', 'exec',
 ]);
-
-function mineWildcard(tool, command) {
-  if (!COMMAND_TOOLS.has(tool)) return null;
-  const arg = String(command == null ? '' : command);
-  if (!arg.trim()) return null;
-
-  const perm = tool === 'PowerShell'
-    ? generalizePowerShellArg(arg)
-    : generalizeCommandArg(arg, tool);
-
-  // Only a clean single-root wildcard `Tool(<root> *)` qualifies. Anything the
-  // generalizer left verbatim (a script/keyword form) fails this shape.
-  const m = perm.match(/^(Bash|PowerShell)\((\S+) \*\)$/);
-  if (!m) return null;
-  const [, t, root] = m;
-
-  // Root must be a bare command name — rejects paths (/…, C:\…), quoted programs,
-  // and the `& *` call form (whose root would be `&`).
-  if (!/^[A-Za-z][\w.-]*$/.test(root)) return null;
-  if (t === 'Bash' && BASH_SCRIPT_KEYWORDS.has(root.toLowerCase())) return null;
-
-  return `${t}(${root} *)`;
-}
 
 // Returns true if `specific` is fully matched by `wildcard` (glob: * = anything).
 function isCoveredBy(specific, wildcard) {
@@ -576,9 +556,15 @@ function applyBypass(settings, on) {
   return { changed: true, from, to, settings: withMode(settings, to) };
 }
 
+// BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
+// Both are internal to the four bypass functions below them — currentMode,
+// isBypassOn, applyBypass and readBypassState — which are exported and are how
+// the CLI, the extension and the tests have always reached the behaviour. A test
+// importing the mode string to compare it against itself would pin nothing that
+// applyBypass's own round trip does not already pin.
 module.exports = {
-  generalizePermission, mineWildcard, BASH_SCRIPT_KEYWORDS,
+  generalizePermission, BASH_SCRIPT_KEYWORDS,
   isCoveredBy, createCoverIndex, prunePermissions, processAllowList, writeFileAtomicSync,
   coverKeyCacheStats, coverIndexKeyCacheStats,
-  BYPASS_MODE, BYPASS_STATE_FILE, currentMode, isBypassOn, applyBypass, readBypassState,
+  currentMode, isBypassOn, applyBypass, readBypassState,
 };

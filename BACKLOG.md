@@ -140,6 +140,70 @@ anything literal. Each can be made checkable by quoting the identifier that actu
 the cited line. **Worth doing when a sentence is being edited anyway, not as a sweep** — and
 note the record's standing warning never to bulk-apply the checker's `suggest` field.
 
+### From the 2026-09-25 audits: what was found and NOT fixed
+
+Three read-only audits ran over the whole two-day effort. Everything they found in the
+product was fixed the same day and is not listed here; what follows is what was left, each
+verified against the tree.
+
+**The highest-yield gate this repo does not have.** Of fourteen confirmed dead-code findings,
+**zero** would be caught by widening `test/dead-exports.test.js`, and **nine** would be caught
+by one new check: *a property on a returned object literal that no caller reads*. The census
+reads `module.exports` and nothing else, so module-local functions, option keys on a context
+object, fields on a result object, arguments at a call site, and everything in `bin/`,
+`scripts/` and `test/` are invisible to it by construction. That is not a defect in the
+census; it is the shape of its blind spot, now measured.
+
+**The drain guard and its own message disagree.** `src/local-settings.js:215-225` blocks on
+`legacy.hook || legacy.generatedAllow.length`. The predicate it replaced also covered
+`legacy.allow` — both `Bash(*)` and `PowerShell(*)` present in user scope — which
+`legacyClaudeMaxStatus` still computes and which the guard now omits. So a user whose snapshot
+is absent and whose approve hook is already gone is no longer blocked, while
+`vscode-extension/extension.js` and `bin/wildcard-perms` both still say *"legacy Bash(\*) and
+PowerShell(\*) grants cover every local entry"*, a message that cannot fire for the case it
+names. Either the condition or the wording is wrong. Mitigated by the high-water local backup,
+so grants are recoverable.
+
+**Two trackers were lost, not two items.** The "untested-but-correct mutants that survive"
+table (7 rows) and the "6 option keys with no supplier" list were both deleted in the
+burn-down. Every name in the first now appears somewhere under `test/`, so some are plausibly
+covered, but the seven mutants were not re-run. The second class lost its only tracker when
+the dead-export census replaced it, and the census does not read option keys.
+
+**Suspected, each with the reason it could not be closed:**
+
+- **Cancelling the model download inside the redirect window** may leave the promise pending
+  and the `.tmp` fd open: `httpsGetFollow` returns without calling `onResponse` when
+  `handle.cancelled` is set at a 3xx, so `fail()` never runs. Either the branch is unreachable
+  (a `destroy()` before the 3xx emits `error` first) or it is that leak; the two readings could
+  not be separated. `liveTransfers` holds only the request handle, not the write stream.
+- **A case-mismatched `target` defeats the substitute invariant on Windows.**
+  `src/codex-policy.js:414-426` compares `resolved` (on-disk casing) with `target`
+  (`path.resolve`) by exact string, with no case folding. Both sides derive from `os.homedir()`
+  today so they agree; a user-configured `codexRulesPath` with different casing would leave the
+  deployed file visible AND append the pending one, a state the code says no write produces.
+- **The packaging gate reports but does not quarantine.** `scripts/package.mjs` runs
+  `assertRetiredMaxAbsent(out)` after `vsce` has written the artefact, so a rejected VSIX stays
+  in the repo root where a later step or a human picking the newest `.vsix` can still ship it.
+- **`warnedOnce` survives a same-realm re-activate.** Module-scope `Set`, never cleared by
+  `activate()` or `deactivate()`, unlike every sibling latch. Its comment says "once per
+  activation"; it is once per realm. Bounded in practice, so cost is nil and only the contract
+  is wrong.
+- **The `explicit: true` legacy-cleanup path has no UI entry point.** `toggleMax` and
+  `toggleCodexMax` are registered but deliberately absent from the manifest, and there are no
+  keybinding contributions, so for a real user the whole explicit half of `offerLegacyCleanup`
+  is unreachable and anyone whose state is snapshot-only is never offered the cleanup.
+
+**Cosmetic, listed so they are not rediscovered as findings:** the `fixed-point cache is back`
+assertion in `scripts/smoke.sh` writes a value and reads it straight back, so it is close to a
+constant equalling itself — the property it argues for is delivered by making the restore
+unconditional, not by that assertion. And `test/codex-contract.test.js` builds a `swapped`
+string it never asserts on (`void swapped;`); the real mutant is built two lines below.
+
+⚠ **The `file:line` corpus got worse across this effort, not better.** `check-line-refs`
+reports **OK 36 | NEAR 16 | STALE 55 | UNVERIFIABLE 17** over 124 references, against OK 119
+on 2026-09-16. Twenty-six of the STALE ones were written by this effort. The gate cannot see
+them, for the reason given in the entry above.
 ---
 
 ## Deliberately not here

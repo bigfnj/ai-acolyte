@@ -568,7 +568,14 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
     let before = app.passes.count;
     await app.commands.get('permission-wildcarding.runNow')();
     await settle();
-    assert.equal(app.passes.count - before, 1, 'one pass per settings write, not two');
+    // "one pass per settings write" is what this line USED to claim, and the fixture
+    // cannot reach that case: FIFTEEN is already fully generalized, so runNow finds a
+    // fixed point and NO settings write happens. The property actually under test is
+    // the optimal path — the refresh that follows must not recompute the value
+    // runWildcarding just handed it. The write path is covered by the test below,
+    // which expects a different number for a documented reason.
+    assert.equal(app.passes.count - before, 1,
+      'one pass on the already-optimal path: the refresh must not recompute it');
     assert.equal(ui.posted.length, 1);
     assert.equal(ui.posted[0].pendingWildcard, 0);
     assert.equal(ui.posted[0].wildcardCount, FIFTEEN.length);

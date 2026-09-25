@@ -107,6 +107,16 @@ The evidence that came with the original entry, and which now survives only in g
 removing the hint on the optimal path is killed by this test; removing it on the **write**
 path survives. **The write-path hint has no coverage at all.**
 
+The MESSAGE was corrected 2026-09-25 to name the branch the fixture actually reaches, which
+is a real improvement and not a fix. An attempt to add the missing write-path test the same
+day was **reverted rather than shipped**, and the measurement is the useful part: a fixture of
+`Bash(git status *)` + `Bash(git status --short *)` is genuinely not a fixed point (it
+collapses to one entry, verified directly), the write demonstrably happens, and yet the pass
+counter moves by **1, not the 2** that two call sites at `vscode-extension/extension.js:2648`
+and `:2690` predict. Either one of those does not run on this path or the harness cannot see
+it. **Settle that before writing the test** -- an assertion carrying a number nobody can
+explain is worse than the gap it covers.
+
 ### The release workflow node24 pins have still never executed
 
 RESTORED 2026-09-25, dropped by the same burn-down, and now live rather than theoretical

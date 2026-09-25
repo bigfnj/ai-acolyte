@@ -680,24 +680,22 @@ function renderClaudePermissions(candidates, options = {}) {
   return [...permissions].sort((a, b) => a.localeCompare(b));
 }
 
-// The three-argument overload shim is gone: it re-read an OBJECT third argument
-// as `options`, and no caller has ever passed one. The single production call
-// site, src/auto-learn-manager.js, spells the third argument `null` explicitly.
+// The vestigial third parameter is gone, and with it the only leg of this
+// function no production input could reach.
 //
-// The third PARAMETER survives, and that is a finding rather than a decision.
-// Only a test passes a function for it; production passes null, so the
-// normalization leg below is unreachable in the product. Removing the parameter
-// means changing that call site, which lives in a module this pass could not
-// edit, so it is left in place and written down instead.
-function mergeClaudeAllow(existing, candidates, processAllowList, options = {}) {
+// History: an overload shim re-read an OBJECT third argument as `options`, which
+// no caller ever passed, and was removed. What survived was a `processAllowList`
+// parameter that only a TEST ever filled — the single production call site,
+// src/auto-learn-manager.js, spelled it `null`. So the normalization branch was
+// dead in the product and alive only in the test that existed to cover it: a
+// closed loop where the test proved the test.
+//
+// Both files are now in one pass, so the parameter is removed rather than
+// documented again. `options` moves to the third position; there was no caller
+// passing four arguments to break.
+function mergeClaudeAllow(existing, candidates, options = {}) {
   const manual = Array.isArray(existing) ? existing.slice() : [];
-  let generated = renderClaudePermissions(candidates, options);
-  // Normalize generated entries only. Giving an old processor the full list
-  // could prune narrower manual entries, violating the non-destructive merge.
-  if (typeof processAllowList === 'function') {
-    const processed = processAllowList(generated.slice());
-    generated = renderClaudePermissions(Array.isArray(processed) ? processed : generated, options);
-  }
+  const generated = renderClaudePermissions(candidates, options);
   const seen = new Set(manual.filter((value) => typeof value === 'string'));
   for (const permission of generated) {
     if (!seen.has(permission)) {
@@ -756,12 +754,51 @@ function mergeGeneratedCodexRules(existingText, generatedText) {
   return existing + separator + managedBlock;
 }
 
+// The inverse of `mergeGeneratedCodexRules`, and the only thing that may touch a
+// rules file this tool no longer maintains.
+//
+// Codex WORKSPACE scope is withdrawn (see bin/wildcard-perms), so an older
+// release may have left `<repo>/.codex/rules/permission-wildcarding.rules`
+// behind. Deleting that file wholesale is not an option: a user is free to have
+// added their own rules to it, and this tool's marker pair is the ONLY proof of
+// what it wrote. So the ownership rule is the same one the retired Codex MAX
+// cleanup uses — no proof of ownership, no write — and the remainder is handed
+// back rather than discarded.
+//
+// Returns `changed: false` with a reason for every shape it will not touch. A
+// cleanup that silently did nothing and a cleanup that silently did the wrong
+// thing look identical to the caller otherwise.
+function removeGeneratedCodexRules(existingText) {
+  const existing = String(existingText == null ? '' : existingText);
+  const begins = markerMatches(existing, CODEX_BEGIN_MARKER);
+  const ends = markerMatches(existing, CODEX_END_MARKER);
+  if (!begins.length && !ends.length) {
+    return { changed: false, text: existing, remaining: existing, markers: 0, reason: 'no generated block' };
+  }
+  if (begins.length !== ends.length || begins.length > 1) {
+    return {
+      changed: false, text: existing, remaining: existing, markers: begins.length,
+      reason: 'unbalanced or duplicate generated markers',
+    };
+  }
+  if (begins[0].start >= ends[0].start) {
+    return {
+      changed: false, text: existing, remaining: existing, markers: 1,
+      reason: 'generated markers are out of order',
+    };
+  }
+  const remaining = existing.slice(0, begins[0].start) + existing.slice(ends[0].end);
+  return { changed: true, text: remaining, remaining, markers: 1, empty: remaining.trim() === '' };
+}
+
 module.exports = {
   renderCodexRules,
   validateCodexRulesText,
   renderClaudePermissions,
   mergeClaudeAllow,
   mergeGeneratedCodexRules,
+  removeGeneratedCodexRules,
+  CODEX_BEGIN_MARKER,
   // Exported so the drift test can assert this gate and the learner's
   // independent copy still describe the same set.
   AUTO_SUFFIX_CLOSED_ROOTS,

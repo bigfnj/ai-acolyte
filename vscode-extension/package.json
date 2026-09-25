@@ -194,16 +194,14 @@
           "type": "string",
           "enum": [
             "user",
-            "workspace",
             "off"
           ],
           "enumDescriptions": [
             "Write the dedicated user rule file at `~/.codex/rules/permission-wildcarding.rules`.",
-            "Write `.codex/rules/permission-wildcarding.rules` in the first trusted workspace folder.",
             "Learn from Codex history but do not write Codex rules."
           ],
           "default": "user",
-          "markdownDescription": "Where validated generated Codex rules are written. Codex loads rules at startup, so restart Codex after a rule change."
+          "markdownDescription": "Where validated generated Codex rules are written. Codex loads rules at startup, so restart Codex after a rule change.\n\n`workspace` is **withdrawn**: its trust model could not be stated, because VS Code workspace trust, this setting and Codex's own project trust are three different decisions and only the last governs whether Codex loads a workspace rule file. A settings file that still says `workspace` is accepted, but Codex rule export stays OFF and the Auto Learn card says so. To remove rules an older release wrote into a repository: `wildcard-perms --codex-workspace-rules remove`."
         },
         "permissionWildcarding.autoLearn.codexExecutable": {
           "type": "string",

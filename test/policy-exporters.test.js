@@ -184,18 +184,44 @@ test('explicitly reviewed Claude export can retain narrow read candidates', () =
   ]);
 });
 
-test('Claude merge preserves manual order and normalizes generated entries only', () => {
+// The third argument used to be an allow-list processor that only this test ever
+// supplied; production spelled it `null`. It is gone, so what is asserted here is
+// what production actually does: append generated entries after the manual ones,
+// never reorder or drop a manual entry, and never mutate the caller's array.
+//
+// The arity is asserted too. A removed parameter that some caller still passes
+// positionally would silently become `options`, and `{ includeReviewed: true }`
+// arriving in the wrong slot is the one mistake this change could cause.
+test('Claude merge appends generated entries and leaves manual ones untouched', () => {
   const manual = ['Bash(git status *)', 'WebSearch'];
-  let processorInput;
   const merged = mergeClaudeAllow(manual, [candidate(['rg', '--files'], {
     tool: 'Bash', claudePermission: 'Bash(rg --files *)',
-  })], (generated) => {
-    processorInput = generated.slice();
-    return generated;
-  });
-  assert.deepEqual(processorInput, ['Bash(rg --files *)']);
+  })]);
   assert.deepEqual(merged, ['Bash(git status *)', 'WebSearch', 'Bash(rg --files *)']);
-  assert.deepEqual(manual, ['Bash(git status *)', 'WebSearch']);
+  assert.deepEqual(manual, ['Bash(git status *)', 'WebSearch'], 'the input array is not mutated');
+
+  // Third position is options now, not a processor.
+  assert.equal(mergeClaudeAllow.length, 2, 'options is defaulted, so only two required parameters');
+  const reviewed = mergeClaudeAllow([], [
+    { autoSafe: false, tool: 'Bash', prefix: ['cat'], claudePermission: 'Bash(cat *)' },
+  ], { includeReviewed: true });
+  assert.deepEqual(reviewed, ['Bash(cat *)'],
+    'options in the third slot still reaches renderClaudePermissions');
+  assert.deepEqual(mergeClaudeAllow([], [
+    { autoSafe: false, tool: 'Bash', prefix: ['cat'], claudePermission: 'Bash(cat *)' },
+  ]), [], 'and without it the reviewed candidate is still withheld');
+
+  // A stray function in the old slot must not be read as options and must not be
+  // called. Silently invoking a leftover argument is how a removed parameter
+  // keeps working just well enough to hide a mistake.
+  let called = false;
+  assert.deepEqual(
+    mergeClaudeAllow(manual, [candidate(['rg', '--files'], {
+      tool: 'Bash', claudePermission: 'Bash(rg --files *)',
+    })], () => { called = true; return []; }),
+    ['Bash(git status *)', 'WebSearch', 'Bash(rg --files *)'],
+  );
+  assert.equal(called, false, 'the retired processor argument is never invoked');
 });
 
 test('Codex managed merge preserves manual text and replaces only its marked section', () => {

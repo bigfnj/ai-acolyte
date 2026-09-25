@@ -50,7 +50,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1272`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1309`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 
@@ -797,9 +797,9 @@ Unrebased whole-object writers still outstanding:
 | Site | Nature |
 |---|---|
 | `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1922-1924`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1933-1935`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
 | `change.before.content` at `src/auto-learn-manager.js:1370` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1361`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2002` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2013` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:245` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:201` read → `:245` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -824,8 +824,8 @@ Three further blockers for whoever attempts it:
 **Prerequisite, since met:** `grep "Policy changed" test/` returned nothing, so
 the entire "detect and throw" behaviour that justifies this writer's safety was
 unpinned, and swapping it for a retrying writer would have passed the full suite
-silently. The "Policy changed" guard is pinned now: `test/auto-learn-manager.test.js:492-511`
-records why, and the two tests are at `:513` and `:593`.
+silently. The "Policy changed" guard is pinned now: `test/auto-learn-manager.test.js:595-614`
+records why, and the two tests are at `:616` and `:696`.
 
 ## `runWildcarding`'s lock: the constraint that decides any refactor
 
@@ -843,7 +843,7 @@ documented at `bin/wildcard-perms:360-374`.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`extension.js:2521-2523`);
+  "a deny rule added by hand first reaches the backup" (`extension.js:2557-2559`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that

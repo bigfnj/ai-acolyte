@@ -30,7 +30,24 @@ function writeFileAtomicSync(target, content) {
   // Unique per-writer temp name so the hook and the VS Code extension (or two
   // extension hosts) never collide on one shared *.wc.tmp.
   const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.wc.tmp`;
-  fs.writeFileSync(tmp, content, 'utf8');
+  // The ONE path that could leave the temp behind. Everything after this line
+  // either renames the file away or reaches the unlink in the in-place
+  // fallback's finally, so the loop below and the fallback were already covered
+  // and this was not. `fs.writeFileSync` CREATES the file before it writes, so a
+  // throw part-way through — ENOSPC, EDQUOT, EACCES on a hardened directory, EIO
+  // — leaves a partial `<target>.<pid>.<rand>.wc.tmp` next to settings.json
+  // forever, with a name nothing ever cleans up and a shape that looks like the
+  // user's own settings to anything globbing the directory.
+  //
+  // src/auto-learn-manager.js:133-162 is the shape being copied: every exit
+  // unlinks. The throw still propagates unchanged — this is a cleanup, not a
+  // swallow, and the caller's error handling is the contract.
+  try {
+    fs.writeFileSync(tmp, content, 'utf8');
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* never created, or already gone */ }
+    throw err;
+  }
 
   const MAX_ATTEMPTS = 10;
   let lastErr;

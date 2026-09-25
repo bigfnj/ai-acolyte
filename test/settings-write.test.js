@@ -628,6 +628,56 @@ test('the in-place fallback names the cause it gave the atomic guarantee up for'
   assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
 });
 
+// The sibling of the assertion above, for the one throw that was NOT covered.
+//
+// writeFileAtomicSync's only unlink used to live in the in-place fallback's
+// `finally`, and every path after the initial temp write either renames the temp
+// away or reaches that finally. So the sole orphan window was a throw from the
+// initial `fs.writeFileSync(tmp, …)` itself — and "it threw" does not mean
+// "nothing is on disk", because that call CREATES the file and then writes into
+// it. ENOSPC, EDQUOT and EIO all land after the create.
+//
+// What that leaves behind is `settings.json.<pid>.<rand>.wc.tmp` holding a
+// partial copy of the user's permission policy, next to settings.json, with no
+// code anywhere that ever removes it. src/auto-learn-manager.js:133-162 is the
+// shape this now copies: every exit unlinks.
+test('a temp file is not orphaned when the write into it fails part-way', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-orphan-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'settings.json');
+  fs.writeFileSync(target, '{"kept":true}\n');
+
+  const realWrite = fs.writeFileSync;
+  t.after(() => { fs.writeFileSync = realWrite; });
+  let created = false;
+  fs.writeFileSync = (file, ...rest) => {
+    if (!String(file).endsWith('.wc.tmp')) return realWrite(file, ...rest);
+    // The failure shape that matters, not a convenient one: the create succeeds,
+    // some bytes land, and THEN the device is full. A stub that throws before
+    // touching the disk tests nothing here, because there is no file to orphan.
+    realWrite(file, '{"half');
+    created = true;
+    throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  };
+
+  assert.throws(() => writeFileAtomicSync(target, '{"ok":true}\n'), /ENOSPC/,
+    'the error still propagates — this is a cleanup, not a swallow');
+  fs.writeFileSync = realWrite;
+
+  assert.equal(created, true,
+    'precondition: the stub really created the temp file before throwing, so there '
+    + 'was something to orphan');
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json'],
+    'a partial copy of the permission policy was left beside settings.json under a '
+    + 'name nothing ever cleans up');
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"kept":true}\n',
+    'and the real file is untouched, because the rename never ran');
+
+  // MUTATION: drop the try/catch around the initial `fs.writeFileSync(tmp, …)` in
+  // src/permissions.js and this fails on the readdir, listing
+  // settings.json.<pid>.<rand>.wc.tmp beside settings.json.
+});
+
 test('a write that throws does not fire the high-water hook', (t) => {
   // onWrite is the allow-list high-water backup. Firing it for a write that
   // did not land would record a watermark the file never reached, and the next

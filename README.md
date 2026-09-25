@@ -1,4 +1,7 @@
-# permission-wildcarding
+# Acolyte
+
+*Formerly Permission Wildcarding. The extension ID, every command ID and every setting key
+are unchanged, so an existing install upgrades in place.*
 
 **Stop re-approving the same command.** Claude Code and Codex ask before running
 things. Approve `Bash(git status)` and you will be asked again for `git log`, then
@@ -25,8 +28,8 @@ What you get:
 ## Install
 
 ```bash
-git clone https://github.com/bigfnj/permission-wildcarding
-cd permission-wildcarding
+git clone https://github.com/bigfnj/ai-acolyte
+cd ai-acolyte
 ./install.sh            # or .\install.ps1 on Windows PowerShell
 ```
 

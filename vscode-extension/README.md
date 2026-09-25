@@ -264,7 +264,7 @@ Needs **VS Code 1.80** or newer (`engines.vscode` is `^1.80.0`) and **Node >= 20
 CLI half in the repository.
 
 Download the `.vsix` from the repository's
-[Releases](https://github.com/bigfnj/permission-wildcarding/releases), then in
+[Releases](https://github.com/bigfnj/ai-acolyte/releases), then in
 VS Code: **Extensions view (`Ctrl+Shift+X`) → `···` menu → Install from VSIX…**
 and pick the file. `code --install-extension <file>.vsix --force` also works and
 does register into the active profile -- measured on VS Code 1.10x, 2026-09-22,

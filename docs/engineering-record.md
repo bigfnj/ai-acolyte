@@ -908,7 +908,7 @@ into per-project directories.
 It only pays off if sessions are launched inside each project, which is not current
 practice. Doing it would mean writing `.claude/settings.json` into 13 other repos, several
 public, while a concurrent session was demonstrably active in at least one of them (two
-`ILT-wt-*` worktrees appeared during this work). And it buys little that the index diet did
+agent worktrees appeared during this work). And it buys little that the index diet did
 not already buy: deleting the slug vocabulary took `MEMORY.md` from 163 lines to 84, which
 was the whole point.
 

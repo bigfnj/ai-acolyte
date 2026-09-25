@@ -58,3 +58,29 @@ SESSION_*
 
 # electron crash log dropped in the repo root
 debug.log
+
+# Key material. `.env` was covered from the start and raw key files were not, which is
+# the gap a pre-close audit found on 2026-09-25: a stray .pem or id_rsa dropped in this
+# tree would have been stageable on a PUBLIC repo. Nothing has ever been tracked under
+# these names; this closes the door before it matters rather than after.
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.ppk
+
+# OS and editor debris. Only `debug.log` was ignored, so any other log was stageable.
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+*.log

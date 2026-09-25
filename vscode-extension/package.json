@@ -2,7 +2,7 @@
   "name": "permission-wildcarding",
   "displayName": "Permission Wildcarding",
   "description": "Cuts agent approval friction, with a different mechanism per agent. Claude Code only: generalizes approved permissions into command-family wildcards on change, drains project-local approvals into user scope, and backs up policy before every write. Codex only: exports execpolicy prefix rules, validated by codex execpolicy check before anything is written. Shared: Auto Learn over both agents' history, a wildcardable shell style for the agent, memory gates, memory-index diagnostics, and prompt diagnostics. Codex has no wildcarding pass and no project-local promotion. Codex rule export is experimental.",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "publisher": "local",
   "license": "MIT",
   "repository": {

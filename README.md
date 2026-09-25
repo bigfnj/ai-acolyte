@@ -369,9 +369,15 @@ workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
 node --test                         # 575 tests; `npm test` runs the same thing
+npm run smoke                       # scripts/smoke.sh, against the LIVE ~/.claude
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN
 python memory/recall.py --lint      # index clean, gates not stale against source
 ```
+
+`npm run smoke` is the only gate that drives the hook the way Claude Code does, against this
+machine's real `settings.json` rather than a fixture, so it catches what a suite of mocked homes
+structurally cannot. It is separate from `node --test` on purpose and is not run by CI, which has
+no live allow list to read.
 
 `node --test` fails a `file:line` reference that lands on a missing file, a line past the end, a
 blank line or a bare closing brace. Two release facts have each cost a version here: VS Code keys

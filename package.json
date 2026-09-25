@@ -5,6 +5,7 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test",
+    "smoke": "bash scripts/smoke.sh",
     "package": "node scripts/package.mjs"
   },
   "engines": {

@@ -165,6 +165,71 @@ else
   fi
 fi
 
+echo "== retired MAX surfaces stay retired"
+# The enable paths were deleted in the post-1.5.1 work. These verbs survive only as
+# one-way cleanup. A status verb that still reports, plus an `on` that still refuses,
+# is the pair worth gating: the packaging gate proves the code is absent from the
+# VSIX, and this proves the CLI a user actually types behaves the same way.
+check "--max status is cleanup-only"       'legacy Claude MAX configuration:' "$(node "$CLI" --max status 2>&1)"
+check "--codex-max status is cleanup-only" 'legacy Codex MAX configuration:'  "$(node "$CLI" --codex-max status 2>&1)"
+MAX_ON="$(node "$CLI" --max on 2>&1)"
+if [ $? -ne 0 ]; then
+  ok "--max on is refused" "$(printf '%s' "$MAX_ON" | head -c 80)"
+else
+  no "--max on is refused" "exited 0 — a retired enable path answered"
+fi
+
+echo "== the CLI reads the Auto Learn state the extension writes"
+# The manager keys its state file on a hash of workspaceRoot, and bin/wildcard-perms
+# defaults that to process.cwd(). So `--learn status` run anywhere but the exact
+# VS Code workspace root reads a DIFFERENT, usually absent, state file and prints
+# zeros — which reads as "Auto Learn is doing nothing" rather than "you are looking
+# at the wrong file". The `--learn status` check above passes on that empty state,
+# because `mode` defaults to "recommend" whether or not anything was ever scanned.
+STATE_DIR="$(dirname "$FPCACHE")"
+CLI_STATE=$(node "$CLI" --learn status 2>/dev/null | node -e '
+  let s = ""; process.stdin.on("data", (d) => { s += d; })
+    .on("end", () => { try { process.stdout.write(JSON.parse(s).paths.state); } catch {} });
+')
+NEWEST_STATE=$(node -e '
+  const fs = require("fs"), path = require("path");
+  const dir = process.argv[1];
+  let best = null;
+  for (const name of fs.readdirSync(dir)) {
+    if (!/^auto-learn-state.*\.json$/.test(name)) continue;
+    try {
+      const at = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")).lastScanAt;
+      if (at && (!best || at > best.at)) best = { at, file: path.join(dir, name) };
+    } catch { /* a half-written state is not the newest */ }
+  }
+  if (best) process.stdout.write(best.file);
+' "$STATE_DIR" 2>/dev/null)
+
+if [ -z "$NEWEST_STATE" ]; then
+  echo "  INFO  no scanned Auto Learn state on this box yet, so there is nothing to diverge from"
+elif [ "$CLI_STATE" = "$NEWEST_STATE" ]; then
+  ok "the CLI and the extension agree on the state file" "$(basename "$CLI_STATE")"
+else
+  no "the CLI and the extension agree on the state file" \
+     "CLI reads $(basename "${CLI_STATE:-<none>}"), newest scanned is $(basename "$NEWEST_STATE")"
+fi
+
+# And that state must not be carrying scan errors. This is the check that would have
+# caught the 2.27 GB rollout defect, which sat unreadable for eight days while every
+# other gate stayed green.
+SCAN_ERRORS=$(node -e '
+  const fs = require("fs");
+  try {
+    const stats = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).lastScanStats;
+    process.stdout.write(String(stats && stats.errors ? stats.errors : 0));
+  } catch { process.stdout.write("0"); }
+' "$NEWEST_STATE" 2>/dev/null)
+if [ "${SCAN_ERRORS:-0}" = "0" ]; then
+  ok "the last Auto Learn scan recorded no errors"
+else
+  no "the last Auto Learn scan recorded no errors" "$SCAN_ERRORS file(s) failed to read"
+fi
+
 # Leave the machine as we found it. The run above re-earns the key on its own,
 # so this only matters when the cold run failed to write one.
 if [ -n "$FP_SAVED" ] && [ ! -s "$FPCACHE" ]; then

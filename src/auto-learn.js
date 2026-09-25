@@ -51,7 +51,7 @@ const ADMIN_ROOTS = new Set([
 const NETWORK_ROOTS = new Set([
   'aria2c', 'aws', 'az', 'curl', 'dig', 'ftp', 'gcloud', 'gh',
   'invoke-restmethod', 'invoke-webrequest', 'nc', 'ncat', 'netcat', 'nslookup',
-  'ping', 'scp', 'sftp', 'socat', 'ssh', 'telnet', 'test-netconnection',
+  'ping', 'rclone', 'scp', 'sftp', 'socat', 'ssh', 'telnet', 'test-netconnection',
   'tracert', 'traceroute', 'wget',
 ]);
 const CREDENTIAL_ROOTS = new Set([
@@ -59,22 +59,38 @@ const CREDENTIAL_ROOTS = new Set([
   'get-credential', 'gpg', 'op', 'pass', 'secret-tool', 'sops', 'ssh-add',
   'ssh-keygen',
 ]);
+// `uvx` added 2026-09-25: it is `npx` for Python, and `npx` has always been here. It
+// fetches and runs an arbitrary package by name, so the executable that matters is its
+// argument, not the root. Omitting it made `Bash(uvx *)` a plain root grant, which is what
+// the development box's allow list actually held.
 const SHELL_WRAPPERS = new Set([
   '.', 'bash', 'bun', 'cmd', 'cmd.exe', 'command', 'dash', 'deno', 'env',
   'eval', 'exec', 'fish', 'iex', 'invoke-expression', 'java', 'ksh', 'mshta',
   'node', 'npm', 'npx', 'parallel', 'perl', 'php', 'pnpm', 'powershell',
   'powershell.exe', 'pwsh', 'py', 'python', 'python3', 'ruby', 'rundll32', 'sh',
-  'source', 'wsl', 'xargs', 'yarn', 'zsh',
+  'source', 'uvx', 'wsl', 'xargs', 'yarn', 'zsh',
 ]);
 const WRITE_ROOTS = new Set([
   'add-content', 'chmod', 'chown', 'copy-item', 'cp', 'dd', 'install', 'ln',
   'mkdir', 'move-item', 'mv', 'new-item', 'out-file', 'rename-item', 'set-acl',
   'set-content', 'set-item', 'set-itemproperty', 'tar', 'touch', 'unzip', 'zip',
 ]);
+// Membership here is a BRAKE, not a grant. `family-subcommand-unknown` fires when a root
+// in this set is seen without a recognised subcommand, which bars the whole-root rule from
+// auto-apply and leaves it a review candidate. So the cost of omitting a subcommand-shaped
+// tool is that `Bash(<tool> *)` becomes auto-grantable, which is the broadest rule the
+// generalizer can emit.
+//
+// `pipx`, `rclone` and `uv` were added 2026-09-25 from the development box's real allow
+// list, where all three already held a bare `<root> *` grant with no brake on them. `uv`
+// and `pipx` both carry a `run` subcommand that executes arbitrary code, and `rclone`
+// moves data to remote storage, so a whole-root grant is exactly the shape that should
+// have needed review.
 const FAMILY_ROOTS = new Set([
   'aws', 'az', 'cargo', 'choco', 'claude', 'codex', 'docker', 'dotnet',
   'gcloud', 'gh', 'git', 'go', 'kubectl', 'npm', 'ollama', 'pip', 'pip3',
-  'pnpm', 'podman', 'scoop', 'terraform', 'winget', 'yarn',
+  'pipx', 'pnpm', 'podman', 'rclone', 'scoop', 'terraform', 'uv', 'winget',
+  'yarn',
 ]);
 const FAMILY_SUBCOMMANDS = new Map(Object.entries({
   cargo: ['add', 'bench', 'build', 'check', 'clean', 'doc', 'fetch', 'fix', 'install', 'metadata', 'new', 'publish', 'remove', 'run', 'search', 'test', 'tree', 'uninstall', 'update', 'vendor'],
@@ -91,7 +107,10 @@ const FAMILY_SUBCOMMANDS = new Map(Object.entries({
   ollama: ['create', 'list', 'ps', 'pull', 'push', 'rm', 'run', 'serve', 'show', 'stop'],
   pip: ['cache', 'check', 'config', 'debug', 'download', 'freeze', 'hash', 'help', 'index', 'inspect', 'install', 'list', 'show', 'uninstall', 'wheel'],
   pip3: ['cache', 'check', 'config', 'debug', 'download', 'freeze', 'hash', 'help', 'index', 'inspect', 'install', 'list', 'show', 'uninstall', 'wheel'],
+  pipx: ['completions', 'ensurepath', 'environment', 'inject', 'install', 'list', 'pin', 'reinstall', 'run', 'runpip', 'uninject', 'uninstall', 'unpin', 'upgrade'],
+  rclone: ['about', 'check', 'cleanup', 'config', 'copy', 'copyto', 'cryptcheck', 'dedupe', 'delete', 'deletefile', 'hashsum', 'link', 'ls', 'lsd', 'lsf', 'lsjson', 'lsl', 'md5sum', 'mkdir', 'mount', 'move', 'moveto', 'ncdu', 'purge', 'rmdir', 'rmdirs', 'sha1sum', 'size', 'sync', 'touch', 'tree', 'version'],
   terraform: ['apply', 'console', 'destroy', 'fmt', 'force-unlock', 'get', 'graph', 'import', 'init', 'login', 'logout', 'metadata', 'output', 'plan', 'providers', 'refresh', 'show', 'state', 'taint', 'test', 'untaint', 'validate', 'version', 'workspace'],
+  uv: ['add', 'build', 'cache', 'export', 'init', 'lock', 'pip', 'publish', 'python', 'remove', 'run', 'self', 'sync', 'tool', 'tree', 'venv', 'version'],
   winget: ['configure', 'download', 'export', 'features', 'hash', 'import', 'info', 'install', 'list', 'pin', 'repair', 'search', 'settings', 'show', 'source', 'uninstall', 'upgrade', 'validate'],
 }).map(([root, commands]) => [root, new Set(commands)]));
 const SAFE_GIT = new Set([

@@ -83,7 +83,7 @@ skipped, so no failure can be silently lost, and the cursor never has to express
   the same tick it was created. Bumping `VERSION` to carry it resets every existing state file,
   because `STATE_MIGRATIONS` is empty and `migrateState` returns null for an unregistered step.
 - A size ceiling that skips the remainder. **Rejected on safety.** `isAutoSafeCandidate`
-  (`src/auto-learn.js:841`) requires `counts.failed === 0`, so a skipped byte range containing
+  requires `counts.failed === 0` (`src/auto-learn.js:860`), so a skipped byte range containing
   the one failure for a family would let that family become auto-safe. Skipping is not a
   performance trade here, it is a permissions trade.
 - Progressive catch-up. **Taken.** Bounded work per tick, honest cursor, nothing lost.

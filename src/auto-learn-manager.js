@@ -1919,6 +1919,17 @@ function createAutoLearnManager(options = {}) {
       // Reported on every apply, not only when something was removed: a prune
       // that could not delete a file is the case worth seeing, and a field that
       // only appears on the interesting run is a field nobody notices.
+      //
+      // WHO READS THESE, asked on 2026-09-25 because a result field nothing reads
+      // is a field that can be wrong for ever. `backupsUnremovable` is the degraded
+      // signal and had no reader at all; it is now surfaced by the extension
+      // (vscode-extension/autoLearnUi.js applicationSummary, and the toast built
+      // from it), so a locked `.bak` says so instead of passing as a clean prune.
+      // `backupsPruned` and `backupsKept` stay as they are: `wildcard-perms --learn
+      // apply` prints this object verbatim, they are the backup cap's only
+      // observable — test/auto-learn-backup-retention.test.js:104-114 asserts the cap
+      // through them and nothing else can see it — and they cost nothing, because
+      // `pruneBackups` counts both to do its own job.
       backupsPruned: backupsPruned.removed, backupsKept: backupsPruned.kept,
       backupsUnremovable: backupsPruned.failed,
       skippedCount: Math.max(0, (keys || Object.keys(state.candidates)).length - selected.length),
@@ -2307,10 +2318,23 @@ function createAutoLearnManager(options = {}) {
         if (conflicts.length) error.rollbackConflicts = conflicts;
         throw error;
       }
+      // After the save, and only now, because until `lastApplication` was cleared
+      // these very files were the protected set. `undo()` did not prune at all, so
+      // an undo left the backups of the application it had just reversed sitting
+      // over the cap until the NEXT apply happened to sweep them. Nothing depends on
+      // them any more: undo is single level, `lastApplication` is null, and the
+      // content they hold is what the restore just wrote back.
+      //
+      // Same shape as the apply path, deliberately: keep the newest `backupLimit`,
+      // count what could not be deleted rather than throwing after a restore that
+      // already succeeded, and report the count so a degraded sweep says so.
+      const backupsPruned = pruneBackups([]);
       return {
         changed: true, undone: true,
         restoredTargets: [...new Set(restores.map((item) =>
           item.target.kind === 'claude-claims' ? 'claude' : item.target.kind))],
+        backupsPruned: backupsPruned.removed, backupsKept: backupsPruned.kept,
+        backupsUnremovable: backupsPruned.failed,
       };
     });
   }
@@ -2322,13 +2346,21 @@ function createAutoLearnManager(options = {}) {
       claudeSettings: claudeSettingsPath, claudeClaims: claudeClaimsPath,
       codexRules: codexRulesPath,
     },
-    scan, status, getStatus: status, overview, explainManaged, rebuildManagedHits,
+    scan, status, overview, explainManaged, rebuildManagedHits,
     derivedReview, decideDerived,
-    // `list` was a third alias of the same function with no consumer anywhere,
-    // production or test. `getCandidates` is NOT one of those: it is the
-    // fallback leg the extension takes at vscode-extension/extension.js:1032
-    // when `listCandidates` is absent, so it stays.
-    listCandidates, getCandidates: listCandidates,
+    // NO ALIASES. `list`, `getStatus` and `getCandidates` were all second names
+    // for a function already here under its own. The argument for keeping
+    // `getCandidates` was that the extension falls back to it when
+    // `listCandidates` is absent, and that argument was circular: both names came
+    // off THIS object, so `listCandidates` is absent exactly when `getCandidates`
+    // is too, and the fallback could not run. Same for `getStatus` beside `status`.
+    // Removed 2026-09-25 with the two dead legs in the extension
+    // (vscode-extension/extension.js:1146-1157, cited above as :1032 — a line
+    // number that had rotted by 113 lines, which is its own argument against
+    // leaving a claim like that unchecked). The rule is pinned by
+    // test/auto-learn-manager.test.js: no two keys on this object may be the same
+    // function.
+    listCandidates,
     setMode, apply: applyPolicy, applyClaude, applyCodex, undo,
   };
 }

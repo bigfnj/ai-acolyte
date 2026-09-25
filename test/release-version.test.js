@@ -280,3 +280,83 @@ test('verify-release.ps1 captures STDERR from --gates refresh, or it cannot see 
     'the exit code is not part of the assertion: a refresh that fails silently on stdout '
     + 'still passes');
 });
+
+test('verify-release.ps1 judges the --lint RUN before it reads the lint TEXT', () => {
+  // Six checks hang off one invocation of `recall.py --lint`, and four of them are
+  // NEGATIVE: `-not ($lint -match 'over budget')` and friends. Empty output satisfies
+  // every one. A lint that died on a traceback printed exactly the board of a lint that
+  // found nothing, in green, and that is the state the release gate exists to catch.
+  //
+  // The block was rewritten to fix that: merge STDERR, read $LASTEXITCODE before
+  // anything else can move it, and assert the RUN before any assertion reads the text.
+  // Nothing pinned the rewrite. This does, on the same terms as the `--gates refresh`
+  // test above — the CONDITION and the ORDER of the source, never that a guarded
+  // statement merely exists, because disabling a guard leaves the statement sitting
+  // there and a regex still matches it.
+  //
+  // FOUR MUTATIONS, all applied on 2026-09-25, all killed here:
+  //   * drop `($lintCode -eq 0) -and` from the run check      -> "the exit code is no longer part"
+  //   * drop `2>&1` from the invocation                       -> "runs --lint without merging STDERR"
+  //   * put a statement between the call and $LASTEXITCODE    -> "no longer the first thing read"
+  //   * move the run check below the text checks              -> "reads the lint text before"
+  //
+  // HONEST LIMIT, same as its sibling: this reads the SOURCE. No test runs
+  // verify-release.ps1, and none should.
+  const ps = psStatements(
+    fs.readFileSync(path.join(repoRoot, 'scripts', 'verify-release.ps1'), 'utf8'));
+  const lines = ps.split('\n');
+
+  const isCall = (line) => /^\s*\$lintOut\s*=.*--lint\b/.test(line);
+  const isRunCheck = (line) => /^\s*Check '.*--lint ran and produced output/.test(line);
+  // Any assertion that reads the captured TEXT rather than the run.
+  const isTextCheck = (line) => /^\s*Check /.test(line) && /\$lint\s+-match|\$lint\b(?!Code|Out)/.test(line)
+    && !isRunCheck(line);
+
+  assert.equal(lines.filter(isCall).length, 1,
+    `expected exactly one \`$lintOut = ... --lint\` invocation to judge, found `
+    + lines.filter(isCall).length);
+  assert.equal(lines.filter(isRunCheck).length, 1,
+    'expected exactly one assertion that the lint RUN happened');
+  const callAt = lines.findIndex(isCall);
+  const runAt = lines.findIndex(isRunCheck);
+  const textAt = lines.map((line, index) => (isTextCheck(line) ? index : -1)).filter((i) => i >= 0);
+  assert.ok(textAt.length >= 4,
+    `witness:lint-run-before-text -- only ${textAt.length} text assertions found; the block `
+    + 'was not parsed and every verdict below is worthless');
+
+  // 1. The invocation captures STDERR. Without this a traceback goes to the console and
+  //    the captured text is empty, which is what makes four negative checks pass.
+  assert.match(lines[callAt], /2>&1/,
+    'verify-release.ps1 runs --lint without merging STDERR, so a lint that died on a '
+    + 'traceback leaves $lint empty and every negative check below it passes');
+
+  // 2. $LASTEXITCODE is read immediately. It is clobbered by the next command to run,
+  //    so a statement between these two silently replaces the verdict with its own.
+  assert.match(lines[callAt + 1], /^\s*\$lintCode\s*=\s*\$LASTEXITCODE\s*$/,
+    '$LASTEXITCODE is no longer the first thing read after the --lint call, so the exit '
+    + 'code the run check reads belongs to whatever ran in between: ' + lines[callAt + 1]);
+
+  // 3. The asserted text comes from the captured output, not from somewhere the
+  //    redirection above never reached.
+  assert.ok(lines.slice(callAt + 1, runAt).some((line) => /\$lint\s*=\s*\$lintOut\b/.test(line)),
+    'the asserted text is no longer derived from the captured output');
+
+  // 4. The run check asserts BOTH halves: a clean exit AND that something was printed.
+  //    Either alone passes in a state the other catches.
+  assert.match(lines[runAt], /\$lintCode\s+-eq\s+0/,
+    'the exit code is no longer part of the run check: a lint that failed and still '
+    + 'printed something passes');
+  assert.match(lines[runAt], /\$lint\.Length\s+-gt\s+0/,
+    'the output length is no longer part of the run check: a lint that exited 0 having '
+    + 'printed nothing passes, and so do the four negative checks under it');
+
+  // 5. THE ORDER. This is the whole point, and the one an "assert the statement exists"
+  //    check cannot make: the run has to be judged before anything reads its text.
+  assert.ok(runAt > callAt,
+    'the run check no longer follows the invocation it judges');
+  const early = textAt.filter((index) => index < runAt);
+  assert.deepEqual(early, [],
+    `${early.length} assertion(s) read the lint text before the run was judged, so a `
+    + 'failed lint is reported as a clean corpus: '
+    + early.map((index) => lines[index].trim().slice(0, 70)).join(' | '));
+});

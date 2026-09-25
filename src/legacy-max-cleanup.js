@@ -364,27 +364,26 @@ function removeLegacyStateFile(statePath) {
   }
 }
 
+// Eight helpers of the retired MAX feature came off this list on 2026-09-25 and
+// stayed in the file — LEGACY_ALLOW_MARKERS, LEGACY_APPROVE_MARKER,
+// LEGACY_APPROVE_SCRIPT, detectMcpServers, legacyAllowActive,
+// legacyApproveHookActive, legacyApproveHookLike and topLevelBound. Each is
+// called only from inside this module, and each is already falsifiable through
+// the surface that remains: breaking them one at a time killed between one and
+// four tests apiece, so no coverage left with the export.
 module.exports = {
   CODEX_CONFIG,
   LEGACY_CLAUDE_STATE_FILE,
   LEGACY_CODEX_STATE_FILE,
-  LEGACY_APPROVE_SCRIPT,
   LEGACY_ALLOW_CORE,
-  LEGACY_ALLOW_MARKERS,
-  LEGACY_APPROVE_MARKER,
-  detectMcpServers,
   legacyGeneratedAllow,
   legacyGeneratedAllowFromState,
   withoutLegacyGeneratedBackup,
-  legacyAllowActive,
   legacyApproveCommandFor,
-  legacyApproveHookActive,
-  legacyApproveHookLike,
   legacyClaudeMaxStatus,
   removeLegacyClaudeMax,
   legacyCodexMaxStatus,
   removeLegacyCodexMax,
   removeLegacyApproveScript,
   removeLegacyStateFile,
-  topLevelBound,
 };

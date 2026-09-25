@@ -132,7 +132,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 those are also the only four message arms the webview host handles (`autoLearnScan`,
-`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:1925-1927`).
+`autoLearnReview`, `autoLearnUndo`, `autoLearnWhy` at `extension.js:1961-1927`).
 **Apply safe candidates** and **Cycle mode** are Command Palette only — see the command
 list at the end of this file. Apply keeps a recoverable snapshot; Undo restores the most
 recent Auto Learn application. The repository CLI uses the same service:

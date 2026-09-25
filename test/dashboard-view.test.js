@@ -1449,7 +1449,7 @@ test('an unreadable settings.json gives the lock-contention budget back', async 
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:1904-1906 records — a file that failed every
+// defect src/auto-learn-manager.js:2214-2216 records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which
@@ -1577,6 +1577,59 @@ test('a clean scan says so rather than going quiet', async (t) => {
   }
 });
 
+test('an evidence cap that cannot get under its limit says so', async (t) => {
+  // The one number that reports a cap running DEGRADED, and it reached nothing.
+  //
+  // pruneObservationHashes holds every hash belonging to a family below the success
+  // threshold, whatever its age, because re-reading a trimmed transcript would inflate
+  // the counts that gate an auto-safe apply. The protected set has no bound of its own,
+  // so a high threshold on a big corpus can hold MORE than the cap allows, and the map
+  // then stays over its limit after the prune has done all it can
+  // (src/auto-learn-manager.js:790-793 documents the trade and promises the overflow is
+  // "REPORTED as retainedObservations on every scan rather than absorbed in silence").
+  //
+  // It was reported to the state file and to the CLI. The panel, which is the only UI
+  // most users of this extension open, never saw it: autoLearnScanHealth copied eight
+  // fields out of lastScanStats and this was not one of them. Same shape as the
+  // `errors` gap above, one field along.
+  //
+  // THE MUTATION: drop `retainedObservations` from autoLearnScanHealth, or drop the
+  // `if (s.retainedObservations)` push from scanTrouble. The first fails on the payload
+  // assertion, the second on the rendered card and the collapsed badge.
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      // Everything else clean, deliberately: a run that read every file, found nothing
+      // it could not parse, and pruned 400 hashes looks perfect on every other number
+      // here. 12 is what would not go.
+      files: 9, observations: 21, errors: 0, partial: 0, unmatchedResults: 0,
+      prunedObservations: 400, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
+      retainedObservations: 12, blindScan: false,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.retainedObservations, 12,
+      'witness:retained-observations -- the overflow count never reached the panel');
+    assert.equal(data.autoLearn.scan.pruned, 400,
+      'and it is not folded into the prune total: 400 came out, 12 would not, and one '
+      + 'number cannot say both');
+
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /12 observation hashes held over the cap/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.equal(rendered.stAutoLearn, 'scan degraded',
+      `the collapsed row said "${rendered.stAutoLearn}", so a user who has not expanded `
+      + 'the card sees a cap that cannot keep its own limit as perfectly healthy');
+  } finally {
+    await app.dispose();
+  }
+});
 // Runs the panel's OWN script against the payload, in a DOM small enough to be
 // read in one screen. Without this the renderer is unreachable: _html() returns a
 // string, VS Code evaluates it, and nothing in this suite ever did — so a field

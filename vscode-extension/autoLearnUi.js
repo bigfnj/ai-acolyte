@@ -66,6 +66,14 @@ function applicationSummary(...results) {
   const appliedKeys = new Set();
   const changedTargets = new Set();
   let fallbackCount = 0;
+  // Summed across every result folded in here, because a scan that auto-applies and
+  // then applies again produces two prunes and one toast. A `.bak` that could not be
+  // deleted is the one outcome of backup pruning worth a word — the manager counts
+  // it rather than throwing, because by then the policy is already written and a
+  // locked file is not worth failing an apply over (src/auto-learn-manager.js:1605).
+  // It had no reader until 2026-09-25, so "counted rather than thrown" meant
+  // "swallowed".
+  let backupsUnremovable = 0;
   for (const outer of results) {
     const result = unwrapApplication(outer);
     if (!result || typeof result !== 'object') continue;
@@ -83,11 +91,15 @@ function applicationSummary(...results) {
       fallbackCount += count ?? (result.changed ? 1 : 0);
     }
     for (const target of uniqueTargets(result.changedTargets)) changedTargets.add(target);
+    if (Number.isFinite(result.backupsUnremovable)) {
+      backupsUnremovable += Math.max(0, result.backupsUnremovable);
+    }
   }
   return {
     appliedCount: appliedKeys.size || fallbackCount,
     appliedKeys: [...appliedKeys],
     changedTargets: [...changedTargets],
+    backupsUnremovable,
   };
 }
 
@@ -97,6 +109,27 @@ function policyTargetLabel(value) {
   if (targets.includes('claude')) return 'Claude';
   if (targets.includes('codex')) return 'Codex';
   return 'policy';
+}
+
+// "The policy was written and the housekeeping behind it was not."
+//
+// A `.bak` the pruner could not delete is counted rather than thrown, deliberately:
+// by the time pruneBackups runs the policy file is already written, and failing an
+// apply over a locked backup would be the worse outcome
+// (src/auto-learn-manager.js:1605, which says the count exists "so a degraded run says
+// so instead of reporting a clean prune"). Counting it and then telling nobody is a
+// third, separate thing, and it is what the code did until 2026-09-25: returned on
+// every apply, read by nothing outside the tests.
+//
+// Appended to the toast already being shown rather than raised as its own. It is never
+// the headline, and a second notification for a housekeeping fact trains the reader to
+// dismiss both. Lives here, beside codexRestartSuffix, because the wording is the part
+// worth testing and extension.js is not unit-reachable.
+function backupPruneSuffix(summary) {
+  const failed = Number(summary?.backupsUnremovable) || 0;
+  if (!Number.isFinite(failed) || failed <= 0) return '';
+  return ' — ' + failed + ' old policy backup' + (failed === 1 ? '' : 's')
+    + ' could not be removed (locked or read-only); the next apply retries them.';
 }
 
 function codexRestartSuffix(value) {
@@ -334,7 +367,7 @@ function managedPromptExplanation(explanation) {
 
 module.exports = {
   applicationSummary,
-  candidateAppliedTargets,
+  backupPruneSuffix,
   managedBlockedNote,
   managedBlockedDetail,
   managedPromptExplanation,
@@ -353,5 +386,4 @@ module.exports = {
   policyTargetLabel,
   selectionsNeedingConfirmation,
   uniqueTargets,
-  unwrapApplication,
 };

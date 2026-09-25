@@ -133,6 +133,56 @@ test('the injected write hook receives what actually landed', (t) => {
     'what the hook records and what is on disk cannot disagree');
 });
 
+test('a writer with no target refuses to be built', () => {
+  // What this replaces: `settingsPath || defaultSettingsPath()`, where
+  // defaultSettingsPath() is the developer's REAL ~/.claude/settings.json. Every
+  // one of the three callers passes settingsPath, so the leg never ran — but the
+  // day one of them stopped, the writer would have silently retargeted itself at
+  // the most dangerous file on the machine, and a test harness that forgot the
+  // option would have rewritten the permission policy of whoever ran it.
+  assert.throws(() => createSettingsWriter({}), /requires a settingsPath/);
+  assert.throws(() => createSettingsWriter({ onWrite: () => {} }), /requires a settingsPath/);
+  // The `= {}` parameter default went too, so a bare call is a TypeError rather
+  // than a writer pointed at a default nobody chose.
+  assert.throws(() => createSettingsWriter(), TypeError);
+
+  // MUTATION: put `|| defaultSettingsPath()` back (with the function restored)
+  // and the first two fail, having built a writer aimed at ~/.claude/settings.json.
+});
+
+test('the returned counts are measured against the file, not the caller snapshot', (t) => {
+  // `addedAllow` was already measured against the rebased read. `removedAllow`
+  // did not exist, so a caller wanting a removal count had nowhere honest to get
+  // one — and bin/wildcard-perms' hook diagnostic duly computed it from its own
+  // pre-write snapshot, which is the anti-pattern the note beside this return
+  // value warns about ("+299 restored" over a file that already had them).
+  const snapshot = { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } };
+  const env = tempSettings(t, snapshot);
+
+  // A neighbour writes between the caller's read and this one: Bash(git diff) is
+  // gone and Bash(zzz *) has appeared. The caller knows nothing about either.
+  fs.writeFileSync(env.file, JSON.stringify({
+    permissions: { allow: ['Bash(git status)', 'Bash(zzz *)'] },
+  }, null, 2) + '\n');
+
+  const out = env.writer().writeAllow(snapshot, ['Bash(git status *)', 'Bash(git diff *)']);
+
+  // Non-degeneracy: the caller's own arithmetic over `snapshot` says two entries
+  // were removed. Only one of them was still there to remove.
+  assert.deepEqual(env.read().permissions.allow,
+    ['Bash(zzz *)', 'Bash(git status *)', 'Bash(git diff *)']);
+  assert.equal(out.removedAllow, 1,
+    'Bash(git diff) was already gone when this write read the file, so removing it '
+    + 'is not something this write did');
+  assert.equal(out.addedAllow, 2, 'Bash(zzz *) was already there and is not an addition');
+  assert.equal(out.allow.length, env.read().permissions.allow.length,
+    'the returned list is the list on disk');
+
+  // MUTATION: compute removedAllow from `originalAllow` (the caller's snapshot)
+  // instead of `latestAllow` and this fails with removedAllow 2 against a file
+  // that only ever lost one entry.
+});
+
 
 // ── writeTransform ───────────────────────────────────────────────────────────
 //
@@ -626,6 +676,56 @@ test('the in-place fallback names the cause it gave the atomic guarantee up for'
   assert.equal(fs.readFileSync(target, 'utf8'), '{"ok":true}\n');
   // And it does not leave its temp file behind on the way.
   assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
+});
+
+// The sibling of the assertion above, for the one throw that was NOT covered.
+//
+// writeFileAtomicSync's only unlink used to live in the in-place fallback's
+// `finally`, and every path after the initial temp write either renames the temp
+// away or reaches that finally. So the sole orphan window was a throw from the
+// initial `fs.writeFileSync(tmp, …)` itself — and "it threw" does not mean
+// "nothing is on disk", because that call CREATES the file and then writes into
+// it. ENOSPC, EDQUOT and EIO all land after the create.
+//
+// What that leaves behind is `settings.json.<pid>.<rand>.wc.tmp` holding a
+// partial copy of the user's permission policy, next to settings.json, with no
+// code anywhere that ever removes it. src/auto-learn-manager.js:133-162 is the
+// shape this now copies: every exit unlinks.
+test('a temp file is not orphaned when the write into it fails part-way', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-orphan-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'settings.json');
+  fs.writeFileSync(target, '{"kept":true}\n');
+
+  const realWrite = fs.writeFileSync;
+  t.after(() => { fs.writeFileSync = realWrite; });
+  let created = false;
+  fs.writeFileSync = (file, ...rest) => {
+    if (!String(file).endsWith('.wc.tmp')) return realWrite(file, ...rest);
+    // The failure shape that matters, not a convenient one: the create succeeds,
+    // some bytes land, and THEN the device is full. A stub that throws before
+    // touching the disk tests nothing here, because there is no file to orphan.
+    realWrite(file, '{"half');
+    created = true;
+    throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  };
+
+  assert.throws(() => writeFileAtomicSync(target, '{"ok":true}\n'), /ENOSPC/,
+    'the error still propagates — this is a cleanup, not a swallow');
+  fs.writeFileSync = realWrite;
+
+  assert.equal(created, true,
+    'precondition: the stub really created the temp file before throwing, so there '
+    + 'was something to orphan');
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json'],
+    'a partial copy of the permission policy was left beside settings.json under a '
+    + 'name nothing ever cleans up');
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"kept":true}\n',
+    'and the real file is untouched, because the rename never ran');
+
+  // MUTATION: drop the try/catch around the initial `fs.writeFileSync(tmp, …)` in
+  // src/permissions.js and this fails on the readdir, listing
+  // settings.json.<pid>.<rand>.wc.tmp beside settings.json.
 });
 
 test('a write that throws does not fire the high-water hook', (t) => {

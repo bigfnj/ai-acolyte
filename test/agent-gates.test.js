@@ -16,6 +16,7 @@ const path = require('node:path');
 const { BEGIN, applyGuidance, setGuidance } = require('../src/agent-guidance');
 const {
   GATES_BEGIN, GATES_END, makeGatesBlock, compiledPath, readCompiled, setGatesAll,
+  gatesStatusAll,
 } = require('../src/agent-gates');
 
 const USER_TEXT = '# My global instructions\n\nAlways use the toolbox python.\n';
@@ -107,6 +108,40 @@ test('a compiled file with no gates in it is treated as nothing compiled', () =>
     assert.equal(results[0].changed, false);
     assert.match(results[0].error, /--gates-compile/);
   }
+});
+
+// `compiled` is the only field that distinguishes "gates are off because you
+// turned them off" from "gates are off because recall.py has never produced a
+// corpus", and `--gates status` prints "(nothing compiled)" off it. Nothing
+// asserted it anywhere: hard-wiring `compiled: true` left all 586 tests green,
+// which was found by mutating this function while removing its dead export.
+//
+// That matters more than a status suffix usually would, because the failure it
+// reports is the one this whole feature was built around — a card reading
+// "gates ON" over a block fenced around nothing.
+test('status distinguishes a missing compile from gates merely being off', () => {
+  const uncompiled = fakeHome(null);
+  const [absent] = gatesStatusAll(uncompiled);
+  assert.equal(absent.compiled, false, 'no gates.generated.md at all');
+  assert.equal(absent.on, false);
+
+  // The other shape a zero-gate compile takes: the file exists and says nothing.
+  const [blank] = gatesStatusAll(fakeHome('   \n\n'));
+  assert.equal(blank.compiled, false, 'a whitespace-only compile is not a compile');
+
+  const home = fakeHome();
+  const [before] = gatesStatusAll(home);
+  assert.equal(before.compiled, true, 'a real corpus is compiled, even with gates off');
+  assert.equal(before.on, false);
+
+  setGatesAll(true, { home, backupDir: path.join(home, 'backups') });
+  const [after_] = gatesStatusAll(home);
+  assert.equal(after_.on, true);
+  assert.equal(after_.compiled, true);
+  assert.equal(after_.current, true, 'freshly installed, so not stale');
+
+  // MUTATION: hard-wire `compiled: true` in gatesStatus and the first two
+  // assertions fail. Before this test, that mutation survived the whole suite.
 });
 
 test('installing with nothing compiled refuses instead of fencing off nothing', () => {

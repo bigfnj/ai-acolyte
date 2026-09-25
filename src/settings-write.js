@@ -16,15 +16,15 @@
 // stay loadable from a bare Node process.
 
 const fs = require('fs');
-const os = require('os');
-const path = require('path');
 
 const { writeFileAtomicSync } = require('./permissions');
 
-function defaultSettingsPath(home = os.homedir()) {
-  return path.join(home, '.claude', 'settings.json');
-}
-
+// `defaultSettingsPath(home)` used to live here. It was exported and imported
+// nowhere, and its one internal caller was `settingsPath || defaultSettingsPath()`
+// inside createSettingsWriter — a leg all three callers make unreachable by
+// passing settingsPath. Deleting the leg left the function with no caller at all,
+// so it went too — and `os` and `path` went with it, since it was the only thing
+// in this module that used either.
 // "The file is not there" and "the file could not be read this instant" collapse
 // into one null for a caller that only wants a value, and that is wrong for
 // anything reasoning about loss: a watcher event landing inside one of Claude
@@ -139,8 +139,15 @@ function deniesLost(before, after) {
 // `onWrite(allow, deny)` runs after a successful write — the extension passes its
 // high-water-mark backup. Omitted by callers that have none, which preserves the
 // CLI's existing behaviour exactly rather than quietly giving it a new one.
-function createSettingsWriter({ settingsPath, onWrite } = {}) {
-  const target = settingsPath || defaultSettingsPath();
+// No `= {}` default and no `|| defaultSettingsPath()` fallback: all three callers
+// (bin/wildcard-perms, vscode-extension/extension.js and the test harness) pass
+// settingsPath, so both legs were unreachable — and the fallback was the worse of
+// the two, because the thing it silently defaulted to is the developer's REAL
+// ~/.claude/settings.json. A writer constructed without a target should say so,
+// not pick the most dangerous file on the machine.
+function createSettingsWriter({ settingsPath, onWrite }) {
+  if (!settingsPath) throw new TypeError('createSettingsWriter requires a settingsPath');
+  const target = settingsPath;
 
   function writeAllow(settings, allow, denyAdditions) {
     // Rebase the intended allow-list delta onto the newest parseable settings so
@@ -216,6 +223,13 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
       allow: rebasedAllow,
       deny: rebasedDeny,
       addedAllow: rebasedAllow.filter((entry) => !latestAllow.includes(entry)).length,
+      // The other half of the same measurement, and it was missing. A caller
+      // reporting a REMOVAL count had nowhere to get an honest one, so the
+      // wildcarding pass computed it from its own pre-write snapshot — the exact
+      // thing the note above tells callers not to do. Computed here against
+      // `latestAllow` for the same reason addedAllow is: that is the file this
+      // write actually rebased onto.
+      removedAllow: latestAllow.filter((entry) => !rebasedAllow.includes(entry)).length,
       // Zero for a malformed deny: nothing was added, and saying otherwise is
       // what made the restore toast a lie.
       addedDeny: Array.isArray(rebasedDeny)
@@ -378,7 +392,6 @@ function createSettingsWriter({ settingsPath, onWrite } = {}) {
 }
 
 module.exports = {
-  defaultSettingsPath,
   readSettingsState,
   createSettingsWriter,
   SETTINGS_ABSENT,

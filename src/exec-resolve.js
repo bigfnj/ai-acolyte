@@ -116,6 +116,11 @@ function commandLaunch(name, args = []) {
   };
 }
 
+// `fallbackDirectories` is not exported: resolveExecutable is its only caller,
+// and test/exec-resolve.test.js already drives the whole fallback through
+// resolveExecutable with a fake APPDATA — including the case where PATH wins and
+// the case where neither holds the name. A test on the directory LIST would pin
+// less than the tests that already exist.
 module.exports = {
-  resolveExecutable, commandLaunch, quoteForCommandProcessor, fallbackDirectories,
+  resolveExecutable, commandLaunch, quoteForCommandProcessor,
 };

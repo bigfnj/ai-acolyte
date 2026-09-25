@@ -360,25 +360,71 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   // through cmd.exe and reintroduces the ~17.6 ms. That needs a runtime probe.
   const body = psCodeOnly(fs.readFileSync(path.join(repoRoot, 'install.ps1'), 'utf8'));
 
+  // EVERY assignment, not the first. The old guard used `.exec`, which stops at
+  // the first match, so `$hookCommand = 'cmd /c ' + $hookCommand` written
+  // anywhere below the real one sailed through — and it is the natural way
+  // someone would add a wrapper.
+  //
   // Anchored at the ASSIGNMENT, never searched for as a substring. install.ps1
   // also contains `node "$hookCmd" --seed` — an interactive seed invocation with
   // an un-normalized backslash path, NOT a registered string — and a naive grep
   // cannot tell the two apart. Comments are stripped for the same reason: the
-  // lines above the assignment quote `node "<path>"` in prose.
-  const assignment = /^[^\S\n]*\$hookCommand\s*=\s*'([^']*)'/m.exec(body);
-  assert.ok(assignment,
-    "install.ps1's $hookCommand assignment moved, or no longer begins with a "
-    + 'single-quoted literal, so this guard can no longer see the launcher');
+  // lines above the assignment quote `node "<path>"` in prose. `+=` is matched
+  // too, so an append cannot hide from a guard that only knows about `=`.
+  const assignments = [...body.matchAll(/^[^\S\n]*\$hookCommand\b\s*(\+?=)([^\r\n]*)/gm)];
+  assert.equal(assignments.length, 1,
+    `install.ps1 assigns $hookCommand ${assignments.length} times; this guard reasons `
+    + 'about one definition, and a second one is how a wrapper gets added without '
+    + `touching the first: ${JSON.stringify(assignments.map((m) => m[0].trim()))}`);
+  assert.equal(assignments[0][1], '=',
+    'an append to $hookCommand is a wrapper by another name');
 
-  // FIRST TOKEN only. Never a substring test for `cmd`/`powershell`/`node`: a
-  // user's install path may legitimately contain any of them
-  // (C:/Users/x/powershell-tools/…, a checkout under node_modules). This repo's
-  // own path is clean, so a substring bug would pass here and fire on them.
-  assert.equal(assignment[1].trim().split(/\s+/)[0], 'node',
-    `install.ps1 starts its registered command with ${JSON.stringify(assignment[1])}; `
-    + 'the first token must be a bare `node`, because both uninstallers parse the '
-    + 'registration with `^node\\s+(.+)$` and a shell wrapper makes the hook '
-    + 'un-uninstallable as well as ~18x slower');
+  // The WHOLE right-hand side, parsed rather than sampled. The old guard read the
+  // first token of the first single-quoted literal, which is blind to everything
+  // after that literal: `'node "' + $p + '" & powershell -c evil'` and
+  // `'node "' + $p + '" | cmd /c more'` both begin with `node` and both register
+  // a shell wrapper.
+  //
+  // Grammar accepted: single-quoted literals and bare `$variable` references
+  // joined by `+`. Anything else — a subexpression, a method call, the format
+  // operator, a second statement on the line — is not something a string check
+  // can reason about, so it FAILS here rather than passing by default. A literal
+  // containing a `+` also fails, for the same reason; it would split wrong, and
+  // failing closed on a shape nobody writes is cheaper than guessing.
+  const rhs = assignments[0][2].trim();
+  const TOKEN = /^(?:'([^']*)'|\$[A-Za-z_][A-Za-z0-9_]*)$/;
+  const rendered = rhs.split('+').map((piece) => {
+    const token = TOKEN.exec(piece.trim());
+    assert.ok(token,
+      `install.ps1 builds its registered command from ${JSON.stringify(piece.trim())}, which `
+      + 'this guard cannot read. Keep the assignment to quoted literals and bare '
+      + `variables, or teach the guard the new shape: ${JSON.stringify(rhs)}`);
+    // A variable stands for the install path. The placeholder carries no space,
+    // no quote and no shell metacharacter, so the shape assertion below is about
+    // the spelling AROUND the path and never about the path itself — which is a
+    // user's directory and may contain anything.
+    return token[1] === undefined ? 'INSTALL_PATH' : token[1];
+  }).join('');
+
+  // THE SHAPE, both ends anchored. Never a substring test for
+  // `cmd`/`powershell`/`node`: a user's install path may legitimately contain any
+  // of them (C:/Users/x/powershell-tools/…, a checkout under node_modules), and
+  // this repo's own path is clean, so a substring bug would pass here and fire on
+  // them. Anchoring is also what catches the suffix wrappers, which no first-token
+  // test can see.
+  //
+  // Case-insensitive, deliberately, and this is where the two halves of the guard
+  // used to disagree with each other and with the contract they cite. The
+  // uninstallers are the contract: uninstall.sh:36 matches `/^node\s+(.+)$/i` and
+  // uninstall.ps1:28 uses `-match`, which is case-insensitive in PowerShell. Both
+  // recover the hook path from `NODE "…"` perfectly well. The twin case in
+  // scripts/verify-installers.ps1 has always matched case-insensitively for that
+  // reason; this half rejected what all three accept.
+  assert.match(rendered, /^node "[^"]+"$/i,
+    `install.ps1 registers ${JSON.stringify(rendered)} (path substituted); the registered `
+    + 'command must be exactly `node "<path>"`, because both uninstallers parse the '
+    + 'registration with `^node\\s+(.+)$` and anything else — a prefix, a suffix, a '
+    + 'pipe — makes the hook un-uninstallable as well as ~18x slower');
 });
 
 // ── uninstall.sh ─────────────────────────────────────────────────────────────

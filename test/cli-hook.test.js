@@ -772,3 +772,168 @@ test('--codex-max off refuses an unowned never policy without changing it', (t) 
   assert.match(run.stderr, /no valid legacy snapshot proves ownership/);
   assert.equal(codexConfigOf(home), before);
 });
+
+// ── the stdin cap ─────────────────────────────────────────────────────────────
+//
+// A PostToolUse payload carries the tool's OUTPUT, so its size is whatever the
+// tool printed, and the hook accumulated it without a bound to read one short
+// string out of it.
+//
+// The dangerous way to cap it is to keep the prefix. A truncated prefix is
+// invalid JSON, hookCwd() returns null, and the project-local drain then stops
+// promoting approvals FOREVER with nothing in any log to say why — which is why
+// these two tests are a pair: one proves the drain still happens under the cap,
+// the other proves that when it does not happen the run says so.
+
+// A workspace with one project-local approval that user scope does not cover, so
+// "the drain ran" and "the drain did not run" are distinguishable on disk.
+function workspaceWithLocalApproval(home) {
+  const workspace = path.join(home, 'project');
+  fs.mkdirSync(path.join(workspace, '.claude'), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, '.claude', 'settings.local.json'),
+    JSON.stringify({ permissions: { allow: ['Bash(tokei .)'] } }, null, 2) + '\n',
+  );
+  return workspace;
+}
+
+const localAllowOf = (workspace) => JSON.parse(fs.readFileSync(
+  path.join(workspace, '.claude', 'settings.local.json'), 'utf8',
+)).permissions.allow;
+
+test('a hook event under the cap still drains the project-local approvals', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status *)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+
+  // Padded, but comfortably under the 1 MiB cap: this is the ordinary case, and
+  // it has to stay ordinary or the assertion below is about the padding.
+  const run = runHook(home, {
+    cwd: workspace, tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(256 * 1024) },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.doesNotMatch(run.stderr, /exceeded/, 'nothing was capped at this size');
+  assert.ok(settingsOf(home).permissions.allow.includes('Bash(tokei *)'),
+    'precondition for the test below: at this size the drain promotes the local entry');
+  assert.deepEqual(localAllowOf(workspace), [],
+    'and prunes it locally once the promotion is verified');
+});
+
+test('a hook event over the cap says so and skips the drain instead of truncating', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+
+  const run = runHook(home, {
+    cwd: workspace, tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(2 * 1024 * 1024) },
+  });
+
+  // Exit 0 whatever happens: this runs after every single tool call.
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, '', 'the hook path stays quiet on stdout');
+  // The line that makes this a graceful fallback rather than a silent one. A cap
+  // that truncates instead reports nothing at all, and the drain simply stops.
+  assert.match(run.stderr, /hook event exceeded 1048576 bytes/);
+  assert.match(run.stderr, /the project-local drain was skipped for this call/);
+
+  // No cwd was read, so no drain — and specifically NOT a half-drain.
+  assert.deepEqual(localAllowOf(workspace), ['Bash(tokei .)'],
+    'the local file must be untouched, not partially promoted');
+  assert.ok(!settingsOf(home).permissions.allow.includes('Bash(tokei *)'),
+    'nothing was promoted from a payload we could not read');
+
+  // And the half that does not depend on the payload still ran, which is what the
+  // stderr line promises. Without this the "user-scope pass still ran" sentence is
+  // a claim nothing checks.
+  assert.deepEqual(settingsOf(home).permissions.allow,
+    ['Bash(git status *)', 'Bash(git diff *)'],
+    'the wildcarding pass reads settings.json, not the event, and is unaffected');
+
+  // MUTATION: remove the cap (`input += chunk` unconditionally, `run(input)`) and
+  // this fails on the stderr match, with the local entry promoted and pruned.
+  // MUTATION: keep the prefix instead of dropping it (`input` not reset, still
+  // `run(input)`) and it fails the same way it would in production — silently, on
+  // the stderr assertion only, with the drain skipped and nothing saying why.
+});
+
+// ── the diagnostic describes the write, not the intent ────────────────────────
+//
+// wildcardUnderLock computed its +added/-removed/total from its OWN pre-write
+// snapshot while writeAllow, which re-reads and rebases inside itself, was
+// already returning the real counts. The two agree until a concurrent settings
+// write lands between the caller's read and the writer's — which is the only
+// case where anyone reads the line, because it is the case where something
+// surprising happened. src/settings-write.js:212-214 names the failure: a caller
+// reporting its own intent announced "+299 restored" over a file that already
+// had them.
+//
+// Deterministic here rather than raced: a `--require` preload patches
+// fs.readFileSync and rewrites settings.json after the caller's read, so
+// writeAllow's re-read sees a file the caller never saw. That is the interleaving
+// Claude Code produces by itself on every /model, /effort and approval.
+function runHookWithSettingsRace(home, { afterRead, replacement }) {
+  const shim = path.join(home, 'race-shim.js');
+  fs.writeFileSync(shim, [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    'const target = path.resolve(process.env.PW_RACE_TARGET);',
+    'const at = Number(process.env.PW_RACE_AFTER);',
+    'const body = process.env.PW_RACE_BODY;',
+    'let reads = 0;',
+    'const real = fs.readFileSync;',
+    'fs.readFileSync = function (file, ...rest) {',
+    '  const out = real.call(this, file, ...rest);',
+    '  if (typeof file === "string" && path.resolve(file) === target) {',
+    '    reads += 1;',
+    '    if (reads === at) real.call(fs, target) && fs.writeFileSync(target, body);',
+    '  }',
+    '  return out;',
+    '};',
+  ].join('\n') + '\n');
+
+  const root = path.parse(home).root;
+  return spawnSync(process.execPath, ['--require', shim, CLI], {
+    cwd: home, encoding: 'utf8', windowsHide: true,
+    input: JSON.stringify({ tool_name: 'Bash' }),
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home,
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+      PW_RACE_TARGET: path.join(home, '.claude', 'settings.json'),
+      PW_RACE_AFTER: String(afterRead),
+      PW_RACE_BODY: JSON.stringify(replacement, null, 2) + '\n',
+    },
+  });
+}
+
+test('the hook diagnostic counts what landed, not what the pass meant to do', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } });
+
+  // Read 1 is run()'s byte read, read 2 is wildcardUnderLock's readSettingsState,
+  // read 3 is writeAllow's own. Rewrite after read 2: a neighbour dropped
+  // Bash(git diff) and added Bash(zzz *) while this pass was thinking.
+  const run = runHookWithSettingsRace(home, {
+    afterRead: 2,
+    replacement: { permissions: { allow: ['Bash(git status)', 'Bash(zzz *)'] } },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  const allow = settingsOf(home).permissions.allow;
+
+  // First: the race really happened, or this test is pinning the easy case where
+  // both implementations agree and it proves nothing.
+  assert.ok(allow.includes('Bash(zzz *)'),
+    'precondition: the concurrent write must have survived the rebase, or no read '
+    + 'disagreed with any other and the diagnostic had nothing to get wrong');
+  assert.deepEqual(allow, ['Bash(zzz *)', 'Bash(git status *)', 'Bash(git diff *)']);
+
+  // And now the line. The total is the one a reader checks against the file.
+  assert.match(run.stderr, /^wildcard-perms: \+2 -1 → 3 entries$/m,
+    `the diagnostic must describe the file that exists; got ${JSON.stringify(run.stderr)}`);
+  const reported = /→ (\d+) entries/.exec(run.stderr);
+  assert.equal(Number(reported[1]), allow.length,
+    'the reported total and the real entry count are the same number or the line is fiction');
+
+  // MUTATION: restore the pre-write snapshot arithmetic in wildcardUnderLock —
+  // `after.filter(p => !before.includes(p))` / `before.filter(p => !after.includes(p))`
+  // over `after.length` — and this fails with "+2 -2 → 2 entries" written over a
+  // file holding 3.
+});

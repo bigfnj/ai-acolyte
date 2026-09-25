@@ -169,11 +169,15 @@ function managedCapabilities(managed) {
 const BULK_LOSS_MINIMUM = 5;
 const BULK_LOSS_FRACTION = 0.1;
 
-function isBulkLoss(missingCount, backupSize, options = {}) {
-  const minimum = Number.isFinite(options.minimum) ? options.minimum : BULK_LOSS_MINIMUM;
-  const fraction = Number.isFinite(options.fraction) ? options.fraction : BULK_LOSS_FRACTION;
+// No `options`. It offered `minimum` and `fraction` overrides that every call
+// site — the one below and seven assertions in test/policy-guard.test.js — passes
+// two arguments past, so both branches were unreachable and the two constants
+// were the only values this ever used. A threshold nobody can tune is also the
+// honest description of what this is: the numbers are a judgement about user
+// behaviour, not a knob.
+function isBulkLoss(missingCount, backupSize) {
   if (missingCount <= 0) return false;
-  return missingCount >= Math.max(minimum, Math.ceil(backupSize * fraction));
+  return missingCount >= Math.max(BULK_LOSS_MINIMUM, Math.ceil(backupSize * BULK_LOSS_FRACTION));
 }
 
 // One assessment, so callers never have to decide which half is actionable.
@@ -186,14 +190,18 @@ function isBulkLoss(missingCount, backupSize, options = {}) {
 // watcher event landing mid-write became a reported wipe of the whole list and an
 // auto-restore of all of it. Unknown is reported as unknown, and nothing is
 // restorable from a state we could not observe.
-function assessPolicy({ live, backup, managed, limits, claimed } = {}) {
+// `claimed` is gone from the parameter list. It let a caller substitute its own
+// permission surface for the one read off disk, and no caller anywhere ever
+// supplied it — not the extension, not the CLI, not a test — so the branch it
+// selected could not run. Its absence also makes the rule below unconditional,
+// which is the rule that was always meant: shadowing is a statement about the
+// LIVE surface, and an unreadable file yields no surface to make it about.
+function assessPolicy({ live, backup, managed, limits } = {}) {
   const unreadable = live === null || live === undefined;
   const missing = unreadable ? { allow: [], deny: [] } : missingFromLive(live, backup);
-  // Shadowing is a statement about the live surface, so it needs the same
-  // evidence. `claimed` is an explicit surface from the caller and stands in.
-  const surface = claimed
-    ? list(claimed)
-    : (unreadable ? [] : [...new Set([...list(live?.permissions?.allow), ...list(backup?.allow)])]);
+  const surface = unreadable
+    ? []
+    : [...new Set([...list(live?.permissions?.allow), ...list(backup?.allow)])];
   const restorable = missing.allow.length + missing.deny.length;
   const backupSize = list(backup?.allow).length + list(backup?.deny).length;
   return {

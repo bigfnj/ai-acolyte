@@ -91,10 +91,49 @@ if (argv.includes('--help') || argv.includes('-h')) {
   // Hook mode. Claude Code sends a JSON context on stdin, and one field of it
   // matters: `cwd` names the project whose settings.local.json may have just
   // received the approval that fired this hook.
+  //
+  // A PostToolUse payload carries the tool's OUTPUT, so its size is whatever the
+  // tool printed — a `git log` on a large repo, a build, a whole file read. This
+  // accumulated it without a bound, on the one path that runs after every single
+  // tool call, to read one short string out of it.
+  //
+  // The cap must never hand run() a TRUNCATED prefix, which is the trap this has
+  // to be written around: a prefix is invalid JSON, hookCwd() returns null, the
+  // project-local drain silently stops promoting approvals, and nothing in any
+  // log says why. A hook that quietly does half its job forever is strictly worse
+  // than one that says it did less. So overflow is EXPLICIT — stop accumulating,
+  // drop what was collected rather than parse half of it, say so on stderr, and
+  // pass null, which is the same "no cwd, no drain" route the payload-without-a-
+  // cwd case already takes. The user-scope wildcarding pass does not read the
+  // payload at all and still runs.
+  //
+  // Chunks keep being consumed after the cap so the writer is never left blocked
+  // on a full pipe; they are simply not kept.
+  const HOOK_STDIN_LIMIT = 1024 * 1024;
   let input = '';
+  let overflowed = false;
   process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => { input += chunk; });
-  process.stdin.on('end', () => run(input));
+  process.stdin.on('data', (chunk) => {
+    if (overflowed) return;
+    if (input.length + chunk.length > HOOK_STDIN_LIMIT) {
+      overflowed = true;
+      input = '';
+      return;
+    }
+    input += chunk;
+  });
+  process.stdin.on('end', () => {
+    if (overflowed) {
+      // Said out loud on every occurrence. A control that runs degraded and does
+      // not report it is indistinguishable from one that is working.
+      process.stderr.write(
+        `wildcard-perms: hook event exceeded ${HOOK_STDIN_LIMIT} bytes, so no cwd was `
+        + 'read from it and the project-local drain was skipped for this call. The '
+        + 'user-scope pass still ran.\n'
+      );
+    }
+    run(overflowed ? null : input);
+  });
   process.stdin.resume();
 }
 
@@ -118,6 +157,65 @@ function learnOption(args, name, fallback) {
   return value;
 }
 
+// "Has this partition ever been scanned?" — the one thing that separates a live
+// workspace state from the stub a mode change leaves behind, since setMode()
+// saves a state file the first time it runs whether or not anything has been
+// observed. An unreadable or half-written file answers no, so a corrupt state
+// can never capture the default.
+function stateWasScanned(statePath) {
+  try {
+    return !!JSON.parse(fs.readFileSync(statePath, 'utf8').replace(/^\uFEFF/, '')).lastScanAt;
+  } catch { return false; }
+}
+
+// The Auto Learn state file is partitioned by a hash of the workspace root, and
+// the extension's root is the VS Code workspace FOLDER — which is almost never
+// the directory a terminal happens to be sitting in. Defaulting to
+// `process.cwd()` therefore keyed a different and usually absent file. Measured
+// on the development box: the CLI read `auto-learn-state.397b082565ea6f56.json`,
+// which did not exist, while the extension was writing
+// `auto-learn-state.4a20f158639aa72c.json` with 613 candidates and 20000
+// observation hashes in it. `--learn status` printed zeros, and "Auto Learn is
+// doing nothing" is indistinguishable from "you are reading the wrong file".
+//
+// So walk UP from cwd and take the workspace that already owns a state file.
+// Only ANCESTORS are candidates, and that is the whole safety argument: every
+// one of them CONTAINS the cwd, so the state can never belong to a project this
+// invocation is not inside. A scanned state beats an unscanned one even when the
+// unscanned one is nearer, because opening a subdirectory in VS Code is enough
+// to create a stub. With no state file anywhere above, cwd stands, so a first
+// `--learn scan` in a fresh workspace still gets its own partition.
+//
+// The candidate path is asked of the MANAGER rather than recomputed here.
+// Rehashing the name in this file is precisely how the two halves drifted apart
+// the first time, and a second copy would drift again on the next rename.
+function inferWorkspaceRoot(createAutoLearnManager) {
+  const start = path.resolve(process.cwd());
+  let owned = null;
+  for (let dir = start; ;) {
+    const statePath = createAutoLearnManager({ workspaceRoot: dir }).paths.state;
+    if (fs.existsSync(statePath)) {
+      if (!owned) owned = dir;
+      if (stateWasScanned(statePath)) return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return owned || start;
+}
+
+// One resolution shared by every verb that reads the learner's state, so
+// `--learn` and `--guidance derived` can never disagree about which workspace
+// they are in. An explicit `--workspace` is still absolute law: nothing is
+// inferred over a value the user typed.
+function workspaceRootFor(args, createAutoLearnManager) {
+  const explicit = learnOption(args, '--workspace', null);
+  return explicit === null
+    ? inferWorkspaceRoot(createAutoLearnManager)
+    : path.resolve(explicit);
+}
+
 function learn(args) {
   // Keep the PostToolUse hot path independent of the optional learner stack.
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
@@ -132,7 +230,7 @@ function learn(args) {
       process.exitCode = 1;
       return;
     }
-    const workspaceRoot = path.resolve(learnOption(args, '--workspace', process.cwd()));
+    const workspaceRoot = workspaceRootFor(args, createAutoLearnManager);
     const codexScope = String(learnOption(args, '--codex-scope', 'user')).toLowerCase();
     if (!['user', 'workspace', 'off'].includes(codexScope)) {
       process.stderr.write(LEARN_USAGE);
@@ -371,11 +469,18 @@ function wildcardUnderLock() {
   if (JSON.stringify(before) === JSON.stringify(after)) return; // someone got there first
 
   try {
-    writer.writeAllow(fresh, after);
-    const added   = after.filter(p => !before.includes(p));
-    const removed = before.filter(p => !after.includes(p));
+    // Reported from what the WRITER returns, never from this function's own
+    // snapshot. writeAllow re-reads and rebases inside itself, so its counts are
+    // measured against the file the write actually landed on; `before`/`after`
+    // here are what this pass intended against a read taken earlier. They agree
+    // in the common case and diverge exactly when a concurrent Claude Code write
+    // lands in between — the case a diagnostic exists to describe. The anti-
+    // pattern is spelled out at src/settings-write.js:212-214, where it produced
+    // "+299 restored" over a file that already had them.
+    const written = writer.writeAllow(fresh, after);
     process.stderr.write(
-      `wildcard-perms: +${added.length} -${removed.length} → ${after.length} entries\n`
+      `wildcard-perms: +${written.addedAllow} -${written.removedAllow} → `
+      + `${written.allow.length} entries\n`
     );
   } catch (err) {
     // SETTINGS_UNREADABLE is "come back in a moment", not a failure to shout
@@ -522,10 +627,12 @@ function guidance(args) {
     const { createAutoLearnManager } = require('../src/auto-learn-manager');
     try {
       // `--workspace` is not cosmetic here: the learner's state is partitioned
-      // per workspace, so defaulting to cwd reads a DIFFERENT state file and
-      // reports an empty review on a machine that has plenty to show.
+      // per workspace, so reading the wrong one reports an empty review on a
+      // machine that has plenty to show. Same resolution as `--learn`, which is
+      // the point — these two verbs used to default differently from each other
+      // only by accident of having the same wrong line copied into both.
       const manager = createAutoLearnManager({
-        workspaceRoot: path.resolve(learnOption(args, '--workspace', process.cwd())),
+        workspaceRoot: workspaceRootFor(args, createAutoLearnManager),
       });
       if (cmd === 'derived') {
         process.stdout.write(JSON.stringify(manager.derivedReview(), null, 2) + '\n');
@@ -586,6 +693,43 @@ function guidance(args) {
   }
   if (cmd === 'on' && results.some((result) => result.changed)) {
     process.stdout.write('  loaded in every session of every project from the next session on.\n');
+  }
+
+  // `off` has to leave nothing of ours behind, and the shell-style block was not
+  // the only thing this tool writes into an instruction file. An ACCEPTED derived
+  // mitigation installs its own marker-fenced block, and no verb swept those:
+  // `--guidance decline <id>` removes one at a time and only while the learner
+  // still derives that id, while install.sh, install.ps1 and both uninstallers do
+  // not touch instruction files at all. So an accepted block outlived the
+  // uninstall of the tool that wrote it, with no command anywhere that removed it.
+  //
+  // Reconciling against an empty wanted-set is the removal path `decline` already
+  // uses; removal reads only the markers, so a block this version no longer knows
+  // how to derive still comes out.
+  //
+  // The learner's accepted/declined RECORD is deliberately left alone. Nothing
+  // re-installs a block on its own — setDerivedGuidance has exactly one caller,
+  // decideDerived — so the record is inert until a human decides again, and
+  // erasing someone's decisions is not what "off" was asked to do.
+  if (cmd === 'off') {
+    const { setDerivedGuidance } = require('../src/derived-guidance');
+    for (const target of setDerivedGuidance([], [])) {
+      if (target.error) {
+        process.stderr.write(
+          `wildcard-perms --guidance off [${target.agent}]: derived blocks were left in `
+          + `place — ${target.error}\n`
+        );
+        process.exitCode = 1;
+        continue;
+      }
+      if (!target.removed.length) continue;
+      process.stdout.write(
+        `wildcard-perms guidance [${target.agent}]: removed `
+        + `${target.removed.length} derived `
+        + `${target.removed.length === 1 ? 'block' : 'blocks'} `
+        + `(${target.removed.join(', ')}) — ${target.path}\n`
+      );
+    }
   }
 }
 

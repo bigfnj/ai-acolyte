@@ -204,9 +204,31 @@ function mirrorBackupPath() {
   } catch { configured = ''; }
   if (typeof configured !== 'string' || !configured.trim()) return MIRROR_BACKUP_DEFAULT;
   const raw = configured.trim();
-  return raw.startsWith('~')
-    ? path.join(os.homedir(), raw.slice(1).replace(/^[\\/]+/, ''))
-    : raw;
+  if (!raw.startsWith('~')) return raw;
+  const rest = raw.slice(1).replace(/^[\\/]+/, '');
+  // `~`, `~/` and `~\` name the home DIRECTORY, and path.join(home, '') is that
+  // directory. This setting names a FILE, so the mirror write then failed EISDIR
+  // into writeBackupCopies' best-effort catch and the off-tree copy silently
+  // stopped existing — the one copy that survives losing all of ~/.claude, which
+  // is not hypothetical here (2026-09-09). Every other `~`-prefixed value was
+  // already handled; this was the one that resolved to a directory.
+  if (!rest) {
+    warnOnce(`permission-wildcarding: backupMirrorPath "${raw}" is the home directory, not a `
+      + `file — using the default ${MIRROR_BACKUP_DEFAULT}`);
+    return MIRROR_BACKUP_DEFAULT;
+  }
+  return path.join(os.homedir(), rest);
+}
+
+// console.error is the house channel for "this ran degraded", but this one is on
+// the path of every policy write, so saying it on every write would be noise the
+// user learns to scroll past. Once per distinct message, per activation.
+const warnedOnce = new Set();
+
+function warnOnce(message) {
+  if (warnedOnce.has(message)) return;
+  warnedOnce.add(message);
+  console.error(message);
 }
 
 function readOneBackup(file) {

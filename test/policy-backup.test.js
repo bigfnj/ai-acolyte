@@ -30,10 +30,15 @@ function purgeProjectModules(extensionPath, rootSrc) {
   }
 }
 
-function harness(tempHome) {
+// `options.settings` overrides configuration keys by name. Nothing in this file
+// needed one until the mirror path itself became configurable evidence: every
+// other test here relies on the DEFAULT mirror location, so the map is empty for
+// them and the fallback below is unchanged.
+function harness(tempHome, options = {}) {
   const commands = new Map();
   const warnings = [];
   const warningAnswers = [];
+  const settings = { ...(options.settings || {}) };
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     RelativePattern: class RelativePattern {
@@ -66,7 +71,10 @@ function harness(tempHome) {
       getConfiguration() {
         return {
           // Auto Learn off: these tests are about the backup, not the learner.
-          get: (key, fallback) => (key === 'autoLearn.enabled' ? false : fallback),
+          get: (key, fallback) => {
+            if (key in settings) return settings[key];
+            return key === 'autoLearn.enabled' ? false : fallback;
+          },
           inspect: () => ({}),
           update: async () => {},
         };
@@ -459,6 +467,58 @@ test('the backup is mirrored outside ~/.claude', async (t) => {
     // The whole point: outside the directory whose reset it survives.
     assert.ok(!env.mirrorPath.startsWith(path.join(env.tempHome, '.claude')),
       'a mirror inside ~/.claude protects against nothing');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// A bare `~` is the one `~`-prefixed value the expander got wrong. It named the
+// home DIRECTORY, so the mirror write failed EISDIR into writeBackupCopies'
+// best-effort catch and the off-tree copy stopped existing — silently, and only
+// for the user who typed the shortest thing that looks right. `~/x`, `~\x` and an
+// absolute path were all already handled.
+test('a bare ~ as the mirror path still writes a mirror, and says why not there', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(rg *)'], deny: DENY } });
+
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => { logged.push(args.map((a) => String(a)).join(' ')); };
+  t.after(() => { console.error = originalError; });
+
+  const app = harness(env.tempHome, { settings: { backupMirrorPath: '~' } });
+  try {
+    await app.commands.get('permission-wildcarding.runNow')();
+
+    assert.ok(fs.existsSync(env.mirrorPath),
+      'a bare ~ resolved to the home directory itself, so the atomic write failed EISDIR '
+      + 'into a swallowing catch and no off-tree copy was written anywhere');
+    const mirrored = JSON.parse(fs.readFileSync(env.mirrorPath, 'utf8'));
+    assert.deepEqual(mirrored, JSON.parse(fs.readFileSync(env.backupPath, 'utf8')),
+      'the fallback copy must be the same bytes as the primary, or restore depends on which '
+      + 'one is read');
+    // A silently-degraded control is the shape this repo keeps getting bitten by,
+    // so the fallback announces itself rather than looking like a working setting.
+    assert.ok(logged.some((m) => /backupMirrorPath/.test(m) && /home directory/.test(m)),
+      `the fallback was taken in silence: ${JSON.stringify(logged)}`);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The other half: a `~`-prefixed value that DOES name a file must still land
+// where it says, so the fix above cannot be "ignore ~ entirely".
+test('a ~-prefixed mirror path still resolves against the home directory', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: DENY } });
+
+  const app = harness(env.tempHome, { settings: { backupMirrorPath: '~/elsewhere/mirror.json' } });
+  try {
+    await app.commands.get('permission-wildcarding.runNow')();
+    const target = path.join(env.tempHome, 'elsewhere', 'mirror.json');
+    assert.ok(fs.existsSync(target), `nothing was written to ${target}`);
+    assert.ok(!fs.existsSync(env.mirrorPath),
+      'a configured mirror path was ignored in favour of the default');
   } finally {
     await app.dispose();
   }

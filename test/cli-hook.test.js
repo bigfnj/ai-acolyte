@@ -937,3 +937,114 @@ test('the hook diagnostic counts what landed, not what the pass meant to do', (t
   // over `after.length` — and this fails with "+2 -2 → 2 entries" written over a
   // file holding 3.
 });
+// ── stdin is read synchronously, and must still be read WHOLE ────────────────
+//
+// The hook stopped using process.stdin: constructing the stream and running the
+// event loop for its 'data'/'end' round trip was 5.4 min / 5.1 p50 ms of a 59-65
+// ms hook call, on the path that runs after every single tool call. What replaces
+// it is a bounded fs.readSync loop, and the loop is the load-bearing part — a
+// pipe hands over whatever has arrived so far, so a short read is not EOF.
+//
+// Stopping at the first read truncates a payload delivered in pieces, and a
+// truncated payload is invalid JSON: hookCwd returns null and the project-local
+// drain is skipped. That is the exact failure the byte cap above is written
+// around, reached by a different door.
+
+// A hook event written in slices with gaps between them, the shape spawnSync
+// cannot produce because it hands the child everything at once. The payload is
+// deliberately larger than one 64 KiB read buffer as well, so a single read
+// cannot accidentally capture it.
+function runHookChunked(home, event, slices = 12) {
+  const root = path.parse(home).root;
+  const child = spawn(process.execPath, [CLI], {
+    cwd: os.tmpdir(), windowsHide: true,
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home,
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+    },
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const payload = JSON.stringify(event);
+  const size = Math.ceil(payload.length / slices);
+  let index = 0;
+  const write = () => {
+    if (index * size >= payload.length) { child.stdin.end(); return; }
+    child.stdin.write(payload.slice(index * size, (index + 1) * size));
+    index += 1;
+    setTimeout(write, 4);
+  };
+  child.stdin.on('error', () => {});
+  write();
+  return new Promise((resolve) => {
+    child.on('close', (status) => resolve({ status, stderr, slices: index }));
+  });
+}
+
+test('a hook event delivered in slices is read whole, not truncated at the first read', async (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status *)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+
+  const run = await runHookChunked(home, {
+    cwd: workspace, tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(200 * 1024) },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(run.slices > 1,
+    `the payload has to arrive in more than one piece or this proves nothing; got ${run.slices}`);
+  assert.doesNotMatch(run.stderr, /exceeded/, `under the cap at this size; got: ${run.stderr}`);
+  assert.doesNotMatch(run.stderr, /did not parse as JSON/,
+    `the whole event was read, so it parsed; got: ${run.stderr}`);
+
+  // The observable that separates "read whole" from "read the first slice":
+  // the cwd only exists in the payload, so the drain can only have run if the
+  // JSON parsed, and the JSON can only parse if every slice was collected.
+  assert.ok(settingsOf(home).permissions.allow.includes('Bash(tokei *)'),
+    'the cwd came out of a payload that arrived in pieces, so the drain promoted the local entry');
+  assert.deepEqual(localAllowOf(workspace), [],
+    'and pruned it locally once the promotion was verified');
+
+  // MUTATION: drop the loop in bin/wildcard-perms — one `fs.readSync(0, ...)`
+  // instead of `for (;;)` — and this fails on the promotion assertion, with
+  // "the 17800-byte hook event on stdin did not parse as JSON" on stderr.
+  // MUTATION: `if (read < buffer.length) break;` fails identically.
+});
+
+test('a hook event that does not parse says so instead of skipping the drain in silence', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status)', 'Bash(git diff)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+
+  // A truncated event: valid JSON up to the cut, which is precisely what a
+  // short read produces and precisely what cannot be distinguished from an
+  // empty one after the fact.
+  const root = path.parse(home).root;
+  const whole = JSON.stringify({ cwd: workspace, tool_name: 'Bash' });
+  const run = spawnSync(process.execPath, [CLI], {
+    cwd: os.tmpdir(), encoding: 'utf8', windowsHide: true,
+    input: whole.slice(0, whole.length - 8),
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home,
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+    },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, '', 'the hook path stays quiet on stdout');
+  // The line that makes the skip visible. Without it the run is byte-identical
+  // to a healthy one that simply had nothing to drain.
+  assert.match(run.stderr, /hook event on stdin did not parse as JSON/);
+  assert.match(run.stderr, /the project-local drain was skipped for this call/);
+
+  // And it is a skip, not a half-drain.
+  assert.deepEqual(localAllowOf(workspace), ['Bash(tokei .)'],
+    'nothing may be promoted or pruned from an event that could not be read');
+  assert.deepEqual(settingsOf(home).permissions.allow,
+    ['Bash(git status *)', 'Bash(git diff *)'],
+    'the user-scope pass reads settings.json, not the event, and still ran');
+
+  // MUTATION: restore the silent `catch { return null; }` in hookCwd and this
+  // fails on the stderr match — with every other assertion still passing, which
+  // is exactly how the silent version survived.
+});

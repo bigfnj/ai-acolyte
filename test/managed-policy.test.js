@@ -355,3 +355,38 @@ test('a blanket managed rule governs its whole tool, in all three spellings', (t
   assert.equal(overridingRule(permissive, 'Bash(docker exec *)'), null,
     'an allow does not outrank, so there is nothing to name');
 });
+
+// The backlog recorded "verdicts.unknown can no longer be non-zero". Half of that
+// is right: the `!policy.present` path is provably dead. This is the half that is
+// wrong, and it is reachable from ordinary data rather than from a hand-written
+// malformed string.
+//
+// sanitizeState truncates claudePermission to 768 characters on every state load.
+// A permission longer than that comes back with its closing paren cut off, which
+// fails RULE_SHAPE, so toolOf() returns nothing and assessPermission answers
+// 'unknown' for a grant that was perfectly well formed when it was written.
+//
+// The production truncation lives in src/auto-learn-manager.js; what is pinned here
+// is the consequence, which is this module's to answer for. The mutation that must
+// break it: make assessByText fall through to 'effective' instead of returning
+// 'unknown' for a permission with no recoverable tool.
+test('a permission truncated past the state cap assesses as unknown, not as effective', (t) => {
+  const policy = readPolicy({
+    home: policyHome(t, { permissions: { ask: ['Bash(docker:*)'], allow: [], deny: [] } }),
+  });
+
+  // Exactly the shape the 768-char cap produces: a real rule, cut mid-specifier.
+  // `kubectl` deliberately, not `docker`: docker is what the managed ask covers, so
+  // it assesses 'inert' and the contrast with 'unknown' would be muddier. A command
+  // the policy says nothing about assesses 'effective', which is the answer this
+  // grant deserves and the one truncation takes away.
+  const whole = `Bash(kubectl get ${'a'.repeat(800)} *)`;
+  const truncated = whole.slice(0, 768);
+
+  assert.equal(assessPermission(policy, whole), 'effective',
+    'precondition: the untruncated rule is well formed and assessable');
+  assert.ok(truncated.length === 768 && !truncated.endsWith(')'),
+    'precondition: the cap really did cut the closing paren');
+  assert.equal(assessPermission(policy, truncated), 'unknown',
+    'a rule the cap made unparseable must be reported as unknown, never guessed at');
+});

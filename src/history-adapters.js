@@ -1607,12 +1607,29 @@ function rolloutThreadIds(sessionsDir) {
 // Read-only, best effort, and never allowed to throw into a scan. `node:sqlite`
 // is unavailable on Node 20 and flagged on Node 22, so the require itself is the
 // first thing that can fail.
+//
+// TWO FAILURE CLASSES, AND THEY ARE NOT THE SAME FINDING. `unavailable: true`
+// means the RUNTIME cannot host this probe at all — the module is absent, or it
+// is present without the constructor. That is a property of the interpreter, it
+// is identical on every scan, and no action by the user can change it. Every
+// other failure here — the file would not open, it holds no table this reader
+// knows, a query threw — is a property of the DATA, it can change between scans,
+// and it is worth a degraded verdict.
+//
+// The distinction is load-bearing rather than cosmetic: no shipping VS Code
+// carries `node:sqlite`, so collapsing the two made the extension host report a
+// degraded scan on 100% of real installs, permanently, with nothing the reader
+// could do about it. A signal that is always on carries no information and it
+// crowded out the one the row exists to show. See `codexHistoryStoreState`
+// below for what each class does to `inspected`.
 function readThreadStoreIds(storePath) {
   let sqlite;
   try { sqlite = require('node:sqlite'); }
-  catch { return { ok: false, reason: 'node:sqlite is unavailable on this Node runtime' }; }
+  catch {
+    return { ok: false, unavailable: true, reason: 'node:sqlite is unavailable on this Node runtime' };
+  }
   if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
-    return { ok: false, reason: 'node:sqlite exposes no DatabaseSync' };
+    return { ok: false, unavailable: true, reason: 'node:sqlite exposes no DatabaseSync' };
   }
   let db = null;
   try {
@@ -1642,24 +1659,36 @@ function readThreadStoreIds(storePath) {
   }
 }
 
+// `malformed` used to be counted here and returned, and no caller in the repo
+// or the tests ever read it. It is gone rather than wired: a line of this file
+// with no id field is not evidence of anything a reader could act on, and the
+// only honest use for the number -- downgrading the verdict -- would fire on
+// every ordinary session index that carries a non-thread record.
 function sessionIndexIds(indexPath) {
   let text;
   try { text = fs.readFileSync(indexPath, 'utf8'); }
   catch (error) { return error?.code === 'ENOENT' ? { ok: true, ids: new Set() } : { ok: false, reason: String(error?.message || error) }; }
   const ids = new Set();
-  let malformed = 0;
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       const record = JSON.parse(line);
       const id = stringValue(firstDefined(record?.id, record?.thread_id, record?.threadId));
       if (id) ids.add(id.toLowerCase());
-      else malformed += 1;
-    } catch { malformed += 1; }
+    } catch { /* a line this reader cannot parse contributes no id, and that is all */ }
   }
-  return { ok: true, ids, malformed };
+  return { ok: true, ids };
 }
 
+// `storeFiles` (the array of paths) and `migrations` (the count) used to be
+// returned too. Both are read INSIDE this function and by nobody outside it, in
+// production or in the tests, so they are gone from the shape. `rolloutFiles`,
+// `rolloutThreads` and `storeThreads` are asserted by test/codex-history-store
+// and stay -- and the three early returns below now carry the same keys as the
+// main one, which they did not: a caller that destructured `storeThreads` got a
+// number on the normal path and `undefined` on every short-circuit, and nothing
+// anywhere noticed because nothing read it on either path.
+const EMPTY_STORE_STATE = { rolloutFiles: 0, rolloutThreads: 0, storeThreads: 0, orphans: [] };
 function codexHistoryStoreState(options = {}) {
   const home = options.home ? String(options.home) : null;
   const codexHome = options.codexHome ? String(options.codexHome)
@@ -1672,7 +1701,7 @@ function codexHistoryStoreState(options = {}) {
     return {
       present: false, stale: false, inspected: 'skipped', reasons: [],
       notes: ['No Codex home was supplied, so no history-store check ran.'],
-      rolloutFiles: 0, storeFiles: [], migrations: 0, orphans: [],
+      ...EMPTY_STORE_STATE,
     };
   }
 
@@ -1683,14 +1712,14 @@ function codexHistoryStoreState(options = {}) {
       return {
         present: false, stale: false, inspected: 'exact', reasons: [],
         notes: ['No ~/.codex directory, so Codex history is not in use on this machine.'],
-        rolloutFiles: 0, storeFiles: [], migrations: 0, orphans: [],
+        ...EMPTY_STORE_STATE,
       };
     }
     return {
       present: false, stale: false, inspected: 'partial',
       reasons: [],
       notes: [`The Codex home could not be listed (${error?.code || 'error'}), so staleness is unknown.`],
-      rolloutFiles: 0, storeFiles: [], migrations: 0, orphans: [],
+      ...EMPTY_STORE_STATE,
     };
   }
 
@@ -1708,11 +1737,33 @@ function codexHistoryStoreState(options = {}) {
   // Starts exact and is DOWNGRADED by anything that could not be read. With no
   // store file present there is nothing to diverge from, and that is a real
   // exact answer rather than an absent one.
+  //
+  // THREE DOWNGRADES, NOT TWO, ordered worst-last so a later one cannot be
+  // undone by an earlier one:
+  //
+  //   exact        the comparison ran against everything it wanted to read.
+  //   unavailable  the runtime cannot host the sqlite probe, so the store half
+  //                never ran and never will on this interpreter. Not a fault,
+  //                not actionable, and NOT trouble -- see `scanTrouble` in
+  //                vscode-extension/extension.js. The session-index half still
+  //                ran, so orphans, migrations and an emptied rollout directory
+  //                are all still detected and `stale` is still authoritative.
+  //   partial      it tried and failed on the DATA: the file would not open, it
+  //                holds no table this reader knows, or a query threw. That can
+  //                change between scans and is worth a degraded verdict.
+  //
+  // Collapsing `unavailable` into `partial` is the defect this ordering exists
+  // to stop: no shipping VS Code carries `node:sqlite`, so it made every real
+  // extension host report a permanently degraded scan.
   let inspected = 'exact';
+  const downgrade = (next) => {
+    const RANK = { exact: 0, unavailable: 1, partial: 2 };
+    if (RANK[next] > RANK[inspected]) inspected = next;
+  };
   for (const store of storeFiles) {
     const result = readThreadStoreIds(store);
     if (!result.ok) {
-      inspected = 'partial';
+      downgrade(result.unavailable ? 'unavailable' : 'partial');
       notes.push(`The thread-history store could not be read (${result.reason}), so the exact ` +
         'rollout-versus-store comparison did not run.');
       continue;
@@ -1722,7 +1773,7 @@ function codexHistoryStoreState(options = {}) {
 
   const index = sessionIndexIds(path.join(codexHome, 'session_index.jsonl'));
   if (!index.ok) {
-    inspected = 'partial';
+    downgrade('partial');
     notes.push(`session_index.jsonl could not be read (${index.reason}).`);
   } else {
     for (const id of index.ids) known.add(id);
@@ -1746,6 +1797,14 @@ function codexHistoryStoreState(options = {}) {
   if (inspected === 'partial' && !reasons.length) {
     notes.push('No divergence was found, but the check ran degraded: treat this as unknown, not healthy.');
   }
+  // Deliberately a different sentence, and deliberately not the word "degraded".
+  // The rollout-versus-index comparison DID run; only the sqlite cross-check was
+  // out of reach, and saying "treat this as unknown" over a check that answered
+  // is the false alarm this state was added to retire.
+  if (inspected === 'unavailable' && !reasons.length) {
+    notes.push('The sqlite thread-history cross-check cannot run on this Node runtime, so it was '
+      + 'skipped. The rollout-versus-session-index comparison ran and found no divergence.');
+  }
   return {
     present: storeFiles.length > 0 || rollouts.files > 0,
     stale: reasons.length > 0,
@@ -1754,9 +1813,7 @@ function codexHistoryStoreState(options = {}) {
     notes,
     rolloutFiles: rollouts.files,
     rolloutThreads: rollouts.ids.size,
-    storeFiles,
     storeThreads: known.size,
-    migrations,
     orphans: orphans.slice(0, 20),
   };
 }

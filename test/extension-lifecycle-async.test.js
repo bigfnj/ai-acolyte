@@ -163,6 +163,13 @@ function harness(tempHome, options = {}) {
   const errors = [];
   const infos = [];
   const warnings = [];
+  // The resolvers for `deferWarnings`, the QuickPick answer queue and what was
+  // actually offered, and every output channel ever created. All four exist for
+  // the post-teardown continuation tests at the bottom of this file.
+  const pendingWarnings = [];
+  const quickPickAnswers = [];
+  const quickPickCalls = [];
+  const outputChannels = [];
   // Every https.get the extension made, newest last, and every withProgress run with the
   // cancellation callbacks its task registered. Both exist for the model download: the
   // redirect follower builds one request per hop and only the last is live.
@@ -210,7 +217,21 @@ function harness(tempHome, options = {}) {
         statusBarItems.push(item);
         return item;
       },
-      createOutputChannel() { return { appendLine() {}, clear() {}, show() {}, dispose() {} }; },
+      // CAPTURED. deactivate() disposes the shared channel and nulls the slot, and
+      // sharedChannel() used to build a new one whenever the slot was empty — so
+      // a "Show detail" clicked after teardown created a document nothing would
+      // ever dispose. How many were built is the only way to see that.
+      createOutputChannel(name) {
+        const channel = {
+          name, disposed: false, lines: [],
+          appendLine(line) { channel.lines.push(String(line)); },
+          clear() { channel.lines.length = 0; },
+          show() {},
+          dispose() { channel.disposed = true; },
+        };
+        outputChannels.push(channel);
+        return channel;
+      },
       // CAPTURED. Whether a push reaches the webview is the only way to see
       // that `dashboard` still points at the live provider — the other
       // observable effects of a refresh happen with or without it.
@@ -218,7 +239,27 @@ function harness(tempHome, options = {}) {
       setStatusBarMessage(message) { statuses.push(String(message)); },
       showErrorMessage(message) { errors.push(String(message)); },
       showInformationMessage(message) { infos.push(String(message)); return Promise.resolve(undefined); },
-      showWarningMessage(message) { warnings.push(String(message)); return Promise.resolve(options.warningChoice); },
+      showWarningMessage(message) {
+        warnings.push(String(message));
+        // DEFERRED, on request. Six write paths in this extension resume from an
+        // awaited dialog, and the window that matters is the one where the user
+        // answers AFTER the host tore down. A promise that is already resolved
+        // cannot express it: the continuation runs before a test can call
+        // deactivate(). `pendingWarnings` hands the resolver back instead.
+        if (options.deferWarnings) return new Promise((resolve) => pendingWarnings.push(resolve));
+        return Promise.resolve(options.warningChoice);
+      },
+      // Answers are matched by label / value / id against whatever the caller
+      // offered, so a test names the choice a user would click rather than an
+      // index into a list it does not build.
+      showQuickPick(items) {
+        quickPickCalls.push(items);
+        if (!quickPickAnswers.length) return Promise.resolve(undefined);
+        const want = quickPickAnswers.shift();
+        const offered = Array.isArray(items) ? items : [];
+        return Promise.resolve(offered.find((item) => (typeof item === 'string' ? item : null) === want
+          || item?.label === want || item?.value === want || item?.id === want));
+      },
       // CAPTURED, not stubbed. The model download is the extension's only cancellable
       // progress, and whether Cancel reaches the request that is actually transferring is
       // unobservable unless the token handed to the task is retained.
@@ -411,9 +452,20 @@ function harness(tempHome, options = {}) {
     progressRuns,
     warnings,
     memoryDirs,
+    outputChannels,
+    quickPickAnswers,
+    quickPickCalls,
     reconcilers,
     settings,
     statusBarItems,
+    // Answer a dialog that is still on screen. Returns false when nothing is
+    // waiting, so a test cannot pass by resolving a prompt that never fired.
+    answerWarning(choice) {
+      const resolve = pendingWarnings.shift();
+      if (!resolve) return false;
+      resolve(choice);
+      return true;
+    },
     subscriptions,
     intervals,
     watchers,
@@ -1719,3 +1771,292 @@ test('a rename that throws fails the download instead of hanging the notificatio
       await app.dispose();
     }
   });
+
+// ── six awaited dialogs, all of them resuming into a write ────────────────────
+//
+// A notification or QuickPick outlives the extension host that raised it: VS Code
+// keeps it on screen, the user answers whenever they notice it, and the
+// continuation runs against whatever the module-level state has become. This
+// class has now been fixed three times in this file — ensureGates, then
+// ensureGuidance ("flipping guidance.enabled after teardown rewrote CLAUDE.md
+// from 1802 bytes to 24"), then the schedulers — and each fix guarded one
+// function while its siblings kept the hole.
+//
+// These six are the rest. Every one writes settings.json, the high-water backup,
+// or the instruction files, and none of them could be reached from this file
+// until the harness above grew a QuickPick and a deferrable warning.
+//
+// Each test drives the SAME path twice: once live, to prove the command really
+// does write — without which the post-teardown assertion passes for the wrong
+// reason — and once after deactivate().
+const GATES_BODY = '## Standing gates (1 memories, managed)\n\n- **Test gate.** Pass: nothing.\n';
+
+function instructionHome(t, { gates = false } = {}) {
+  const home = tempHome(t);
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'),
+    '# my own notes\n\nnothing managed here yet\n');
+  if (gates) fs.writeFileSync(path.join(home, '.claude', 'gates.generated.md'), GATES_BODY);
+  return home;
+}
+const readClaudeMd = (home) => fs.readFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'utf8');
+
+test('toggleGuidance after teardown leaves the instruction files alone', TEST_TIMEOUT, async (t) => {
+  // ensureGuidance carries this guard and says why. toggleGuidance calls the same
+  // setGuidanceAll against the same two files, behind a modal and a config
+  // update — two awaits, either of which can span a teardown — and did not.
+  const home = instructionHome(t);
+  const settings = { 'guidance.enabled': true };
+
+  const live = harness(home, { settings: { ...settings }, warningChoice: 'Remove' });
+  let installed;
+  try {
+    installed = readClaudeMd(home);
+    assert.match(installed, /BEGIN permission-wildcarding/, 'activation installed the block');
+    await live.commands.get('permission-wildcarding.toggleGuidance')();
+    assert.doesNotMatch(readClaudeMd(home), /BEGIN permission-wildcarding: shell style/,
+      'witness:toggle-teardown -- the live toggle did not remove the block, so this test '
+      + 'cannot tell a guard from a no-op');
+  } finally {
+    await live.dispose();
+  }
+
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), installed);
+  const app = harness(home, { settings: { ...settings }, warningChoice: 'Remove' });
+  try {
+    const before = readClaudeMd(home);
+    await app.extension.deactivate();
+    await app.commands.get('permission-wildcarding.toggleGuidance')();
+    assert.equal(readClaudeMd(home), before,
+      'witness:toggle-teardown -- a torn-down host rewrote the managed block out of CLAUDE.md');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('toggleGates after teardown leaves the instruction files alone', TEST_TIMEOUT, async (t) => {
+  // The widest window of the three: up to four awaits in front of the write — a
+  // compile prompt, the compile, a modal, the config update.
+  const home = instructionHome(t, { gates: true });
+  const settings = { 'gates.enabled': true, 'guidance.enabled': false };
+
+  const live = harness(home, { settings: { ...settings }, warningChoice: 'Remove' });
+  let installed;
+  try {
+    installed = readClaudeMd(home);
+    assert.match(installed, /BEGIN permission-wildcarding: memory gates/,
+      'activation installed the gates block');
+    await live.commands.get('permission-wildcarding.toggleGates')();
+    assert.doesNotMatch(readClaudeMd(home), /BEGIN permission-wildcarding: memory gates/,
+      'witness:toggle-teardown -- the live toggle did not remove the gates block');
+  } finally {
+    await live.dispose();
+  }
+
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), installed);
+  const app = harness(home, { settings: { ...settings }, warningChoice: 'Remove' });
+  try {
+    const before = readClaudeMd(home);
+    await app.extension.deactivate();
+    await app.commands.get('permission-wildcarding.toggleGates')();
+    assert.equal(readClaudeMd(home), before,
+      'witness:toggle-teardown -- a torn-down host removed the gates block');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('the wildcard picker after teardown prunes nothing', TEST_TIMEOUT, async (t) => {
+  // Two awaited dialogs in front of a write to settings.json AND to the
+  // high-water backup, and the comment at that call site says the pair is not
+  // recoverable: the prune drops the entry from the backup on purpose, so a later
+  // restore will not bring it back.
+  const home = tempHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const read = () => JSON.parse(fs.readFileSync(settingsPath, 'utf8')).permissions.allow;
+
+  const live = harness(home, { warningChoice: 'Remove' });
+  try {
+    live.quickPickAnswers.push('Bash(rg *)');
+    await live.commands.get('permission-wildcarding.showWildcards')();
+    assert.deepEqual(read(), [],
+      'witness:picker-teardown -- the live picker pruned nothing, so this test cannot tell a '
+      + 'guard from a broken command');
+  } finally {
+    await live.dispose();
+  }
+
+  fs.writeFileSync(settingsPath,
+    `${JSON.stringify({ permissions: { allow: ['Bash(rg *)'], deny: [] } }, null, 2)}\n`);
+  const app = harness(home, { warningChoice: 'Remove' });
+  try {
+    await app.extension.deactivate();
+    app.quickPickAnswers.push('Bash(rg *)');
+    await app.commands.get('permission-wildcarding.showWildcards')();
+    assert.deepEqual(read(), ['Bash(rg *)'],
+      'witness:picker-teardown -- a torn-down host pruned an allow entry from settings.json and '
+      + 'from the only backup of it');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The sharpest of the six. deactivate() nulls `autoLearnManager`, and
+// getAutoLearnManager() BUILDS A NEW ONE when the slot is empty — so the usual
+// "the retainer is gone, nothing can happen" reasoning is exactly backwards here:
+// a continuation arriving after teardown constructs a live manager against a dead
+// host and writes CLAUDE.md through it. Two QuickPicks upstream make the window
+// wide.
+function derivedGuidanceHome(t) {
+  const home = tempHome(t);
+  const workspace = path.join(home, 'workspace');
+  fs.mkdirSync(workspace, { recursive: true });
+  const script = path.join(workspace, 'build.ps1');
+  const records = [{ type: 'session_meta', payload: { id: 'derived', cwd: workspace } }];
+  // 60 edits of one gated path: over the threshold that protects the context
+  // budget, which is what makes `batch-file-edits` derivable at all. The cwd is
+  // inside the workspace root the harness reports, or the scan filters every
+  // observation out and the review comes back empty.
+  for (let index = 0; index < 60; index += 1) {
+    records.push(
+      { type: 'assistant',
+        message: { role: 'assistant',
+          content: [{ type: 'tool_use', id: `e${index}`, name: 'Edit', input: { file_path: script } }] } },
+      { type: 'user',
+        message: { role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: `e${index}`, is_error: false, content: 'ok' }] } },
+    );
+  }
+  const history = path.join(home, '.claude', 'projects', 'p', 'session.jsonl');
+  fs.mkdirSync(path.dirname(history), { recursive: true });
+  fs.writeFileSync(history, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`);
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), '# my own instructions\n\nread these first\n');
+  fs.writeFileSync(path.join(home, '.claude', 'remote-settings.json'),
+    `${JSON.stringify({ permissions: { ask: ['Edit(**/*.ps1)'], deny: [], allow: [] } }, null, 2)}\n`);
+  // Seeded through the REAL learner, at the state path the extension resolves to
+  // from the same home and workspace root. A stubbed review would prove nothing:
+  // what is under test is what the continuation does with a manager it builds
+  // itself.
+  // eslint-disable-next-line global-require
+  const { createAutoLearnManager } = require('../src/auto-learn-manager');
+  createAutoLearnManager({ home, workspaceRoot: workspace }).scan();
+  return home;
+}
+
+test('derived guidance accepted after teardown writes no instruction file', TEST_TIMEOUT, async (t) => {
+  const home = derivedGuidanceHome(t);
+  const settings = { 'autoLearn.enabled': true, 'guidance.enabled': false, 'gates.enabled': false };
+
+  const live = harness(home, { settings: { ...settings } });
+  let notes;
+  try {
+    notes = readClaudeMd(home);
+    live.quickPickAnswers.push('batch-file-edits', 'Accept');
+    await live.commands.get('permission-wildcarding.derivedGuidance')();
+    assert.ok(live.quickPickCalls.length >= 2,
+      `witness:derived-teardown -- the second QuickPick never appeared: ${live.quickPickCalls.length} shown`);
+    assert.match(readClaudeMd(home), /batch-file-edits \(derived\)/,
+      'witness:derived-teardown -- the live command wrote no derived block, so this test cannot '
+      + 'tell a guard from a path that never reaches the write');
+  } finally {
+    await live.dispose();
+  }
+
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), notes);
+  const app = harness(home, { settings: { ...settings } });
+  try {
+    await app.extension.deactivate();
+    app.quickPickAnswers.push('batch-file-edits', 'Accept');
+    await app.commands.get('permission-wildcarding.derivedGuidance')();
+    assert.equal(readClaudeMd(home), notes,
+      'witness:derived-teardown -- a torn-down host built a fresh Auto Learn manager and wrote a '
+      + 'standing instruction into CLAUDE.md through it');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The two arms of the managed-policy prompt. It fires from activation and both
+// answers write — "Re-assert them" merges the whole backup into settings.json,
+// "Forget them" rewrites the only copy of the high-water mark — so the answer has
+// to be deferred past deactivate() for the window to exist at all.
+function policyPromptHome(t) {
+  const home = tempHome(t);
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
+    `${JSON.stringify({ permissions: { allow: [], deny: [] } }, null, 2)}\n`);
+  const backupDir = path.join(home, '.claude', 'backups');
+  fs.mkdirSync(backupDir, { recursive: true });
+  fs.writeFileSync(path.join(backupDir, 'allow-list.latest.json'),
+    `${JSON.stringify({ allow: ['Bash(tokei *)', 'Bash(fd *)'], deny: [] }, null, 2)}\n`);
+  return { home, backupPath: path.join(backupDir, 'allow-list.latest.json') };
+}
+
+for (const [choice, label] of [['Re-assert them', 're-assert'], ['Forget them', 'forget']]) {
+  test(`the managed-policy prompt answered ${label} after teardown writes nothing`,
+    TEST_TIMEOUT, async (t) => {
+      const { home, backupPath } = policyPromptHome(t);
+      const settingsPath = path.join(home, '.claude', 'settings.json');
+      const app = harness(home, { deferWarnings: true });
+      try {
+        const settingsBefore = fs.readFileSync(settingsPath, 'utf8');
+        const backupBefore = fs.readFileSync(backupPath, 'utf8');
+        assert.ok(app.warnings.some((message) => /missing from settings\.json/.test(message)),
+          `witness:policy-teardown -- the prompt never fired: ${JSON.stringify(app.warnings)}`);
+
+        await app.extension.deactivate();
+        assert.equal(app.answerWarning(choice), true,
+          'witness:policy-teardown -- nothing was waiting on an answer, so the continuation under '
+          + 'test never ran');
+        await tick(100);
+
+        assert.equal(fs.readFileSync(settingsPath, 'utf8'), settingsBefore,
+          `witness:policy-teardown -- "${choice}" wrote settings.json from a torn-down host`);
+        assert.equal(fs.readFileSync(backupPath, 'utf8'), backupBefore,
+          `witness:policy-teardown -- "${choice}" rewrote the high-water backup from a torn-down host`);
+      } finally {
+        await app.dispose();
+      }
+    });
+}
+
+test('"Show detail" after teardown creates no channel nobody will dispose', TEST_TIMEOUT, async (t) => {
+  // sharedChannel() built a new OutputChannel whenever its slot was empty, and
+  // deactivate() disposes the channel and empties that slot — the same
+  // empty-slot-means-build-a-new-one shape as getAutoLearnManager and
+  // getAutoLearnWorkerRunner, both of which carry a `deactivated` check for it.
+  // A BULK loss, not the two-entry one above: "Show detail" only exists on the
+  // notification that follows an automatic restore, and that needs five missing
+  // entries to clear the bulk-loss line. Answering the small-loss prompt with
+  // "Show detail" matches neither of its arms and reaches nothing — measured,
+  // not guessed: that is what the first version of this test did, and the
+  // mutation survived it.
+  const home = tempHome(t);
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
+    `${JSON.stringify({ permissions: { allow: [], deny: [] } }, null, 2)}\n`);
+  const backupDir = path.join(home, '.claude', 'backups');
+  fs.mkdirSync(backupDir, { recursive: true });
+  fs.writeFileSync(path.join(backupDir, 'allow-list.latest.json'),
+    `${JSON.stringify({
+      allow: ['Bash(tokei *)', 'Bash(fd *)', 'Bash(jq *)', 'Bash(yq *)', 'Bash(bat *)', 'Bash(delta *)'],
+      deny: [],
+    }, null, 2)}\n`);
+
+  const app = harness(home, { deferWarnings: true });
+  try {
+    assert.ok(app.warnings.some((message) => /policy change detected/.test(message)),
+      `witness:channel-teardown -- the Show detail prompt never fired: ${JSON.stringify(app.warnings)}`);
+    await app.extension.deactivate();
+    const built = app.outputChannels.length;
+    for (const channel of app.outputChannels) {
+      assert.equal(channel.disposed, true, 'precondition: teardown disposed what it had');
+    }
+
+    assert.equal(app.answerWarning('Show detail'), true);
+    await tick(100);
+
+    assert.equal(app.outputChannels.length, built,
+      'witness:channel-teardown -- a torn-down host created an OutputChannel with no owner and no '
+      + 'disposer');
+  } finally {
+    await app.dispose();
+  }
+});

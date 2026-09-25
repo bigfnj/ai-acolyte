@@ -50,8 +50,10 @@ const installed = Array.isArray(cfg.hooks?.PostToolUse) ? cfg.hooks.PostToolUse 
 
 // Removed PER HOOK, not per entry. Dropping the whole entry took any hook that
 // happened to share its `hooks` array with ours — somebody else's tool, deleted
-// silently by our uninstaller. src/permissions.js:unregisterApproveHook already
-// filters per hook; these two scripts were the ones that did not.
+// silently by our uninstaller. The rule was copied from a per-hook filter in
+// src/permissions.js; that function went with MAX and these two scripts are now
+// the only place it lives, so this comment is the whole record of why the loop
+// below rebuilds `hooks` instead of dropping the entry.
 let removed = 0;
 const kept = [];
 for (const entry of installed) {

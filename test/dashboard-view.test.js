@@ -1315,6 +1315,70 @@ test('the change toast counts what the locked read changed, not what the probe g
     }
   });
 
+test('the change toast counts what the WRITE landed, not what the locked read planned',
+  async (t) => {
+    // One read further than the test above. `lockedBefore` is taken inside the
+    // policy lock, but Claude Code does not take that lock — it writes
+    // settings.json on every approval, /model and /effort — so a write can land
+    // between our locked read and writeAllow's own re-read, and writeAllow
+    // rebases onto the latter.
+    //
+    // `removedAllow` was added to src/settings-write.js:232 for exactly this, with
+    // a note saying a caller computing a removal count from its own pre-write
+    // snapshot is doing the thing the measurement exists to replace. The caller
+    // was never switched over, so the toast kept reporting the plan.
+    //
+    // THE KILLING MUTATION: put `lockedBefore.filter(p => !lockedAfter.includes(p)).length`
+    // back in place of `written.removedAllow`. The toast then says "pruned 2" over
+    // a write that pruned nothing, and "1 total" over a four-entry file.
+    const env = setup(t);
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+    const app = harness(env.tempHome);
+    const realRead = fs.readFileSync;
+    try {
+      await settle();
+      env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+
+      // Armed when the lock is taken, so the locked read still sees NON_OPTIMAL
+      // and only writeAllow's re-read sees the concurrent list.
+      let armed = false;
+      let injected = false;
+      app.locks.insideLock = () => { armed = true; };
+      fs.readFileSync = function patchedRead(file, ...rest) {
+        const out = realRead.call(this, file, ...rest);
+        if (armed && !injected && String(file) === env.settingsPath) {
+          injected = true;
+          armed = false;
+          env.write({ permissions: { allow: OTHER_NON_OPTIMAL, deny: [] } });
+        }
+        return out;
+      };
+
+      app.shown.length = 0;
+      await app.commands.get('permission-wildcarding.runNow')();
+      await settle();
+
+      assert.ok(injected, 'precondition: the concurrent write never landed');
+      assert.deepEqual(env.read().permissions.allow,
+        [...OTHER_NON_OPTIMAL, 'Bash(git status *)'],
+        'precondition: writeAllow must have rebased the delta onto the concurrent list — '
+        + 'without this the two reads never actually differed');
+
+      const toast = app.shown.find((entry) => /wildcarded/.test(entry.message));
+      assert.ok(toast, `no change was announced: ${JSON.stringify(app.shown)}`);
+      assert.match(toast.message, /pruned 0/,
+        'witness:removed-allow -- the toast reported the locked read’s plan (two entries it '
+        + `meant to prune) over a write that pruned none of them: "${toast.message}"`);
+      assert.match(toast.message, /4 total/,
+        `witness:removed-allow -- the total is the caller's intended list, not the file: "${toast.message}"`);
+      assert.match(toast.message, /wildcarded 1 permission\b/,
+        `witness:removed-allow -- the control: one entry really was added: "${toast.message}"`);
+    } finally {
+      fs.readFileSync = realRead;
+      await app.dispose();
+    }
+  });
+
 test('a write under the lock records when it happened', async (t) => {
   // `lastRun` is the dashboard's "last wildcarded" line. Deleting the assignment
   // left the suite green, and the panel then said nothing had ever run.
@@ -1626,6 +1690,116 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
     assert.equal(rendered.stAutoLearn, 'scan degraded',
       `the collapsed row said "${rendered.stAutoLearn}", so a user who has not expanded `
       + 'the card sees a cap that cannot keep its own limit as perfectly healthy');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// ── the Codex history probe, through the renderer ─────────────────────────────
+//
+// THE GAP THAT HID THE WORST DEFECT IN THIS FILE. Every seed above omits
+// `codexHistoryInspected`, `scanStats()` defaults an absent value to 'skipped',
+// and 'skipped' matches neither arm of scanTrouble's Codex branch — so no test
+// in this suite had ever driven that branch at all, in either direction.
+//
+// What was behind it: `readThreadStoreIds` needs `node:sqlite`, no shipping VS
+// Code has it, so the probe reported 'partial' on every real extension host,
+// scanTrouble turned that into a permanent 'scan degraded', and the row badge
+// ranked it ABOVE the review count. The user stopped seeing "3 to review" for
+// the life of the install with nothing they could do about it.
+const SCAN_SEED = {
+  files: 9, observations: 21, errors: 0, partial: 0, unmatchedResults: 0,
+  prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
+  retainedObservations: 0, blindScan: false, codexHistoryStale: false,
+};
+
+test('a Codex probe the runtime cannot host is not a degraded scan', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, codexHistoryInspected: 'partial' });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const degradedData = ui.posted.at(-1);
+    // The control first, and it is the assertion that did not exist: a probe that
+    // RAN and could not conclude is still trouble, and must still be drawn.
+    assert.equal(degradedData.autoLearn.scan.codexHistoryInspected, 'partial',
+      'witness:codex-probe -- the field never reached the panel, so neither arm of '
+      + 'scanTrouble is reachable from this suite');
+    const degraded = renderDashboard(app.provider, degradedData);
+    assert.match(degraded.alScanHealth, /Codex history-store check ran degraded/,
+      `the card body said "${degraded.alScanHealth}"`);
+    assert.match(degraded.stAutoLearn, /scan degraded/,
+      `the collapsed row said "${degraded.stAutoLearn}"`);
+
+    // And the state this whole change exists for. Same payload, same renderer,
+    // one field different: a probe the interpreter cannot host is inapplicable,
+    // not degraded, and it must cost the row nothing.
+    const unavailableData = structuredClone(degradedData);
+    unavailableData.autoLearn.scan.codexHistoryInspected = 'unavailable';
+    const unavailable = renderDashboard(app.provider, unavailableData);
+    assert.doesNotMatch(unavailable.alScanHealth, /degraded/,
+      'witness:codex-probe -- a check that cannot run on this runtime was reported as a check '
+      + `that ran badly. The card said "${unavailable.alScanHealth}"`);
+    assert.match(unavailable.alScanHealth, /read 9 files cleanly/,
+      `the card said "${unavailable.alScanHealth}" rather than reporting a clean scan`);
+    assert.doesNotMatch(unavailable.stAutoLearn, /degraded/,
+      `the collapsed row said "${unavailable.stAutoLearn}"`);
+
+    // The half that must NOT be quieted with it: a stale rollout directory is a
+    // real finding, it is computed without sqlite, and it still has to shout.
+    const staleData = structuredClone(unavailableData);
+    staleData.autoLearn.scan.codexHistoryStale = true;
+    const stale = renderDashboard(app.provider, staleData);
+    assert.match(stale.alScanHealth, /rollout directory is stale/,
+      'witness:codex-probe -- the real finding was suppressed along with the false alarm. '
+      + `The card said "${stale.alScanHealth}"`);
+    assert.match(stale.stAutoLearn, /scan degraded/);
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a degraded scan qualifies the review count instead of replacing it', async (t) => {
+  // Suppressing the count was the second half of the defect and the expensive
+  // one. The old chain put trouble ABOVE the counts, so while a trouble condition
+  // was permanent the only actionable thing on the row was permanently gone. The
+  // caveat belongs BESIDE the number, not instead of it.
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, blindScan: true });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const base = ui.posted.at(-1);
+    assert.ok(renderDashboard(app.provider, base).stAutoLearn.includes('scan degraded'),
+      'witness:review-count -- precondition: this payload has to be in trouble, or the test '
+      + 'below measures nothing');
+
+    const withReview = structuredClone(base);
+    withReview.autoLearn.counts = { ...withReview.autoLearn.counts, review: 3, safe: 0 };
+    assert.equal(renderDashboard(app.provider, withReview).stAutoLearn, '3 to review · scan degraded',
+      'witness:review-count -- the actionable count was dropped rather than qualified');
+
+    // `safe` is the same rule one rank down, and it had the same bug.
+    const withSafe = structuredClone(base);
+    withSafe.autoLearn.counts = { ...withSafe.autoLearn.counts, review: 0, safe: 2 };
+    assert.equal(renderDashboard(app.provider, withSafe).stAutoLearn, '2 safe to apply · scan degraded');
+
+    // The control: with nothing to review and nothing wrong, the row is neither
+    // of those and says what mode it is in.
+    const clean = structuredClone(base);
+    clean.autoLearn.scan = { ...clean.autoLearn.scan, blindScan: false };
+    clean.autoLearn.counts = { ...clean.autoLearn.counts, review: 0, safe: 0 };
+    assert.equal(renderDashboard(app.provider, clean).stAutoLearn, 'recommend');
   } finally {
     await app.dispose();
   }

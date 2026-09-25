@@ -327,13 +327,28 @@ function backupCount() {
 // The one way an entry leaves the high-water mark: the user said to remove it.
 // Without this the backup would resurrect every deliberate prune, and the policy
 // guard would read the user's own edit as damage.
-function forgetFromBackup(permissions, kind = 'both') {
-  const drop = new Set(Array.isArray(permissions) ? permissions : [permissions]);
+//
+// TWO LISTS, NAMED SEPARATELY, and the signature is the fix rather than a tidy-up.
+// This took `(permissions, kind = 'both')`, both call sites passed one argument,
+// and the caller that used `kind` went with MAX — so the parameter was dead and
+// 'both' was the only behaviour anyone got. Not cosmetic: the managed-policy
+// continuation handed it `[...missing.allow, ...missing.deny]` as one flat list
+// and 'both' then stripped every string in it from BOTH lists, so a permission
+// that was missing from the live ALLOW list and also sat in the backup's DENY
+// list was silently forgotten from deny as well. Losing a killswitch entry from
+// the only copy of it is the unrecoverable direction.
+//
+// A `kind` flag would have fixed that and left the same shape of mistake one
+// typo away. Taking the two lists by name cannot be got wrong, and it is one
+// write rather than two.
+function forgetFromBackup({ allow = [], deny = [] } = {}) {
+  const dropAllow = new Set(Array.isArray(allow) ? allow : [allow]);
+  const dropDeny = new Set(Array.isArray(deny) ? deny : [deny]);
   const backup = readBackupRaw();
   if (!backup) return;
   const next = {
-    allow: kind === 'deny' ? backup.allow : backup.allow.filter((entry) => !drop.has(entry)),
-    deny: kind === 'allow' ? backup.deny : backup.deny.filter((entry) => !drop.has(entry)),
+    allow: backup.allow.filter((entry) => !dropAllow.has(entry)),
+    deny: backup.deny.filter((entry) => !dropDeny.has(entry)),
   };
   if (next.allow.length === backup.allow.length && next.deny.length === backup.deny.length) return;
   try {
@@ -402,9 +417,18 @@ function onManagedPolicyChanged() {
       `permission-wildcarding: ${assessment.restorable} saved ${assessment.restorable === 1 ? 'entry is' : 'entries are'} missing from settings.json.`,
       'Re-assert them', 'Forget them'
     ).then((choice) => {
+      // An awaited dialog resumes wherever the host happens to be, and teardown
+      // is one of the places it happens to be: the notification outlives
+      // deactivate(), both arms below write, and the flag is the only thing that
+      // can tell them the host they belong to has gone. `restoreFromBackup`
+      // merges the whole backup into settings.json and `forgetFromBackup`
+      // rewrites the only copy of the high-water mark.
+      if (deactivated) return;
       if (choice === 'Re-assert them') restoreFromBackup();
       else if (choice === 'Forget them') {
-        forgetFromBackup(stale);
+        // The two lists stay apart all the way down. `stale` is still the flat
+        // union, but only because the count in the message below is a total.
+        forgetFromBackup({ allow: assessment.missing.allow, deny: assessment.missing.deny });
         vscode.window.setStatusBarMessage(
           `$(check) permission-wildcarding: forgot ${stale.length} stale ${stale.length === 1 ? 'entry' : 'entries'} from the backup`, 4000);
         dashboard?.refresh();
@@ -441,6 +465,7 @@ function onManagedPolicyChanged() {
   ).then((choice) => {
     if (choice !== 'Show detail') return;
     const channel = sharedChannel({ fresh: true });
+    if (!channel) return;   // the host went while this notification was up
     // Name the source honestly. On a console-managed org there is often no
     // managed-settings.json at all, and saying "managed policy: undefined" would
     // be worse than saying where the signal actually came from.
@@ -1242,7 +1267,10 @@ function autoLearnScanHealth(stats) {
     // writes." A migrated backend leaves `~/.codex/sessions` frozen, and a scan
     // of a frozen directory reports exactly the numbers a quiet week reports.
     // `codexHistoryInspected: 'partial'` is the other half: the comparison could
-    // not be made, which is not an answer of `false`.
+    // not be made, which is not an answer of `false`. `'unavailable'` is a
+    // different statement again — the probe needs `node:sqlite` and the host
+    // does not have it — and it is passed through UNCHANGED rather than folded
+    // into 'partial', because scanTrouble treats only the latter as trouble.
     codexHistoryStale: stats.codexHistoryStale === true,
     codexHistoryInspected: stats.codexHistoryInspected || 'skipped',
   };
@@ -1434,6 +1462,7 @@ async function reviewAutoLearnCandidates() {
   const blockedNote = managedBlockedNote(managed);
   const showBlockedDetail = () => {
     const channel = sharedChannel({ fresh: true });
+    if (!channel) return;   // the host went while this notification was up
     for (const line of managedBlockedDetail(managed)) channel.appendLine(line);
     channel.show(true);
   };
@@ -1594,9 +1623,12 @@ function codexRuleFileSetFor(cfg) {
   return codexRuleFileSet({ home: os.homedir(), target: cfg.codexRulesPath || null });
 }
 
-function codexRuleFiles(cfg) {
-  return codexRuleFileSetFor(cfg).files;
-}
+// `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
+// Its one caller was rewritten to take the whole set -- it needs `effective` and
+// `blindSpots` as well -- and the helper was left behind with no callers at all.
+// Removed rather than kept as a convenience: a narrowing accessor onto a
+// diagnostic that is about to answer a question about the WHOLE visible rule set
+// is the wrong shape to offer the next caller.
 
 function learnedCandidateExplanation(invocation, learned, target, threshold) {
   const label = invocation.prefix?.join(' ') || candidateKey(invocation);
@@ -1652,6 +1684,7 @@ function showAutoLearnBlocked() {
     return;
   }
   const channel = sharedChannel({ fresh: true });
+  if (!channel) return;   // the host went while this command was awaiting
   for (const line of managedBlockedDetail(managed)) channel.appendLine(line);
   channel.show(true);
 }
@@ -1690,6 +1723,15 @@ async function showDerivedGuidance() {
     title: pick.label, placeHolder: `Currently ${pick.state}`,
   });
   if (!decision) return;
+  // THE SHARPEST OF THE SIX, because the usual retainer check does not help here.
+  // deactivate() nulls `autoLearnManager`, and getAutoLearnManager() BUILDS A NEW
+  // ONE when the slot is empty — so a continuation arriving after teardown does
+  // not find a dead manager and give up, it constructs a live one against a dead
+  // host and writes the user's CLAUDE.md through it. Two awaited QuickPicks
+  // upstream make that a wide window. Same class as the defect recorded on
+  // ensureGuidance, where flipping guidance.enabled after teardown rewrote
+  // CLAUDE.md from 1802 bytes to 24.
+  if (deactivated) return;
 
   try {
     const result = getAutoLearnManager().decideDerived(pick.id, decision.value);
@@ -2023,7 +2065,19 @@ function registerLocalWatchers(context) {
 // Created on first use and disposed with the extension. Lazy rather than built
 // in activate, because the mocked-vscode activation test does not stub every
 // window API and a channel nobody opened costs nothing.
+// Null after teardown, never a fresh channel. deactivate() disposes this one and
+// nulls the slot, so a "Show detail" action clicked from a notification that
+// outlived the host used to create a SECOND channel that nothing would ever
+// dispose — the same empty-slot-means-build-a-new-one shape as
+// getAutoLearnManager and getAutoLearnWorkerRunner, and the reason both of those
+// carry a `deactivated` check at the caller.
+//
+// Returning null rather than a no-op stub: all three call sites write several
+// lines and then `show()`, and a stub would let them believe they had rendered a
+// report nobody can read. Each one checks, which is three lines against one
+// silently discarded document.
 function sharedChannel({ fresh = false } = {}) {
+  if (deactivated) return null;
   if (!outputChannel) outputChannel = vscode.window.createOutputChannel('Permission Wildcarding');
   // Every consumer writes a SELF-CONTAINED report and none of them had a way to
   // start a clean one. Collapsing N channels into one fixed the disposal leak
@@ -2623,6 +2677,11 @@ function runWildcarding(manual = false) {
   let locked;
   let lockedBefore;
   let lockedAfter;
+  // What the write REPORTS, as opposed to what this function intended. See the
+  // report block below: `writeAllow` rebases onto its own fresh read, so its
+  // counts are the only honest ones and there is one more read between the
+  // locked snapshot and the bytes on disk than `lockedBefore` can see.
+  let written = null;
   try {
     getPolicyLock().locked(() => {
       locked = readSettings();
@@ -2630,7 +2689,7 @@ function runWildcarding(manual = false) {
       lockedBefore = locked?.permissions?.allow ?? [];
       lockedAfter = processAllowList(lockedBefore);
       if (JSON.stringify(lockedBefore) === JSON.stringify(lockedAfter)) return;
-      writeAllow(locked, lockedAfter);
+      written = writeAllow(locked, lockedAfter);
       lastRun = Date.now();
     });
   } catch (err) {
@@ -2659,21 +2718,41 @@ function runWildcarding(manual = false) {
   }
 
   {
-    const addedList   = lockedAfter.filter(p => !lockedBefore.includes(p));
-    const removedList = lockedBefore.filter(p => !lockedAfter.includes(p));
-    if (addedList.length || removedList.length) {
+    // THE COUNTS COME FROM THE WRITE. `addedAllow` and `removedAllow` are
+    // measured inside writeAllow against the read it actually rebased onto, and
+    // the note beside them says in as many words that a caller computing a
+    // removal count from its own pre-write snapshot is doing the thing the
+    // measurement exists to replace. `removedAllow` was added to retire exactly
+    // this call site and the call site was never switched over.
+    //
+    // `lockedBefore` is one read too early to be honest even inside the lock:
+    // Claude Code does not take our policy lock, so it can land a settings write
+    // between our locked read and writeAllow's own re-read, and every number
+    // below was then describing a list that no longer existed. The already-
+    // optimal short-circuit above still compares the locked pair, because that
+    // question is "did OUR pass have anything to do", not "what landed".
+    //
+    // The NAMES are still derived from the locked pair, and deliberately: the
+    // write returns counts, not lists, and the detail pane is a description of
+    // what this pass generalized rather than a claim about the file. The numbers
+    // are the part a reader acts on and the part that was wrong.
+    const addedList = lockedAfter.filter(p => !lockedBefore.includes(p));
+    const added = written ? written.addedAllow : 0;
+    const removed = written ? written.removedAllow : 0;
+    const total = written ? written.allow.length : lockedAfter.length;
+    if (added || removed) {
       vscode.window.showInformationMessage(
-        `permission-wildcarding: wildcarded ${addedList.length} permission${addedList.length !== 1 ? 's' : ''}, pruned ${removedList.length} — ${lockedAfter.length} total`,
+        `permission-wildcarding: wildcarded ${added} permission${added !== 1 ? 's' : ''}, pruned ${removed} — ${total} total`,
         { detail: addedList.map(p => `→ ${p}`).join('\n') }
       );
       vscode.window.setStatusBarMessage(
-        `$(shield) permission-wildcarding: +${addedList.length} -${removedList.length} → ${lockedAfter.length} entries`,
+        `$(shield) permission-wildcarding: +${added} -${removed} → ${total} entries`,
         5000
       );
     }
   }
 
-  dashboard?.refresh(wildcardingHint(lockedAfter));
+  dashboard?.refresh(wildcardingHint(written ? written.allow : lockedAfter));
 }
 
 // ── project-local approvals ─────────────────────────────────────────────────────
@@ -2900,6 +2979,17 @@ async function toggleGuidance() {
     return;
   }
 
+  // ensureGuidance got this guard and its twin did not. Both call setGuidanceAll,
+  // both write ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md, and this one does it
+  // after a modal and a config update — two awaits, either of which can span a
+  // teardown. The measurement in ensureGuidance's note applies verbatim: flipping
+  // guidance off after teardown rewrote CLAUDE.md from 1802 bytes to 24.
+  //
+  // AFTER the config update, deliberately. The setting is the user's stated
+  // intent and recording it is not a write into their instruction files; the next
+  // activation's ensureGuidance is what makes the file agree with it.
+  if (deactivated) return;
+
   const results = setGuidanceAll(next);
   const failed = results.filter((result) => result.error);
   if (failed.length) {
@@ -3125,6 +3215,12 @@ async function toggleGates() {
     return;
   }
 
+  // The same guard toggleGuidance takes, for the same reason and against the same
+  // two files. This path has up to four awaits in front of it — a compile prompt,
+  // the compile itself, a modal, the config update — so its window is the widest
+  // of the three.
+  if (deactivated) return;
+
   const results = setGatesAll(next);
   const failed = results.filter((result) => result.error);
   if (failed.length) {
@@ -3196,7 +3292,9 @@ function removeAllowEntry(perm) {
     // outcome, traded for a recoverable one (a stale backup entry the guard
     // offers to re-assert or forget).
     writeAllow(settings, allow);
-    forgetFromBackup([perm]);
+    // ALLOW only. This function removes an allow entry and nothing else, so a
+    // deny rule that happens to spell the same permission must survive it.
+    forgetFromBackup({ allow: [perm] });
     lastRun = Date.now();
     vscode.window.setStatusBarMessage(`$(shield) permission-wildcarding: removed ${perm}`, 4000);
     return true;
@@ -3256,6 +3354,11 @@ async function showWildcardPicker() {
     },
     'Remove');
   if (choice !== 'Remove') return;
+  // Two awaited dialogs in front of a write to settings.json AND to the
+  // high-water backup, and the comment above says in as many words that the pair
+  // is not recoverable. A prune that lands after teardown is the same write with
+  // nobody left to report it.
+  if (deactivated) return;
   if (removeAllowEntry(pick.label)) dashboard?.refresh();
 }
 
@@ -3779,14 +3882,29 @@ class WildcardingViewProvider {
     if (!a.enabled) setState('stAutoLearn', 'disabled');
     else if (a.busy) setState('stAutoLearn', 'scanning…');
     else if (a.error) setState('stAutoLearn', 'error', 'hot');
-    // Above "N to review", deliberately. A scan that could not read the corpus
-    // makes every count under it a statement about a fraction of the evidence,
-    // so a row that reads "3 to review" over a blind scan is worse than one that
-    // says nothing: it asserts a number it cannot support.
-    else if (scanTrouble(a.scan).length) setState('stAutoLearn', 'scan degraded', 'warn');
-    else if (counts.review) setState('stAutoLearn', counts.review + ' to review', 'warn');
-    else if (counts.safe) setState('stAutoLearn', counts.safe + ' safe to apply', 'warn');
-    else setState('stAutoLearn', String(a.mode || 'recommend'));
+    else {
+      // BOTH, not one or the other. Trouble used to sit ABOVE the counts in this
+      // chain, on the argument that "3 to review" over a scan that could not read
+      // the corpus asserts a number it cannot support. The argument is right and
+      // the remedy was wrong: suppressing the count does not make the reader
+      // better informed, it makes the one actionable thing on the row disappear
+      // — and while a trouble condition was permanent, it disappeared
+      // permanently, with no way for the user to get it back.
+      //
+      // The caveat is what the reader needed, so the caveat is APPENDED. The
+      // count keeps its place and 'scan degraded' qualifies it, which is the
+      // honest form of the same warning and the form the card body already used.
+      //
+      // No backtick anywhere in this comment, for the reason stated in
+      // scanTrouble below: this whole block lives inside the webview template
+      // literal and one backtick would end the string.
+      const degraded = scanTrouble(a.scan).length ? 'scan degraded' : '';
+      const headline = counts.review ? counts.review + ' to review'
+        : counts.safe ? counts.safe + ' safe to apply'
+          : degraded ? '' : String(a.mode || 'recommend');
+      const text = [headline, degraded].filter(Boolean).join(' · ');
+      setState('stAutoLearn', text, (degraded || counts.review || counts.safe) ? 'warn' : null);
+    }
 
     const g = d.guidance || {};
     setState('stGuidance', !g.on ? 'not installed' : (g.current ? 'on' : 'older wording'),
@@ -3893,6 +4011,17 @@ class WildcardingViewProvider {
     // Second, for the same reason: a scan of a directory Codex has stopped
     // writing to looks healthy on every other number here.
     if (s.codexHistoryStale) trouble.push('Codex history store has moved — rollout directory is stale');
+    // 'partial' ONLY, and 'unavailable' deliberately absent. That state means the
+    // probe cannot run on this runtime at all: readThreadStoreIds needs
+    // node:sqlite, which no shipping VS Code carries, so this branch used to fire
+    // on every real extension host on every scan, for ever. A check that is
+    // inapplicable is not a degraded check, and reporting it as one cost the user
+    // the actionable count in the row badge above. The half that is real,
+    // codexHistoryStale, is computed from the session index and the migration
+    // directory without sqlite and still fires on the line above.
+    //
+    // No backtick in this comment on purpose, same as the one further down: this
+    // function lives inside the webview template literal.
     else if (s.codexHistoryInspected === 'partial') trouble.push('Codex history-store check ran degraded');
     if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
     // "The evidence cap is over its limit and cannot get back under it." Distinct

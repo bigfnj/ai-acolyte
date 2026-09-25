@@ -52,7 +52,11 @@ function assertFreshProjectCache(extensionPath, rootSrc) {
 function harness(tempHome, options = {}) {
   const commands = new Map();
   const warnings = [];
-  const warningAnswers = [];
+  // `options.answers` is queued BEFORE activate(), which is the only way to reach
+  // the managed-policy prompt: onManagedPolicyChanged() runs from activation
+  // (vscode-extension/extension.js:2124) and this harness's file-system watcher
+  // is a no-op, so there is no post-activation trigger to push an answer for.
+  const warningAnswers = [...(options.answers || [])];
   const settings = { ...(options.settings || {}) };
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -642,6 +646,57 @@ test('legacy cleanup preserves MCP blankets for servers introduced after MAX', a
 // and the reverse \u2014 the EXTENSION losing its hook, which silently stops every backup \u2014
 // was unasserted too. Both directions, in one place, so neither can drift quietly.
 //
+// \u2500\u2500 "Forget them" forgets from the list it was told about \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+//
+// `forgetFromBackup` carried a `kind` parameter defaulting to 'both'. Both call
+// sites passed one argument and the caller that used `kind` went with MAX, so
+// the parameter was dead \u2014 and this is what dead meant in practice: the
+// managed-policy continuation handed it `[...missing.allow, ...missing.deny]` as
+// ONE flat list and 'both' stripped every string in it from BOTH lists.
+//
+// The backup is a high-water UNION, so a permission that was once allowed and is
+// now denied legitimately sits in both. Forgetting it from allow then took the
+// deny entry with it, from the only copy of it there is, and a killswitch rule
+// lost from the backup is the unrecoverable direction \u2014 the opposite of the
+// trade `removeAllowEntry` reasons about in as many words.
+//
+// THE KILLING MUTATION: pass a flat `[...missing.allow, ...missing.deny]` as both
+// halves. The deny assertion below then fails with the rule gone.
+test('forgetting a stale allow entry leaves a deny rule of the same name alone', async (t) => {
+  const SHARED = 'Bash(npm publish *)';
+  const DENY_PLUS = [...DENY, SHARED];
+  const env = setup(t);
+  // Live: the allow list was reset; the deny list is intact.
+  env.write({ permissions: { allow: [], deny: DENY_PLUS } });
+  // Backup: the high-water mark remembers the permission on BOTH lists.
+  writeBackupCopies(env, ['Bash(tokei *)', SHARED], DENY_PLUS);
+
+  const app = harness(env.tempHome, { answers: ['Forget them'] });
+  try {
+    // The prompt is raised from activation and answered through a promise, so the
+    // continuation needs a turn of the loop before the backup is rewritten.
+    for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+    const prompt = app.warnings.find((message) => /missing from settings\.json/.test(message));
+    assert.ok(prompt,
+      `witness:forget-kind -- the managed-policy prompt never fired, so nothing was forgotten: ${JSON.stringify(app.warnings)}`);
+
+    for (const [label, file] of [['primary', env.backupPath], ['mirror', env.mirrorPath]]) {
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.deepEqual(saved.deny, DENY_PLUS,
+        `witness:forget-kind -- the ${label} backup lost a deny rule because the same string was `
+        + `stale on the allow side: ${JSON.stringify(saved.deny)}`);
+      // The control. Without it a forgetFromBackup that did nothing at all would
+      // satisfy the assertion above for the wrong reason.
+      assert.deepEqual(saved.allow, [],
+        `witness:forget-kind -- the ${label} backup did not forget the stale allow entries it `
+        + `was asked to: ${JSON.stringify(saved.allow)}`);
+    }
+  } finally {
+    await app.dispose();
+  }
+});
+
 // A source check, and it asserts the CONDITION rather than the presence of a guarded
 // statement: it reads the options object of each construction site and judges what is in it.
 test('the high-water backup hook is the extension\u2019s alone, by construction', () => {

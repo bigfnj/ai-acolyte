@@ -37,8 +37,8 @@ const RULE_LIMIT = 200;
 // user's own instruction file. The remote-settings cache it arrives in is local and
 // client-refreshed, so any local process that can write it picks that string. Both
 // suppliers of costliestRules now apply clean: the managed-hits side runs
-// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:1793`, and the
-// inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1129`. But that only
+// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2173`, and the
+// inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1448`. But that only
 // collapses control characters; it knows nothing about a code span. Sanitising HERE,
 // at the interpolation, is what escapes the backtick and the comment opener.
 //
@@ -334,9 +334,25 @@ function derivedStatus({ home = os.homedir() } = {}) {
 // guidance or gates writer takes. It takes the instruction-file lock here instead, so
 // this reconcile and a `--guidance off` running beside it cannot each write a whole file
 // computed from a read the other has already invalidated.
+// ONE DEFAULT, AND IT AGREES WITH THE MANAGER. `backupDir` used to default to
+// `~/.claude/backups` and to compute that from `os.homedir()` rather than from
+// the `home` it had just been handed, which was wrong twice over:
+//
+//   - The only two callers disagreed. `decideDerived` passes the learner's
+//     `~/.claude/wildcarding/backups`; `--guidance off` passed nothing. So which
+//     directory held the pre-change copy of the user's CLAUDE.md depended on
+//     which verb removed the block, and the copy `off` wrote landed where
+//     nobody -- no doc, no command, no pruner -- looks for it.
+//   - Ignoring `home` meant a caller pointed at a temp home still wrote its
+//     safety copy into the developer's REAL ~/.claude/backups.
+//
+// The learner's directory wins because the rest of that arrangement is already
+// built around it: `src/auto-learn-manager.js:886` anchors the backup pruner on
+// the names `backup()` writes precisely so a sweep by age cannot delete the
+// `.pre-derived` copy sitting beside them, and that is this directory.
 function setDerivedGuidance(mitigations, accepted, {
   home = os.homedir(),
-  backupDir = path.join(os.homedir(), '.claude', 'backups'),
+  backupDir = path.join(home, '.claude', 'wildcarding', 'backups'),
 } = {}) {
   return derivedTargets(home).map((target) => withInstructionLock(target.path, () => {
     const base = { agent: target.agent, path: target.path };

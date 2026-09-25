@@ -809,6 +809,10 @@ function guidance(args) {
   // erasing someone's decisions is not what "off" was asked to do.
   if (cmd === 'off') {
     const { setDerivedGuidance } = require('../src/derived-guidance');
+    // No options, and that is now correct rather than an omission. The default
+    // `backupDir` is the learner's `~/.claude/wildcarding/backups`, which is
+    // where `decideDerived` puts the same `.pre-derived` copy — see the note on
+    // setDerivedGuidance for why the two used to disagree and what it cost.
     for (const target of setDerivedGuidance([], [])) {
       if (target.error) {
         process.stderr.write(

@@ -129,3 +129,19 @@ added it should be `acolyte`, with `wildcard-perms` kept as a silent forwarding 
 existing hook registrations keep working. The hook command string is recorded in
 `~/.claude/settings.json` on every install, so renaming the executable without a shim
 breaks every existing installation on its next tool call.
+
+**The npm name is reserved.** `ai-acolyte@0.0.1` was published 2026-09-25: two files,
+1431 bytes unpacked, a `package.json` and a README that says outright that the version
+reserves the name and installs nothing useful. `agent-policy`, which the superseded plan
+preferred, was already taken; `acolyte` unscoped is taken too (`0.0.2`), which is why the
+`ai-` prefix. Version `0.0.1` leaves the real CLI free to land at `1.5.x` later.
+
+Publishing from an agent tool call does not work and will not be made to work. npm's
+2FA on this account is a **security key**, and npm no longer offers a TOTP authenticator
+at all, so there is no `--otp` code to pass. The CLI falls back to a browser approval
+flow that needs a TTY to wait on; without one it exits `EOTP` having printed a URL it
+then abandons. Disabling 2FA does not help and makes it worse: the registry answers
+`403 Two-factor authentication or granular access token with bypass 2fa enabled is
+required to publish`. Granular bypass tokens are also being restricted for direct
+publishing in Jan 2027, so they are not worth building on. **Publish from a real
+terminal.**

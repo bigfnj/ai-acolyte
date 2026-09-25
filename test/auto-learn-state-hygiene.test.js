@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { createAutoLearnManager } = require('../src/auto-learn-manager');
+const { createAutoLearnManager, migrateStateTo } = require('../src/auto-learn-manager');
 
 function tempHome(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-hygiene-'));
@@ -120,6 +120,59 @@ test('a state file written by a NEWER copy of the tool is read but never written
     'the field an older copy would have dropped is still there');
 });
 
+// ── the version floor, which this module's own ladder cannot reach ────────────
+
+// `MIN_SUPPORTED_VERSION` and `VERSION` are both 1 and `STATE_MIGRATIONS` is
+// empty, so every state the floor rejects is a state the missing-step check
+// rejects on the very next line. MEASURED, not assumed: mutating the floor to
+// `if (false) return null` leaves the whole suite green, "a state file from an
+// unsupported older version is reset" above included, because version 0 falls
+// out of the `while` for want of a migration and returns null anyway. Two
+// doors, one reachable.
+//
+// The case where the two doors DISAGREE is exactly the one a version bump
+// creates: a ladder that has a migration for a version below the floor, where
+// the missing-step door is wide open and only the floor refuses. `VERSION`
+// cannot be raised here to reach it -- bumping it against an empty
+// `STATE_MIGRATIONS` resets every user's state file -- so `migrateStateTo`
+// takes the ladder as a parameter and these drive it with a synthetic one.
+
+test('the version floor refuses a state the migration chain could otherwise climb', () => {
+  const migrations = new Map([
+    [1, (raw) => ({ ...raw, version: 2, climbed: [...(raw.climbed || []), 1] })],
+    [2, (raw) => ({ ...raw, version: 3, climbed: [...(raw.climbed || []), 2] })],
+  ]);
+  const ladder = { version: 3, minSupported: 2, migrations };
+  const ancient = { version: 1, mode: 'observe' };
+
+  // The control, and this test is worthless without it: the same input against
+  // the same migrations with the floor lowered climbs both rungs. So the null
+  // below is the floor's doing and not a missing step.
+  assert.deepEqual(migrateStateTo(ancient, { ...ladder, minSupported: 1 }).climbed, [1, 2],
+    'witness:version-floor -- the chain really can carry a version 1 state up to 3');
+
+  assert.equal(migrateStateTo(ancient, ladder), null,
+    'witness:version-floor -- below the floor is a reset even when every migration exists');
+
+  // At the floor, not below it, so this one is read and migrated.
+  assert.deepEqual(migrateStateTo({ version: 2, mode: 'observe' }, ladder).climbed, [2],
+    'witness:version-floor -- the floor is inclusive; a state AT it is still readable');
+});
+
+test('a missing migration step is still its own reason to reset', () => {
+  // The other door, kept honest. With the floor at 1 and no step registered for
+  // 1, the `while` is what refuses -- so neither check is standing in for the
+  // other and removing either one is visible from here.
+  const ladder = { version: 3, minSupported: 1, migrations: new Map([[2, (raw) => raw]]) };
+  assert.equal(migrateStateTo({ version: 1 }, ladder), null,
+    'witness:version-floor -- no step for version 1, so the chain cannot be climbed');
+  // And a state from a newer build is handed back untouched rather than reset,
+  // which is what lets `save()` refuse to write over it.
+  const newer = { version: 9, mode: 'observe' };
+  assert.equal(migrateStateTo(newer, ladder), newer,
+    'witness:version-floor -- a newer state is readable, not resettable');
+});
+
 // ── what a scan reports about itself ──────────────────────────────────────────
 
 test('a scan that could not enumerate anything says so, and the flag survives a reload', (t) => {
@@ -148,9 +201,13 @@ test('a scan that could not enumerate anything says so, and the flag survives a 
 
 test('prunedObservations survives a reload instead of being dropped by the reader', (t) => {
   const home = tempHome(t);
+  // `threshold: 1`, so the two-run family is at the bar and its dedupe entries
+  // are trimmable. Below the bar they are held whatever their age -- see
+  // `pruneObservationHashes` -- and this test would then be measuring the
+  // reload of a field the cap was never allowed to set.
   const learn = manager(home, scanner({
     observations: [observed('a', 'rg --files src'), observed('b', 'rg --files test')],
-  }), { observationHashLimit: 1 });
+  }), { observationHashLimit: 1, threshold: 1 });
   const result = learn.scan();
   assert.equal(result.prunedObservations, 1, 'the cap trimmed one hash');
   assert.equal(readState(home).lastScanStats.prunedObservations, 1, 'and the writer wrote it');

@@ -229,7 +229,16 @@ test('a stale store turns a clean-looking scan into a reported degraded one', (t
   assert.ok(stats.codexHistoryReasons.length >= 1);
 });
 
-test('a healthy corpus scan says so, and the detector cannot fail the scan', (t) => {
+// `{ skip: !exactTier }` like its five siblings, and it was the one test in this file
+// that lacked it. Both assertions below name a verdict only reachable when the exact
+// tier can run: with no `node:sqlite` every root answers `unavailable`, so the "one
+// healthy root, one unreadable root" premise cannot be built and the worst-of is
+// `unavailable` rather than `partial` — which is CORRECT behaviour, not a regression.
+//
+// It went red on node 20 on both platforms while passing on node 22 and 24. That is
+// precisely the defect this whole test file was added to catch, reproduced inside the
+// test written to catch it: an assertion that encodes the author's runtime.
+test('a healthy corpus scan says so, and the detector cannot fail the scan', { skip: !exactTier }, (t) => {
   const home = codexHome(t, 'scan-ok');
   const sessions = path.join(home, '.codex', 'sessions');
   rollout(home, THREADS[0]);

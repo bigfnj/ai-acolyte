@@ -159,6 +159,99 @@ test('a corrupt cache file reads as unbuilt instead of throwing', () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ── the parsed cache ──────────────────────────────────────────────────────────
+//
+// recall_index.json is 1.20 MB on the live store and the dashboard re-read and re-parsed
+// it on every push: 4.62 min / 6.14 p50 ms (n=40, warm, against the real ~/.claude), the
+// largest single fs term in the whole push, against 0.035/0.045 ms for a statSync of the
+// same file. So the parse is memoised on the file's own `mtimeMs:size`.
+//
+// The 100+ statSync of the corpus in recallIndexStatus are NOT memoised and must not be —
+// they are the staleness check itself, and recall_index.json is not watched. Only the
+// CACHE side of the comparison is held.
+const EMBED_ID_SAME_LENGTH = 'bge-small-onnz';
+
+test('the index parse is memoised on mtime:size, and both halves of the key bust it', () => {
+  assert.equal(EMBED_ID_SAME_LENGTH.length, RECALL_EMBED_ID.length,
+    'the fixture rewrites the embed id in place, so the two ids must be the same length');
+  const dir = store({ 'one.md': 'first' });
+  const idx = path.join(dir, RECALL_INDEX_NAME);
+  try {
+    const stamp = new Date(1_700_000_000_000);
+    fs.utimesSync(idx, stamp, stamp);
+    assert.equal(recallIndexStatus(dir).reason, 'current',
+      'precondition: a matching cache reads as current, and this is the read that memoises it');
+    const before = fs.statSync(idx);
+
+    // A rewrite that changes NEITHER half of the key: same byte length, and the stamp put
+    // back. This is not a scenario recall.py produces — measured on this box, NTFS mtime
+    // granularity is ~0.5 ms and a re-embed takes seconds — it is the only input that can
+    // tell a memoised read from a fresh one, so it is what pins the memo.
+    const text = fs.readFileSync(idx, 'utf8');
+    const rewritten = text.replace(`"embed":"${RECALL_EMBED_ID}"`, `"embed":"${EMBED_ID_SAME_LENGTH}"`);
+    assert.notEqual(rewritten, text, 'precondition: the embed id really was rewritten');
+    fs.writeFileSync(idx, rewritten);
+    fs.utimesSync(idx, stamp, stamp);
+    const after = fs.statSync(idx);
+    assert.equal(after.size, before.size, 'precondition: the size half of the key is unchanged');
+    assert.equal(after.mtimeMs, before.mtimeMs, 'precondition: the mtime half is unchanged');
+
+    assert.equal(recallIndexStatus(dir).reason, 'current',
+      'the 1.2 MB parse is memoised: nothing the key can see has changed');
+
+    // The mtime half. Same bytes on disk, a newer stamp, and the new content appears.
+    const later = new Date(stamp.getTime() + 5000);
+    fs.utimesSync(idx, later, later);
+    assert.equal(recallIndexStatus(dir).reason, 'embed-id-changed',
+      'a new mtime has to bust the memo, or recall.py rewriting the index is invisible');
+
+    // The size half, at a stamp the cache has already seen. Without it, a rewrite landing
+    // inside one mtime tick would be held forever.
+    fs.writeFileSync(idx, `${text} `);
+    fs.utimesSync(idx, later, later);
+    assert.equal(fs.statSync(idx).mtimeMs, later.getTime(),
+      'precondition: the mtime is the one already in the memo');
+    assert.notEqual(fs.statSync(idx).size, after.size, 'precondition: only the size moved');
+    assert.equal(recallIndexStatus(dir).reason, 'current',
+      'size is the other half of the key, and it is what covers a same-tick rewrite');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the memo is keyed on the index file, so two stores cannot answer for each other', () => {
+  // Claude Code mints a project slug per working directory, so several stores at once is
+  // the ordinary case, not a contrivance -- and the dashboard reads whichever one won
+  // selection. Both index files below are byte-identical in LENGTH and carry the same
+  // stamp, so `mtimeMs:size` alone cannot tell them apart. Only the path can.
+  const stamp = new Date(1_700_000_100_000);
+  const dirs = [
+    fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-recall-a-')),
+    fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-recall-b-')),
+  ];
+  try {
+    for (const dir of dirs) {
+      fs.writeFileSync(path.join(dir, MEMORY_INDEX_NAME), '- [one](one.md) — hook\n');
+      fs.writeFileSync(path.join(dir, 'one.md'), 'first');
+      fs.utimesSync(path.join(dir, 'one.md'), stamp, stamp);
+    }
+    const entry = { mtime: stamp.getTime() / 1000, size: 5, desc: 'one.md', vec: [0, 1] };
+    const embeds = [RECALL_EMBED_ID, EMBED_ID_SAME_LENGTH];
+    dirs.forEach((dir, i) => {
+      fs.writeFileSync(path.join(dir, RECALL_INDEX_NAME),
+        JSON.stringify({ embed: embeds[i], files: { 'one.md': entry } }));
+      fs.utimesSync(path.join(dir, RECALL_INDEX_NAME), stamp, stamp);
+    });
+    const stats = dirs.map((dir) => fs.statSync(path.join(dir, RECALL_INDEX_NAME)));
+    assert.equal(stats[0].size, stats[1].size, 'precondition: the two keys collide on size');
+    assert.equal(stats[0].mtimeMs, stats[1].mtimeMs, 'precondition: and on mtime');
+
+    assert.equal(recallIndexStatus(dirs[0]).reason, 'current');
+    assert.equal(recallIndexStatus(dirs[1]).reason, 'embed-id-changed',
+      'the second store must not be served the first store\'s cache');
+  } finally {
+    for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the constants shared with recall.py have not drifted', () => {
   // Two copies of one rule is how the off-by-one got in. recall.py stays the
   // authority; this pins the extension-side copy to it.

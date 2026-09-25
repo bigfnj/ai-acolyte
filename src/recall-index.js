@@ -37,12 +37,62 @@ function indexableMemories(dir) {
   } catch { return null; }
 }
 
+// One memoised read of recall_index.json, keyed on the file's own `mtimeMs:size`.
+//
+// The dashboard pushes this on every refresh and the file is not small: 1.20 MB on the
+// live store, 4.62 min / 6.14 p50 ms to read and parse (n=40, warm, real ~/.claude), which
+// is the largest single fs term in the whole push. A statSync of the same file is
+// 0.035/0.045 ms. recall.py rewrites the index through a pid-suffixed temp plus
+// os.replace, so every rewrite lands a new mtime.
+//
+// This cannot produce a false "not stale", which is the one outcome the staleness check
+// exists to prevent and the reason the per-memory statSync in recallIndexStatus below (one
+// each, 136 on the live store) are NOT removed. Those still run on every call; only the CACHE side
+// of the comparison is memoised. Measured on this box, NTFS mtime granularity is ~0.5 ms
+// (191 distinct stamps over 200 back-to-back same-size rewrites; mtimeNs gives no extra
+// resolution, so `{ bigint: true }` would buy nothing). So the residual risk is an index
+// rewritten to an identical SIZE inside one 0.5 ms tick — and even then the stale half is
+// the cache, whose older entries mismatch the newer files and report `stale: true`. A
+// spurious incremental `--list`, self-healing on the next write. The dangerous direction
+// needs the file on disk to go BACKWARDS in content, which nothing writes.
+//
+// What is kept is a projection, not the parsed object: `vec` is 384 floats per memory and
+// no caller here reads it. Measured on the live index (136 entries, 10 retained copies
+// divided, two forced GCs either side): the whole parse holds 486 KB, the projection 16 KB.
+// Both are for the life of the window, which is why the 470 KB is worth four lines.
+let indexCache = { file: null, key: null, value: null };
+
 // The parsed cache, or null when it is absent, unreadable, or not a cache.
 function readRecallIndex(dir) {
+  const file = path.join(dir, RECALL_INDEX_NAME);
+  let key = null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(dir, RECALL_INDEX_NAME), 'utf8'));
-    return parsed && parsed.files && typeof parsed.files === 'object' ? parsed : null;
-  } catch { return null; }
+    const stats = fs.statSync(file);
+    key = `${stats.mtimeMs}:${stats.size}`;
+    if (indexCache.file === file && indexCache.key === key) return indexCache.value;
+  } catch {
+    // No stat means no file to key on. Drop what was held for THIS file and fall through
+    // to the read, which answers null the same way it always did. Scoped to this file
+    // because a second store's index going missing must not evict the one that is fine.
+    if (indexCache.file === file) indexCache = { file: null, key: null, value: null };
+  }
+  let value = null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && parsed.files && typeof parsed.files === 'object') {
+      const files = {};
+      for (const [name, entry] of Object.entries(parsed.files)) {
+        files[name] = entry && typeof entry === 'object'
+          ? { mtime: entry.mtime, size: entry.size }
+          : entry;
+      }
+      value = { embed: parsed.embed, files };
+    }
+  } catch { value = null; }
+  // A corrupt or absent-`files` cache is memoised too, on the same key: re-parsing 1.2 MB
+  // of broken JSON on every push to reach the same null is the case this exists to stop.
+  if (key !== null) indexCache = { file, key, value };
+  return value;
 }
 
 // How many memories are in the cache; null when it has not been built yet.

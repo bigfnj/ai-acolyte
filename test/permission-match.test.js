@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  normalizeRule, ruleMatches, sameRule, matchCacheStats,
+  normalizeRule, ruleMatches, sameRule, matchCacheStats, MATCH_CACHE_LIMIT,
 } = require('../src/permission-match');
 const { isCoveredBy, processAllowList } = require('../src/permissions');
 const { claudePermissionDecision } = require('../vscode-extension/autoLearnUi');
@@ -139,4 +139,36 @@ test('the matcher cache is bounded, and stays correct across an eviction', () =>
   assert.equal(normalizeRule('Bash(git:*)'), 'Bash(git *)');
   assert.deepEqual(processAllowList(['Bash(git status --short)', 'Bash(git status *)']),
     ['Bash(git status *)'], 'and the pipeline still collapses after an eviction');
+});
+
+// The test above reads the bound from `matchCacheStats()`, which returns the
+// same constant the enforcement uses, so it holds for ANY value of that
+// constant -- including 1, which would clear the cache on almost every call and
+// turn the thing the module exists for into a per-call recompile. The VALUE is
+// what the module's own note argues for, and until now nothing asserted it.
+//
+// So this pins the number, and pins it against the reason it was chosen rather
+// than as a bare literal: "a real allow list plus a managed policy is a few
+// hundred distinct strings, so reaching this limit means a caller is
+// synthesizing rules in a loop, which is a bug rather than a workload". A
+// measured allow list here was 316 entries; the headroom has to be an order of
+// magnitude clear of that, or an ordinary session evicts.
+test('the matcher cache bound is the documented value, and the report cannot drift from it', () => {
+  assert.equal(MATCH_CACHE_LIMIT, 5000,
+    'witness:match-cache-limit -- the documented bound moved. Change it deliberately: the '
+    + 'comment above it argues from a measured 316-entry allow list and a wholesale clear on '
+    + 'eviction, so a smaller value makes an ordinary session thrash and a much larger one '
+    + 'stops the map being bounded in any practical sense.');
+
+  // The enforced bound and the advertised one are the same constant TODAY. A
+  // report that hardcoded its own number would make every cap assertion in this
+  // file self-fulfilling, so the two spellings are tied together here.
+  assert.equal(matchCacheStats().limit, MATCH_CACHE_LIMIT,
+    'witness:match-cache-limit -- matchCacheStats() must report the bound that is enforced');
+
+  // The margin the comment claims, stated as a condition rather than as prose.
+  assert.ok(MATCH_CACHE_LIMIT >= 10 * 316,
+    'witness:match-cache-limit -- the bound must stay an order of magnitude above the '
+    + 'largest real allow list measured for this project (316 entries), or eviction stops '
+    + 'being a bug signal and becomes the normal case');
 });

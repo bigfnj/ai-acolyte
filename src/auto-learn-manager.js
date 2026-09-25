@@ -49,26 +49,53 @@ const STATE_MIGRATIONS = new Map();
 // file this tool has ever written carries `version: 1`, so an absent version
 // means a hand-written or foreign file rather than an older one, and treating
 // it as current keeps that readable instead of wiping it.
-function declaredVersion(raw) {
+function declaredVersion(raw, version = VERSION) {
   const value = object(raw) ? raw.version : undefined;
-  return Number.isInteger(value) ? value : VERSION;
+  return Number.isInteger(value) ? value : version;
 }
-// Returns the raw state brought up to `VERSION`, or null when it cannot be.
-// Null means reset: a state older than the oldest supported version, or one
-// whose chain has a step nobody wrote, is not partially readable.
-function migrateState(raw) {
-  let from = declaredVersion(raw);
-  if (from > VERSION) return raw;
-  if (from < MIN_SUPPORTED_VERSION) return null;
+// Returns the raw state brought up to the ladder's current version, or null
+// when it cannot be. Null means reset: a state older than the oldest supported
+// version, or one whose chain has a step nobody wrote, is not partially
+// readable.
+//
+// THE LADDER IS A PARAMETER, and that is the whole reason this function is
+// shaped this way. With `VERSION` and `MIN_SUPPORTED_VERSION` both 1 and
+// `STATE_MIGRATIONS` empty, the floor check below CANNOT CHANGE AN OUTCOME:
+// every `from` it rejects is also a `from` the `while` rejects on the next
+// line for want of a migration step, so mutating it to `if (false)` leaves the
+// suite green and the guard is decoration. Two doors, one reachable.
+//
+// Deleting the floor was the other option and is the worse one: the mechanism
+// is here for the NEXT version bump, and the case the two doors stop agreeing
+// about is precisely the one a bump creates -- a ladder that HAS a migration
+// for a version below the floor, where the missing-step door is wide open and
+// only the floor refuses. Injecting the ladder makes that case reachable now,
+// so the guard is tested before the bump that needs it rather than after.
+//
+// `VERSION` itself is deliberately not injectable through `createAutoLearnManager`:
+// bumping it with an empty `STATE_MIGRATIONS` would reset every user's state
+// file, so it stays a module constant and only this pure function takes an
+// override.
+function migrateStateTo(raw, ladder = {}) {
+  const version = Number.isInteger(ladder.version) ? ladder.version : VERSION;
+  const minSupported = Number.isInteger(ladder.minSupported)
+    ? ladder.minSupported : MIN_SUPPORTED_VERSION;
+  const migrations = ladder.migrations instanceof Map ? ladder.migrations : STATE_MIGRATIONS;
+  let from = declaredVersion(raw, version);
+  if (from > version) return raw;
+  if (from < minSupported) return null;
   let current = raw;
-  while (from < VERSION) {
-    const step = STATE_MIGRATIONS.get(from);
+  while (from < version) {
+    const step = migrations.get(from);
     if (!step) return null;
     current = step(current);
     if (!object(current)) return null;
     from += 1;
   }
   return current;
+}
+function migrateState(raw) {
+  return migrateStateTo(raw);
 }
 const MODES = new Set(['observe', 'recommend', 'auto-safe']);
 const CLAUDE_CLAIMS_VERSION = 1;
@@ -265,11 +292,24 @@ function codexTargets(value) {
   }
   return result;
 }
+// The key here is a PERMISSION, not a candidate key -- `applyUnlocked` re-keys
+// the map by permission because one family can carry more than one spelling --
+// so it has to be cleaned to a permission's length. It used to be cleaned to
+// 512, the candidate-key length, while the value beside it kept 768: a
+// permission longer than 512 characters was stored under a TRUNCATED key, and
+// two permissions sharing a 512-character prefix collapsed onto that one key,
+// so the second silently replaced the first and its grant was dropped from the
+// claims registry and from what `undo()` restores.
+//
+// 512 is still right for `applied`, `reviewed` and `codexTargets`, whose keys
+// really are candidate keys (`candidate()` cleans those to 512 as well). This
+// map is the odd one out, and matching the value's own limit is what makes the
+// key a lossless spelling of it.
 function managedClaude(value) {
   const result = {};
   if (!object(value)) return result;
   for (const [key, permission] of Object.entries(value)) {
-    const safeKey = clean(key, 512);
+    const safeKey = clean(key, 768);
     const safePermission = clean(permission, 768);
     if (safeKey && safePermission) result[safeKey] = safePermission;
   }
@@ -590,6 +630,12 @@ function scanStats(value) {
     // than inferred from the absence of something else.
     partial: count('partial'), unmatchedResults: count('unmatchedResults'),
     prunedObservations: count('prunedObservations'),
+    // Dedupe entries the cap could not evict because their families are still
+    // below the success threshold, so the map is over its limit. Normal at
+    // zero, and the one number that says the observation cap is running
+    // degraded -- a cap that quietly stops capping is the failure this repo
+    // keeps finding, so it reports rather than hides.
+    retainedObservations: count('retainedObservations'),
     prunedCursors: count('prunedCursors'),
     prunedCandidates: count('prunedCandidates'),
     prunedGrants: count('prunedGrants'),
@@ -694,13 +740,66 @@ function changeOutcome(item, before, after) {
 // twice. Cursors mean that re-read is rare and recent, so the index is capped
 // and trimmed oldest first. Insertion order is preserved through JSON, and an
 // entry whose family is gone can never dedupe anything again.
+//
+// WHAT "OLDEST FIRST" ALONE GOT WRONG. This cap and the cursor cap evict in the
+// SAME direction: the oldest transcript's observations went into this map
+// first, and that same transcript carries the oldest `mtimeMs`, so the cursor
+// `pruneCursors` drops is precisely the one whose dedupe entries have already
+// been trimmed from here. `pruneCursors` justified itself with "the re-read is
+// deduped by `observationHashes`, so it cannot inflate a count", and for the
+// files it evicts that was false. A cursor-less file takes `mode: 'full'`
+// (`safeContinuation` returns false with no prior), a full read emits every
+// observation in the file wholesale (`src/history-adapters.js:1500`), and each
+// one whose hash is gone is counted again -- into `counts.success`, which is
+// what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
+// on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with
+// `prunedObservations` non-zero every tick, so the trimming half of this was
+// already running; only the cursor half was still below its cap.
+//
+// THE REPAIR IS TO STOP TRIMMING THE HASHES THAT CAN STILL CHANGE A DECISION. A
+// family that has not yet reached the success threshold is the only kind a
+// re-read can PROMOTE: every other input to `isAutoSafeCandidate` is a static
+// property of the command, `counts.failed` only ever grows (`changeOutcome`
+// refuses to clear a failure), and a family already at the threshold is already
+// in Review or already applied, so counting its runs again cannot move it
+// anywhere it is not already. Those entries are held whatever their age.
+// Everything else is trimmed oldest first exactly as before, and in a real
+// corpus that is the bulk of the map: the protected families are the long tail
+// carrying one or two runs each.
+//
+// WHAT THIS DOES NOT FIX, said here rather than left to be discovered. A family
+// already over the threshold can still have its DISPLAYED run total inflated by
+// a re-read, and RAISING `threshold` after the fact re-opens the gap for
+// families that cleared the old bar and have since had their hashes trimmed.
+// Both are reporting errors, not policy writes.
+//
+// The protected set is not itself bounded, so a very high threshold can hold
+// more entries than the cap allows. That is the deliberate trade -- dropping
+// them is the inflation this exists to stop -- and the overflow is REPORTED as
+// `retainedObservations` on every scan rather than absorbed in silence.
 function pruneObservationHashes(state, limit) {
   const entries = Object.entries(state.observationHashes);
   const live = entries.filter(([, value]) => state.candidates[value.key]);
-  const kept = limit > 0 && live.length > limit ? live.slice(live.length - limit) : live;
-  if (kept.length === entries.length) return 0;
+  // Read from the state rather than from the candidate: `scan()` has just
+  // refreshed every candidate against `state.threshold`, and a stored
+  // `candidate.threshold` from a run with a different setting would make two
+  // entries of the same family disagree about whether they are protected.
+  const threshold = positive(state.threshold, 3);
+  const decisive = ([, value]) => state.candidates[value.key].counts.success < threshold;
+  let kept = live;
+  let overCap = 0;
+  if (limit > 0 && live.length > limit) {
+    const held = live.filter(decisive);
+    const trimmable = live.filter((entry) => !decisive(entry));
+    const room = Math.max(0, limit - held.length);
+    const survivors = new Set(trimmable.slice(Math.max(0, trimmable.length - room))
+      .map(([id]) => id));
+    kept = live.filter((entry) => decisive(entry) || survivors.has(entry[0]));
+    overCap = Math.max(0, kept.length - limit);
+  }
+  if (kept.length === entries.length) return { pruned: 0, overCap };
   state.observationHashes = Object.fromEntries(kept);
-  return entries.length - kept.length;
+  return { pruned: entries.length - kept.length, overCap };
 }
 // Cursors used to be pruned only as a side effect of `scan()` replacing the map
 // wholesale. The blind-scan guard suspends that replacement, and it fires for a
@@ -710,10 +809,20 @@ function pruneObservationHashes(state, limit) {
 // Existence-based pruning is not available there: a cursor is keyed by a
 // SHA-256 of its path, so there is no path left to stat, and a blind scan by
 // definition enumerated nothing to compare against. What IS available is a cap.
-// A cursor is a pure cache -- losing one costs a single re-read of that file,
-// and the re-read is deduped by `observationHashes`, so it cannot inflate a
-// count -- which is what makes evicting without evidence safe here and not safe
-// for candidates.
+// A cursor is a pure cache: losing one costs a single re-read of that file, and
+// a re-read is deduped by `observationHashes`, which is what makes evicting
+// without evidence safe here and not safe for candidates.
+//
+// THAT DEDUPE ARGUMENT USED TO BE FALSE FOR EXACTLY THESE FILES, and it is the
+// other half of this cap rather than a detail of the other one. Both caps
+// evicted oldest-first, so the cursor dropped here was the one whose hashes
+// `pruneObservationHashes` had already dropped, and the full re-read that
+// followed re-counted every success in the file. It holds now because that
+// function no longer trims a hash whose family is still below the success
+// threshold -- the only families a re-count can promote. The narrower claim,
+// which is the one to rely on: evicting a cursor can cost I/O and can inflate
+// the reported run total of a family that has ALREADY cleared the threshold; it
+// can no longer push a family across one. See the note there for the residue.
 //
 // Eviction is by `mtimeMs`, oldest transcript first, because the oldest
 // transcript is the one least likely to be appended to again and therefore the
@@ -746,6 +855,26 @@ function pruneCursors(state, limit) {
 // candidate from zero. Re-counting from an old total would double-count,
 // because `pruneObservationHashes` drops the hashes of a family that is gone.
 const CANDIDATE_LIMIT = 1000;
+// Policy backups were the one structure in this directory with no bound at all.
+// `backup()` writes a uniquely named `.bak` per changed target per apply, and
+// `undo()` reads only the most recent application's set, so every earlier file
+// is unreachable by any code path in the repo -- no reader, no pruner, no
+// deleter. Measured on the machine this was found on: 44 files, 562 KB, about
+// 1.2 a day, in the one directory where `managedHits` (200), `prunedCandidates`
+// (2000), `candidates` (1000), `cursors` (5000) and `observationHashes` (20000)
+// are all explicitly capped.
+//
+// 200 files is roughly five months at that rate and a couple of megabytes. A
+// FILE count rather than a byte budget, because how big a settings.json is is
+// not this module's business, and a count is the thing a reader can check
+// against `ls`.
+const BACKUP_LIMIT = 200;
+// The names `backup()` writes, and nothing else. `setDerivedGuidance` writes
+// `<name>.pre-derived` into the SAME directory, so a pruner that swept it by
+// age would eventually delete the pre-derived copy of the user's CLAUDE.md.
+// Anchored on the kinds `lastApplication` accepts, so a file this module did
+// not write cannot match by accident.
+const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-(?:claude|claude-claims|codex)-[0-9a-f]{8}\.bak$/;
 function pruneCandidates(state, limit, protectedKeys) {
   const keys = Object.keys(state.candidates);
   if (!(limit > 0) || keys.length <= limit) return 0;
@@ -811,8 +940,19 @@ function defaultCodexValidator(text, context) {
   fs.mkdirSync(path.dirname(context.path), { recursive: true });
   const temp = path.join(path.dirname(context.path),
     `.permission-wildcarding-validate.${process.pid}.${crypto.randomBytes(6).toString('hex')}.rules`);
-  fs.writeFileSync(temp, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  // INSIDE the try, not above it. `writeFileSync` opens the file and then
+  // writes, so a failure part way through -- ENOSPC, a quota stop, an
+  // interrupted write -- leaves the temp on disk with the throw escaping over
+  // the `finally` that exists to remove it. The file is created with `wx`, so
+  // the orphan also makes the NEXT validation with the same pid and random
+  // suffix fail EEXIST. `atomicWrite` in this file and `writeFileAtomicSync`
+  // in permissions.js have the same shape; this was the third copy of it.
+  //
+  // The `finally` tolerates the file never existing, which is the other half of
+  // moving the write in: an `unlinkSync` of a path that was never created is
+  // ENOENT and is already swallowed.
   try {
+    fs.writeFileSync(temp, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     const command = Array.isArray(context.command) && context.command.length
       ? context.command.map(String) : ['__claude_wildcarding_validation__'];
     // Fails closed on purpose: no reachable codex means no validation, and an
@@ -905,6 +1045,8 @@ function createAutoLearnManager(options = {}) {
     ? Math.max(0, Math.floor(options.cursorLimit)) : CURSOR_LIMIT;
   const candidateLimit = Number.isFinite(options.candidateLimit)
     ? Math.max(0, Math.floor(options.candidateLimit)) : CANDIDATE_LIMIT;
+  const backupLimit = Number.isFinite(options.backupLimit)
+    ? Math.max(0, Math.floor(options.backupLimit)) : BACKUP_LIMIT;
   // Cached, because the policy is a client-refreshed cache and re-reading it per
   // candidate would only add I/O to a listing — but keyed on a cheap stat rather
   // than held for the manager's lifetime. Nothing watches the policy file, and
@@ -1359,6 +1501,45 @@ function createAutoLearnManager(options = {}) {
       existed: before.exists,
     };
   }
+  // Keeps the newest `backupLimit` `.bak` files, plus every backup the state
+  // still names, whatever its age.
+  //
+  // The second half is what keeps `undo()` correct. Undo restores from
+  // `lastApplication.targets[].backupPath` and refuses outright when one is
+  // missing or altered, so a pruner going by age alone would eventually delete
+  // the files that make the last apply reversible -- and with a limit of 0 it
+  // would do it on the very first apply. Protecting by NAME rather than by
+  // position is deliberate: the recorded paths are absolute and always inside
+  // this directory, and comparing basenames cannot be defeated by a separator
+  // or a case difference on Windows.
+  //
+  // Names sort chronologically on their own, because `backup()` builds them
+  // from an ISO timestamp with `:` and `.` rewritten to `-`, which is fixed
+  // width. No stat per file, and no dependence on an mtime that a copy, a
+  // restore or a backup tool can rewrite.
+  //
+  // Failures are counted rather than thrown. By the time this runs the policy
+  // has already been written and the state saved; turning a locked or
+  // read-only `.bak` into a failed apply would be a strictly worse outcome
+  // than leaving the file. The count is returned so a degraded run says so
+  // instead of reporting a clean prune.
+  function pruneBackups(keepPaths) {
+    let names;
+    try { names = fs.readdirSync(backupDir); }
+    catch { return { removed: 0, kept: 0, failed: 0 }; }
+    const keep = new Set((Array.isArray(keepPaths) ? keepPaths : [])
+      .map((item) => path.basename(String(item || ''))).filter(Boolean));
+    const mine = names.filter((name) => BACKUP_NAME.test(name)).sort();
+    const excess = Math.max(0, mine.length - backupLimit);
+    let removed = 0;
+    let failed = 0;
+    for (const name of mine.slice(0, excess)) {
+      if (keep.has(name)) continue;
+      try { fs.unlinkSync(path.join(backupDir, name)); removed += 1; }
+      catch (error) { if (error.code !== 'ENOENT') failed += 1; }
+    }
+    return { removed, kept: mine.length - removed, failed };
+  }
   function rollback(written) {
     const conflicts = [];
     for (const change of written.slice().reverse()) try {
@@ -1639,12 +1820,23 @@ function createAutoLearnManager(options = {}) {
       if (conflicts.length) error.rollbackConflicts = conflicts;
       throw error;
     }
+    // After the save, so the protected set is the application this apply just
+    // recorded. Pruning earlier would protect the PREVIOUS application's
+    // backups, and a rollback would then leave that application un-undoable
+    // having deleted its files for a write that never landed.
+    const backupsPruned = pruneBackups((state.lastApplication?.targets || [])
+      .map((target) => target.backupPath));
     const appliedKeys = [...new Set([...newly.claude, ...newly.codex])].sort();
     const changedTargets = [...new Set(changes.map((item) =>
       item.kind === 'claude-claims' ? 'claude' : item.kind))];
     return {
       changed: changes.length > 0, changedTargets,
       applied: newly, appliedKeys, appliedCount: appliedKeys.length,
+      // Reported on every apply, not only when something was removed: a prune
+      // that could not delete a file is the case worth seeing, and a field that
+      // only appears on the interesting run is a field nobody notices.
+      backupsPruned: backupsPruned.removed, backupsKept: backupsPruned.kept,
+      backupsUnremovable: backupsPruned.failed,
       skippedCount: Math.max(0, (keys || Object.keys(state.candidates)).length - selected.length),
       // Each entry names the managed rule that beat it, because a verdict alone
       // sends the reader hunting through a few hundred managed entries.
@@ -1829,7 +2021,9 @@ function createAutoLearnManager(options = {}) {
       ]);
       const prunedCandidateCount = pruneCandidates(state, candidateLimit, grantedKeys);
       const prunedGrants = pruneGrantKeys(state);
-      const prunedObservations = pruneObservationHashes(state, observationHashLimit);
+      const observationPrune = pruneObservationHashes(state, observationHashLimit);
+      const prunedObservations = observationPrune.pruned;
+      const retainedObservations = observationPrune.overCap;
       // A scan that enumerated NO FILES AT ALL does not get to speak for the
       // cursor map. `findJsonlFiles` cannot read a root it has no access to --
       // EACCES from antivirus, a disconnected profile share -- and it reports
@@ -1884,6 +2078,7 @@ function createAutoLearnManager(options = {}) {
         unmatchedResults: Array.isArray(result.files)
           ? result.files.reduce((total, item) => total + (Number(item.unmatchedResults) || 0), 0) : 0,
         prunedObservations,
+        retainedObservations,
         prunedCursors: prunedCursorCount,
         prunedCandidates: prunedCandidateCount,
         prunedGrants,
@@ -1907,7 +2102,7 @@ function createAutoLearnManager(options = {}) {
         errors: state.lastScanStats.errors,
         partial: state.lastScanStats.partial,
         unmatchedResults: state.lastScanStats.unmatchedResults,
-        prunedObservations,
+        prunedObservations, retainedObservations,
         prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidateCount, prunedGrants,
         blindScan,
         candidates: Object.keys(state.candidates).length, application, apply: application,
@@ -2021,9 +2216,17 @@ function createAutoLearnManager(options = {}) {
     },
     scan, status, getStatus: status, overview, explainManaged, rebuildManagedHits,
     derivedReview, decideDerived,
-    listCandidates, list: listCandidates, getCandidates: listCandidates,
+    // `list` was a third alias of the same function with no consumer anywhere,
+    // production or test. `getCandidates` is NOT one of those: it is the
+    // fallback leg the extension takes at vscode-extension/extension.js:1032
+    // when `listCandidates` is absent, so it stays.
+    listCandidates, getCandidates: listCandidates,
     setMode, apply: applyPolicy, applyClaude, applyCodex, undo,
   };
 }
 
-module.exports = { createAutoLearnManager };
+// `migrateStateTo` is test-only, not dead: the version floor it carries is
+// unreachable with this module's own one-rung ladder, and driving it with an
+// injected ladder is the only way any input can make that check fail. See the
+// note above the function.
+module.exports = { createAutoLearnManager, migrateStateTo };

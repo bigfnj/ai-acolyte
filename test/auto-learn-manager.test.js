@@ -681,8 +681,15 @@ test('the observation index is capped and drops entries whose family is gone', (
   const many = Array.from({ length: 40 }, (_, index) =>
     observed(`call-${index}`, `tool-${index} run`, 'success'));
   const feed = scannerFeed(many);
+  // `threshold: 1` so each one-run family is AT the threshold and its dedupe
+  // entry is therefore trimmable. The cap no longer evicts a hash whose family
+  // is still below the threshold, because that is the only kind a re-read can
+  // promote; with the old `threshold: 3` all forty of these would be held and
+  // this test would be asserting the cap against the one population it is not
+  // allowed to touch. The protection itself is pinned in
+  // test/auto-learn-evidence-cap.test.js.
   const learn = manager(home, feed, {
-    codexRulesPath: null, threshold: 3, observationHashLimit: 10,
+    codexRulesPath: null, threshold: 1, observationHashLimit: 10,
   });
   const result = learn.scan();
   assert.equal(result.observations, 40, 'every observation is still counted');

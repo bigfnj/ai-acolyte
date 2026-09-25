@@ -255,7 +255,7 @@ all references across `src/`, `bin/`, `vscode-extension/` and `test/`.
 answer.** This section used to say "every internal import in this repo is
 destructured and there is no namespace-style require of an internal module in
 production code, so textual absence really does mean unused". There is one:
-`bin/wildcard-perms:276` does `const cache = require('../src/fixed-point-cache')`
+`bin/wildcard-perms:364` does `const cache = require('../src/fixed-point-cache')`
 and then `cache.isFixedPoint` and `cache.writeFixedPoint(cache.fixedPointKey(…))`
 on the hook's hot path. A destructure-only scan reports those three as test-only
 when they have a production consumer. Tests use member access too, in at least

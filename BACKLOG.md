@@ -12,7 +12,7 @@ Anything measured says so and names the date. Anything unverified says that too.
 **Emptied 2026-09-25.** This file was 955 lines and 88 open items. Every one was given a
 disposition: fixed and deleted, proven already done and deleted, or measured and moved to
 the record as a decline. What is below is what survived that, plus what the work itself
-found. The suite went 574 to 710 tests over it.
+found. The suite went 574 to 731 tests over it.
 
 ---
 

@@ -12,9 +12,11 @@ preview so it cannot become the panel.
 
 Claude Code policy handling is the established path. Codex history ingestion,
 reviewed rule export, AGENTS guidance, memory gates, and prompt diagnostics are
-available, but the Codex path is not yet compatibility-certified. The required
-correctness fixes and real-CLI proof are tracked under "Codex compatibility
-certification" in the repository `BACKLOG.md`.
+available, and the Codex path is **conditionally certified** for `codex-cli` 0.145.0
+on Windows. What is proven against the real binary, and what is still missing, are in
+[`docs/codex-certification.md`](../docs/codex-certification.md). What remains open is
+tracked under "Codex certification: breadth, not depth" in the repository
+`BACKLOG.md`.
 
 Because it is a VS Code extension rather than a Claude Code hook, none of this
 depends on a hook being allowed to fire, so it keeps working where a managed
@@ -132,7 +134,9 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the **fourteen** message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:3289`. This sentence twice claimed four was the total, and the
+`vscode-extension/extension.js:3391`. This sentence has now been wrong three times: twice it
+claimed four was the total, once it cited a DESCENDING range, and the correction itself then
+cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
 **Apply safe candidates** and **Cycle mode** are Command Palette only — see the command
 list at the end of this file. Apply keeps a recoverable snapshot; Undo restores the most
@@ -160,7 +164,7 @@ Codex rules default to `~/.codex/rules/permission-wildcarding.rules`. The
 exporting Codex policy. The `workspace` value was withdrawn and the manifest enum no longer
 offers it. Setting it by hand turns Codex export OFF and says so, and never falls back to user
 scope silently.
-Auto Learn never overwrites `default.rules`. Every generated rule must pass an
+Every generated rule must pass an
 isolated `codex execpolicy check` before a write; validation failure leaves active rules unchanged.
 That check now evaluates every visible rule file together, not just the generated one: `--rules`
 is repeatable and Codex resolves a conflict toward the MORE restrictive decision, measured
@@ -212,11 +216,11 @@ works under a managed policy.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:38`), and `recallScriptPath`
-(`extension.js:553-560`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:616`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing `<name>.tmp`
 and renaming on success. **Cancel** or any failure unlinks that partial inside `close()`'s
-callback — `fs.unlinkSync(tmp)` (`extension.js:764`) — and resolves only after it, so a
+callback — `fs.unlinkSync(tmp)` (`extension.js:799`) — and resolves only after it, so a
 cancelled download leaves nothing behind. Unlinking *beside* the close raced the still-open
 write handle and lost on Windows, which orphaned every cancelled transfer. See the Memory
 card section below.
@@ -225,7 +229,7 @@ card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:628`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:685`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -240,7 +244,7 @@ the model asset and the venv, and never runs Python.
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:794`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:919`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104`) — plus the embed identity, and never a bare
@@ -355,6 +359,13 @@ dashboard title-bar buttons.
 ## Every setting
 
 All 17 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
+
+One knob is deliberately **not** here, because it is not a VS Code setting. The Auto Learn
+worker deadline is `PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` (default 300000, `0` disables
+it). It is an environment variable rather than a manifest key, so `getConfiguration()` cannot
+read it and the Settings UI cannot show it. Raise it only if a legitimately slow scan is being
+killed; the deadline exists so a worker wedged in a synchronous filesystem call cannot hold
+teardown open forever.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

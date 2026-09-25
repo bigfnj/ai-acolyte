@@ -35,11 +35,17 @@ the extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension permission-wildcarding-*.vsix
+code --install-extension permission-wildcarding-1.5.2.vsix
 ```
 
-No dependencies, no lockfile, no `node_modules`. Node 20 or later, VS Code 1.80 or
-later.
+Name the version rather than globbing it. Old builds accumulate in the repo root, they
+are gitignored so `git clean` will not take them, and `permission-wildcarding-*.vsix`
+can hand VS Code the older one. Installing an equal or lower version is a silent no-op,
+so that failure presents as "the upgrade did nothing".
+
+The repo itself has no dependencies, no lockfile and no `node_modules`. `npm run package`
+does fetch one: it shells out to `npx --yes @vscode/vsce`, which downloads the packaging
+toolchain on first use. Node 20 or later, VS Code 1.80 or later.
 
 Upgrading from a release that exposed MAX does not leave an enable path behind.
 The extension offers an automatic review only when the exact retired Claude hook
@@ -308,7 +314,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2244`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2298`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
@@ -344,9 +350,10 @@ The automation lives in a VS Code extension rather than a Claude Code hook, and 
 it survive a locked-down managed policy. A `SessionStart` hook is the obvious way to make an agent
 do something automatically, and it is exactly what an org policy can take away:
 `allowManagedHooksOnly` is enforced per event, so on a machine whose policy defines only
-`PostToolUse` a user `SessionStart` entry sits in `settings.json` and never fires. Measured rather
-than assumed, a `PostToolUse` canary fired on 4 of 4 tool calls while a real session start and a
-`/clear` both left the compiled file untouched.
+`PostToolUse` a user `SessionStart` entry sits in `settings.json` and never fires. A `PostToolUse` canary was run against this
+and reported 4 of 4 tool calls, with a real session start and a `/clear` both leaving the
+compiled file untouched. ⚠ That run left no artefact in the tree, so treat it as a report
+rather than a reproducible measurement until someone repeats it.
 
 An extension is not a hook, so no policy toggle reaches it, and that reframes the build. Trigger
 on the cause rather than the ceremony: recompiling gates on a corpus change fires once per edit
@@ -360,7 +367,7 @@ a file is not.
 A performance number here is real only when measured cold, in fresh interleaved processes, against
 a purpose-built variant with the change removed; numbers without a recorded method are not
 repeated. The matcher memo was measured in-process on one real 316-entry allow list at 507 ms and
-192,150 RegExp compilations per pass before, 55.1 ms and 316 compilations after, the output proven
+192,150 RegExp compilations per pass before and 316 compilations after, the output proven
 identical by hash and a file-level diff rather than assumed. The note at
 `src/permission-match.js:32-38` keeps `ruleMatches` in the past tense on purpose, because the
 coverage index has since narrowed both passes, taking one pass from 52.7 ms at 423 entries to 8.1
@@ -376,7 +383,9 @@ hook AFTER             min 103.5  p50 109.8  p90 119.1   ms
 
 That span contains the matcher memo, the lazy requires for modules the hook never reaches, and
 moving the drain's file check ahead of the lock, so read it as the span rather than any one change.
-It is not the hook's cost today either: later runs landed between 59 ms and 175 ms elsewhere.
+It is not the hook's cost today either: later runs landed well away from it. A range quoted here
+for those later runs was not sourced anywhere in the tree, so it has been removed rather than
+given a method it never had.
 
 ### Build, test, release
 
@@ -392,7 +401,7 @@ which `wildcard-perms --version` prints. `test/installers.test.js:511` asserts t
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
-node --test                         # 710 tests; `npm test` runs the same thing
+node --test                         # 731 tests; `npm test` runs the same thing
 npm run smoke                       # scripts/smoke.sh, against the LIVE ~/.claude
 node scripts/drive-installed.js     # activates the INSTALLED VSIX and drives it
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN

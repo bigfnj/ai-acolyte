@@ -45,7 +45,12 @@ function harness(tempHome, opts = {}) {
   // but BEFORE the guarded work — i.e. inside the read-to-write window. Nothing
   // in the suite could observe either before this: no test asserted the
   // extension took the lock, and none counted acquisitions.
-  const locks = { count: 0, insideLock: null };
+  //
+  // `contended`, set by a test, makes every acquisition fail the way it fails in
+  // production: Auto Learn holds the lock, so createPolicyLock throws with
+  // code AUTO_LEARN_LOCKED. That is the only branch that spends the retry budget,
+  // and nothing in the suite could reach it.
+  const locks = { count: 0, insideLock: null, contended: false, refused: 0 };
   const settingsPath = path.join(tempHome, '.claude', 'settings.json');
   // One directive per read of settings.json, consumed in order, then
   // pass-through. Armed by a test via app.arm(); empty for every other test, so
@@ -55,6 +60,17 @@ function harness(tempHome, opts = {}) {
   // hands back to modal ones. See the window stub below.
   const shown = [];
   const answers = [];
+  // Every status-bar message, which used to be thrown away. "already optimal" is
+  // only ever said there, so a path that must NOT claim it — an absent or
+  // half-written settings.json — was unobservable.
+  const statuses = [];
+  // Every timer the extension arms, with its delay. The 1500 ms one is
+  // runWildcarding's lock-contention backoff and the only observable the retry
+  // BUDGET has: `lockedRetries` is module-private and its whole effect is whether
+  // a retry gets scheduled at all. Nothing else in this harness arms 1500 ms —
+  // schedulePolicyCheck uses the same figure but is reachable only from a watcher
+  // event, and the watchers here are inert stubs.
+  const timers = [];
   let provider = null;
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -71,7 +87,7 @@ function harness(tempHome, opts = {}) {
     window: {
       createStatusBarItem() { return { hide() {}, show() {}, dispose() {} }; },
       registerWebviewViewProvider(_viewId, instance) { provider = instance; return disposable(); },
-      setStatusBarMessage() {},
+      setStatusBarMessage(message) { statuses.push(String(message)); },
       showErrorMessage(message) { shown.push({ level: 'error', message, options: null, actions: [] }); },
       showInformationMessage(message) {
         shown.push({ level: 'info', message, options: null, actions: [] });
@@ -164,14 +180,25 @@ function harness(tempHome, opts = {}) {
           const lock = real.createPolicyLock(...args);
           return {
             ...lock,
-            locked: (fn) => lock.locked(() => {
-              locks.count += 1;
-              // The injection point. A settings.json write landing here is
-              // exactly the interleaving writeAllow's delta replay cannot
-              // survive unless the guarded work re-reads.
-              if (locks.insideLock) locks.insideLock();
-              return fn();
-            }),
+            locked: (fn) => {
+              // What production does when Auto Learn already holds it: throw with
+              // code AUTO_LEARN_LOCKED. That is the only branch that spends the
+              // retry budget, and nothing in the suite could reach it.
+              if (locks.contended) {
+                locks.refused += 1;
+                const busy = new Error('Auto Learn is holding the policy lock');
+                busy.code = real.POLICY_LOCK_CODE;
+                throw busy;
+              }
+              return lock.locked(() => {
+                locks.count += 1;
+                // The injection point. A settings.json write landing here is
+                // exactly the interleaving writeAllow's delta replay cannot
+                // survive unless the guarded work re-reads.
+                if (locks.insideLock) locks.insideLock();
+                return fn();
+              });
+            },
           };
         },
       };
@@ -209,6 +236,15 @@ function harness(tempHome, opts = {}) {
   for (const cached of Object.keys(require.cache)) {
     if (cached.startsWith(rootSrc + path.sep)) delete require.cache[cached];
   }
+  // Recorded, and unref'd. Unref matters: the contention tests arm 1500 ms
+  // retries deliberately and must not keep `node --test` alive waiting for them.
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, ms, ...rest) => {
+    const handle = originalSetTimeout(fn, ms, ...rest);
+    if (typeof handle?.unref === 'function') handle.unref();
+    timers.push({ ms, handle });
+    return handle;
+  };
   const extension = require(extensionPath);
   extension.activate({ subscriptions: [] });
   return {
@@ -219,11 +255,21 @@ function harness(tempHome, opts = {}) {
     passes,
     locks,
     shown,
+    statuses,
+    // How many lock-contention retries were scheduled. See `timers` above for
+    // why 1500 ms identifies them uniquely under this harness.
+    retriesScheduled() { return timers.filter((entry) => entry.ms === 1500).length; },
     answer(...values) { answers.push(...values); },
     arm(plan) { reads.length = 0; reads.push(...plan); },
+    // How many armed read directives are still unconsumed. A test that scripts a
+    // corrupt read has to prove the read HAPPENED, or it is asserting against an
+    // ordinary successful one.
+    armsLeft() { return reads.length; },
     get provider() { return provider; },
     async dispose() {
       await extension.deactivate();
+      for (const entry of timers) clearTimeout(entry.handle);
+      global.setTimeout = originalSetTimeout;
       Module._load = originalLoad;
       // Purge the whole tree, not just the entry. Every src/ module that
       // defaults a home resolves it against its OWN `os` binding, frozen at
@@ -1094,6 +1140,232 @@ test('a view that is alive but not visible gets no push and no work-up', async (
     await settle();
     assert.ok(ui.posted.length > posts, 'showing the view again pushes fresh state');
   } finally {
+    await app.dispose();
+  }
+});
+
+// ── runWildcarding: five branches nothing was holding ─────────────────────────
+//
+// All five are CORRECT at HEAD. Each was found by mutating it and watching the
+// whole suite stay green, which is the only way a branch with no test is
+// distinguishable from one with a passing test.
+
+const NON_OPTIMAL = ['Bash(git status)', 'Bash(git status --short)'];   // -> Bash(git status *)
+const OTHER_NON_OPTIMAL = ['Bash(git diff)', 'Bash(git diff --stat)', 'Bash(git diff --cached)'];
+
+test('a backup deleted under us is rebuilt when someone else generalized the list first',
+  async (t) => {
+    // The post-lock already-optimal path, reached when another writer generalizes
+    // between the unlocked probe and the lock. It calls the same
+    // reportAlreadyOptimal as the probe's early return, and that call is the ONLY
+    // thing in this extension that rebuilds a DELETED backup — not hypothetical:
+    // on 2026-09-09 every directory under ~/.claude was recreated and this is
+    // what restored the mirror.
+    //
+    // Replacing the branch with `if (false)` left the suite green. Nothing wrote
+    // to the backup on this path, and nothing looked.
+    const env = setup(t);
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });   // quiet activation
+    const app = harness(env.tempHome);
+    try {
+      await settle();
+      const backupPath = path.join(env.tempHome, '.claude', 'backups', 'allow-list.latest.json');
+      assert.ok(fs.existsSync(backupPath), 'precondition: activation captured a backup');
+
+      // The wipe this path exists to recover from. BOTH copies: the backup is a
+      // high-water-mark union and readBackupRaw falls back to the off-tree
+      // mirror, so leaving the mirror in place makes the rebuilt file hold
+      // yesterday's list too and the assertion below reads the wrong thing.
+      fs.rmSync(path.join(env.tempHome, '.claude', 'backups'), { recursive: true, force: true });
+      fs.rmSync(path.join(env.tempHome, '.permission-wildcarding'), { recursive: true, force: true });
+      env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+
+      // Somebody else generalizes it while we are waiting for the lock, so the
+      // in-lock read finds a fixed point and no write is due after all.
+      let injected = false;
+      app.locks.insideLock = () => {
+        if (injected) return;
+        injected = true;
+        fs.writeFileSync(env.settingsPath, JSON.stringify(
+          { permissions: { allow: ['Bash(git status *)'], deny: [] } }, null, 2) + '\n');
+      };
+
+      await app.commands.get('permission-wildcarding.runNow')();
+      await settle();
+
+      assert.ok(injected, 'precondition: the lock was taken, so the race was actually run');
+      assert.ok(fs.existsSync(backupPath),
+        'the post-lock already-optimal path did not rebuild the backup, which is the one '
+        + 'property it exists for');
+      assert.deepEqual(JSON.parse(fs.readFileSync(backupPath, 'utf8')).allow,
+        ['Bash(git status *)'],
+        'the rebuilt backup must hold what the LOCKED read saw, not the probe’s stale list');
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('the change toast counts what the locked read changed, not what the probe guessed',
+  async (t) => {
+    // The probe's snapshot is discarded and everything recomputed inside the lock,
+    // precisely because another writer can land in between. The report has to come
+    // from the same read the write rebased onto, or it describes a change that
+    // never happened.
+    //
+    // Reverting the two filters to the probe's `before`/`after` left the suite
+    // green: no test made the two reads differ while both were still non-optimal.
+    const env = setup(t);
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+    const app = harness(env.tempHome);
+    try {
+      await settle();
+      env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });   // probe: +1 -2
+
+      let injected = false;
+      app.locks.insideLock = () => {
+        if (injected) return;
+        injected = true;
+        // A different, also-ungeneralized list: +1 -3 rather than +1 -2.
+        fs.writeFileSync(env.settingsPath, JSON.stringify(
+          { permissions: { allow: OTHER_NON_OPTIMAL, deny: [] } }, null, 2) + '\n');
+      };
+
+      app.shown.length = 0;
+      await app.commands.get('permission-wildcarding.runNow')();
+      await settle();
+
+      assert.ok(injected, 'precondition: the lock was taken, so the race was actually run');
+      assert.deepEqual(env.read().permissions.allow, ['Bash(git diff *)'],
+        'precondition: the write rebased onto the concurrent list, not the probe’s');
+      const toast = app.shown.find((entry) => /wildcarded/.test(entry.message));
+      assert.ok(toast, `no change was announced: ${JSON.stringify(app.shown)}`);
+      assert.match(toast.message, /pruned 3/,
+        `the toast reported the probe’s delta, describing a change that never happened: `
+        + `"${toast.message}"`);
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('a write under the lock records when it happened', async (t) => {
+  // `lastRun` is the dashboard's "last wildcarded" line. Deleting the assignment
+  // left the suite green, and the panel then said nothing had ever run.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.equal(ui.posted.at(-1).lastRun, null,
+      'precondition: an optimal list writes nothing, so nothing has stamped lastRun yet — '
+      + 'without this the assertion below could be satisfied by any earlier write');
+
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    await settle();
+
+    assert.deepEqual(env.read().permissions.allow, ['Bash(git status *)'],
+      'precondition: a write really happened');
+    assert.equal(typeof ui.posted.at(-1).lastRun, 'number',
+      'the panel cannot say when the list was last wildcarded, because the write did not '
+      + 'record it');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('an unreadable settings.json is never reported as "already optimal"', async (t) => {
+  // The probe's `if (!settings)` guard. Delete it and `before` collapses to `[]`,
+  // `after` is `[]` too, the lists compare equal — and a manual run cheerfully
+  // tells the user their policy is already optimal when the extension could not
+  // read it at all. Claude Code rewrites settings.json in place on every
+  // approval, /model and /effort, so landing inside a write is routine.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    app.statuses.length = 0;
+    app.arm(['corrupt']);
+    await app.commands.get('permission-wildcarding.runNow')();
+
+    assert.equal(app.armsLeft(), 0,
+      'precondition: the scripted half-written read was never taken, so this test is '
+      + 'asserting against an ordinary successful read');
+    assert.deepEqual(app.statuses.filter((m) => /already optimal/.test(m)), [],
+      'a settings.json the extension could not read was reported to the user as an '
+      + 'already-optimal policy');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The retry budget. `lockedRetries` is module-private and its only effect is
+// whether a contended run schedules another attempt, so the observable is the
+// 1500 ms backoff timer. Both early returns reset it, and deleting EITHER left
+// the suite green: 20 contended runs in one window then permanently disabled the
+// retry, so a settings.json change that lost the race with an Auto Learn scan was
+// simply never re-attempted.
+async function exhaustRetryBudget(app, env) {
+  app.locks.contended = true;
+  env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+  for (let i = 0; i < 20; i += 1) await app.commands.get('permission-wildcarding.runNow')();
+  assert.equal(app.retriesScheduled(), 20,
+    `precondition: the budget is 20 and was spent, got ${app.retriesScheduled()}`);
+  await app.commands.get('permission-wildcarding.runNow')();
+  assert.equal(app.retriesScheduled(), 20,
+    'precondition: a 21st contended run must schedule nothing, or the budget is not spent '
+    + 'and the resets below prove nothing');
+}
+
+test('an already-optimal run gives the lock-contention budget back', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    await exhaustRetryBudget(app, env);
+
+    // The reset under test: the probe finds a fixed point and returns before the
+    // lock, so the window of contention it was spending budget on is over.
+    env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.retriesScheduled(), 21,
+      'the budget was never given back, so every later contended write is abandoned for the '
+      + 'life of the window');
+  } finally {
+    app.locks.contended = false;
+    await app.dispose();
+  }
+});
+
+test('an unreadable settings.json gives the lock-contention budget back', async (t) => {
+  // The second site, and the one its own commit message got wrong: "the budget is
+  // now also reset on the early return" was true for the already-optimal return
+  // and not for this one until it was added. An absent or half-written
+  // settings.json is the routine case, not the exotic one.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    await exhaustRetryBudget(app, env);
+
+    app.arm(['corrupt']);
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.armsLeft(), 0, 'precondition: the half-written read was taken');
+
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.retriesScheduled(), 21,
+      'a settings.json that was mid-write when we looked left the retry budget spent, so '
+      + 'every later contended write is abandoned for the life of the window');
+  } finally {
+    app.locks.contended = false;
     await app.dispose();
   }
 });

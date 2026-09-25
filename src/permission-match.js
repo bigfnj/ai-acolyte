@@ -138,7 +138,21 @@ function matchCacheStats() {
   return { normalized: normalizedRules.size, compiled: compiledRules.size, limit: MATCH_CACHE_LIMIT };
 }
 
+// `ruleRegexSource` is deliberately NOT exported. It had no consumer anywhere,
+// production or test, and there is nothing it can prove that `ruleMatches`
+// cannot: every property of the pattern it builds -- the bare-command
+// allowance, the single-wildcard condition, a metacharacter treated as a
+// literal -- is asserted through the matcher in test/permission-match.test.js,
+// against the behaviour rather than against the regex text. Exporting the
+// intermediate would invite an assertion on the SPELLING of a pattern, which
+// breaks on a harmless refactor and proves nothing about matching.
+//
+// `MATCH_CACHE_LIMIT` is exported for the opposite reason: its VALUE is
+// load-bearing (see the note above it) and `matchCacheStats().limit` reports
+// the same constant, so a test reading only the report could not tell the
+// enforced bound from the advertised one. The test destructures both and pins
+// them together.
 module.exports = {
-  normalizeRule, ruleRegexSource, ruleMatches, sameRule,
+  normalizeRule, ruleMatches, sameRule,
   matchCacheStats, MATCH_CACHE_LIMIT,
 };

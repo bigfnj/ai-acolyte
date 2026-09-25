@@ -1213,8 +1213,20 @@ test('a same-size rewrite with a new mtime is still caught and re-read', (t) => 
   assert.equal(Buffer.byteLength(rewritten), size,
     'precondition: the rewrite really is the same number of bytes');
   fs.writeFileSync(file, rewritten);
+  // Move the mtime EXPLICITLY rather than trusting the wall clock to advance
+  // between two writes. Both land inside one filesystem timestamp tick often
+  // enough to matter: node 20 on windows-latest failed this precondition on
+  // 2026-09-25 with actual and expected identical to the nanosecond
+  // (1790307248153.764), while the same commit passed on both ubuntu legs and on
+  // node 22 everywhere. What this test is about is a same-SIZE rewrite being
+  // caught DESPITE a moved mtime, so the mtime moving is setup, and setup must
+  // not be left to a race. The precondition assertion stays: it is what turned a
+  // silent non-test into a visible failure in the first place.
+  const priorMtimeMs = Object.values(cursors)[0].mtimeMs;
+  const moved = new Date(priorMtimeMs + 2000);
+  fs.utimesSync(file, moved, moved);
   const after = fs.statSync(file);
-  assert.notEqual(after.mtimeMs, Object.values(cursors)[0].mtimeMs,
+  assert.notEqual(after.mtimeMs, priorMtimeMs,
     'precondition: the rewrite moved the mtime, which is the ordinary case');
 
   const second = scanHistoryFiles({ cursors, claudeRoots: [root] });

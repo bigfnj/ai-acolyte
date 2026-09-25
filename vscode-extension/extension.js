@@ -1158,6 +1158,41 @@ function autoLearnEvidence(cfg) {
   return data;
 }
 
+// What the last scan could not read, taken from the manager's persisted
+// `lastScanStats` rather than from a scan() return value — so it survives a
+// window reload and is answerable on any refresh, not only in the seconds after
+// a scan.
+//
+// `autoLearnLastError` is a DIFFERENT thing: it is the message of an exception
+// that escaped, i.e. a scan that never returned. These are the failures of a scan
+// that DID return, reporting that part of the corpus was unreadable, and they
+// were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
+// every one of them. That is the exact shape of the defect that sat unnoticed for
+// eight days (src/auto-learn-manager.js:1904-1906: "`errors` was computed here
+// all along and then not returned, so a file that failed every scan for eight
+// days was invisible"). Surfacing it in the CLI and not in the panel most users
+// live in only moves where it hides.
+function autoLearnScanHealth(stats) {
+  if (!stats || typeof stats !== 'object') return null;
+  const count = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  return {
+    files: count(stats.files),
+    observations: count(stats.observations),
+    errors: count(stats.errors),
+    partial: count(stats.partial),
+    unmatchedResults: count(stats.unmatchedResults),
+    // One number, because the four prune counters are one housekeeping fact from
+    // the card's point of view and four stats tiles it does not have room for.
+    pruned: count(stats.prunedObservations) + count(stats.prunedCursors)
+      + count(stats.prunedCandidates) + count(stats.prunedGrants),
+    // "The cursor map was preserved because nothing was enumerated." Distinct
+    // from `errors`, which says a root failed but not that the scan was therefore
+    // unable to look at anything — and indistinguishable, on the numbers alone,
+    // from an ordinary quiet scan.
+    blindScan: stats.blindScan === true,
+  };
+}
+
 function autoLearnCardData() {
   const cfg = autoLearnConfig();
   let status = {};
@@ -1176,6 +1211,7 @@ function autoLearnCardData() {
     counts: countAutoLearnCandidates(
       candidates, status, cfg.codexRulesPath ? ['claude', 'codex'] : ['claude'], cfg.mode, readSettings(),
     ),
+    scan: autoLearnScanHealth(status.lastScanStats),
     canUndo: Boolean(status.canUndo || status.lastApplication),
   };
 }
@@ -3502,6 +3538,7 @@ class WildcardingViewProvider {
           <div class="stat"><div class="n" id="alreview">–</div><div class="l">review</div></div>
           <div class="stat"><div class="n" id="alobserve">–</div><div class="l">observing</div></div>
         </div>
+        <div class="memissues" id="alScanHealth"></div>
         <div class="buttonrow">
           <button class="restore" id="alScan">Scan now</button>
           <button class="restore" id="alReview">Review</button>
@@ -3643,6 +3680,11 @@ class WildcardingViewProvider {
     if (!a.enabled) setState('stAutoLearn', 'disabled');
     else if (a.busy) setState('stAutoLearn', 'scanning…');
     else if (a.error) setState('stAutoLearn', 'error', 'hot');
+    // Above "N to review", deliberately. A scan that could not read the corpus
+    // makes every count under it a statement about a fraction of the evidence,
+    // so a row that reads "3 to review" over a blind scan is worse than one that
+    // says nothing: it asserts a number it cannot support.
+    else if (scanTrouble(a.scan).length) setState('stAutoLearn', 'scan degraded', 'warn');
     else if (counts.review) setState('stAutoLearn', counts.review + ' to review', 'warn');
     else if (counts.safe) setState('stAutoLearn', counts.safe + ' safe to apply', 'warn');
     else setState('stAutoLearn', String(a.mode || 'recommend'));
@@ -3719,6 +3761,42 @@ class WildcardingViewProvider {
     for (const id of ['alScan', 'alWhy']) $(id).disabled = !!a.busy;
     $('alReview').disabled = !active || !!a.busy || a.mode === 'observe';
     $('alReview').textContent = (counts.review > 0) ? 'Review (' + counts.review + ')' : 'Review';
+
+    // What the last scan could not read. Never collapsed into a.error, which is
+    // the message of an exception that ESCAPED — a scan that returned while
+    // failing to read half the corpus sets that to null and used to leave the
+    // card reading perfectly healthy.
+    const health = $('alScanHealth');
+    const s = a.scan;
+    if (!s) { health.textContent = ''; health.className = 'memissues'; return; }
+    const trouble = scanTrouble(s);
+    if (trouble.length) {
+      health.className = 'memissues';
+      health.style.color = 'var(--vscode-charts-yellow, #d29922)';
+      health.textContent = '⚠ last scan: ' + trouble.join(' · ');
+    } else {
+      health.className = 'memissues muted';
+      health.style.color = '';
+      health.textContent = '✓ last scan read ' + s.files + ' file' + (s.files === 1 ? '' : 's')
+        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '');
+    }
+  }
+
+  // Shared by the card body and the collapsed row badge, so the two can never
+  // disagree the way the memory card's badge and body once did.
+  function scanTrouble(s) {
+    if (!s) return [];
+    const trouble = [];
+    // First: it subsumes the rest. "Nothing was enumerated" is not the same
+    // statement as "a root errored", and on the numbers alone it is
+    // indistinguishable from an ordinary quiet scan.
+    if (s.blindScan) trouble.push('nothing enumerated — cursor map preserved');
+    if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
+    if (s.partial) trouble.push(s.partial + ' partly read');
+    if (s.unmatchedResults) {
+      trouble.push(s.unmatchedResults + ' unmatched result' + (s.unmatchedResults === 1 ? '' : 's'));
+    }
+    return trouble;
   }
 
   function fmtK(n) {

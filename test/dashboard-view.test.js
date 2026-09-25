@@ -96,8 +96,13 @@ function harness(tempHome, opts = {}) {
       },
       getConfiguration() {
         return {
-          // Auto Learn off: this is about the panel, not the learner.
-          get: (key, fallback) => (key === 'autoLearn.enabled' ? false : fallback),
+          // Auto Learn off: this is about the panel, not the learner. `opts.settings`
+          // overrides by key, for the one test that needs the learner's own card
+          // populated; empty for every other, so the default below is unchanged.
+          get: (key, fallback) => {
+            if (opts.settings && key in opts.settings) return opts.settings[key];
+            return key === 'autoLearn.enabled' ? false : fallback;
+          },
           inspect: () => ({}),
           update: async () => {},
         };
@@ -1092,3 +1097,206 @@ test('a view that is alive but not visible gets no push and no work-up', async (
     await app.dispose();
   }
 });
+
+// ── what the last scan could not read ─────────────────────────────────────────
+//
+// autoLearnCardData copied eleven fields out of the manager's status and not one
+// of them was `lastScanStats`, so `errors`, `partial`, `unmatchedResults`,
+// `blindScan` and the four prune counters existed in the state file, were printed
+// in full by `wildcard-perms --learn scan`, and appeared nowhere in the panel
+// that is the only UI most users of this extension ever open.
+//
+// `error` on the card is not the same thing: it is the message of an EXCEPTION
+// that escaped. A scan that returns while failing to read half the corpus leaves
+// it null, so the card read perfectly healthy. That is exactly the shape of the
+// defect src/auto-learn-manager.js:1904-1906 records — a file that failed every
+// scan for eight days, invisible because a computed number was not passed on.
+
+// Writes the manager's state file wherever the manager would look for it, which
+// depends on a hash of the workspace root. Required lazily and INSIDE the
+// harness's Module._load hook rather than at the top of this file, so the copy it
+// resolves is the one the extension is already using, bound to the mocked `os`.
+function seedAutoLearnState(tempHome, lastScanStats) {
+  // eslint-disable-next-line global-require
+  const { createAutoLearnManager } = require('../src/auto-learn-manager');
+  const statePath = createAutoLearnManager({
+    home: tempHome,
+    workspaceRoot: path.join(tempHome, 'workspace'),
+  }).status().paths.state;
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 1, sourceVersion: 1, mode: 'recommend', threshold: 3,
+    candidates: {}, observationHashes: {}, cursors: {},
+    applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
+    codexTargets: {}, managedClaude: {}, managedHits: {}, managedHitsAt: null,
+    derivedGuidance: { accepted: [], declined: [] }, prunedCandidates: {},
+    lastScanAt: Date.now(), lastScanStats, lastApplication: null,
+  }, null, 2) + '\n');
+  return statePath;
+}
+
+test('the dashboard reports what the last scan could not read', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      files: 12, observations: 40, errors: 3, partial: 1, unmatchedResults: 7,
+      prunedObservations: 2, prunedCursors: 1, prunedCandidates: 0, prunedGrants: 4,
+      blindScan: false,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const scan = ui.posted.at(-1).autoLearn.scan;
+    assert.ok(scan, 'the payload carries no per-scan health at all, so the panel cannot '
+      + 'show a scan that failed to read files');
+    assert.equal(scan.errors, 3, 'the unreadable-file count never reached the panel');
+    assert.equal(scan.partial, 1, 'the partly-read count never reached the panel');
+    assert.equal(scan.unmatchedResults, 7);
+    assert.equal(scan.blindScan, false);
+    assert.equal(scan.files, 12);
+    // Four counters, one number: the card has no room for four tiles and they are
+    // one housekeeping fact from its point of view.
+    assert.equal(scan.pruned, 7, 'the prune counters were dropped rather than summed');
+    // And the thing that made this invisible in the first place: the exception
+    // channel says nothing about a scan that RETURNED.
+    assert.equal(ui.posted.at(-1).autoLearn.error, null,
+      'precondition: no exception escaped, so `error` cannot be the field that carries this');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a blind scan is reported even though every count reads clean', async (t) => {
+  // The nastiest case, and the reason blindScan exists as its own flag: zero
+  // errors, zero partials, zero observations — numerically identical to a quiet
+  // scan of a corpus with nothing new in it. The only difference is that nothing
+  // was enumerated at all.
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      files: 0, observations: 0, errors: 0, partial: 0, unmatchedResults: 0,
+      prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
+      blindScan: true,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.blindScan, true,
+      'a scan that enumerated nothing is indistinguishable from a quiet one on the numbers, '
+      + 'and the flag that separates them did not reach the panel');
+
+    // The renderer half, run for real rather than assumed: the panel document is
+    // the only place the payload becomes something a user can see, and a field
+    // that arrives and is never drawn is still invisible.
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /nothing enumerated/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.equal(rendered.stAutoLearn, 'scan degraded',
+      `the collapsed row said "${rendered.stAutoLearn}", so a user who has not expanded the `
+      + 'card sees nothing wrong');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a clean scan says so rather than going quiet', async (t) => {
+  // The other side, and the one that keeps the warning meaningful: if the line
+  // only ever appears when something is wrong, its absence is ambiguous between
+  // "clean" and "never scanned".
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      files: 9, observations: 21, errors: 0, partial: 0, unmatchedResults: 0,
+      prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
+      blindScan: false,
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /read 9 files cleanly/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.notEqual(rendered.stAutoLearn, 'scan degraded',
+      'a clean scan was badged as degraded');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// Runs the panel's OWN script against the payload, in a DOM small enough to be
+// read in one screen. Without this the renderer is unreachable: _html() returns a
+// string, VS Code evaluates it, and nothing in this suite ever did — so a field
+// added to the payload and never drawn would pass every assertion above.
+//
+// Only the ids the Auto Learn card touches are stubbed. An element the renderer
+// reaches for and does not find shows up here as a TypeError naming the id,
+// which is the failure mode wanted: silently ignoring unknown ids would let the
+// renderer be rewritten out from under the test.
+function renderDashboard(provider, data) {
+  // The tag carries a per-render nonce, so it is matched rather than searched for
+  // literally. One <script> in the document today; the assertion below is what
+  // notices if that stops being true.
+  const html = provider._html();
+  const open = html.match(/<script\b[^>]*>/);
+  assert.ok(open, 'the panel document has no script element');
+  const start = open.index + open[0].length;
+  const script = html.slice(start, html.indexOf('</script>', start));
+  assert.ok(script.includes('function renderAutoLearn'),
+    'the panel script was not extracted — this test would prove nothing');
+
+  const nodes = new Map();
+  const node = (id) => {
+    if (!nodes.has(id)) {
+      const classes = new Set();
+      nodes.set(id, {
+        id, textContent: '', className: '', title: '', disabled: false,
+        innerHTML: '', style: {}, hidden: false, value: '',
+        classList: {
+          add: (name) => classes.add(name),
+          remove: (name) => classes.delete(name),
+          toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)),
+          contains: (name) => classes.has(name),
+        },
+        addEventListener() {}, appendChild() {}, removeChild() {},
+        querySelector: () => null, querySelectorAll: () => [],
+      });
+    }
+    return nodes.get(id);
+  };
+  const detached = (tag) => ({
+    tag, className: '', textContent: '', innerHTML: '', title: '', style: {},
+    dataset: {}, children: [],
+    addEventListener() {}, appendChild(child) { this.children.push(child); return child; },
+  });
+  const document = {
+    getElementById: (id) => node(id),
+    querySelectorAll: () => [],
+    createElement: detached,
+    createTextNode: (text) => ({ textContent: text }),
+    addEventListener() {},
+  };
+  const window = { addEventListener() {} };
+  const acquireVsCodeApi = () => ({ postMessage() {}, getState() {}, setState() {} });
+
+  // eslint-disable-next-line no-new-func
+  const run = new Function('document', 'window', 'acquireVsCodeApi', 'console',
+    `${script}\nreturn { render };`);
+  const api = run(document, window, acquireVsCodeApi, console);
+  api.render(data);
+  const text = (id) => node(id).textContent;
+  return { alScanHealth: text('alScanHealth'), stAutoLearn: text('stAutoLearn'), node };
+}

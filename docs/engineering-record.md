@@ -1216,3 +1216,108 @@ the noise, necessarily, because nothing is memoised yet. NTFS mtime granularity 
 no extra resolution and `{ bigint: true }` was not added. What is cached is a projection,
 not the parse: the full parse retains 486 KB, the projection 16 KB, because `vec` is 384
 floats per memory and no caller reads it.
+
+---
+
+## The 2026-09-25 measurement pass: fourteen claims, one survivor
+
+Every open performance item in `BACKLOG.md` was measured to the standing protocol in one
+serial pass, with nothing else running. **One was implemented, seven declined with
+numbers, five were already at HEAD, one was a breakdown.** The declines are the product.
+
+### The one that survived, and the refutation that was aimed at a different change
+
+**Hook stdin no longer goes through `process.stdin`. IMPLEMENTED.** The Socket
+construction plus the event-loop round trip for `data`/`end` was the largest remaining
+term in a hook call. Cold, fresh interleaved processes, real hook spawn with a real
+PostToolUse payload, both arms on the cache-hit path: against a purpose-built reverted
+arm, n=41 x3, **min -5.359 / -6.382 / -5.567, p50 -3.815 / -5.852 / -5.677** off a
+59-65 ms call. Re-measured against shipped code rather than an approximation: min
+-3.657 / -5.330 / -3.953, p50 -3.868 / -6.018 / -5.218. **8-9% off every PostToolUse
+call.**
+
+It is not the wait for data: with the payload written 20 ms after spawn, -4.810 / -6.205.
+**The recorded refutation "doing the fs work before installing the stdin listeners was
+1.27 p50 WORSE" is true and measured a DIFFERENT change** — it kept the stream. That
+entry should not be read as covering this one.
+
+Deliberately NOT `fs.readFileSync(0, 'utf8')`: that buffers the whole payload before
+anything can cap it, reinstating the unbounded accumulation the 1 MiB cap exists to
+prevent. A bounded `fs.readSync` loop measures the same.
+
+### Declined, with the number. Do not retry any of these.
+
+**The hook keys twice on a miss.** 0.487 min / 0.699 p50 ms, cold n=41, real 45,891-byte
+settings.json. **Smaller than the recorded ~1.2 ms**, a quarter of the bar, and paid only
+on a miss whose real rate is near zero.
+
+**Path probes poison the rule-match cache. THE PREMISE IS FALSE.** `normalizedRules` and
+`compiledRules` are separate Maps with separate size checks and only rule strings reach
+the compiled one. Measured after 1,000 / 5,000 / 10,000 / 20,000 synthesized
+`Tool(<path>)` probes against the real 149-rule managed set: compiled = **78, 78, 78, 78.
+Never once evicted.** Only `normalizedRules` thrashes. Cost of that thrash at 20,000
+probes, cold n=15: with the cap raised out of reach, min -46.178 / **p50 +23.017**, sign
+flips, claim nothing. With the probe never cached, -22.026 / -2.977 of 2,290 ms, i.e.
+0.00015 ms per probe. The cap is meanwhile earning its keep as a leak bound: without it
+`normalized` reaches 20,271.
+
+**The drain reads settings.json four times.** It reads it **five** times on the one call
+that promotes, then 1 read / 0 passes on every call after. One extra read is 0.263 / 0.317
+ms, so removing all of them is ~1.3 ms on a once-per-project event. **Zero
+`.claude/settings.local.json` files exist anywhere under the working root**, so the path
+does not run here at all. The five reads are the unlocked probe, the in-lock plan read,
+the writer's state read, the writer's rebase re-read, and the verify-after-write read that
+"the truth is the file, not the intent" rests on.
+
+**`new RegExp` in a nested loop, policy-exporters.** At the realistic 60-block export: min
+-0.166, **p50 +0.009**, sign flips. At 200 blocks: -0.772 / -0.809, still well under the
+bar, on a validator that only runs when Codex rules are exported. The
+`history-adapters.js` refutation now has a sibling.
+
+**`[...deny, ...ask]` spread and `coversPrefix` lowercasing.** The CPU cost is real and
+reproduces: isolated over 525 real allow entries, cold n=41, **saving 3.757 min / 3.803
+p50**. It does not survive into the only call that contains it. A real `status()` over the
+live 618-candidate state, cold n=31 x3: p50 **-1.409 / -1.247 / -2.404** of a 146-167 ms
+call. Under the bar, and it would buy that with a `tokens`/`lower` sync invariant on the
+exported `rulePrefix` shape. **Declined on the containing call, not on the microbenchmark**
+— that distinction is the whole point.
+
+**`best_line` calls `_display_keys` per printed result.** In-process the recorded ~5 ms is
+right (0.459/0.513 per call, k=10). It does not survive to the process: run 1 min **+3.379**
+/ p50 -8.967; run 2 min **+6.979** / p50 **+1.702**. Sign flips within a run and between
+runs. The cause is visible below: this box drifted 25% across the session, 20x the effect.
+
+**The sticky dashboard hint. Declined because the `coverIndexKey` memo already spent it.**
+The hint's entire ceiling is one warm `processAllowList` per push, now 0.996 min / 1.197
+p50 (n=200, A/B interleaved). A hint that never missed saves less than that. The recorded
+1.38-2.19 / 1.65-2.20 is stale, and **the guard-test problem never has to be solved.** For
+the record it IS solvable, so the blocker is the number and not the test: the pass-count
+assertion re-expresses on OUTPUT as `pendingWildcard === 0` after a stale hint, because
+trusting a stale hint against a 15-entry disk list renders 16, not 0.
+
+### Figures corrected
+
+**The `coverIndexKey` memo's own source comment does not reproduce.** It records warm n=270
+`0.983/1.095 -> 0.483/0.540`. A no-memo arm measures **0.483/0.774** — their stated AFTER is
+the measured BEFORE, and the memo arm is 0.065/0.107. Either the arms were labelled
+backwards or the workload differed. The DO verdict is unaffected; the magnitudes are wrong.
+
+**`recall.py`'s "1.0 s fixed cost with ~0.7 s unaccounted" is stale and now resolved.**
+Total is **660.1 min / 688.9 p50**, not 1.0 s. The breakdown, n=11 fresh processes:
+`import numpy` 110.7/116.8 (17%), `import onnxruntime` 81.9/88.8 (13%), **the ONNX session
+190.6/205.1 (30%)**, **the BM25 corpus build 83.0/90.8 (13%)**, index load plus 136 stats
+26.1/28.0, module body 9.6/10.3, query embed 6.5/6.9, matmul 0.067/0.102. So the
+"unaccounted 0.7 s" is the session plus the corpus build. **First run after a boot pays
+552 ms for the session, not 194**, because the 34 MB model comes off disk.
+
+**Measurement drift on this box is 25%.** The same arms re-run forty minutes later moved
+every one of them by that much. `recall.py` whole-process timing **cannot resolve anything
+under ~30 ms here**; only in-process phase timing can. Three items were settled in-process
+for that reason.
+
+### Adjacent finding, not acted on
+
+`onnxruntime` is used at exactly one line and `numpy` only inside the embedder, the matmul
+and `--selftest`, yet both are imported at module scope. `--lint`, `--lexical-only`,
+`--gates-compile` and `--list` therefore pay **237 min / 244 p50 ms** of imports they never
+touch, and `--gates-compile` is on the extension's corpus-watcher path.

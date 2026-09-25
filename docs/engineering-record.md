@@ -428,8 +428,9 @@ segment stats.
 grant, the learner refuses to propose these exact shapes, and the Codex exporter
 rejects one of them as "too broad" while the Claude seed installs it. Left in
 place on the maintainer's call 2026-09-03. Note that auto mode discards most of
-this class at load, so they are inert there and live in manual, which is the mode
-MAX switches to.
+this class at load, so they are inert there and live only in manual. That sentence
+used to end "which is the mode MAX switches to"; MAX was retired on 2026-09-24 and
+nothing switches the mode any more.
 
 ### An audit of a live allow list
 
@@ -587,6 +588,64 @@ already a fixed point, which is the only state in which it must fire zero times.
 - **~6650 leftover temp directories** had accumulated in `%TEMP%` on the dev
   machine from the leak fixed above. The leak is closed; clearing the historical
   residue is a one-time manual step, deliberately not automated.
+
+### The CLI drain has no trust gate, and that is now an accepted risk (2026-09-24)
+
+The extension refuses to drain an untrusted workspace: `drainableRoots()` returns `[]`
+unless `vscode.workspace.isTrusted`. The CLI hook has no equivalent and no analogue
+available to it. It takes `cwd` from the PostToolUse payload on stdin, tests that project
+for `.claude/settings.local.json`, and drains it into USER scope on a path that is quiet
+by design.
+
+The gate that runs is `PROMOTABLE`, and it tests PORTABILITY, never provenance. So a
+cloned repository that commits a `.claude/settings.local.json` containing a clean command
+family clears it and that family lands in the user's global allow list. Nothing in the
+flow shows a prompt, and the only trace is one stderr line on a hook that prints nothing
+in the normal case.
+
+**Decision 2026-09-24: keep the behaviour, record the risk.** The two alternatives were an
+explicit trusted-roots allowlist, which puts a first-run step in front of every new
+project for a threat the owner does not face on a single-user box, and removing CLI drain
+entirely, which would stop promoting approvals for every folder VS Code never opens. The
+exposure is bounded by what `PROMOTABLE` already refuses: script blobs, absolute-path
+executables, MCP tools and file/web families all stay local, so the reachable damage is a
+command-family grant the user would very likely have approved anyway.
+
+Revisit if this repository is ever used on a machine that clones untrusted code, which is
+the condition that changes the answer. Do not re-file it as a defect without that change.
+
+### The two stat-keyed caches can still return a stale verdict
+
+`policyFingerprint` and `autoLearnStateStamp` both key on `${stat.mtimeMs}:${stat.size}`,
+so a same-size in-place rewrite inside timestamp granularity is invisible to both.
+Accepted when written and re-affirmed 2026-09-24. The alternative is a content hash, and
+the record already declines that trade for the fixed-point cache on the opposite grounds:
+replacing a content hash with `mtime:size` weakens the one property that module exists
+for. These two are not in that position. Both recompute on the next real change.
+
+### The transcript corpus is mirrored to D: on a schedule, not junctioned (2026-09-24)
+
+`~/.claude/projects` holds every session transcript and the memory store, measured at
+**1.0 GB across 1,596 files on 2026-09-24**, up from 732.7 MB on 2026-09-14. It is a plain
+directory, Claude Code's path for it is not configurable, and the 2026-09-10 profile wipe
+took the lot once already. Nothing in this repository protects it and nothing in it can.
+
+The originally proposed fix, junctioning the directory to a git repo on `D:`, was refused:
+C: is the only SSD on this box, so a junction would move every transcript append onto a
+spinning disk and trade a durability problem for a latency one on the hot path of every
+session. That trade was never stated when the fix was proposed.
+
+**Decision 2026-09-24: a scheduled mirror.** ROBOCOPY `/MIR` every six hours to
+`D:\.backups\claude-corpus`, driven by a Scheduled Task. Writes stay on the SSD, loss is
+bounded to one interval instead of everything, and deletions propagate so the mirror does
+not become a second unbounded corpus. First run: 1,608 files, 1.05 GB.
+
+The script lives outside every checkout on this box, deliberately. **The corpus is private
+and must never enter this public repository under any option.** Two things it got wrong
+first and now guards against: `[TimeSpan]::MaxValue` is the obvious spelling for an
+indefinite repetition and the Task Scheduler rejects it as out of range, and the first
+version logged "registered" after a `Register-ScheduledTask` that had just failed, because
+the error was non-terminating and the log line could not fail. It reads the task back now.
 
 
 ---

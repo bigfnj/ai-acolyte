@@ -303,3 +303,127 @@ test('the shipped artefact carries no workspace-scope surface', async () => {
   assert.equal(inspected.manifest, true);
   assert.equal(inspected.extension, true);
 });
+
+// The runtime half. The gate above reads the packaged artefact; this ACTIVATES
+// the real extension with `codexScope: "workspace"` still in the settings and
+// proves no Codex rules file appears under either root. A manifest that no
+// longer offers the value does not stop a settings.json that already holds it.
+test('the extension writes no Codex rules while the setting still says workspace', async (t) => {
+  const Module = require('node:module');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-ws-runtime-'));
+  t.after(() => { try { fs.rmSync(home, { recursive: true, force: true }); } catch {} });
+  const workspaceRoot = path.join(home, 'repo');
+  fs.mkdirSync(path.join(workspaceRoot, '.claude'), { recursive: true });
+  fs.mkdirSync(path.join(home, '.claude', 'projects', 'p'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
+    `${JSON.stringify({ permissions: { allow: [] } }, null, 2)}\n`);
+  const call = (id, command) => JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] },
+  });
+  const ok = (id) => JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: false, content: 'ok' }] },
+  });
+  fs.writeFileSync(path.join(home, '.claude', 'projects', 'p', 's.jsonl'), [
+    JSON.stringify({ type: 'session_meta', payload: { id: 'v', cwd: workspaceRoot } }),
+    call('a', 'rg --files'), ok('a'),
+    call('b', 'rg --files src'), ok('b'),
+    call('c', 'rg --files test'), ok('c'),
+    '',
+  ].join('\n'));
+
+  const disposable = () => ({ dispose() {} });
+  const commands = new Map();
+  const vscode = {
+    ExtensionMode: { Test: 3 },
+    StatusBarAlignment: { Left: 1, Right: 2 },
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    ProgressLocation: { Notification: 15 },
+    RelativePattern: class RelativePattern {
+      constructor(base, pattern) { this.base = base; this.pattern = pattern; }
+    },
+    ThemeColor: class ThemeColor { constructor(id) { this.id = id; } },
+    EventEmitter: class { constructor() { this.event = () => disposable(); } fire() {} dispose() {} },
+    Uri: { file: (p) => ({ fsPath: p }) },
+    commands: {
+      registerCommand(id, handler) { commands.set(id, handler); return disposable(); },
+      executeCommand() { return Promise.resolve(); },
+    },
+    window: {
+      createOutputChannel() { return { appendLine() {}, append() {}, show() {}, clear() {}, dispose() {} }; },
+      createStatusBarItem() { return { show() {}, hide() {}, dispose() {}, text: '', tooltip: '' }; },
+      registerWebviewViewProvider() { return disposable(); },
+      setStatusBarMessage() {},
+      showErrorMessage() {},
+      showInformationMessage() { return Promise.resolve(undefined); },
+      showWarningMessage() {},
+      showQuickPick() { return Promise.resolve(undefined); },
+    },
+    workspace: {
+      isTrusted: true,
+      workspaceFolders: [{ uri: { fsPath: workspaceRoot } }],
+      createFileSystemWatcher() {
+        return { onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} };
+      },
+      getConfiguration() {
+        return {
+          get: (key, fallback) => {
+            if (key === 'autoLearn.codexScope') return 'workspace';
+            if (key === 'autoLearn.mode') return 'auto-safe';
+            return fallback;
+          },
+          inspect: () => ({}), update: async () => {},
+        };
+      },
+      onDidChangeConfiguration() { return disposable(); },
+      onDidChangeWorkspaceFolders() { return disposable(); },
+    },
+  };
+
+  const extensionPath = require.resolve('../vscode-extension/extension');
+  const rootSrc = path.resolve(__dirname, '..', 'src');
+  const originalLoad = Module._load;
+  Module._load = function load(request, parent, isMain) {
+    if (request === 'vscode') return vscode;
+    if (request === 'os') return { ...os, homedir: () => home };
+    if (parent?.filename === extensionPath && request.startsWith('./src/')) {
+      return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
+    }
+    if (request === './memoryLint' && parent?.filename === extensionPath) {
+      return {
+        MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
+        memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
+        discoverDirs: () => [],
+      };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  let extension;
+  try {
+    delete require.cache[extensionPath];
+    extension = require(extensionPath);
+    extension.activate({ subscriptions: [] });
+    assert.ok(commands.has('permission-wildcarding.autoLearnScan'),
+      'precondition: the scan command registered, so something really ran');
+    await commands.get('permission-wildcarding.autoLearnScan')();
+    await commands.get('permission-wildcarding.autoLearnApplySafe')();
+  } finally {
+    Module._load = originalLoad;
+    try { await extension?.deactivate?.(); } catch { /* teardown only */ }
+    delete require.cache[extensionPath];
+  }
+
+  assert.equal(fs.existsSync(path.join(workspaceRoot, '.codex')), false,
+    'no rules were written into the repository');
+  assert.equal(fs.existsSync(path.join(home, '.codex', 'rules', 'permission-wildcarding.rules')), false,
+    'and the withdrawn scope did NOT silently fall back to user scope either');
+  // The Claude half is untouched by the withdrawal: this must not read as
+  // "Auto Learn stopped working".
+  const allow = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'))
+    .permissions.allow;
+  assert.ok(allow.includes('Bash(rg --files *)'),
+    `the Claude grant still lands; allow list was ${JSON.stringify(allow)}`);
+});

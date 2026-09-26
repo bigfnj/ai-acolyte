@@ -21,7 +21,7 @@ Only text a user reads. Every compatibility identifier is byte-identical.
 | Visible product name | **`Acolyte`** (was `Permission Wildcarding`) |
 | Command palette titles | **`Acolyte: …`** (17 of them) |
 | Activity-bar container title, settings section title | **`Acolyte`** |
-| Output channel, notification and diagnostic prefixes | **`acolyte: …`** (104 strings) |
+| Output channel, notification and diagnostic prefixes | **`ai-acolyte: …`** (73 strings) |
 | VS Code extension ID | unchanged, `local.permission-wildcarding` |
 | Manifest `name` and `publisher` | unchanged |
 | Command IDs | unchanged, every `permission-wildcarding.*` |

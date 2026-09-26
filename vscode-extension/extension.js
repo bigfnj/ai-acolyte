@@ -223,7 +223,7 @@ function mirrorBackupPath() {
   // is not hypothetical here (2026-09-09). Every other `~`-prefixed value was
   // already handled; this was the one that resolved to a directory.
   if (!rest) {
-    warnOnce(`acolyte: backupMirrorPath "${raw}" is the home directory, not a `
+    warnOnce(`ai-acolyte: backupMirrorPath "${raw}" is the home directory, not a `
       + `file — using the default ${MIRROR_BACKUP_DEFAULT}`);
     return MIRROR_BACKUP_DEFAULT;
   }
@@ -414,7 +414,7 @@ function onManagedPolicyChanged() {
     // editing settings.json directly (the ✕ button forgets; a hand edit can't).
     const stale = [...assessment.missing.allow, ...assessment.missing.deny];
     vscode.window.showWarningMessage(
-      `acolyte: ${assessment.restorable} saved ${assessment.restorable === 1 ? 'entry is' : 'entries are'} missing from settings.json.`,
+      `ai-acolyte: ${assessment.restorable} saved ${assessment.restorable === 1 ? 'entry is' : 'entries are'} missing from settings.json.`,
       'Re-assert them', 'Forget them'
     ).then((choice) => {
       // An awaited dialog resumes wherever the host happens to be, and teardown
@@ -430,7 +430,7 @@ function onManagedPolicyChanged() {
         // union, but only because the count in the message below is a total.
         forgetFromBackup({ allow: assessment.missing.allow, deny: assessment.missing.deny });
         vscode.window.setStatusBarMessage(
-          `$(check) acolyte: forgot ${stale.length} stale ${stale.length === 1 ? 'entry' : 'entries'} from the backup`, 4000);
+          `$(check) ai-acolyte: forgot ${stale.length} stale ${stale.length === 1 ? 'entry' : 'entries'} from the backup`, 4000);
         dashboard?.refresh();
       }
     });
@@ -460,7 +460,7 @@ function onManagedPolicyChanged() {
   if (!notes.length) return;
 
   vscode.window.showWarningMessage(
-    `acolyte: policy change detected — ${notes.join('; ')}.`,
+    `ai-acolyte: policy change detected — ${notes.join('; ')}.`,
     'Show detail'
   ).then((choice) => {
     if (choice !== 'Show detail') return;
@@ -528,12 +528,12 @@ function restoreFromBackup(options = {}) {
   if (!backup) {
     // Name both, or a user whose ~/.claude was reset is told the only copy is
     // missing while the off-tree one sits there unmentioned.
-    vscode.window.showWarningMessage('acolyte: no backup found at '
+    vscode.window.showWarningMessage('ai-acolyte: no backup found at '
       + `${LATEST_BACKUP} or ${mirrorBackupPath()}`);
     return null;
   }
   if (!backup.allow.length && !backup.deny.length) {
-    vscode.window.showWarningMessage('acolyte: backup is empty — nothing to restore');
+    vscode.window.showWarningMessage('ai-acolyte: backup is empty — nothing to restore');
     return null;
   }
 
@@ -543,7 +543,7 @@ function restoreFromBackup(options = {}) {
   // live half to preserve. An absent file is different: there is nothing to lose.
   if (liveState.state === SETTINGS_UNREADABLE) {
     vscode.window.showWarningMessage(
-      `acolyte: ${SETTINGS} could not be parsed — not restoring over it. ` +
+      `ai-acolyte: ${SETTINGS} could not be parsed — not restoring over it. ` +
       'Fix the file (or close whatever is writing it) and run Restore again.'
     );
     return null;
@@ -559,7 +559,7 @@ function restoreFromBackup(options = {}) {
 
   if (JSON.stringify(current) === JSON.stringify(merged) && !missingDeny.length) {
     if (announce) {
-      vscode.window.setStatusBarMessage('$(history) acolyte: policy already matches backup', 4000);
+      vscode.window.setStatusBarMessage('$(history) ai-acolyte: policy already matches backup', 4000);
     }
     dashboard?.refresh();
     return null;
@@ -576,7 +576,7 @@ function restoreFromBackup(options = {}) {
       // here reaches the user verbatim. The status-bar calls keep theirs, where
       // the substitution does happen.
       vscode.window.showInformationMessage(
-        `acolyte: restored from backup — +${written.addedAllow} allow ` +
+        `ai-acolyte: restored from backup — +${written.addedAllow} allow ` +
         `(${written.allow.length} ${written.allow.length === 1 ? 'entry' : 'entries'} now active)` +
         (written.addedDeny
           ? `, +${written.addedDeny} deny ${written.addedDeny === 1 ? 'rule' : 'rules'}`
@@ -584,7 +584,7 @@ function restoreFromBackup(options = {}) {
       );
     }
   } catch (err) {
-    vscode.window.showErrorMessage(`acolyte: restore failed — ${err.message}`);
+    vscode.window.showErrorMessage(`ai-acolyte: restore failed — ${err.message}`);
   }
   dashboard?.refresh();
   return written;
@@ -742,7 +742,7 @@ function downloadRecallModel() {
   const vocabTarget = path.join(modelDir, RECALL_VOCAB_FILE);
 
   return vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'acolyte: downloading recall model (bge-small, ~32MB)…', cancellable: true },
+    { location: vscode.ProgressLocation.Notification, title: 'ai-acolyte: downloading recall model (bge-small, ~32MB)…', cancellable: true },
     (progress, token) => new Promise((resolve) => {
       // The same guard every execFile callback carries, and the only one of the
       // extension's long jobs that did not have it. Refusing to START is
@@ -756,13 +756,13 @@ function downloadRecallModel() {
       if (!fs.existsSync(vocabTarget)) {
         if (!vocabSource) {
           vscode.window.showErrorMessage(
-            `acolyte: ${RECALL_VOCAB_FILE} not found — cannot set up the recall model.`);
+            `ai-acolyte: ${RECALL_VOCAB_FILE} not found — cannot set up the recall model.`);
           resolve(false); return;
         }
         try { fs.copyFileSync(vocabSource, vocabTarget); }
         catch (err) {
           vscode.window.showErrorMessage(
-            `acolyte: could not copy ${RECALL_VOCAB_FILE} — ${err.message}`);
+            `ai-acolyte: could not copy ${RECALL_VOCAB_FILE} — ${err.message}`);
           resolve(false); return;
         }
       }
@@ -792,7 +792,7 @@ function downloadRecallModel() {
         // "the download you did not cancel failed" is not a thing to tell
         // somebody who just reloaded. The cleanup still runs.
         if (!deactivated) {
-          vscode.window.showErrorMessage(`acolyte: recall model download failed — ${err.message || err}`);
+          vscode.window.showErrorMessage(`ai-acolyte: recall model download failed — ${err.message || err}`);
         }
         // Unlink INSIDE close()'s callback and resolve only after it: close() is async, so
         // unlinking beside it raced the open handle, which on Windows is a swallowed EPERM.
@@ -852,25 +852,25 @@ function downloadRecallModel() {
 async function rebuildRecall() {
   const { dir } = memoryReport();
   if (!dir) {
-    vscode.window.showInformationMessage('acolyte: no MEMORY.md found to index.');
+    vscode.window.showInformationMessage('ai-acolyte: no MEMORY.md found to index.');
     return;
   }
   const script = recallScriptPath();
   if (!script) {
     vscode.window.showWarningMessage(
-      'acolyte: recall.py not found. Set its path so the card can rebuild the index.',
+      'ai-acolyte: recall.py not found. Set its path so the card can rebuild the index.',
       'Set recall.py path…'
     ).then((c) => { if (c === 'Set recall.py path…') setRecallPath(); });
     return;
   }
   let st = recallStatus();
   if (!st.venv) {
-    vscode.window.showWarningMessage(`acolyte: DevToolbox venv python not found at ${st.py} — cannot rebuild the recall index.`);
+    vscode.window.showWarningMessage(`ai-acolyte: DevToolbox venv python not found at ${st.py} — cannot rebuild the recall index.`);
     return;
   }
   if (!st.model) {
     const choice = await vscode.window.showWarningMessage(
-      'acolyte: the CPU recall model (bge-small-en-v1.5, ~32MB) isn\'t installed yet. Download it from Hugging Face now?',
+      'ai-acolyte: the CPU recall model (bge-small-en-v1.5, ~32MB) isn\'t installed yet. Download it from Hugging Face now?',
       'Download', 'Cancel'
     );
     if (choice !== 'Download') return;
@@ -879,13 +879,13 @@ async function rebuildRecall() {
     st = recallStatus();
     if (!st.model) {
       vscode.window.showErrorMessage(
-        `acolyte: model download reported success but ${RECALL_MODEL_FILE} still was not detected — check ${RECALL_MODEL_HOME}.`);
+        `ai-acolyte: model download reported success but ${RECALL_MODEL_FILE} still was not detected — check ${RECALL_MODEL_HOME}.`);
       return;
     }
   }
 
   vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'acolyte: rebuilding recall index…' },
+    { location: vscode.ProgressLocation.Notification, title: 'ai-acolyte: rebuilding recall index…' },
     () => new Promise((resolve) => {
       const env = { ...process.env, RECALL_MODEL_DIR: st.modelDir, RECALL_MEMORY_DIR: dir, RECALL_REEXEC: '1' };
       trackChild(execFile(st.py, [script, '--rebuild'], { env, timeout: 180000 }, (err, _stdout, stderr) => {
@@ -893,10 +893,10 @@ async function rebuildRecall() {
         // the error this reports would be the teardown's own SIGTERM.
         if (deactivated) { resolve(); return; }
         if (err) {
-          vscode.window.showErrorMessage(`acolyte: recall rebuild failed — ${(stderr || err.message || '').trim().slice(0, 300)}`);
+          vscode.window.showErrorMessage(`ai-acolyte: recall rebuild failed — ${(stderr || err.message || '').trim().slice(0, 300)}`);
         } else {
           const n = recallIndexCount(dir);
-          vscode.window.showInformationMessage(`acolyte: recall index rebuilt${n != null ? ` — ${n} memories embedded` : ''}.`);
+          vscode.window.showInformationMessage(`ai-acolyte: recall index rebuilt${n != null ? ` — ${n} memories embedded` : ''}.`);
         }
         dashboard?.refresh();
         resolve();
@@ -939,7 +939,7 @@ function autoSyncRecallIfStale() {
           `$(book) Recall index synced${n != null ? ` — ${n} memories embedded` : ''}`, 5000
         );
       } else {
-        console.error('acolyte: auto recall sync failed —', (stderr || err.message || '').trim().slice(0, 300));
+        console.error('ai-acolyte: auto recall sync failed —', (stderr || err.message || '').trim().slice(0, 300));
       }
       dashboard?.refresh();
     }));
@@ -950,13 +950,13 @@ function autoSyncRecallIfStale() {
     // It also recurs: :1981's timer is one-shot, but memBounce re-enters here on every
     // MEMORY.md write, so a deterministic throw fires again on every trigger and a broken
     // run logged identically to a working one.
-    console.error('acolyte: auto recall sync could not run —', err);
+    console.error('ai-acolyte: auto recall sync could not run —', err);
   }
 }
 
 async function setRecallPath() {
   const val = await vscode.window.showInputBox({
-    title: 'acolyte: path to recall.py',
+    title: 'ai-acolyte: path to recall.py',
     prompt: "Absolute path to your permission-wildcarding repo's memory/recall.py",
     value: recallScriptPath(),
     ignoreFocusOut: true,
@@ -1371,7 +1371,7 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
       autoLearnNextRetryAt = Date.now() + delayMinutes * 60 * 1000;
     }
     if (manual) vscode.window.showErrorMessage(`Auto Learn scan failed: ${error.message}`);
-    else console.error('acolyte: Auto Learn scan failed —', error);
+    else console.error('ai-acolyte: Auto Learn scan failed —', error);
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
@@ -1976,7 +1976,7 @@ function registerAutoLearnWatchers(context) {
       watcher.onDidDelete(() => scheduleAutoLearn());
       context.subscriptions.push(watcher);
     } catch (error) {
-      console.error('acolyte: Auto Learn watcher failed —', error);
+      console.error('ai-acolyte: Auto Learn watcher failed —', error);
     }
   }
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
@@ -2006,7 +2006,7 @@ function registerLocalWatchers(context) {
         watcher.onDidCreate(() => scheduleLocalDrain());
         watchers.push(watcher);
       } catch (error) {
-        console.error('acolyte: local-settings watcher failed —', error);
+        console.error('ai-acolyte: local-settings watcher failed —', error);
       }
     }
   };
@@ -2229,7 +2229,7 @@ function activate(context) {
   try {
     registerLocalWatchers(context);
   } catch (err) {
-    console.error('acolyte: local-settings watchers failed —', err);
+    console.error('ai-acolyte: local-settings watchers failed —', err);
   }
 
   // Process once on activation to catch anything missed while VS Code was closed.
@@ -2269,7 +2269,7 @@ function activate(context) {
     // activate cannot take the initial build down with it.
     context.subscriptions.push(memoryLint.onReconcile(() => reconcileMemoryWatchers()));
   } catch (err) {
-    console.error('acolyte: memory lint failed to activate —', err);
+    console.error('ai-acolyte: memory lint failed to activate —', err);
   }
 
   // The initial build of both memory-store watcher sets. Every later rebuild comes through
@@ -2282,7 +2282,7 @@ function activate(context) {
     // the same leak shape the folder-change watchers were fixed for.
     context.subscriptions.push({ dispose: () => disposeMemoryWatchers() });
   } catch (err) {
-    console.error('acolyte: memory-store watchers failed —', err);
+    console.error('ai-acolyte: memory-store watchers failed —', err);
   }
 }
 
@@ -2422,7 +2422,7 @@ async function offerLegacyCleanup({ explicit = false } = {}) {
         !codexState.readable ? 'Codex config.toml' : null,
       ].filter(Boolean).join(' and ');
       vscode.window.showWarningMessage(
-        `acolyte: ${unreadable} could not be read safely; legacy cleanup left every artifact unchanged.`
+        `ai-acolyte: ${unreadable} could not be read safely; legacy cleanup left every artifact unchanged.`
       );
     }
     return;
@@ -2440,7 +2440,7 @@ async function offerLegacyCleanup({ explicit = false } = {}) {
   if (!shouldOffer) {
     if (explicit) {
       vscode.window.showInformationMessage(
-        'acolyte: no owned legacy MAX configuration was found. The feature cannot be enabled.'
+        'ai-acolyte: no owned legacy MAX configuration was found. The feature cannot be enabled.'
       );
     }
     return;
@@ -2554,16 +2554,16 @@ async function cleanupLegacyMaxConfiguration() {
   dashboard?.refresh();
   if (notes.length) {
     vscode.window.showInformationMessage(
-      `acolyte: legacy cleanup complete. ${notes.join('; ')}. Restart the affected agent.`
+      `ai-acolyte: legacy cleanup complete. ${notes.join('; ')}. Restart the affected agent.`
     );
   }
   if (warnings.length) {
     vscode.window.showWarningMessage(
-      `acolyte: legacy cleanup left items unchanged. ${[...new Set(warnings)].join('; ')}.`
+      `ai-acolyte: legacy cleanup left items unchanged. ${[...new Set(warnings)].join('; ')}.`
     );
   }
   if (!notes.length && !warnings.length) {
-    vscode.window.showInformationMessage('acolyte: no legacy configuration needed a change.');
+    vscode.window.showInformationMessage('ai-acolyte: no legacy configuration needed a change.');
   }
 }
 
@@ -2609,7 +2609,7 @@ function runWildcarding(manual = false) {
   // first reaches the backup.
   const reportAlreadyOptimal = (list, deny) => {
     backupPolicy(list, deny);
-    if (manual) vscode.window.setStatusBarMessage('$(shield) acolyte: already optimal', 4000);
+    if (manual) vscode.window.setStatusBarMessage('$(shield) ai-acolyte: already optimal', 4000);
     dashboard?.refresh(wildcardingHint(list));
   };
 
@@ -2700,7 +2700,7 @@ function runWildcarding(manual = false) {
       dashboard?.refresh();
       return;
     }
-    vscode.window.showErrorMessage(`acolyte: write failed — ${err.message}`);
+    vscode.window.showErrorMessage(`ai-acolyte: write failed — ${err.message}`);
     dashboard?.refresh();
     return;
   }
@@ -2742,11 +2742,11 @@ function runWildcarding(manual = false) {
     const total = written ? written.allow.length : lockedAfter.length;
     if (added || removed) {
       vscode.window.showInformationMessage(
-        `acolyte: wildcarded ${added} permission${added !== 1 ? 's' : ''}, pruned ${removed} — ${total} total`,
+        `ai-acolyte: wildcarded ${added} permission${added !== 1 ? 's' : ''}, pruned ${removed} — ${total} total`,
         { detail: addedList.map(p => `→ ${p}`).join('\n') }
       );
       vscode.window.setStatusBarMessage(
-        `$(shield) acolyte: +${added} -${removed} → ${total} entries`,
+        `$(shield) ai-acolyte: +${added} -${removed} → ${total} entries`,
         5000
       );
     }
@@ -2801,8 +2801,8 @@ function drainLocal(manual = false) {
     if (manual) {
       vscode.window.setStatusBarMessage(
         vscode.workspace.isTrusted
-          ? '$(shield) acolyte: no .claude/settings.local.json in this workspace'
-          : '$(shield) acolyte: workspace is not trusted — local drain skipped',
+          ? '$(shield) ai-acolyte: no .claude/settings.local.json in this workspace'
+          : '$(shield) ai-acolyte: workspace is not trusted — local drain skipped',
         5000);
     }
     return;
@@ -2817,7 +2817,7 @@ function drainLocal(manual = false) {
     if (err?.code === POLICY_LOCK_CODE) {
       // Auto Learn holds the lock; its write fires the settings watcher and we
       // come back through here. Only a manual click deserves a message.
-      if (manual) vscode.window.setStatusBarMessage(`$(shield) acolyte: ${POLICY_LOCK_BUSY_MESSAGE}`, 5000);
+      if (manual) vscode.window.setStatusBarMessage(`$(shield) ai-acolyte: ${POLICY_LOCK_BUSY_MESSAGE}`, 5000);
       return;
     }
     if (err?.code === SETTINGS_UNREADABLE_CODE) {
@@ -2829,11 +2829,11 @@ function drainLocal(manual = false) {
       if (localDrainRetries < 20) { localDrainRetries += 1; scheduleLocalDrain(3000); }
       if (manual) {
         vscode.window.setStatusBarMessage(
-          '$(shield) acolyte: settings.json is mid-write — retrying the drain shortly', 5000);
+          '$(shield) ai-acolyte: settings.json is mid-write — retrying the drain shortly', 5000);
       }
       return;
     }
-    vscode.window.showErrorMessage(`acolyte: local drain failed — ${err.message}`);
+    vscode.window.showErrorMessage(`ai-acolyte: local drain failed — ${err.message}`);
     return;
   }
   localDrainRetries = 0;
@@ -2841,7 +2841,7 @@ function drainLocal(manual = false) {
   if (reports.some((report) => report.blocked === 'legacy-blanket')) {
     if (manual) {
       vscode.window.showWarningMessage(
-        'acolyte: legacy Bash(*) and PowerShell(*) grants cover every ' +
+        'ai-acolyte: legacy Bash(*) and PowerShell(*) grants cover every ' +
         'project-local entry, so draining could empty that file. Remove the legacy ' +
         'configuration first.');
     }
@@ -2855,14 +2855,14 @@ function drainLocal(manual = false) {
     localDrainAt = Date.now();
     lastRun = Date.now();
     vscode.window.showInformationMessage(
-      `acolyte: promoted ${promoted.length} project-local approval${promoted.length !== 1 ? 's' : ''} ` +
+      `ai-acolyte: promoted ${promoted.length} project-local approval${promoted.length !== 1 ? 's' : ''} ` +
       `to user scope, pruned ${pruned} now-redundant local ${pruned === 1 ? 'entry' : 'entries'}`,
       { detail: promoted.map((p) => `→ ${p}`).join('\n') }
     );
   } else if (manual) {
     const kept = reports.reduce((sum, report) => sum + report.kept, 0);
     vscode.window.setStatusBarMessage(
-      `$(shield) acolyte: nothing to promote — ${kept} local ` +
+      `$(shield) ai-acolyte: nothing to promote — ${kept} local ` +
       `${kept === 1 ? 'entry is' : 'entries are'} project-specific`, 5000);
   }
   dashboard?.refresh();
@@ -2934,13 +2934,13 @@ function ensureGuidance(announce = false) {
     if (!changed.length) return;
     if (announce || want) {
       vscode.window.setStatusBarMessage(
-        `$(shield) acolyte: shell-style guidance ${want ? 'added to' : 'removed from'} ` +
+        `$(shield) ai-acolyte: shell-style guidance ${want ? 'added to' : 'removed from'} ` +
         changed.map((result) => result.agent).join(' + '),
         6000);
     }
     dashboard?.refresh();
   } catch (err) {
-    console.error('acolyte: guidance write failed —', err);
+    console.error('ai-acolyte: guidance write failed —', err);
   }
 }
 
@@ -2975,7 +2975,7 @@ async function toggleGuidance() {
   try {
     await config.update('guidance.enabled', next, vscode.ConfigurationTarget.Global);
   } catch (err) {
-    vscode.window.showErrorMessage(`acolyte: ${err.message}`);
+    vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
     return;
   }
 
@@ -2994,10 +2994,10 @@ async function toggleGuidance() {
   const failed = results.filter((result) => result.error);
   if (failed.length) {
     vscode.window.showErrorMessage(
-      `acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
+      `ai-acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
   } else {
     vscode.window.showInformationMessage(
-      `acolyte: shell-style guidance ${next ? 'ON' : 'OFF'} — ` +
+      `ai-acolyte: shell-style guidance ${next ? 'ON' : 'OFF'} — ` +
       results.map((result) => result.path.replace(os.homedir(), '~')).join(', ') +
       (next ? ' (applies from each agent’s next session)' : ''));
   }
@@ -3095,12 +3095,12 @@ function compiledGateCount() {
 // a modal at someone who was only editing a note, so it reports to the console instead.
 function compileGates({ quiet = false } = {}) {
   const warn = (msg, action) => {
-    if (quiet) { console.error('acolyte: ' + msg); return; }
+    if (quiet) { console.error('ai-acolyte: ' + msg); return; }
     if (action) {
-      vscode.window.showWarningMessage('acolyte: ' + msg, action)
+      vscode.window.showWarningMessage('ai-acolyte: ' + msg, action)
         .then((c) => { if (c === action) setRecallPath(); });
     } else {
-      vscode.window.showWarningMessage('acolyte: ' + msg);
+      vscode.window.showWarningMessage('ai-acolyte: ' + msg);
     }
   };
   // Nothing here may start after teardown: the callback chains into a write of
@@ -3125,8 +3125,8 @@ function compileGates({ quiet = false } = {}) {
       if (deactivated) { resolve(false); return; }
       if (err) {
         const detail = (stderr || err.message || '').trim().slice(0, 300);
-        if (quiet) console.error('acolyte: gate compile failed —', detail);
-        else vscode.window.showErrorMessage(`acolyte: gate compile failed — ${detail}`);
+        if (quiet) console.error('ai-acolyte: gate compile failed —', detail);
+        else vscode.window.showErrorMessage(`ai-acolyte: gate compile failed — ${detail}`);
         resolve(false);
         return;
       }
@@ -3155,13 +3155,13 @@ function ensureGates(announce = false) {
     if (!changed.length) return;
     if (announce || want) {
       vscode.window.setStatusBarMessage(
-        `$(law) acolyte: memory gates ${want ? 'added to' : 'removed from'} ` +
+        `$(law) ai-acolyte: memory gates ${want ? 'added to' : 'removed from'} ` +
         changed.map((result) => result.agent).join(' + '),
         6000);
     }
     dashboard?.refresh();
   } catch (err) {
-    console.error('acolyte: gates write failed —', err);
+    console.error('ai-acolyte: gates write failed —', err);
   }
 }
 
@@ -3187,7 +3187,7 @@ async function toggleGates() {
     states = gatesStatusAll();
     if (!states.some((state) => state.compiled)) {
       vscode.window.showWarningMessage(
-        'acolyte: nothing to install — no memory carries a <!-- gate --> block '
+        'ai-acolyte: nothing to install — no memory carries a <!-- gate --> block '
         + 'with `scope: global`.');
       dashboard?.refresh();
       return;
@@ -3211,7 +3211,7 @@ async function toggleGates() {
   try {
     await config.update('gates.enabled', next, vscode.ConfigurationTarget.Global);
   } catch (err) {
-    vscode.window.showErrorMessage(`acolyte: ${err.message}`);
+    vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
     return;
   }
 
@@ -3225,10 +3225,10 @@ async function toggleGates() {
   const failed = results.filter((result) => result.error);
   if (failed.length) {
     vscode.window.showErrorMessage(
-      `acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
+      `ai-acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
   } else {
     vscode.window.showInformationMessage(
-      `acolyte: memory gates ${next ? 'ON' : 'OFF'} — ` +
+      `ai-acolyte: memory gates ${next ? 'ON' : 'OFF'} — ` +
       results.map((result) => result.path.replace(os.homedir(), '~')).join(', ') +
       (next ? ' (applies from each agent’s next session)' : ''));
   }
@@ -3296,10 +3296,10 @@ function removeAllowEntry(perm) {
     // deny rule that happens to spell the same permission must survive it.
     forgetFromBackup({ allow: [perm] });
     lastRun = Date.now();
-    vscode.window.setStatusBarMessage(`$(shield) acolyte: removed ${perm}`, 4000);
+    vscode.window.setStatusBarMessage(`$(shield) ai-acolyte: removed ${perm}`, 4000);
     return true;
   } catch (err) {
-    vscode.window.showErrorMessage(`acolyte: remove failed — ${err.message}`);
+    vscode.window.showErrorMessage(`ai-acolyte: remove failed — ${err.message}`);
     return false;
   }
 }
@@ -3315,7 +3315,7 @@ async function showWildcardPicker() {
   const settings = readSettings();
   if (!settings) {
     vscode.window.showWarningMessage(
-      'acolyte: settings.json is missing or unreadable.');
+      'ai-acolyte: settings.json is missing or unreadable.');
     return;
   }
   const allow = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
@@ -3324,7 +3324,7 @@ async function showWildcardPicker() {
   const wildcards = allow.filter((p) => p.includes('*')).sort();
   if (!wildcards.length) {
     vscode.window.showInformationMessage(
-      'acolyte: no wildcard entries yet — approve some commands first.');
+      'ai-acolyte: no wildcard entries yet — approve some commands first.');
     return;
   }
   const pick = await vscode.window.showQuickPick(

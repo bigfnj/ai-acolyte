@@ -1,4 +1,4 @@
-# Acolyte
+# AI Acolyte
 
 *Formerly Permission Wildcarding. The extension ID, every command ID and every setting key
 are unchanged, so an existing install upgrades in place.*

@@ -1,8 +1,8 @@
 {
   "name": "permission-wildcarding",
-  "displayName": "Acolyte",
+  "displayName": "AI Acolyte",
   "description": "Cuts agent approval friction, with a different mechanism per agent. Claude Code only: generalizes approved permissions into command-family wildcards on change, drains project-local approvals into user scope, and backs up policy before every write. Codex only: exports execpolicy prefix rules, validated by codex execpolicy check before anything is written. Shared: Auto Learn over both agents' history, a wildcardable shell style for the agent, memory gates, memory-index diagnostics, and prompt diagnostics. Codex has no wildcarding pass and no project-local promotion. Codex rule export is experimental.",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -21,7 +21,7 @@
       "activitybar": [
         {
           "id": "permissionWildcarding",
-          "title": "Acolyte",
+          "title": "AI Acolyte",
           "icon": "media/icon.svg"
         }
       ]
@@ -31,94 +31,94 @@
         {
           "type": "webview",
           "id": "permissionWildcarding.dashboard",
-          "name": "Wildcarding"
+          "name": "AI Acolyte"
         }
       ]
     },
     "commands": [
       {
         "command": "permission-wildcarding.runNow",
-        "title": "Acolyte: Wildcard Now",
+        "title": "AI Acolyte: Wildcard Now",
         "icon": "$(sync)"
       },
       {
         "command": "permission-wildcarding.restoreBackup",
-        "title": "Acolyte: Restore prunes from backup",
+        "title": "AI Acolyte: Restore prunes from backup",
         "icon": "$(history)"
       },
       {
         "command": "permission-wildcarding.showWildcards",
-        "title": "Acolyte: Show all tracked wildcards",
+        "title": "AI Acolyte: Show all tracked wildcards",
         "icon": "$(list-filter)"
       },
       {
         "command": "permission-wildcarding.scanHistory",
-        "title": "Acolyte: Auto Learn - Scan now (compatibility command)",
+        "title": "AI Acolyte: Auto Learn - Scan now (compatibility command)",
         "icon": "$(search)"
       },
       {
         "command": "permission-wildcarding.autoLearnScan",
-        "title": "Acolyte: Auto Learn - Scan now",
+        "title": "AI Acolyte: Auto Learn - Scan now",
         "icon": "$(sync)"
       },
       {
         "command": "permission-wildcarding.autoLearnReview",
-        "title": "Acolyte: Auto Learn - Review candidates",
+        "title": "AI Acolyte: Auto Learn - Review candidates",
         "icon": "$(checklist)"
       },
       {
         "command": "permission-wildcarding.autoLearnApplySafe",
-        "title": "Acolyte: Auto Learn - Apply safe candidates",
+        "title": "AI Acolyte: Auto Learn - Apply safe candidates",
         "icon": "$(shield)"
       },
       {
         "command": "permission-wildcarding.autoLearnUndo",
-        "title": "Acolyte: Auto Learn - Undo last application",
+        "title": "AI Acolyte: Auto Learn - Undo last application",
         "icon": "$(discard)"
       },
       {
         "command": "permission-wildcarding.autoLearnCycleMode",
-        "title": "Acolyte: Auto Learn - Cycle mode",
+        "title": "AI Acolyte: Auto Learn - Cycle mode",
         "icon": "$(settings-gear)"
       },
       {
         "command": "permission-wildcarding.autoLearnWhy",
-        "title": "Acolyte: Auto Learn - Why did this prompt?",
+        "title": "AI Acolyte: Auto Learn - Why did this prompt?",
         "icon": "$(question)"
       },
       {
         "command": "permission-wildcarding.autoLearnShowBlocked",
-        "title": "Acolyte: Auto Learn - Show families blocked by managed policy",
+        "title": "AI Acolyte: Auto Learn - Show families blocked by managed policy",
         "icon": "$(shield)"
       },
       {
         "command": "permission-wildcarding.derivedGuidance",
-        "title": "Acolyte: Derived guidance - review mitigations for prompts no rule can stop",
+        "title": "AI Acolyte: Derived guidance - review mitigations for prompts no rule can stop",
         "icon": "$(lightbulb)"
       },
       {
         "command": "permission-wildcarding.drainLocal",
-        "title": "Acolyte: Drain project-local approvals into user scope",
+        "title": "AI Acolyte: Drain project-local approvals into user scope",
         "icon": "$(export)"
       },
       {
         "command": "permission-wildcarding.toggleGuidance",
-        "title": "Acolyte: Toggle shell-style guidance in ~/.claude/CLAUDE.md",
+        "title": "AI Acolyte: Toggle shell-style guidance in ~/.claude/CLAUDE.md",
         "icon": "$(book)"
       },
       {
         "command": "permission-wildcarding.toggleGates",
-        "title": "Acolyte: Toggle memory gates in ~/.claude/CLAUDE.md",
+        "title": "AI Acolyte: Toggle memory gates in ~/.claude/CLAUDE.md",
         "icon": "$(law)"
       },
       {
         "command": "permission-wildcarding.lintMemory",
-        "title": "Acolyte: Lint memory index (MEMORY.md bloat + broken links)",
+        "title": "AI Acolyte: Lint memory index (MEMORY.md bloat + broken links)",
         "icon": "$(book)"
       },
       {
         "command": "permission-wildcarding.rebuildRecall",
-        "title": "Acolyte: Rebuild recall index (CPU bge-small re-embed)",
+        "title": "AI Acolyte: Rebuild recall index (CPU bge-small re-embed)",
         "icon": "$(sync)"
       }
     ],
@@ -142,7 +142,7 @@
       ]
     },
     "configuration": {
-      "title": "Acolyte",
+      "title": "AI Acolyte",
       "properties": {
         "permissionWildcarding.backupMirrorPath": {
           "type": "string",

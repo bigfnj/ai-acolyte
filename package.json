@@ -1,6 +1,6 @@
 {
   "name": "permission-wildcarding",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Cuts agent approval friction, with a different mechanism per agent. Claude Code only: generalizes approved permissions into command-family wildcards, promotes project-local approvals to user scope, and backs up policy before every write. Codex only: exports execpolicy prefix rules, validated by codex execpolicy check before anything is written. Shared: Auto Learn over both agents' history, a wildcardable shell style installed into CLAUDE.md and AGENTS.md, memory gates, and prompt diagnostics. Codex has no wildcarding pass and no project-local promotion. Codex rule export is experimental.",
   "license": "MIT",
   "scripts": {

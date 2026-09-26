@@ -1,4 +1,4 @@
-# Acolyte (VS Code extension)
+# AI Acolyte (VS Code extension)
 
 Watches `~/.claude/settings.json` and live-generalizes approved Claude Code
 permissions to depth-aware wildcards. Adds an Activity Bar dashboard: a hero card

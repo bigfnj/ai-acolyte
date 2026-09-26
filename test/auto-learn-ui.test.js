@@ -391,7 +391,7 @@ test('the blocked note names a command that can actually show the list', () => {
 
   const pkg = require('../vscode-extension/package.json');
   const titles = pkg.contributes.commands.map((entry) => entry.title);
-  assert.ok(titles.includes('Acolyte: Auto Learn - Show families blocked by managed policy'),
+  assert.ok(titles.includes('AI Acolyte: Auto Learn - Show families blocked by managed policy'),
     'the note points at a command the palette does not contribute');
 });
 

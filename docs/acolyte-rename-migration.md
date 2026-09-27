@@ -1,6 +1,11 @@
 # Acolyte rename migration
 
-**Phase 2 is DONE as of 2026-09-25.** The visible product name is now `Acolyte`.
+**Phase 2 is DONE as of 2026-09-25.** The visible product name is now `AI Acolyte`.
+
+⚠ It was `Acolyte` for part of that day. Commit `1553d74` changed it to **`AI Acolyte`**
+because the sidebar read "Acolyte: Wildcarding" and did not match the view title. The rows
+below say `AI Acolyte` for that reason; anything quoting the bare `Acolyte:` prefix is
+describing the intermediate state, not the shipped one.
 
 This file replaces `agent-policy-console-rename-migration.md`. That plan named
 `Agent Policy Console` as the target; the name chosen instead is **Acolyte**, for a tool
@@ -18,9 +23,9 @@ Only text a user reads. Every compatibility identifier is byte-identical.
 
 | Surface | State |
 |---|---|
-| Visible product name | **`Acolyte`** (was `Permission Wildcarding`) |
-| Command palette titles | **`Acolyte: …`** (17 of them) |
-| Activity-bar container title, settings section title | **`Acolyte`** |
+| Visible product name | **`AI Acolyte`** (was `Permission Wildcarding`) |
+| Command palette titles | **`AI Acolyte: …`** (17 of them) |
+| Activity-bar container title, settings section title | **`AI Acolyte`** |
 | Output channel, notification and diagnostic prefixes | **`ai-acolyte: …`** (73 strings) |
 | VS Code extension ID | unchanged, `local.permission-wildcarding` |
 | Manifest `name` and `publisher` | unchanged |
@@ -80,9 +85,27 @@ is ever used on a machine that clones untrusted code". Publishing is that condit
 relies on the extension path, which VS Code already gates behind workspace trust. The
 local build keeps current behaviour.
 
-Also outstanding: no `icon` is declared and the Marketplace listing needs one; the eight
-screenshots under `img/` have never been eyeballed for legible paths or window titles, and
-the repo's own privacy gate is text-only so nothing automated will ever check them.
+Also outstanding: no `icon` is declared and the Marketplace listing needs one.
+
+**The eight screenshots under `img/` have now been eyeballed, 2026-09-27.** The repo's
+privacy gate is text-only and never will check them, so this was done by opening each one.
+What is in them:
+
+- No employer name, no email address, and no window title or path bar — every one is a
+  crop of a single card, so the pre-rename product name is not visible in any of them.
+  The rename did **not** invalidate them.
+- `01-wildcarding.png` carries a version badge reading **`v1.4.13`** against a current
+  1.5.4, which is the one provably false thing in the set.
+- Legible local paths: `C:\Users\Admin\AppData\Local\DevToolbox\...` and a
+  `D:/.ai-work/projects/desktopPet/...` build path in `08-tracking.png`,
+  `d:\.ai-work\.claude\settings.local.json` in `04`, and the memory store path in `07`.
+  The username and the unrelated project name are public on a public repo.
+- Counts are all from 2026-09-16 and have drifted (`06` says 16 gates, `07` says 123
+  files).
+
+`03-maxmode.png` was deleted in `d947565` with the MAX retirement, so no retired surface
+is pictured. Owner decision 2026-09-27: **re-capture later**; the set stays as it is until
+then.
 
 ## Phase 5, the local checkout directory: BLOCKED, and the script is written
 

@@ -271,8 +271,12 @@ function managedBlockedNote(managed) {
   if (!blocked.length) return '';
   // A count with no route to the list is a dead end, and a quick-pick title
   // cannot be clicked, so name the command that shows it.
-  return ` (${blocked.length} blocked by managed policy — run "Auto Learn - Show families blocked` +
-    ' by managed policy")';
+  // The quoted name must be the palette title VERBATIM, prefix included. The
+  // 2026-09-25 rename put "AI Acolyte: " on all 17 contributed titles and left
+  // this string behind, so the note named a command no title matched. The
+  // palette fuzzy-matches, so it still found it -- which is why nothing noticed.
+  return ` (${blocked.length} blocked by managed policy — run "AI Acolyte: Auto Learn - Show` +
+    ' families blocked by managed policy")';
 }
 
 // The detail behind that note. Names the managed rule, because a verdict alone

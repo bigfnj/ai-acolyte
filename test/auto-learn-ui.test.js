@@ -386,13 +386,22 @@ test('the blocked note names a command that can actually show the list', () => {
   // A quick-pick title cannot be clicked, so a bare count is a dead end. The
   // title has to name the command, and that command has to exist: this string
   // is checked against package.json by the contribution test below.
+  // Derived from the manifest, never restated here. The previous version of this
+  // test asserted a SUBSTRING of the note and, separately, a hard-coded literal
+  // in package.json. Those two move independently: the rename added a prefix to
+  // the title and to the literal together, the substring still matched, and the
+  // note kept naming a command that no longer existed under that name. A test
+  // that pins both sides of a relation cannot see the relation break.
   const note = managedBlockedNote(BLOCKED);
-  assert.match(note, /Auto Learn - Show families blocked by managed policy/);
+  const quoted = note.match(/run "([^"]+)"/);
+  assert.ok(quoted, `the note quotes no command name at all: ${note}`);
 
   const pkg = require('../vscode-extension/package.json');
   const titles = pkg.contributes.commands.map((entry) => entry.title);
-  assert.ok(titles.includes('AI Acolyte: Auto Learn - Show families blocked by managed policy'),
-    'the note points at a command the palette does not contribute');
+  assert.ok(titles.includes(quoted[1]),
+    `the note tells the reader to run "${quoted[1]}", which is not a contributed `
+    + 'palette title. Nearest: '
+    + (titles.find((title) => title.endsWith(quoted[1])) || '(none)'));
 });
 
 test('"why did this prompt" names the managed rule instead of gesturing at org policy', () => {

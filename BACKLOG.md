@@ -260,6 +260,23 @@ string it never asserts on (`void swapped;`); the real mutant is built two lines
 ⚠ **The `file:line` corpus got worse across this effort, not better**, and roughly half the
 stale citations were written by it. The counts live in one place only, in the entry above;
 do not restate them here. The gate cannot see them, for the reason that entry gives.
+### The screenshots are stale, and one of them is provably wrong
+
+Eyeballed 2026-09-27, which `docs/acolyte-rename-migration.md` had listed as never done.
+That file now holds the full inventory; the short version is that `img/01-wildcarding.png`
+shows a version badge reading **`v1.4.13`** against a current 1.5.4, every count in the set
+is from 2026-09-16, and three of the eight carry legible local paths including a username
+and an unrelated project's build directory, on a public repo.
+
+The rename did **not** invalidate them: all eight are single-card crops with no window
+title, so the old product name appears nowhere. `03-maxmode.png` went with the MAX
+retirement in `d947565`, so no retired surface is pictured either.
+
+**Owner decision 2026-09-27: re-capture later, leave the set alone until then.** Worth
+doing against a scratch `HOME` so the paths are not this machine's. Nothing automated will
+ever catch this — the privacy gate is text-only, and a PNG has no line for a checker to
+read.
+
 ---
 
 ## Deliberately not here

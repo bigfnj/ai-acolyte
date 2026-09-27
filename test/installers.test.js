@@ -526,3 +526,35 @@ test('the two package manifests report the same version', () => {
     `root package.json is ${root.version} but the extension manifest is ${ext.version}; `
     + 'release.yml treats the extension manifest as authoritative, so bump the root to match');
 });
+
+test("the README's install command names the version a build actually produces", () => {
+  // README.md tells the reader to name the version rather than glob it, because
+  // `permission-wildcarding-*.vsix` can hand VS Code an older leftover and
+  // installing an equal or lower version is a silent no-op. That advice only works
+  // if the version in the command is the one packaging writes.
+  //
+  // It went stale: the command still read 1.5.2 at 1.5.4, naming a file no longer
+  // in the tree. scripts/check-version-sync.mjs was green throughout -- it reads
+  // the two manifests, the artefact and the build stamp, and never the README. The
+  // identical hard-coded 1.5.2 in scripts/drive-installed.js was found and fixed;
+  // this copy was not, because nothing looked at it.
+  const ext = JSON.parse(fs.readFileSync(
+    path.join(repoRoot, 'vscode-extension', 'package.json'), 'utf8'));
+  const readme = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
+
+  const named = [...readme.matchAll(/permission-wildcarding-(\d+\.\d+\.\d+)\.vsix/g)]
+    .map((match) => match[1]);
+
+  // Asserting the list is non-empty first: a README that stopped naming a version
+  // at all would otherwise pass this vacuously.
+  assert.ok(named.length > 0,
+    'README.md names no permission-wildcarding-<version>.vsix at all, so the install '
+    + 'instruction can no longer be checked against the manifest');
+
+  for (const version of named) {
+    assert.equal(version, ext.version,
+      `README.md tells the reader to install permission-wildcarding-${version}.vsix, but `
+      + `packaging produces ${ext.version}. The README warns that installing an equal or `
+      + 'lower version is a silent no-op, so a stale number here is the failure it describes.');
+  }
+});

@@ -38,7 +38,7 @@ the extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension permission-wildcarding-1.5.5.vsix
+code --install-extension permission-wildcarding-1.5.6.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

@@ -292,9 +292,22 @@ test('neither drain-blocked message claims a cause the block does not require', 
     const text = read(rel);
     assert.ok(text.includes('legacy-blanket') || text.includes('l.blocked'),
       `${rel} no longer handles the blocked drain; this guard has lost its subject`);
-    assert.ok(!/blanket\s*' \+\s*'?grants cover every local entry|PowerShell\(\*\) grants cover every local entry/.test(text),
-      `${rel} tells the user that blanket grants cover every local entry, but the block `
-      + 'fires on the retired hook or its generated entries, with no blanket grant required');
+    // Two spellings of the same false claim. The long sentence was the one the
+    // first pass fixed; the status row said "legacy blanket detected" in two words
+    // and slipped through a tripwire that only knew the long form. It was caught by
+    // grepping the INSTALLED artefact, which is the argument for checking the thing
+    // that ships rather than the patch you just wrote.
+    const falseClaims = [
+      /blanket\s*' \+\s*'?grants cover every local entry/,
+      /PowerShell\(\*\) grants cover every local entry/,
+      /legacy blanket detected/,
+    ];
+    for (const claim of falseClaims) {
+      assert.ok(!claim.test(text),
+        `${rel} matches ${claim}, telling the user a blanket grant is why the drain is `
+        + 'blocked. The block fires on the retired hook or its generated entries, with '
+        + 'no blanket grant required.');
+    }
   }
 });
 

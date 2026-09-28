@@ -3939,7 +3939,7 @@ class WildcardingViewProvider {
     // renderLocal defines it, so the row and the card can never disagree.
     const l = d.local || {};
     const pending = (l.promote || 0) + (l.prune || 0);
-    if (l.blocked) setState('stLocal', 'legacy blanket detected', 'warn');
+    if (l.blocked) setState('stLocal', 'retired MAX state active', 'warn');
     else if (!l.trusted) setState('stLocal', 'workspace not trusted');
     else if (pending) setState('stLocal', pending + ' to drain', 'warn');
     else setState('stLocal', 'drained');

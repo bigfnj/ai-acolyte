@@ -1401,3 +1401,15 @@ a source-text tripwire beside the behavioural test. It is honest about being a t
 strings live inside a webview template and an inline CLI branch, so neither is reachable from a
 unit test, and the guard asserts the CONDITION (the block does not imply blanket grants) rather
 than that the strings exist.
+
+⚠ **There were THREE sites, not two, and the first fix missed one.** The status row at
+`vscode-extension/extension.js:3942` said the same thing in two words — `'legacy blanket
+detected'` — and the tripwire, written against the long sentence, did not know that spelling.
+It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which
+was green, and not by re-reading the patch, which looked complete. The tripwire now carries a
+list of spellings rather than one regex.
+
+This is the same lesson as the release-note claim about validating the deployed artefact, and it
+keeps arriving from a different direction: **a patch script that asserts `count === 1` proves
+its pattern was unique, not that the pattern was the only place the thing was said.** Uniqueness
+of a string is not coverage of a concept. Grep the artefact for the CONCEPT afterwards.

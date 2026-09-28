@@ -14,6 +14,21 @@ disposition: fixed and deleted, proven already done and deleted, or measured and
 the record as a decline. What is below is what survived that, plus what the work itself
 found. The suite went 574 to 731 tests over it.
 
+**Verified against the code 2026-09-27, and twenty claims here were wrong.** Three read-only
+passes checked every open entry against the tree rather than against its own prose. One
+finding was **refuted outright** (the `httpsGetFollow` leak), two mechanisms were described
+as something the code does not do (`SHELL_WRAPPERS` stripping, the census reading
+`module.exports`), one proposed gate turned out to be worth **one** finding rather than
+nine, two measurements were off (zero local settings files is one; ~145 references is 129),
+and several citations pointed at the wrong lines — including one inside the dead-export
+census itself. Corrections are inline and dated, not appended, so an entry cannot be read
+without its correction. **Two deleted trackers were recovered** from `b5b206f^` and are
+restored below.
+
+The pattern worth naming: **an entry rots in a way its own prose cannot show.** Every
+correction below came from running the thing or reading the line, never from re-reading the
+entry. Re-verify before acting on anything here, including this paragraph.
+
 ---
 
 ## Open
@@ -26,21 +41,45 @@ found. The suite went 574 to 731 tests over it.
 - **No declared version window that FAILS.** One platform, one contract-tested version.
   Nothing breaks when Codex moves outside it, so the next breaking change arrives as a
   silent wrong answer rather than a red test. This is the largest remaining gap.
+  ⚠ **Stronger than this entry said, verified 2026-09-27: there is no version window at
+  all, declared or enforced, and no code path anywhere reads a Codex version.** Searched
+  `src/`, `bin/`, `vscode-extension/`, `scripts/` for min/max version constants, semver
+  comparison and `codexVersion`: the only `MIN_SUPPORTED_VERSION` in the tree is the Auto
+  Learn state-schema version at `src/auto-learn-manager.js:41`, unrelated. `codex
+  --version` is invoked in exactly one place, `test/codex-contract.test.js:38`, and only
+  to build the skip banner. `cli_version` appears solely inside the synthetic fixture
+  `test/fixtures/codex-rollout-sanitized.jsonl`, which nothing in `src/` reads. So the
+  version is observed once, printed, and never compared.
 - **The contract tests cannot run in CI.** GitHub's runners have no `codex` binary and no
   authentication for one, so they skip with a banner naming the reason. A self-hosted
   runner is the only way this becomes continuous; until then the evidence is a local
   artefact with a date on it.
-- **`classifyCodexOutput` is unreachable from any real rollout on this box.** It runs only
-  for the direct `function_call` shell shape. Across all 53 rollouts here the
+- **`classifyCodexOutput` never DECIDES for any real rollout on this box.** ⚠ Corrected
+  2026-09-27: "runs only for the direct `function_call` shape" was wrong. It is CALLED on
+  both output shapes (`src/history-adapters.js:847`); on the `_customExec` path its verdict
+  is then discarded and recomputed from `nestedStatuses` in `applyCodexGroupResult`
+  (`src/history-adapters.js:749-755`). It survives only through the `result.status ===
+  'failed'` disjunct, which `nested.includes('failed')` already covers independently — and
+  that double coverage is precisely why the always-`success` mutation survived. Across all
+  53 rollouts here the
   `function_call` names are `wait`, `spawn_agent`, `wait_agent`, `send_message`,
   `list_agents`, `followup_task`, `interrupt_agent`; every shell call arrives as
   `custom_tool_call` name `exec` and takes the `_customExec` branch. A mutation making the
-  function always return `success` survived the fixture. Measured 2026-09-25. Its own
-  comment already said "NOT VERIFIED AGAINST A REAL SAMPLE"; this is how far that goes. A
-  fixture was deliberately NOT invented for a shape nobody has seen.
+  function always return `success` survived the fixture. Measured 2026-09-25. A fixture was
+  deliberately NOT invented for a shape nobody has seen. ⚠ The "NOT VERIFIED AGAINST A REAL
+  SAMPLE" comment this entry attributed to the function is not on it — there is no comment
+  above the function at all. It sits at `src/history-adapters.js:565`, on
+  `CODEX_FUNCTION_SHELL_NAMES` (`src/history-adapters.js:565-573`), i.e. on the GATE that
+  fact, anchored one level up.
 - **Qualify the shell-guidance claim.** Official documentation permits splitting simple
   chains for policy evaluation, while the Windows 0.154 probe did not match the wrapper
   form the extension currently describes. The guidance text has not been corrected.
+  ⚠ **It has TWO sites, not one** (verified 2026-09-27): the shipped body at
+  `src/agent-guidance.js:89-92` and the module comment restating it at `:44-48`. Correcting
+  one leaves the other, which is the "uniqueness of a string is not coverage of a concept"
+  trap recorded in `docs/engineering-record.md`. Related and unlisted: `:81-86` recommends
+  invoking a wrapper script, while `:89-92` explains a `bash -lc` wrapper defeats Codex
+  argv-prefix matching. Different wrappers, but the block does not distinguish them.
 
 ### The `file:line` gate catches less than it looks like it catches
 
@@ -48,10 +87,22 @@ found. The suite went 574 to 731 tests over it.
 or a bare closing brace. A stale citation pointing at a plausible-looking line is invisible
 to CI.
 
+⚠ **That list was incomplete** (verified 2026-09-27). `checkBounds`
+(`scripts/check-line-refs.js:599-644`) also fails on a missing file, an unreadable file, an
+out-of-bounds line, and a **descending range** (`:623-632`, added after three shipped in one
+commit). And it SKIPS ambiguous basenames entirely (`:605`), so an ambiguous reference can
+never fail the suite. The floor assertions matter too: `test/line-refs.test.js:65-77` and
+`:114-133` both require `refs.length >= 100`, so a silently-dead extractor fails rather than
+passing with zero findings.
+
 **The measurement, stated once so it cannot drift in two places: run**
-`node scripts/check-line-refs.js --quiet`. On 2026-09-25 it reported **OK 38 | NEAR 16 |
-STALE 54 | UNVERIFIABLE 17** over 125 references, against **OK 119 on 2026-09-16**. None of
-the 54 fails the suite.
+`node scripts/check-line-refs.js --quiet`. On 2026-09-27 it reported **OK 47 | NEAR 16 |
+STALE 49 | UNVERIFIABLE 17** over 129 references, exit 0. It read **OK 38 | NEAR 16 | STALE
+54 | UNVERIFIABLE 17** over 125 on 2026-09-25. None of the STALE rows fails the suite.
+
+Where they concentrate, measured 2026-09-27: **28 of the 49 STALE sit in five files** —
+`docs/engineering-record.md` 12, `vscode-extension/extension.js` comments 5,
+`test/dashboard-view.test.js` 5, `src/fixed-point-cache.js` 3, `src/auto-learn-manager.js` 3.
 
 Two corrections this entry had to make to ITSELF, which is the point. It first called 84 the
 STALE count when 84 was the non-OK TOTAL. It then quoted two different counts in two places,
@@ -69,33 +120,91 @@ says why: it picks a neighbouring symbol often enough that asserting it would fa
 on correct references, and a gate that cries wolf gets suppressed. **So this is a known
 limit rather than a bug.** What would close it without that cost is an anchor form — cite
 `file:line` plus the identifier expected there — which is checkable exactly and needs no
-heuristic. That is a corpus-wide change to ~145 references and has not been attempted.
+heuristic. That is a corpus-wide change to **129** references (not the ~145 this entry used
+to claim) and has not been attempted.
+
+Feasibility, measured 2026-09-27, because it is cheaper than it reads. An anchor can be
+**optional**: it lands in a new capture group on `REF_RE`
+(`scripts/check-line-refs.js:57-62`), `REF_STRIP_RE` (`:85`) inherits it for free since it is
+derived from the same source, and `judge()` (`:440`) takes one early branch when the anchor
+is present, bypassing the entire heuristic path. Un-anchored references keep their current
+verdicts verbatim, so the corpus can migrate one reference at a time, with a ratchet on the
+anchored count mirroring the existing `>= 100` floor. Note that a hypothetical
+`src/foo.js:12#fooBar` **already parses today** — `#` is not in the lookahead class —  <!-- line-refs:ignore -->
+so the syntax can be adopted textually before it is enforced. (That example carries an
+ignore marker: it names no real file, and the checker rightly called it BROKEN on the first
+draft of this entry.) And the text to anchor with is already there: **128 of 129**
+cited spans carry >= 8 characters of real content, so a `code`-kind anchor is writable by
+hand for all but one (`test/policy-backup.test.js:57`, whose cited line is literally `//`).
 
 Related, found the same day: a drift scan that required citations to begin with a directory
 (`src/`, `vscode-extension/`) missed every bare-filename form (`extension.js:2521`), which  <!-- line-refs:ignore -->
-was 20 of the 35 citations one change touched.
+was 20 of the 35 citations one change touched. ⚠ **That limitation was never a property of
+`scripts/check-line-refs.js`**, corrected 2026-09-27: `resolveTarget` (`:147-161`) falls back
+to a basename lookup and resolves bare filenames fine. It was an ad-hoc scan from that
+session and nothing like it is committed. 39 of the 129 references are bare today.
+
+**A real blind spot, found 2026-09-27 and not previously recorded: `.py`, `.yml`, `.yaml`
+and `.json` are never scanned for references at all.** `SOURCE_EXT`
+(`scripts/check-line-refs.js:103`) admits only `.js`, `.mjs`, `.cjs`, `.ps1`, `.sh`, plus four
+extensionless names at `:104` — while `commentRuns` (`:361`) already implements hash-style
+comment detection for `.py`, `.yml` and `.yaml`. That capability is dead code: nothing routes
+those extensions to it. Live casualty: `memory/recall.py:1130` cites  <!-- line-refs:ignore -->
+`extension.js:3013`, a gates-status getter. That citation is quoted here because it is  <!-- line-refs:ignore -->
+WRONG, so it carries an ignore marker rather than being counted as a claim of ours. The
+real `slice(0, 300)` sites are
+`vscode-extension/extension.js:896`, `:942` and `:3127`. `memory/recall.py` is tracked, so
+this is a stale citation that the checker, the test and the `--quiet` count are all blind to.
+Fixing it is one line in `SOURCE_EXT`, and it will raise the reference count.
 
 ### The Project-local card reports on a path it did not watch
 
 Not a bug; the hook covers what the card misses. It is a UI blind spot, which is the class
 where a control reports on something other than what is running.
 
-`drainableRoots()` (`vscode-extension/extension.js:2693`) enumerates every workspace folder,
-but `localSettingsPath` is a single non-recursive join, so the extension drains one file per
-open FOLDER and never a subdirectory. The CLI hook drains the Claude Code session's own cwd
-on every tool call. With the editor open at a parent and sessions running in
+`drainableRoots()` (`vscode-extension/extension.js:2772`) enumerates every workspace folder,
+but `localSettingsPath` (`src/local-settings.js:42-46`) is a single non-recursive join, so the
+extension drains one file per open FOLDER and never a subdirectory. The CLI hook drains the
+Claude Code session's own cwd on every tool call (`bin/wildcard-perms:501-515`, reading
+`event.cwd` off the hook payload). With the editor open at a parent and sessions running in
 `projects/<name>`, a file the hook drains is invisible to the card, and the card can read
 "nothing to drain" while a subproject file is being drained under it.
+
+⚠ **Three corrections, 2026-09-27.** The citation above said `:2693`; `drainableRoots()` is
+at **`:2772`**, and `:2693` is an unrelated comment block. **The card does not call
+`drainableRoots()` at all** — `localCardData()` (`:2881-2902`) carries its own duplicated copy
+of the same filter, and that copy **omits the `isTrusted` gate** `drainableRoots()` applies,
+so an untrusted workspace still gets dry-run numbers while the drain itself refuses. And the
+blind spot is three-fold rather than two: the **watcher** glob at `:2000-2007` is
+`.claude/settings.local.json` with **no `**/` prefix**, so a subdirectory file fires no
+watcher event either. Never discovered, never watched, never named.
+
+The subtitle already tries to name the path (`:4132`): with one folder it renders the real
+`~`-relative path, but with two or more it collapses to the bare constant
+`.claude\settings.local.json`, which names nothing. That is the exact surface a "name the
+path it watched" fix would touch.
 
 ⚠ **An earlier version of this entry named the wrong cause** and would have sent a fix at
 `workspaceFolders?.[0]`, which governs Auto Learn's state partitioning and is not on the
 drain path at all. Corrected 2026-09-24.
 
 The honest fixes are to make the card name the path it actually watched, or to discover
-local files beneath the workspace root rather than only at it. Neither is done. Measured
-2026-09-25: **zero `.claude/settings.local.json` files exist anywhere under the working
-root**, so the zeros on that card were never evidence about promotability in the first
-place.
+local files beneath the workspace root rather than only at it. Neither is done.
+
+⚠ **The "zero files" measurement is off by one**, re-measured 2026-09-27: exactly **one**
+`.claude/settings.local.json` exists under the working root, at `D:\.ai-work\` itself, and
+its `permissions.allow` is empty. An empty allow returns early at `src/local-settings.js:212`,
+so the card still reads zeros and the conclusion survives — but the premise "no such file
+exists" does not, and the one that does exist sits exactly where the card looks.
+
+If recursive discovery is ever built, the walker to copy is `findJsonlFiles`
+(`src/history-adapters.js:903-998`), the only production recursive walk in the repo: iterative
+rather than recursive, cycle-safe on `fs.realpathSync.native` keys (`path.resolve` was tried
+and is NOT enough — it preserves 8.3 short names so one directory got two keys), and it
+handles Windows junctions, which report neither `isDirectory()` nor `isFile()`. It is not
+exported and it honours no ignore list at all, not even `node_modules`. `vscode.workspace.
+findFiles`, which honours `files.exclude` natively, is currently unused anywhere in the
+extension.
 
 ### Two surfaces with no way to configure them
 
@@ -163,17 +272,42 @@ real allow list. These three also hold a bare `Bash(<root> *)` grant there, but 
 `FAMILY_ROOTS` nor `SHELL_WRAPPERS` is obviously right for them, so they were left alone
 rather than guessed at.
 
-- **`just`** runs a recipe named by its argument. `SHELL_WRAPPERS` would strip the root and
-  classify the next token, but a recipe name is not a command, so the stripped result would
-  be meaningless rather than conservative.
-- **`hyperfine`** runs its quoted argument as a command. Stripping is arguably right here,
-  and would land on `quoted-executable`, which already bars auto-apply.
+⚠ **This entry described a mechanism that does not exist.** Corrected 2026-09-27:
+**`SHELL_WRAPPERS` does not strip anything.** Membership does exactly two things
+(`src/auto-learn.js:648-649`): it raises `risk` to `'shell'` and adds the reason
+`shell-wrapper`, which `isAutoSafeCandidate` rejects. Nothing in `src/` unwraps a
+`bash -lc "..."` payload; the only stripping in `deriveBaseInvocation` is a hard-coded bash
+preamble list (env assignments, `command`, `builtin`, `timeout`) at `:517-535`, and those
+names are literals, not table entries.
+
+Measured behaviour of all three today, all identical and all unbraked:
+
+| Command | Permission emitted | Risk | Reasons |
+|---|---|---|---|
+| `just build` | `Bash(just *)` | unknown | `unknown-command` |
+| `hyperfine 'sleep 1'` | `Bash(hyperfine *)` | unknown | `unknown-command` |
+| `duckdb -c "SELECT 1"` | `Bash(duckdb *)` | unknown | `unknown-command` |
+
+- **`just`** runs a recipe named by its argument. A recipe name is not a command, so even if
+  stripping existed the result would be meaningless rather than conservative.
+- **`hyperfine`** runs its quoted argument as a command. ⚠ It would **not** land on
+  `quoted-executable`: that fires only when the FIRST token is quoted
+  (`src/auto-learn.js:554`), and `hyperfine` is bare. Measured above.
 - **`duckdb`** executes SQL that can read files, write files and install extensions. It is
   neither a subcommand dispatcher nor a shell wrapper; it is closer to an interpreter, and
   no existing table describes that shape.
 
 Each needs its own decision with its own evidence. One sweep across all three would be the
 wrong shape of answer.
+
+The pattern to follow if any of them is adopted is commit `a7a2035`: table edits only,
+alphabetically inserted, each addition preceded by a comment naming the date and the per-root
+evidence, plus one new test with a mutation-named assertion per entry. Note that
+`FAMILY_ROOTS` and `FAMILY_SUBCOMMANDS` (`src/auto-learn.js:78-115`) **must move together** —
+a root added to the first without a subcommand list in the second makes every invocation
+`family-subcommand-unknown`. Also note there are TWO unrelated `SHELL_WRAPPERS` tables:
+`src/auto-learn.js:62-72` (40 entries, the classifier) and `src/policy-exporters.js:11-15`
+(20 entries, the Codex-export refusal path). They are not interchangeable.
 
 ### 14% of this box's stored approvals can never be wildcarded
 
@@ -194,10 +328,34 @@ own list is 14% populated by the thing it warns against.
 
 **The product opportunity is a diagnostic, not a rule.** Nothing can generalize these, so
 there is no rule to propose; what is missing is telling the user they exist and that each
-one is dead weight that will re-prompt on the next variation. `classifyInvocation` already
-records `script-syntax`, `shell-structure` and `compound-command` reasons, so the
-classification exists. Nothing surfaces it against the INSTALLED allow list, as opposed to
-against newly observed history.
+one is dead weight that will re-prompt on the next variation. Nothing surfaces this against
+the INSTALLED allow list, as opposed to against newly observed history.
+
+⚠ **The three reasons this entry named would miss the largest bucket.** Corrected
+2026-09-27 by running the live classifier against each shape:
+
+| Shape | Count | Reasons actually produced |
+|---|---|---|
+| `$variable` assignment | 57 | `dynamic-executable` + **`missing-command-root`** — NOT
+  `shell-structure`, because `!root` takes the other branch at `src/auto-learn.js:629` |
+| `foreach` / `if` | part of 14 | `reserved-keyword` + `script-syntax` + `shell-structure` |
+| `1..6` | part of 14 | **`unknown-command` only**, and it emits a live
+  `PowerShell(1..6 *)` permission with `complex: false` |
+| unquoted `;` | 65 | `compound-command`, per segment |
+
+So a diagnostic keyed on `script-syntax`, `shell-structure` and `compound-command` alone
+would miss all 57 assignment-shaped entries and the `1..6` cases. The set it actually needs
+is `{missing-command-root, dynamic-executable, reserved-keyword, script-syntax,
+shell-structure, compound-command}`. Note `shell-structure` is an ALIAS, not an independent
+signal (`src/auto-learn.js:625-626`), and it is mutually exclusive with
+`missing-command-root`.
+
+Plumbing, if it is built: the closest existing analogue is `autoLearnScanHealth`
+(`vscode-extension/extension.js:1239-1277`), a derived read-only summary hung off the card
+payload and rendered through the shared `scanTrouble` helper so badge and body cannot
+disagree. The live allow list should be read via `readSettingsState()` (`:184`), which the
+dashboard already calls once per push — a second `readSettings()` would be a regression the
+comment at `:3483-3500` explicitly warns about.
 
 ### From the 2026-09-25 audits: what was found and NOT fixed
 
@@ -205,44 +363,142 @@ Three read-only audits ran over the whole two-day effort. Everything they found 
 product was fixed the same day and is not listed here; what follows is what was left, each
 verified against the tree.
 
-**The highest-yield gate this repo does not have.** Of fourteen confirmed dead-code findings,
-**zero** would be caught by widening `test/dead-exports.test.js`, and **nine** would be caught
-by one new check: *a property on a returned object literal that no caller reads*. The census
-reads `module.exports` and nothing else, so module-local functions, option keys on a context
-object, fields on a result object, arguments at a call site, and everything in `bin/`,
-`scripts/` and `test/` are invisible to it by construction. That is not a defect in the
-census; it is the shape of its blind spot, now measured.
+**The returned-object check: re-measured 2026-09-27, and it is worth much less than this
+entry claimed.** The proposal was *a property on a returned object literal that no caller
+reads*, said to catch nine of fourteen dead-code findings. Those fourteen were fixed on
+2026-09-25. Run against the tree today the rule yields **one** finding, not nine:
+`precedence` at `vscode-extension/autoLearnUi.js:169`, whose only other occurrences in the
+whole tree are a test NAME and prose. Three weaker candidates have no production `.prop`
+reader but are load-bearing anyway (see FP-4 below): `bypassDisabled` and
+`forcedDefaultMode` at `src/policy-guard.js:151,153`, and `skippedCount` at
+`src/auto-learn-manager.js:2031`.
+
+**The naive form of the rule is unsound before it is even run.** Of 231 returned-object-
+literal sites carrying 920 (site, key) pairs, **176 of 315 distinct names appear at more
+than one site, covering 85% of all pairs** — `changed` alone appears at 38 sites across 9
+modules. A rule phrased as "no caller reads this property name" is therefore silenced for
+85% of pairs by an unrelated object that happens to share a name.
+
+Five false-positive classes, each large enough to sink it on its own:
+
+1. **Whole object `JSON.stringify`d to CLI stdout** (`bin/wildcard-perms:349`, `:735`,
+   `:749`). Every key of the ~30-key `scan`/`apply`/`undo` results is a user-visible output
+   field with no `.prop` reader. `src/auto-learn-manager.js:2024-2028` says so in a comment.
+2. **The webview boundary.** ~20 keys are posted by `postMessage` and read only inside a
+   template-literal `<script>` (`vscode-extension/extension.js:4213-4227`). A text scan sees
+   those readers; **an AST does not** — that script is string data to the parser.
+3. **The worker-thread boundary.** `src/auto-learn-worker.js:25-34` posts
+   `{ok, result, error:{message, code, stack}}`; the readers are in another file on another
+   thread (`vscode-extension/autoLearnWorkerRunner.js:162-170`), with no call site linking
+   them.
+4. **`assert.deepEqual` pins a property without reading it.** `test/policy-guard.test.js:
+   98-105` pins the whole shape, so deleting `bypassDisabled` fails the build even though
+   nothing reads it. This repo uses `deepEqual` for contract pinning heavily.
+5. **Spread, both directions** (`src/auto-learn.js:670-677`,
+   `src/auto-learn-manager.js:1362-1370`) and **dynamic dispatch** off the returned API
+   object (`manager[operation](...args)`, `src/auto-learn-worker.js:20`). Also persisted
+   state, where the reader is a later process run.
+
+**Implementation constraint, measured:** a regex/brace-matching version is not viable. A
+loose key extractor reported 18 candidates of which ~14 were parser artefacts, a 78%
+artefact rate. It needs a real AST, and no parser is vendored — `node_modules/` is absent
+and this repo has zero dependencies by design, so the check would cost the repo its first
+one. Given a yield of one finding, that trade looks bad.
+
+⚠ **And this entry described the census wrongly.** `test/dead-exports.test.js` does NOT
+"read `module.exports`": it `require()`s each module in a sandbox with `vscode` stubbed and
+`os.homedir` redirected, then enumerates the live exports object (`:190-219`). Consumer
+detection is four regexes (`:251-306`). And `bin/`, `scripts/` and `test/` are **not**
+invisible to it — they are invisible as SUBJECTS (their own exports are never audited) but
+fully scanned as CONSUMERS, with `bin/wildcard-perms` added by hand at `:164` precisely
+because it is the highest-frequency consumer. The genuine blind spots are the ones listed
+above plus: comment and string matches count as consumers; `import * as ns` and default
+imports are not among the four shapes; and the census is a non-recursive `readdir` of
+`src/` and `vscode-extension/` only.
+
+**New, and self-referential: the census contains a stale citation of its own.**
+`test/dead-exports.test.js:81-82` says `CODEX_BUNDLE_CACHE` is at `src/codex-policy.js:71`,  <!-- line-refs:ignore -->
+used at `:12` — both quoted as the defect, hence the ignore marker. The constant is at
+`src/codex-policy.js:11` and `readEnterpriseBundle` at `:13`; `:71` is a
+comment line. The claim is still true, the coordinates are not.
 
 
-**Two trackers were lost, not two items.** The "untested-but-correct mutants that survive"
-table (7 rows) and the "6 option keys with no supplier" list were both deleted in the
-burn-down. Every name in the first now appears somewhere under `test/`, so some are plausibly
-covered, but the seven mutants were not re-run. The second class lost its only tracker when
-the dead-export census replaced it, and the census does not read option keys.
+**Two trackers were lost, not two items — and BOTH ARE RECOVERED.** They were deleted in
+`b5b206f`; `git show b5b206f^:BACKLOG.md` has them. Neither was in
+`docs/engineering-record.md`. Re-verified against HEAD 2026-09-27.
+
+**Tracker 1, seven surviving mutants** (correct at HEAD, no test would notice a reversion),
+ranked by what a reversion costs:
+
+| Site | Mutant | Consequence |
+|---|---|---|
+| post-lock `reportAlreadyOptimal` (`vscode-extension/extension.js:2716`) | branch to `if (false)` | `backupPolicy` never runs on the "someone else generalized it while we waited" path, so **a deleted backup is not rebuilt** — the one property its comment promises |
+| toast counts | revert to the probe's `after`/`before` | wrong added/removed numbers shown |
+| `lastRun` assignment | delete it | the dashboard's "last run" never advances |
+| probe read guard | delete `if (!settings)` | reports "already optimal" over an unreadable settings.json |
+| both `lockedRetries = 0` resets (`:2643`, `:2654`) | delete either | retry budget strands or never strands; untested at both |
+| `COVER_KEY_CACHE_LIMIT` (`src/permissions.js:385`) | set to 3 | the comment's "5000 is load-bearing" is asserted nowhere |
+| `coverLookupKeys` non-string passthrough (`src/permissions.js:389`) | delete it | nothing observes it |
+
+**Tracker 2, option keys read with zero suppliers — now FIVE, not six.**
+`busyMessage` gained a production supplier at `src/agent-guidance.js:281` (commit `9dfcda6`)
+and is closed. Still open, each leaving an unreachable branch:
+
+- `managedPolicyPath` — read at `src/auto-learn-manager.js:1244`, `:1259`; no supplier anywhere, tests included.
+- `defaultTool` — read at `src/history-adapters.js:738` (moved from `:718`); makes that early return unreachable.
+- `priorCursors` — `src/history-adapters.js:1250`, the second leg of `options.cursors || options.priorCursors`.
+- `homeDir` and `successThreshold` — unreachable because `vscode-extension/extension.js:1085-1086` sets BOTH spellings on the same object literal, so the `||` and `??` legs at `src/auto-learn-manager.js:1140` and `:1142` never fire.
 
 **Suspected, each with the reason it could not be closed:**
 
-- **Cancelling the model download inside the redirect window** may leave the promise pending
-  and the `.tmp` fd open: `httpsGetFollow` returns without calling `onResponse` when
-  `handle.cancelled` is set at a 3xx, so `fail()` never runs. Either the branch is unreachable
-  (a `destroy()` before the 3xx emits `error` first) or it is that leak; the two readings could
-  not be separated. `liveTransfers` holds only the request handle, not the write stream.
+- ~~**Cancelling the model download inside the redirect window**~~ **REFUTED 2026-09-27.**
+  The early return at `vscode-extension/extension.js:710` is real and IS reached — 
+  `test/extension-lifecycle-async.test.js:1604-1620` drives exactly it. But it does not leak:
+  the only way `handle.cancelled` becomes true is `handle.destroy(err)` (`:703`), which also
+  calls `handle.req.destroy(err)`, and a destroyed request emits `'error'`, which reaches
+  `onResponse(null, err)` at `:714` and runs `fail()`. The test asserts the promise settles.
+  Both destroy callers supply an Error, so the event always fires. Of the two readings this
+  entry could not separate, **the first one was right**. The `liveTransfers` half of the claim
+  stands — it holds only the request handle, not the write stream — so the premise was sound
+  and only the antecedent never occurs.
 - **A case-mismatched `target` defeats the substitute invariant on Windows.**
   `src/codex-policy.js:414-426` compares `resolved` (on-disk casing) with `target`
   (`path.resolve`) by exact string, with no case folding. Both sides derive from `os.homedir()`
-  today so they agree; a user-configured `codexRulesPath` with different casing would leave the
-  deployed file visible AND append the pending one, a state the code says no write produces.
-- **The packaging gate reports but does not quarantine.** `scripts/package.mjs` runs
-  `assertRetiredMaxAbsent(out)` after `vsce` has written the artefact, so a rejected VSIX stays
-  in the repo root where a later step or a human picking the newest `.vsix` can still ship it.
-- **`warnedOnce` survives a same-realm re-activate.** Module-scope `Set`, never cleared by
-  `activate()` or `deactivate()`, unlike every sibling latch. Its comment says "once per
-  activation"; it is once per realm. Bounded in practice, so cost is nil and only the contract
-  is wrong.
+  today so they agree; a `codexRulesPath` with different casing would leave the deployed file
+  visible AND append the pending one, a state the code says no write produces.
+  ⚠ **Not reachable from any shipped surface**, verified 2026-09-27: there is no
+  `codexRulesPath` setting in the manifest (17 keys, none of them a rules path) and no CLI
+  flag. Both producers hard-code it off `os.homedir()` (`vscode-extension/extension.js:1045`,
+  `bin/wildcard-perms:324-325`). It is reachable only through the programmatic API, i.e. an
+  embedder or a test. That lowers it well below the other items here.
+- **The packaging gate reports but does not quarantine.** `scripts/package.mjs:56-62` runs
+  `assertRetiredMaxAbsent(out)` after `vsce` has written the artefact, with no `try`/`catch`
+  and no `rmSync(out)`, so a rejected VSIX stays in the repo root where a human picking the
+  newest `.vsix` can still ship it. The ordering is deliberate and pinned —
+  `test/retired-max-package-gate.test.js:65-73` asserts the gate runs AFTER packaging, so the
+  fix is quarantine-on-failure, not reordering. ⚠ **CI cannot ship a rejected artefact**
+  (verified 2026-09-27): `release.yml` runs packaging as its own step and neither upload step
+  carries `if: always()`, so a throw stops the job first. **The exposure is local only** —
+  and three `.vsix` files are sitting in the repo root right now.
+- **`warnedOnce` survives a same-realm re-activate.** Module-scope `Set`
+  (`vscode-extension/extension.js:233-242`), never cleared by `activate()` or `deactivate()`,
+  unlike every sibling latch — both reset `deactivated`, `activationGeneration`,
+  `autoLearnBusy` and `autoLearnWorkerRunner` with a paragraph of rationale each. Its comment
+  says "once per activation"; it is once per realm. Bounded in practice, so cost is nil and
+  only the contract is wrong. ⚠ **Found 2026-09-27: the repo's own inventory misses it too.**
+  `docs/engineering-record.md:226-245` enumerates module state surviving `deactivate()` — "28
+  module-level mutables, 9 reset, 19 surviving" — and `warnedOnce` is not in that list. Same
+  gap, second location.
 - **The `explicit: true` legacy-cleanup path has no UI entry point.** `toggleMax` and
-  `toggleCodexMax` are registered but deliberately absent from the manifest, and there are no
-  keybinding contributions, so for a real user the whole explicit half of `offerLegacyCleanup`
-  is unreachable and anyone whose state is snapshot-only is never offered the cleanup.
+  `toggleCodexMax` are registered (`vscode-extension/extension.js:2217-2220`) but deliberately
+  absent from the manifest — verified: `contributes` has no `keybindings` key at all, and
+  their absence is ENFORCED by `scripts/assert-retired-max-absent.mjs:24-29`. So the explicit
+  half of `offerLegacyCleanup` is unreachable and anyone whose state is snapshot-only is never
+  offered the cleanup. ⚠ **One entry point does exist and this entry did not credit it**
+  (2026-09-27): a user's own pre-existing `keybindings.json` binding from a pre-retirement
+  release. That is an intended, tested path — `scripts/drive-installed.js:223-228` asserts
+  both ids stay reachable "because an existing keybinding calls them". The claim is exact only
+  for users who never bound them.
 
 **Cosmetic, listed so they are not rediscovered as findings:** the `fixed-point cache is back`
 assertion in `scripts/smoke.sh` writes a value and reads it straight back, so it is close to a

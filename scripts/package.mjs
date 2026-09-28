@@ -5,7 +5,7 @@
 //   node scripts/package.mjs 1.2.0      # override version (e.g. from a release tag)
 //   node scripts/package.mjs v1.2.0     # leading "v" is stripped
 //
-// Output: permission-wildcarding-<version>.vsix in the repo root.
+// Output: ai-acolyte-v<version without dots>.vsix in the repo root (e.g. ai-acolyte-v160.vsix).
 
 import { execSync } from 'node:child_process';
 import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';

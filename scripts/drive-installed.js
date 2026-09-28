@@ -74,7 +74,7 @@ if (!fs.existsSync(entry)) {
     ? `  ${VERSION} was requested explicitly.`
     : `  ${VERSION} is this checkout's manifest version, so the build under test is NOT installed.`);
   console.error(`  installed: ${found.length ? found.join(', ') : '(none)'}`);
-  console.error(`  fix: node scripts/package.mjs && code --install-extension permission-wildcarding-${VERSION}.vsix --force`);
+  console.error('  fix: run node scripts/package.mjs, then code --install-extension <the VSIX it reports> --force');
   process.exit(2);
 }
 

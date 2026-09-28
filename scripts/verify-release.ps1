@@ -472,7 +472,7 @@ if ($script:failed -gt 0) {
     Write-Host "If the only failure is 'installed extension.js matches the repo source',"
     Write-Host "the code is fine and just is not packaged yet:"
     Write-Host "    node scripts\package.mjs"
-    Write-Host "    code --install-extension permission-wildcarding-<version>.vsix"
+    Write-Host "    code --install-extension ai-acolyte-v<version-without-dots>.vsix"
     Write-Host "then reload VS Code and re-run this script."
     Write-Host ""
 }

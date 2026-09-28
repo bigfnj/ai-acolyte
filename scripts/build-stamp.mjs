@@ -15,7 +15,7 @@ import { join } from 'node:path';
 export const BUILD_STAMP = '.vsix-build.json';
 
 /** The one place the artefact filename is spelled. Both scripts derive it from a version. */
-export const artefactName = (version) => `permission-wildcarding-${version}.vsix`;
+export const artefactName = (version) => `ai-acolyte-v${version.replaceAll('.', '')}.vsix`;
 
 /**
  * Record which artefact this build is about to write. Call it BEFORE vsce, never after.

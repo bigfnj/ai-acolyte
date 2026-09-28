@@ -55,14 +55,14 @@ function fixture({
     name: 'permission-wildcarding', version: ext, publisher: 'local',
   }, null, 2) + '\n');
   if (vsix) {
-    const built = path.join(dir, `permission-wildcarding-${vsix}.vsix`);
+    const built = path.join(dir, `ai-acolyte-v${vsix.replaceAll('.', '')}.vsix`);
     fs.writeFileSync(built, 'x');
     fs.utimesSync(built, vsixAt, vsixAt);
   }
   if (stamp) {
     const receipt = path.join(dir, BUILD_STAMP);
     fs.writeFileSync(receipt, JSON.stringify({
-      artefact: `permission-wildcarding-${stamp}.vsix`,
+      artefact: `ai-acolyte-v${stamp.replaceAll('.', '')}.vsix`,
       version: stamp,
       startedAt: stampAt.toISOString(),
     }, null, 2) + '\n');
@@ -162,7 +162,7 @@ test('the release check fails when packaging produced no matching VSIX', () => {
   withFixture({ root: '1.4.5', ext: '1.4.5', vsix: '1.4.4' }, (dir) => {
     const { code, out } = runChecker(dir);
     assert.equal(code, 1, 'a VSIX named for a different version is not this build');
-    assert.match(out, /did not produce permission-wildcarding-1\.4\.5\.vsix/);
+    assert.match(out, /did not produce ai-acolyte-v145\.vsix/);
   });
 });
 
@@ -209,8 +209,8 @@ test('the release check fails when the stamp names an artefact the manifests do 
   withFixture({ root: '1.4.5', ext: '1.4.5', vsix: '1.4.5', stamp: '1.4.4' }, (dir) => {
     const { code, out } = runChecker(dir);
     assert.equal(code, 1, 'the packaged name and the manifest name must be the same name');
-    assert.match(out, /stamp says packaging wrote permission-wildcarding-1\.4\.4\.vsix/);
-    assert.match(out, /manifests call for permission-wildcarding-1\.4\.5\.vsix/);
+    assert.match(out, /stamp says packaging wrote ai-acolyte-v144\.vsix/);
+    assert.match(out, /manifests call for ai-acolyte-v145\.vsix/);
   });
 });
 

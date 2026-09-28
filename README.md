@@ -37,11 +37,11 @@ the extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension permission-wildcarding-1.6.0.vsix
+code --install-extension ai-acolyte-v160.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
-are gitignored so `git clean` will not take them, and `permission-wildcarding-*.vsix`
+are gitignored so `git clean` will not take them, and `ai-acolyte-v*.vsix`
 can hand VS Code the older one. Installing an equal or lower version is a silent no-op,
 so that failure presents as "the upgrade did nothing".
 

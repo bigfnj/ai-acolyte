@@ -37,14 +37,14 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: vsix
-          path: "*.vsix"
+          path: "ai-acolyte-v*.vsix"
           if-no-files-found: error
 
       - name: Attach VSIX to the release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v3
         with:
-          files: "*.vsix"
+          files: "ai-acolyte-v*.vsix"
 
       # Keep the Releases page to the three most recent, matching IdleLauncherTray,
       # desktop-ai-companion and runas-helper. The git TAGS are retained (no --cleanup-tag),

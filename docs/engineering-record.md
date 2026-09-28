@@ -802,7 +802,7 @@ Unrebased whole-object writers still outstanding:
 | `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1933-1935`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
 | `change.before.content` at `src/auto-learn-manager.js:1731` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1727`. |
 | `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2013` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
-| `{ ...local, permissions }` at `src/local-settings.js:245` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:201` read → `:245` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
+| `{ ...local, permissions }` at `src/local-settings.js:266` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:205` read → `:266` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
 needs a **two-file atomic window**: `updateClaudeClaims` mutates `claims` in
@@ -1402,9 +1402,10 @@ strings live inside a webview template and an inline CLI branch, so neither is r
 unit test, and the guard asserts the CONDITION (the block does not imply blanket grants) rather
 than that the strings exist.
 
-⚠ **There were THREE sites, not two, and the first fix missed one.** The status row at
-`vscode-extension/extension.js:3942` said the same thing in two words — `'legacy blanket
-detected'` — and the tripwire, written against the long sentence, did not know that spelling.
+⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
+`setState('stLocal', ...)` at `vscode-extension/extension.js:3942` — said the same thing in two
+words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
+know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which
 was green, and not by re-reading the patch, which looked complete. The tripwire now carries a
 list of spellings rather than one regex.

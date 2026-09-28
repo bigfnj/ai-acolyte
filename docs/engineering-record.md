@@ -1319,9 +1319,85 @@ every one of them by that much. `recall.py` whole-process timing **cannot resolv
 under ~30 ms here**; only in-process phase timing can. Three items were settled in-process
 for that reason.
 
-### Adjacent finding, not acted on
+### Adjacent finding — DONE 2026-09-27, this entry was stale
 
 `onnxruntime` is used at exactly one line and `numpy` only inside the embedder, the matmul
 and `--selftest`, yet both are imported at module scope. `--lint`, `--lexical-only`,
 `--gates-compile` and `--list` therefore pay **237 min / 244 p50 ms** of imports they never
 touch, and `--gates-compile` is on the extension's corpus-watcher path.
+
+**That was fixed and this entry did not say so.** `memory/recall.py:104-105` now binds both
+through a `_LazyModule` proxy (`np = _LazyModule("numpy")`, `ort = _LazyModule("onnxruntime")`),
+and the comment at line 51 records the change from the old `import onnxruntime, numpy`.
+Verified 2026-09-27 rather than read off the source: `python -X importtime recall.py --lint`
+loads **neither** module.
+
+⚠ **The lesson is about this file, not about the imports.** The entry sat under a heading
+whose section is titled "do not re-derive these", so it was actively steering work away from
+something already complete. A record of open findings needs the same disposition discipline
+the backlog has — an entry is FIXED, DECLINED or OPEN, and "not acted on" is a claim with a
+shelf life. It was caught only because a recommendation was checked against the code before
+being made.
+
+## MEASUREMENT HAZARD: `npm publish --dry-run` exits 0 on a private package
+
+Checked against **npm 11.13.0**, 2026-09-27, while adding `"private": true` to the root
+manifest. The obvious way to confirm the flag works is the obvious wrong one:
+
+```
+$ npm publish --dry-run
+npm notice Publishing to https://registry.npmjs.org/ with tag latest and default access (dry-run)
++ permission-wildcarding@1.5.5
+$ echo $?
+0
+```
+
+That reads exactly like the flag is inert. It is not. The refusal lives at **line 15 of
+libnpmpublish's `lib/publish.js`** — `if (manifest.private) throw EPRIVATE` — and npm calls
+libnpmpublish **only when `!dryRun`**, at line 181 of its own `lib/commands/publish.js`. So the
+one guard that stops a real publish is the one a dry run never reaches.
+
+(Those two are deliberately not written in `file:line` form. They name npm's tree, not this
+one, and `scripts/check-line-refs.js` correctly refuses a citation it cannot resolve against a
+tracked file — which it did, on the first draft of this entry.)
+
+A second trap sits beside it. `npm`'s *own* `lib/commands/publish.js` also tests `private`, at
+line 142, but that test is `if (workspace && manifest.private)` and exists so
+`npm publish --workspaces` skips private members. Reading only that file, in a repo that is not
+a workspace, supports the opposite and equally wrong conclusion: that npm no longer honours
+`private` at all.
+
+**So `private: true` does block a real publish here, and neither reading npm's publish command
+nor running a dry run demonstrates it.** Both were tried in that order and both pointed the
+wrong way.
+
+## A control that names a cause it does not require
+
+`drainLocalSettings` blocks on **migration evidence** — the retired approve-all hook, or allow
+entries the retired implementation generated that are still in user scope. It deliberately does
+**not** block on `legacy.allow`, both blanket grants being live, because `Bash(*)` and
+`PowerShell(*)` can be the user's own choice and blocking a legitimate drain is the worse error.
+That trade-off is pinned by *"user-owned broad grants without migration evidence do not block the
+drain"* in `test/local-settings.test.js`.
+
+Both user-facing messages nevertheless told the reader the opposite: *"Legacy Bash(\*) and
+PowerShell(\*) grants cover every local entry"*, and the dashboard label read *"legacy blanket
+detected"*. Reachable counter-example, now a test: a user whose snapshot-derived `Read(*)` and
+`Write` are still in user scope, with **neither** blanket grant anywhere, is blocked and told
+that blanket grants cover every local entry.
+
+`BACKLOG.md` had framed this as "either the condition or the wording is wrong". **It is the
+wording.** The condition is correct and was already pinned by a named test; the first reading of
+this entry proposed changing the predicate, which would have broken that test and penalised
+exactly the legitimate user it protects. Fixed 2026-09-27 in `extension.js`, `bin/wildcard-perms`
+and the guard's own comment.
+
+The `legacy-blanket` report key is left alone: five call sites agree on it, and renaming a
+contract to fix a sentence is the wrong trade. It carries a comment saying the name is
+historical.
+
+**Nothing asserted either string**, which is why the wording outlived the condition. There is now
+a source-text tripwire beside the behavioural test. It is honest about being a tripwire: both
+strings live inside a webview template and an inline CLI branch, so neither is reachable from a
+unit test, and the guard asserts the CONDITION (the block does not imply blanket grants) rather
+than that the strings exist.

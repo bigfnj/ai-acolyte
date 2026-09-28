@@ -242,6 +242,62 @@ test('user-owned broad grants without migration evidence do not block the drain'
   assert.deepEqual(box.readLocal().permissions.allow, []);
 });
 
+test('the drain blocks on migration evidence with NO blanket grant present', () => {
+  // The sibling test above pins the other half: blanket grants ALONE do not block,
+  // because they can be the user's own choice. So the trigger is evidence, and this
+  // is the state that proves it -- generated entries still in user scope, and neither
+  // Bash(*) nor PowerShell(*) anywhere.
+  //
+  // Both user-facing messages used to say "Bash(*) and PowerShell(*) grants cover every
+  // local entry", which is simply false here. Nothing asserted either string, so the
+  // wording outlived the condition it described.
+  const box = scratch();
+  box.writeLocal({ permissions: { allow: ['Bash(git status)'] } });
+
+  // Read(*) and Write are LEGACY_ALLOW_CORE entries, so they count as generated.
+  const user = userScope(['Read(*)', 'Write']);
+  const legacyStatePath = path.join(box.backupDir, 'wildcarding-max.json');
+  fs.mkdirSync(path.dirname(legacyStatePath), { recursive: true });
+  fs.writeFileSync(legacyStatePath, JSON.stringify({
+    allowSnapshot: ['Bash(rg *)'], defaultMode: null,
+  }) + '\n');
+
+  const { legacyClaudeMaxStatus } = require('../src/legacy-max-cleanup');
+  const status = legacyClaudeMaxStatus(user.state, { statePath: legacyStatePath });
+  assert.equal(status.allow, false,
+    'the premise of this test is that neither blanket grant is present');
+  assert.deepEqual(status.generatedAllow, ['Read(*)', 'Write']);
+
+  const report = drainLocalSettings({
+    workspaceRoot: box.workspace,
+    readUserSettings: user.readUserSettings,
+    applyUserAllow: user.applyUserAllow,
+    backupDir: box.backupDir,
+    legacyStatePath,
+  });
+
+  assert.equal(report.blocked, 'legacy-blanket');
+  assert.equal(report.changed, false);
+  assert.deepEqual(box.readLocal().permissions.allow, ['Bash(git status)']);
+});
+
+test('neither drain-blocked message claims a cause the block does not require', () => {
+  // A source-text tripwire, not a proof: these two strings live inside a webview
+  // template and an inline CLI branch, so neither is reachable from a unit test.
+  // It asserts the CONDITION the test above establishes -- the block does not imply
+  // blanket grants -- rather than asserting the strings merely exist.
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', ...rel.split('/')), 'utf8');
+
+  for (const rel of ['vscode-extension/extension.js', 'bin/wildcard-perms']) {
+    const text = read(rel);
+    assert.ok(text.includes('legacy-blanket') || text.includes('l.blocked'),
+      `${rel} no longer handles the blocked drain; this guard has lost its subject`);
+    assert.ok(!/blanket\s*' \+\s*'?grants cover every local entry|PowerShell\(\*\) grants cover every local entry/.test(text),
+      `${rel} tells the user that blanket grants cover every local entry, but the block `
+      + 'fires on the retired hook or its generated entries, with no blanket grant required');
+  }
+});
+
 test('a dry run reports the same plan and writes neither file', () => {
   const box = scratch();
   const file = box.writeLocal({ permissions: { allow: ['Bash(git status)', 'Bash(rg x)'] } });

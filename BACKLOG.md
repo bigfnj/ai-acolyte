@@ -133,10 +133,12 @@ and that is currently correct: there is nothing publishable to push.
   would ship the entire tree including `test/`, `img/`, `docs/` and any VSIX sitting in the
   root. Fixing that shape is the real work, and it rests on a decision nobody has made:
   **does the CLI ship standalone at all, or only inside the extension?**
-- **`private` is undefined, so nothing guards an accidental publish.** `npm publish` run in
-  the repo root today would attempt `permission-wildcarding@1.5.2` with the whole tree
-  attached. Adding `"private": true` until publishing is deliberate costs nothing and is
-  the cheapest item here.
+- **`"private": true` was added 2026-09-27**, so an accidental `npm publish` in the repo
+  root is refused rather than pushing the whole tree under the wrong name. Taking it off is
+  now a deliberate step in the publish work, and `test/installers.test.js` fails if it goes
+  missing. ⚠ `npm publish --dry-run` **exits 0 on a private package** and will not
+  demonstrate this; the reason, and the two npm source sites involved, are in
+  `docs/engineering-record.md`.
 - **Use Trusted Publishing over OIDC when it is wired, never a token.** This account's 2FA
   is a security key, so CI has no OTP to present, and npm no longer offers a TOTP
   authenticator at all. Granular tokens with 2FA bypass are being restricted by npm:
@@ -211,15 +213,6 @@ object, fields on a result object, arguments at a call site, and everything in `
 `scripts/` and `test/` are invisible to it by construction. That is not a defect in the
 census; it is the shape of its blind spot, now measured.
 
-**The drain guard and its own message disagree.** `src/local-settings.js:215-225` blocks on
-`legacy.hook || legacy.generatedAllow.length`. The predicate it replaced also covered
-`legacy.allow` — both `Bash(*)` and `PowerShell(*)` present in user scope — which
-`legacyClaudeMaxStatus` still computes and which the guard now omits. So a user whose snapshot
-is absent and whose approve hook is already gone is no longer blocked, while
-`vscode-extension/extension.js` and `bin/wildcard-perms` both still say *"legacy Bash(\*) and
-PowerShell(\*) grants cover every local entry"*, a message that cannot fire for the case it
-names. Either the condition or the wording is wrong. Mitigated by the high-water local backup,
-so grants are recoverable.
 
 **Two trackers were lost, not two items.** The "untested-but-correct mutants that survive"
 table (7 rows) and the "6 option keys with no supplier" list were both deleted in the

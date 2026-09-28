@@ -4123,11 +4123,11 @@ class WildcardingViewProvider {
     const pending = l.promote + l.prune;
     $('locdot').className = 'dot' + (pending && l.trusted && !l.blocked ? '' : ' idle');
     $('loctext').textContent = l.blocked
-      ? 'Project-local approvals - legacy blanket detected'
+      ? 'Project-local approvals - retired MAX state active'
       : (pending ? 'Project-local approvals: ' + pending + ' to drain' : 'Project-local approvals: drained');
     $('loctext').style.fontWeight = '600';
     $('locsub').textContent = l.blocked
-      ? 'Legacy Bash(*) and PowerShell(*) grants cover every local entry. Remove the legacy configuration before draining.'
+      ? 'A retired auto-approve hook, or grants it generated, is still in user scope. Remove the legacy configuration before draining.'
       : (!l.trusted ? 'workspace not trusted — read-only'
         : (l.folders > 1 ? l.folders + ' folders · ' + l.file : l.file)
           + (l.enabled ? '' : ' · auto-drain off'));

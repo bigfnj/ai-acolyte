@@ -527,6 +527,33 @@ test('the two package manifests report the same version', () => {
     + 'release.yml treats the extension manifest as authoritative, so bump the root to match');
 });
 
+test('the root manifest cannot be published by accident', () => {
+  // `npm publish` in the repo root would otherwise attempt
+  // permission-wildcarding@<version> with the WHOLE TREE attached: there is no
+  // `files` list and no .npmignore, so test/, img/, docs/ and any .vsix sitting in
+  // the root all go up. The name would be wrong too -- the reserved npm name is
+  // ai-acolyte, and this manifest is not it.
+  //
+  // Publishing the CLI for real is a live backlog item. When it happens this flag
+  // comes off deliberately and this test changes with it, which is the point: the
+  // decision becomes visible in a diff instead of being one stray command away.
+  //
+  // DO NOT verify this with `npm publish --dry-run`. It exits 0 on a private package
+  // and prints "+ permission-wildcarding@<version>", which reads exactly like the flag
+  // is inert. Checked against npm 11.13.0: the refusal lives at line 15 of libnpmpublish's
+  // own lib/publish.js (`if (manifest.private) throw EPRIVATE`), and npm calls
+  // libnpmpublish ONLY when !dryRun. The `private` check inside npm's own publish command
+  // is gated on `workspace &&`, so it is about skipping private members of a workspace and
+  // is not what stops a plain publish here. Those paths are npm's tree, not ours, so they
+  // are deliberately not written as file:line -- check-line-refs.js refuses what it cannot
+  // resolve against a tracked file, and it refused the first draft of this comment.
+  const root = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+
+  assert.equal(root.private, true,
+    'package.json has lost "private": true, so `npm publish` in the repo root would '
+    + 'push the entire tree under the wrong package name');
+});
+
 test("the README's install command names the version a build actually produces", () => {
   // README.md tells the reader to name the version rather than glob it, because
   // `permission-wildcarding-*.vsix` can hand VS Code an older leftover and

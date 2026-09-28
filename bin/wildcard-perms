@@ -652,8 +652,9 @@ function drain(args) {
     }
     if (report.blocked === 'legacy-blanket') {
       process.stderr.write(
-        'wildcard-perms --drain: legacy MAX configuration is still active and its blanket ' +
-        'grants cover every local entry. Run wildcard-perms --max off to remove it first.\n'
+        'wildcard-perms --drain: a retired MAX configuration is still active in user scope ' +
+        '(its approve hook, or the allow entries it generated). Run wildcard-perms --max off ' +
+        'to remove it first.\n'
       );
       process.exitCode = 1;
       return;

@@ -212,14 +212,27 @@ function drainLocalSettings({
   if (!localAllow.length) return emptyReport(file, { exists: true });
 
   const user = (typeof readUserSettings === 'function' ? readUserSettings() : null) ?? {};
-  // Old releases could leave both blanket grants in user scope. Draining
-  // against those would treat every project-local entry as redundant and empty
-  // the local file before the one-way migration has restored user scope.
+  // Block only on MIGRATION EVIDENCE: the retired approve-all hook, or allow
+  // entries the retired implementation generated that are still in user scope.
+  // Draining against leftover MAX state would treat every project-local entry as
+  // redundant and empty the local file before the one-way migration has restored
+  // user scope.
+  //
+  // `legacy.allow` -- both blanket grants live -- is deliberately NOT a trigger.
+  // Bash(*) and PowerShell(*) can be a user's own deliberate choice, and blocking
+  // a legitimate drain is the worse error. That trade-off is pinned by "user-owned
+  // broad grants without migration evidence do not block the drain" in
+  // test/local-settings.test.js.
   const legacy = legacyClaudeMaxStatus(user, {
     ...(legacyStatePath ? { statePath: legacyStatePath } : {}),
     ...(legacyScriptPath ? { scriptPath: legacyScriptPath } : {}),
     ...(platform ? { platform } : {}),
   });
+  // `legacy-blanket` is a HISTORICAL key: the trigger is the evidence above, not the
+  // blanket grants the name suggests. Both user-facing messages claimed "Bash(*) and
+  // PowerShell(*) grants cover every local entry" until 2026-09-27, which is false
+  // whenever generatedAllow fires without them. That state is reachable and is now a
+  // test; the key is left alone because five call sites agree on it.
   if (legacy.hook || legacy.generatedAllow.length) {
     return emptyReport(file, { exists: true, blocked: 'legacy-blanket', kept: localAllow.length });
   }

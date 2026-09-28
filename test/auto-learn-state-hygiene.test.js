@@ -111,7 +111,7 @@ test('a state file written by a NEWER copy of the tool is read but never written
   // machine mid-upgrade, and reading cannot lose a field.
   assert.equal(learn.status().candidateCount, 1);
 
-  assert.throws(() => learn.scan(), /version 1 over version 99/,
+  assert.throws(() => learn.scan(), /version 3 over version 99/,
     'writing this copy\'s whitelist back would silently drop the newer copy\'s fields');
 
   const after = readState(home);

@@ -153,6 +153,8 @@ test('the Review command names families a managed rule blocks, and offers the de
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
@@ -233,6 +235,10 @@ test('the Review command names families a managed rule blocks, and offers the de
     // failure, which is the worst way for CI to report a broken build.
     try { await extension?.deactivate(); } catch {}
     Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     purgeProjectModules(extensionPath, rootSrc);
     fs.rmSync(tempHome, { recursive: true, force: true });
   }

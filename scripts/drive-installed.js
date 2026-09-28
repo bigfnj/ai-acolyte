@@ -1,20 +1,17 @@
 #!/usr/bin/env node
-// Drive the INSTALLED extension, not the checkout.
+// Drive the installed extension's command handlers with a SIMULATED VS Code API.
+// Workers, disk writes, and Codex execpolicy checks are real. Synthetic transcripts
+// live in a temporary home; no model/provider call or live Codex session is started.
+// This does not exercise VS Code UI, native watchers, or fresh-session instruction
+// loading. The remaining feature validation is tracked in docs/codex-compatibility.md.
 //
-// scripts/verify-release.ps1 only HASHES the installed extension.js against the repo
-// source; nothing in the tree loads and runs the installed copy. docs/codex-certification.md
-// records that gap as "the extension half was not clicked through". This closes the
-// automatable part of it: activation from the packaged artefact, the real command
-// handlers, and a scan/apply/undo round trip through the files VS Code actually loads.
+//   node scripts/drive-installed.js [version]
+//   node scripts/drive-installed.js [version] --subject <copied-extension-directory>
+//   node scripts/drive-installed.js [version] --extension-dir <packaged-directory>
+//   Add --codex-layout custom-override to use an external CODEX_HOME and AGENTS.override.md.
 //
-// It cannot click a button. What it proves is that the PACKAGED artefact activates and
-// its commands work, which is the half that has silently broken here before (a worker
-// spawned by PATH found no module because the packaged layout differs from the repo).
-//
-// Writes NOTHING to the real ~/.claude: os.homedir() is stubbed before the extension is
-// required, and the stub is asserted to have taken before anything runs.
-//
-//   node scripts/drive-installed.js [version]      default: this checkout's manifest version
+// --subject exists for mutation tests against a COPY of the installed artefact. Its
+// output explicitly identifies that override; it never substitutes it silently.
 //
 // Local only, like scripts/smoke.sh and scripts/verify-release.ps1: it needs the VSIX
 // actually installed, which CI has no way to arrange.
@@ -32,6 +29,8 @@ const os = require('os');
 const path = require('path');
 const Module = require('node:module');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 // The default is the version THIS CHECKOUT would produce, read from the extension
 // manifest. It used to be the literal '1.5.2', and that went stale the moment 1.5.3 was
@@ -42,8 +41,22 @@ const assert = require('node:assert/strict');
 // verdict.
 const MANIFEST = path.join(__dirname, '..', 'vscode-extension', 'package.json');
 const MANIFEST_VERSION = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')).version;
-const VERSION = process.argv[2] || MANIFEST_VERSION;
-const INSTALLED = path.join(os.homedir(), '.vscode', 'extensions',
+const args = process.argv.slice(2);
+const VERSION = args[0] && !args[0].startsWith('--') ? args.shift() : MANIFEST_VERSION;
+const options = {};
+while (args.length) {
+  const option = args.shift();
+  assert.ok(['--subject', '--extension-dir', '--codex-layout'].includes(option) && args.length && !args[0].startsWith('--'),
+    'usage: node scripts/drive-installed.js [version] [--extension-dir packaged-directory] [--codex-layout default|custom-override]');
+  assert.equal(options[option], undefined, `duplicate option: ${option}`);
+  options[option] = args.shift();
+}
+assert.ok(!(options['--subject'] && options['--extension-dir']), 'use only one extension-directory option');
+const codexLayout = options['--codex-layout'] || 'default';
+assert.ok(['default', 'custom-override'].includes(codexLayout), `unsupported Codex layout: ${codexLayout}`);
+const subject = options['--subject'] || options['--extension-dir'];
+const realHome = os.homedir();
+const INSTALLED = subject ? path.resolve(subject) : path.join(realHome, '.vscode', 'extensions',
   `local.permission-wildcarding-${VERSION}`);
 const entry = path.join(INSTALLED, 'extension.js');
 
@@ -65,12 +78,44 @@ if (!fs.existsSync(entry)) {
   process.exit(2);
 }
 
-console.log(`driving ${VERSION} (${process.argv[2] ? 'explicit argument' : 'from vscode-extension/package.json'})`);
+console.log(`driving ${VERSION}: ${INSTALLED}${subject ? ' (EXPLICIT SUBJECT OVERRIDE)' : ''}`);
+console.log(`extension.js SHA256: ${createHash('sha256').update(fs.readFileSync(entry)).digest('hex')}`);
+console.log('Boundary: simulated VS Code API; real packaged handlers, workers, files, and Codex execpolicy. No provider session.');
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-installed-drive-'));
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-installed-drive-'));
+const home = path.join(sandbox, 'home');
+fs.mkdirSync(home);
+const codexHome = codexLayout === 'custom-override' ? path.join(sandbox, 'custom-codex') : path.join(home, '.codex');
+const codexInstructions = path.join(codexHome, codexLayout === 'custom-override' ? 'AGENTS.override.md' : 'AGENTS.md');
+console.log(`Codex layout: ${codexLayout}; CODEX_HOME=${codexHome}`);
+// Workers do not inherit Module._load. Isolate their home and Codex state too.
+const originalEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((k) => [k, process.env[k]]));
+process.env.HOME = home;
+process.env.USERPROFILE = home;
+process.env.CODEX_HOME = codexHome;
+assert.equal(os.homedir(), home, 'precondition: native home lookup must be isolated before loading the extension');
 fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+fs.mkdirSync(codexHome, { recursive: true });
 fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
-  JSON.stringify({ permissions: { allow: ['Bash(git status *)'], deny: [], ask: [] } }, null, 2));
+  JSON.stringify({ permissions: { allow: ['Bash(git status *)'], deny: [], ask: [] } }, null, 2) + '\n');
+const instructionFiles = [path.join(home, '.claude', 'CLAUDE.md'), codexInstructions];
+const ownInstructions = '# Fixture user instructions\nKeep this user-owned line.\n';
+for (const file of instructionFiles) fs.writeFileSync(file, ownInstructions);
+const inactiveInstructions = '# Inactive base instructions\nThis base file must stay byte-identical.\n';
+if (codexLayout === 'custom-override') fs.writeFileSync(path.join(codexHome, 'AGENTS.md'), inactiveInstructions);
+const assertInactiveCodexPaths = () => {
+  if (codexLayout !== 'custom-override') return;
+  assert.equal(fs.existsSync(path.join(home, '.codex')), false, 'extension created the unused default ~/.codex directory');
+  assert.equal(fs.readFileSync(path.join(codexHome, 'AGENTS.md'), 'utf8'), inactiveInstructions,
+    'inactive AGENTS.md was changed despite AGENTS.override.md');
+};
+assertInactiveCodexPaths();
+const compiledGates = '## Fixture standing order\nVerify the requested behavior before reporting it.\n';
+fs.writeFileSync(path.join(home, '.claude', 'gates.generated.md'), compiledGates);
+const rulesFile = path.join(codexHome, 'rules', 'permission-wildcarding.rules');
+fs.mkdirSync(path.dirname(rulesFile), { recursive: true });
+const originalRules = '# Fixture user policy remains owned by the user\n';
+fs.writeFileSync(rulesFile, originalRules);
 
 // A transcript the scan can actually learn from, in the real Claude shape.
 const projectDir = path.join(home, '.claude', 'projects', 'drive');
@@ -90,8 +135,41 @@ for (let i = 0; i < 6; i += 1) {
 }
 fs.writeFileSync(path.join(projectDir, 'session.jsonl'), lines.join('\n') + '\n');
 
+// A DISTINCT Codex-only family prevents a passing Claude scan masking a broken
+// Codex parser. Use the current custom-tool wrapper and correlate each result.
+const codexDir = path.join(codexHome, 'sessions', '2026', '09', '27');
+fs.mkdirSync(codexDir, { recursive: true });
+const codexLines = [{ type: 'session_meta', payload: { id: 'installed-drive-codex', cwd: home } }];
+for (let i = 0; i < 4; i += 1) {
+  const call_id = `codex-drive-${i}`;
+  codexLines.push({ type: 'response_item', payload: {
+    type: 'custom_tool_call', name: 'exec', call_id,
+    input: `const result = await tools.exec_command(${JSON.stringify({ cmd: 'git status --short', workdir: home })});`,
+  } });
+  codexLines.push({ type: 'response_item', payload: {
+    type: 'custom_tool_call_output', call_id, output: 'Exit code: 0\n',
+  } });
+}
+fs.writeFileSync(path.join(codexDir, 'rollout-installed-drive.jsonl'),
+  codexLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
+
 const commands = new Map();
 const shown = [];
+const dialogs = [];
+const picks = [];
+const inputs = [];
+// Manual Scan Now still works while automatic scans are disabled. This prevents
+// activation's timer from masking a broken explicit scan command.
+const config = new Map([['guidance.enabled', false], ['gates.enabled', false], ['autoLearn.enabled', false]]);
+const output = [];
+function message(kind, m, options, ...choices) {
+  shown.push(`${kind === 'error' ? 'ERROR ' : ''}${m}`);
+  dialogs.push({ kind, message: String(m), detail: options?.detail || '' });
+  // Only the two tested removal modals are accepted. Other prompts remain closed.
+  return Promise.resolve(kind === 'warning' &&
+    ['Remove shell-style guidance?', 'Remove memory gates?'].includes(m) && choices.includes('Remove')
+    ? 'Remove' : undefined);
+}
 
 // console.error is a real reporting channel for this extension, so the harness has to
 // watch it as well as the vscode stub. Recorded AND still printed, so a failure is
@@ -106,7 +184,10 @@ const vscode = {
   workspace: {
     isTrusted: true,
     workspaceFolders: [{ uri: { fsPath: home } }],
-    getConfiguration: () => ({ get: (_k, d) => d }),
+    getConfiguration: () => ({
+      get: (k, d) => config.has(k) ? config.get(k) : d,
+      update: async (k, v) => { config.set(k, v); },
+    }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     // Missing from the first version of this harness, and the cost was real: the
@@ -126,18 +207,22 @@ const vscode = {
     }),
   },
   window: {
-    showInformationMessage: (m) => { shown.push(String(m)); return Promise.resolve(undefined); },
-    showWarningMessage: (m) => { shown.push(String(m)); return Promise.resolve(undefined); },
-    showErrorMessage: (m) => { shown.push(`ERROR ${m}`); return Promise.resolve(undefined); },
+    showInformationMessage: (m, o, ...c) => message('info', m, o, ...c),
+    showWarningMessage: (m, o, ...c) => message('warning', m, o, ...c),
+    showErrorMessage: (m, o, ...c) => message('error', m, o, ...c),
     setStatusBarMessage: () => ({ dispose() {} }),
     onDidChangeActiveTextEditor: () => ({ dispose() {} }),
     onDidChangeVisibleTextEditors: () => ({ dispose() {} }),
     activeTextEditor: undefined,
     visibleTextEditors: [],
     createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {}, text: '' }),
-    createOutputChannel: () => ({ appendLine() {}, show() {}, dispose() {} }),
+    createOutputChannel: () => ({ appendLine(m) { output.push(String(m)); }, clear() {}, show() {}, dispose() {} }),
     registerWebviewViewProvider: () => ({ dispose() {} }),
-    showQuickPick: () => Promise.resolve(undefined),
+    showQuickPick: (items) => {
+      const choice = picks.shift();
+      return Promise.resolve(items.find((item) => item === choice || item.value === choice));
+    },
+    showInputBox: () => Promise.resolve(inputs.shift()),
     withProgress: (_o, task) => task({ report() {} }, { onCancellationRequested: () => ({ dispose() {} }) }),
   },
   commands: {
@@ -165,6 +250,31 @@ Module._load = function load(request, parent, isMain) {
   const results = [];
   const ok = (name, detail) => { results.push(['PASS', name, detail || '']); };
   const bad = (name, detail) => { results.push(['FAIL', name, detail || '']); };
+  const check = async (name, task) => {
+    try { const detail = await task(); ok(name, detail); }
+    catch (error) { bad(name, error.message); }
+  };
+  const invoke = async (name) => {
+    const id = `permission-wildcarding.${name}`;
+    assert.equal(typeof commands.get(id), 'function', `${id} did not register`);
+    const start = shown.length;
+    await commands.get(id)();
+    const errors = shown.slice(start).filter((m) => m.startsWith('ERROR '));
+    assert.deepEqual(errors, [], `${id} reported a failure`);
+  };
+  const state = () => {
+    const dir = path.join(home, '.claude', 'wildcarding');
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /^auto-learn-state.*\.json$/.test(f)) : [];
+    assert.equal(files.length, 1, `expected exactly one learner state file under ${dir}`);
+    return JSON.parse(fs.readFileSync(path.join(dir, files[0]), 'utf8'));
+  };
+  const codexCandidate = (value) => {
+    const found = Object.values(value.candidates || {}).find((item) => item.prefix.join(' ') === 'git status');
+    assert.ok(found, 'Codex-only git status candidate is missing');
+    assert.deepEqual(found.sources, ['codex'], 'Codex fixture must not borrow Claude evidence');
+    assert.equal(found.counts.success, 4, 'Codex results must be correlated exactly once');
+    return found;
+  };
 
   let extension;
   try {
@@ -198,6 +308,8 @@ Module._load = function load(request, parent, isMain) {
     'permission-wildcarding.autoLearnUndo',
     'permission-wildcarding.autoLearnWhy',
     'permission-wildcarding.drainLocal',
+    'permission-wildcarding.toggleGuidance',
+    'permission-wildcarding.toggleGates',
   ];
   const missing = expected.filter((id) => !commands.has(id));
   if (missing.length) bad('the real command handlers registered', `missing: ${missing.join(', ')}`);
@@ -227,25 +339,113 @@ Module._load = function load(request, parent, isMain) {
     else bad(`${id} is still reachable after the retirement`, 'an existing keybinding would error');
   }
 
-  try {
-    await commands.get('permission-wildcarding.autoLearnScan')();
-    ok('a scan runs through the installed worker', 'no throw');
-  } catch (error) {
-    bad('a scan runs through the installed worker', error.message);
-  }
+  const { commandLaunch } = require(path.join(INSTALLED, 'src', 'exec-resolve.js'));
+  const runCodex = (argv) => {
+    const launch = commandLaunch('codex', argv);
+    const result = spawnSync(launch.file, launch.args, {
+      ...launch.options, cwd: home, env: process.env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, `Codex CLI failed: ${result.stderr || result.stdout}`);
+    return result.stdout.trim();
+  };
+  const decision = (argv) => JSON.parse(runCodex(['execpolicy', 'check', '--rules', rulesFile, '--', ...argv]));
 
-  const stateDir = path.join(home, '.claude', 'wildcarding');
-  const stateFile = fs.existsSync(stateDir)
-    ? fs.readdirSync(stateDir).find((f) => f.startsWith('auto-learn-state'))
-    : null;
-  if (stateFile) {
-    const state = JSON.parse(fs.readFileSync(path.join(stateDir, stateFile), 'utf8'));
-    const n = Object.keys(state.candidates || {}).length;
-    if (n > 0) ok('the scan learned from the transcript', `${n} candidate(s), lastScanAt ${state.lastScanAt}`);
-    else bad('the scan learned from the transcript', 'zero candidates from 6 successful runs');
-  } else {
-    bad('the scan wrote state', `nothing under ${stateDir}`);
-  }
+  await check('the real Codex CLI is available (required)', () => runCodex(['--version']));
+  await check('the installed worker learns both Claude and Codex histories', async () => {
+    await invoke('autoLearnScan');
+    const learned = state();
+    const claude = Object.values(learned.candidates).find((item) => item.prefix.join(' ') === 'rg --files');
+    assert.ok(claude, 'Claude rg --files candidate is missing');
+    assert.deepEqual(claude.sources, ['claude']);
+    assert.equal(claude.counts.success, 6, 'Claude baseline must retain six correlated successes');
+    const codex = codexCandidate(learned);
+    assert.ok(codex.baseAutoSafe, 'Codex read-only candidate must be safe to apply');
+    assert.ok(!learned.applied.codex.includes(codex.key), 'recommend-mode scan must leave Codex policy unapplied');
+    assert.equal(fs.readFileSync(rulesFile, 'utf8'), originalRules, 'scan changed Codex policy');
+    assertInactiveCodexPaths();
+    return `${claude.key}: 6 Claude successes; ${codex.key}: 4 Codex-only successes`;
+  });
+  await check('Codex safe apply, diagnostic, and undo change real policy and learner state', async () => {
+    const before = state();
+    const candidate = codexCandidate(before);
+    const originalSettings = fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8');
+    config.set('autoLearn.enabled', true);
+    await invoke('autoLearnApplySafe');
+    const applied = state();
+    assert.ok(applied.applied.codex.includes(candidate.key), 'apply did not mark the Codex candidate applied');
+    assertInactiveCodexPaths();
+    const written = fs.readFileSync(rulesFile, 'utf8');
+    assert.ok(written.startsWith(originalRules), 'apply lost the user-owned policy preamble');
+    assert.notEqual(written, originalRules, 'apply did not write Codex rules');
+    const allow = decision(['git', 'status', '--short']);
+    assert.equal(allow.decision, 'allow', 'written policy does not allow the learned command');
+    assert.ok(allow.matchedRules.length > 0, 'allow was not backed by a matching rule');
+    const miss = decision(['git', 'reset', '--hard']);
+    assert.notEqual(miss.decision, 'allow', 'status rule must not allow a destructive Git command');
+    assert.equal(miss.matchedRules.length, 0, 'near-miss unexpectedly matched a rule');
+    const transaction = applied.lastApplication;
+    assert.ok(transaction?.targets.some((item) => item.kind === 'codex' && path.resolve(item.path) === path.resolve(rulesFile)),
+      'Codex undo transaction did not target the selected CODEX_HOME rules file');
+    for (const target of transaction.targets) {
+      assert.ok(target.path.startsWith(sandbox + path.sep), `policy target escaped the fixture sandbox: ${target.path}`);
+      assert.ok(target.backupPath.startsWith(home + path.sep), `backup escaped the fixture home: ${target.backupPath}`);
+      assert.ok(fs.existsSync(target.backupPath), `missing undo backup: ${target.backupPath}`);
+    }
+
+    const dialogStart = dialogs.length;
+    picks.push('codex', 'Bash');
+    inputs.push('git status --short');
+    await invoke('autoLearnWhy');
+    const analysis = dialogs.slice(dialogStart).find((item) => item.message === 'Codex execpolicy analysis');
+    assert.ok(analysis, 'Why did this prompt? did not display Codex analysis');
+    assert.match(analysis.detail, /decision: allow/, 'diagnostic did not report the actual allow decision');
+    assert.ok(analysis.detail.includes('permission-wildcarding.rules'), 'diagnostic omitted the evaluated rule file');
+    assert.equal(fs.readFileSync(rulesFile, 'utf8'), written, 'read-only diagnostic changed rules');
+
+    await invoke('autoLearnUndo');
+    assert.equal(fs.readFileSync(rulesFile, 'utf8'), originalRules, 'undo did not restore the exact Codex bytes');
+    assert.equal(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'), originalSettings,
+      'undo did not restore the companion Claude policy');
+    const undone = state();
+    assert.deepEqual(undone.applied, before.applied, 'undo left candidate apply state behind');
+    assert.equal(undone.lastApplication, null, 'undo left the transaction active');
+    codexCandidate(undone);
+    const restored = decision(['git', 'status', '--short']);
+    assert.notEqual(restored.decision, 'allow', 'undo left the generated Codex allow effective');
+    assert.equal(restored.matchedRules.length, 0);
+    assertInactiveCodexPaths();
+    return `${rulesFile}: Codex-only evidence -> applied rule + backup -> real CLI allow/near-miss -> diagnostic -> byte-exact undo`;
+  });
+  await check('guidance and compiled memory gates toggle independently in both instruction files', async () => {
+    const guidanceBegin = '<!-- BEGIN permission-wildcarding: shell style (managed) -->';
+    const gatesBegin = '<!-- BEGIN permission-wildcarding: memory gates (managed) -->';
+    const assertInstructions = (guidanceOn, gatesOn) => {
+      assertInactiveCodexPaths();
+      for (const file of instructionFiles) {
+        const text = fs.readFileSync(file, 'utf8');
+        assert.ok(text.startsWith(ownInstructions), `user text was changed in ${file}`);
+        assert.equal(text.split(guidanceBegin).length - 1, Number(guidanceOn), `guidance block count in ${file}`);
+        assert.equal(text.split(gatesBegin).length - 1, Number(gatesOn), `memory gates block count in ${file}`);
+        if (gatesOn) assert.ok(text.includes(compiledGates.trim()), `compiled gate body missing in ${file}`);
+        if (!guidanceOn && !gatesOn) assert.equal(text, ownInstructions, `toggle round trip changed ${file}`);
+      }
+    };
+    assertInstructions(false, false);
+    await invoke('toggleGuidance');
+    assertInstructions(true, false);
+    assert.equal(config.get('guidance.enabled'), true);
+    await invoke('toggleGates');
+    assertInstructions(true, true);
+    assert.equal(config.get('gates.enabled'), true);
+    await invoke('toggleGuidance');
+    assertInstructions(false, true);
+    assert.equal(config.get('guidance.enabled'), false);
+    await invoke('toggleGates');
+    assertInstructions(false, false);
+    assert.equal(config.get('gates.enabled'), false);
+    return `CLAUDE.md and ${path.basename(codexInstructions)}: on/off, preserved user text, independent blocks and persisted settings`;
+  });
 
   try {
     await extension.deactivate();
@@ -255,9 +455,13 @@ Module._load = function load(request, parent, isMain) {
   }
 
   // Nothing may have touched the real home.
-  const realTouched = shown.filter((m) => m.includes(os.homedir()) && !m.includes(home));
+  const realTouched = shown.filter((m) => m.includes(realHome) && !m.includes(sandbox));
   if (realTouched.length) bad('nothing addressed the real home', realTouched[0]);
-  else ok('nothing addressed the real home', `sandbox ${home}`);
+  else ok('home lookup and command paths stayed in the fixture', `sandbox ${sandbox}`);
+
+  const commandFailures = [...shown, ...stderrLines].filter((m) => /failed to activate|ERROR /.test(m));
+  if (commandFailures.length) bad('no command or subsystem reported an error', commandFailures.join(' | '));
+  else ok('no command or subsystem reported an error');
 
   report(results);
 })().catch((error) => {
@@ -265,6 +469,11 @@ Module._load = function load(request, parent, isMain) {
   process.exitCode = 3;
 }).finally(() => {
   Module._load = originalLoad;
+  console.error = realConsoleError;
+  for (const [key, value] of Object.entries(originalEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 function report(results) {

@@ -19,12 +19,18 @@ const { isCoveredBy } = require('./permissions');
 const { scanHistoryFiles, codexHistoryStoreState } = require('./history-adapters');
 const { createPolicyLock } = require('./policy-lock');
 const { commandLaunch } = require('./exec-resolve');
-const { codexRuleFileSet, codexRulesArguments } = require('./codex-policy');
+const { codexRuleFileSet, codexRulesArguments, enterprisePolicyAssessment, enterprisePrefixRuleHealth } = require('./codex-policy');
+const { resolveCodexHome } = require('./codex-paths');
+const { readCodexClaims, updateCodexClaims, renderCodexClaims } = require('./codex-claims');
+const { createCodexRuleStore } = require('./codex-rule-store');
+const { createCodexMcpReview } = require('./codex-mcp-review');
+const { assertReady: assertCodexMcpReady } = require('./codex-mcp-config');
+const { parseCodexRules } = require('./codex-rule-inventory');
 const {
   readPolicy, assessPermission, overridingRule, coversPermission, defaultPolicyPath,
 } = require('./managed-policy');
 const {
-  deriveMitigations, derivedStatus, setDerivedGuidance,
+  deriveMitigations, deriveCodexMitigations, derivedStatus, setDerivedGuidance,
   DEFAULT_THRESHOLD, DEFAULT_LIMIT,
 } = require('./derived-guidance');
 const {
@@ -32,22 +38,29 @@ const {
   mergeGeneratedCodexRules,
 } = require('./policy-exporters');
 
-const VERSION = 1;
+const VERSION = 3;
+// Revise when Codex observations change meaning, independently of file layout.
+// Revision 2 added authoritative MCP outcomes and distinguished namespaced MCP
+// exec_command tools from Codex's built-in shell tools. Revision 3 correlates
+// terminal write_stdin results with pending built-in executions. Re-read old
+// cursors once while preserving grants and their Undo transactions.
+const CODEX_EVIDENCE_REVISION = 3;
 // The oldest on-disk version this code can still make sense of. A state written
 // below it is reset rather than read, which is the reset mechanism that did not
 // exist: `VERSION` was write-only, so bumping it did nothing at all and the one
 // time a reset was wanted (the Codex `session` fix) the change had to be
 // designed around its absence.
 const MIN_SUPPORTED_VERSION = 1;
-// fromVersion -> (raw) => raw, applied in order until the file reads as
-// `VERSION`. EMPTY TODAY, and that is the honest state of it: there has only
-// ever been one version, so there is no migration to register and no test can
-// reach the loop body. What the mechanism buys is that the NEXT bump has a
-// place to put its migration and a defined behaviour when none exists, instead
-// of the field being inert.
-const STATE_MIGRATIONS = new Map();
+// Preserve policy transactions while invalidating only the parser's evidence.
+// Version 2 also makes an older extension refuse to discard this provenance.
+// Version 3 records shared Codex ownership in the undo transaction. Older
+// writers of this same workspace must not silently discard its new target kind.
+const STATE_MIGRATIONS = new Map([
+  [1, (raw) => ({ ...raw, version: 2, codexEvidenceRevision: 0 })],
+  [2, (raw) => ({ ...raw, version: 3 })],
+]);
 // A state file's declared version, or `VERSION` when it says nothing. Every
-// file this tool has ever written carries `version: 1`, so an absent version
+// file this tool writes carries a version, so an absent version
 // means a hand-written or foreign file rather than an older one, and treating
 // it as current keeps that readable instead of wiping it.
 function declaredVersion(raw, version = VERSION) {
@@ -59,19 +72,8 @@ function declaredVersion(raw, version = VERSION) {
 // version, or one whose chain has a step nobody wrote, is not partially
 // readable.
 //
-// THE LADDER IS A PARAMETER, and that is the whole reason this function is
-// shaped this way. With `VERSION` and `MIN_SUPPORTED_VERSION` both 1 and
-// `STATE_MIGRATIONS` empty, the floor check below CANNOT CHANGE AN OUTCOME:
-// every `from` it rejects is also a `from` the `while` rejects on the next
-// line for want of a migration step, so mutating it to `if (false)` leaves the
-// suite green and the guard is decoration. Two doors, one reachable.
-//
-// Deleting the floor was the other option and is the worse one: the mechanism
-// is here for the NEXT version bump, and the case the two doors stop agreeing
-// about is precisely the one a bump creates -- a ladder that HAS a migration
-// for a version below the floor, where the missing-step door is wide open and
-// only the floor refuses. Injecting the ladder makes that case reachable now,
-// so the guard is tested before the bump that needs it rather than after.
+// Tests inject a ladder with a migration below its supported floor, making
+// the floor guard independently reachable from the missing-step guard.
 //
 // `VERSION` itself is deliberately not injectable through `createAutoLearnManager`:
 // bumping it with an empty `STATE_MIGRATIONS` would reset every user's state
@@ -215,6 +217,20 @@ function counts(value) {
   result.total = result.success + result.failed + result.unknown;
   return result;
 }
+function sumSourceCounts(value) {
+  const total = counts();
+  for (const entry of Object.values(value || {})) for (const outcome of OUTCOMES) total[outcome] += entry?.[outcome] || 0;
+  return counts(total);
+}
+function sourceCounts(value, total, sources = []) {
+  const result = {};
+  if (object(value)) for (const [source, entry] of Object.entries(value)) {
+    if (['claude', 'codex', 'unknown'].includes(source) && object(entry)) result[source] = counts(entry);
+  }
+  const sum = sumSourceCounts(result);
+  if ([...OUTCOMES].every((outcome) => sum[outcome] === total[outcome])) return result;
+  return sources.length === 1 ? { [sources[0]]: counts(total) } : null;
+}
 function refresh(candidate, threshold) {
   candidate.threshold = threshold;
   candidate.counts.total = candidate.counts.success + candidate.counts.failed + candidate.counts.unknown;
@@ -223,7 +239,7 @@ function refresh(candidate, threshold) {
   candidate.unknownRuns = candidate.counts.unknown;
   candidate.sourceCount = candidate.sources.length;
   candidate.meetsThreshold = candidate.counts.success >= threshold;
-  candidate.autoSafe = isAutoSafeCandidate(candidate);
+  candidate.autoSafe = !candidate.evidencePending && isAutoSafeCandidate(candidate);
   candidate.disposition = candidate.autoSafe ? 'auto-safe' : candidate.meetsThreshold ? 'review' : 'observe';
   return candidate;
 }
@@ -253,6 +269,9 @@ function candidate(value, threshold) {
   const claudePermission = clean(value.claudePermission, 768) || null;
   const reasons = [...new Set((Array.isArray(value.reasons) ? value.reasons : [])
     .map((item) => clean(item, 80)).filter(Boolean))].sort();
+  const sources = [...new Set((Array.isArray(value.sources) ? value.sources : [])
+    .map((item) => clean(item, 32)).filter(Boolean))].sort();
+  const total = counts(value.counts);
   return refresh({
     key, tool: clean(value.tool, 64), shell: clean(value.shell, 32),
     kind,
@@ -267,9 +286,7 @@ function candidate(value, threshold) {
     // no amount of later clean evidence would clear it.
     complex: reasons.some((reason) => COMPLEX_REASONS.has(reason)),
     reasons,
-    sources: [...new Set((Array.isArray(value.sources) ? value.sources : [])
-      .map((item) => clean(item, 32)).filter(Boolean))].sort(),
-    counts: counts(value.counts),
+    sources, counts: total, sourceCounts: sourceCounts(value.sourceCounts, total, sources),
   }, threshold);
 }
 function applied(value) {
@@ -521,6 +538,10 @@ function prunedCandidates(value) {
 function emptyState(mode, threshold) {
   return {
     version: VERSION, sourceVersion: VERSION,
+    codexEvidenceRevision: CODEX_EVIDENCE_REVISION, codexEvidenceRebuildPending: false,
+    codexEvidencePendingFiles: [],
+    codexEvidenceRebuildStartedAt: null, codexEvidenceUntimedFailureRuns: 0,
+    legacyCodexEvidence: {}, preservedEvidenceGrants: {},
     mode, threshold, candidates: {}, observationHashes: {}, cursors: {},
     applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
     codexTargets: {}, managedClaude: {}, managedHits: {}, managedHitsAt: null,
@@ -533,7 +554,7 @@ function emptyState(mode, threshold) {
 function lastApplication(value) {
   if (!object(value) || !Array.isArray(value.targets)) return null;
   const targets = value.targets.map((item) => {
-    if (!object(item) || !['claude', 'claude-claims', 'codex'].includes(item.kind)) return null;
+    if (!object(item) || !['claude', 'claude-claims', 'codex', 'codex-claims'].includes(item.kind)) return null;
     const beforeHash = /^[a-f0-9]{64}$/.test(item.beforeHash || '') ? item.beforeHash : null;
     const afterHash = /^[a-f0-9]{64}$/.test(item.afterHash || '') ? item.afterHash : null;
     if (!item.path || !item.backupPath || !beforeHash || !afterHash) return null;
@@ -569,6 +590,13 @@ function sanitizeState(input, mode, threshold) {
   const raw = migrateState(input);
   if (!object(raw)) return state;
   state.sourceVersion = declaredVersion(raw);
+  state.codexEvidenceRevision = Number.isInteger(raw.codexEvidenceRevision)
+    ? raw.codexEvidenceRevision : CODEX_EVIDENCE_REVISION;
+  state.codexEvidenceRebuildPending = raw.codexEvidenceRebuildPending === true;
+  state.codexEvidenceRebuildStartedAt = clean(raw.codexEvidenceRebuildStartedAt, 64) || null;
+  state.codexEvidenceUntimedFailureRuns = Math.max(0, Number(raw.codexEvidenceUntimedFailureRuns) || 0);
+  state.codexEvidencePendingFiles = [...new Set((Array.isArray(raw.codexEvidencePendingFiles)
+    ? raw.codexEvidencePendingFiles : []).filter((id) => /^path-sha256:[a-f0-9]{24}$/.test(id)))];
   state.mode = MODES.has(raw.mode) ? raw.mode : mode;
   state.threshold = positive(raw.threshold, threshold);
   if (object(raw.candidates)) for (const value of Object.values(raw.candidates)) {
@@ -612,7 +640,104 @@ function sanitizeState(input, mode, threshold) {
   state.lastScanAt = clean(raw.lastScanAt, 64) || null;
   state.lastScanStats = scanStats(raw.lastScanStats);
   state.lastApplication = lastApplication(raw.lastApplication);
+  if (object(raw.legacyCodexEvidence)) for (const [key, value] of Object.entries(raw.legacyCodexEvidence)) {
+    const original = candidate(value?.candidate, state.threshold);
+    if (!original || original.key !== key) continue;
+    state.legacyCodexEvidence[key] = { candidate: original,
+      retainedCounts: counts(value.retainedCounts), quarantinedCounts: counts(value.quarantinedCounts) };
+  }
+  if (object(raw.preservedEvidenceGrants)) for (const [key, value] of Object.entries(raw.preservedEvidenceGrants)) {
+    const original = candidate(value, state.threshold);
+    if (original?.key === key) state.preservedEvidenceGrants[key] = { ...original,
+      failureCountAtRebuild: Math.max(0, Number(value.failureCountAtRebuild) || 0) };
+  }
+  migrateCodexEvidence(state);
+  refreshEvidenceStatus(state);
   return state;
+}
+
+function grantKeys(state) {
+  return new Set([
+    ...state.applied.claude, ...state.applied.codex, ...state.reviewed.claude, ...state.reviewed.codex,
+    ...Object.values(state.codexTargets).flatMap((entry) => [...entry.applied, ...entry.reviewed]),
+    ...['grantsBefore', 'grantsAfter'].flatMap((name) => {
+      const snapshot = state.lastApplication?.[name];
+      return [...(snapshot?.applied?.claude || []), ...(snapshot?.applied?.codex || []),
+        ...(snapshot?.reviewed?.claude || []), ...(snapshot?.reviewed?.codex || []),
+        ...Object.values(snapshot?.codexTargets || {}).flatMap((entry) => [...entry.applied, ...entry.reviewed])];
+    }),
+  ]);
+}
+
+function migrateCodexEvidence(state) {
+  if (state.codexEvidenceRevision >= CODEX_EVIDENCE_REVISION) return;
+  const granted = grantKeys(state);
+  const known = {};
+  for (const entry of Object.values(state.observationHashes)) {
+    const bySource = known[entry.key] ||= {};
+    const total = bySource[entry.source] ||= counts();
+    if (OUTCOMES.has(entry.outcome)) total[entry.outcome] += 1;
+  }
+  let affected = Object.values(state.cursors).some((entry) => entry.source === 'codex');
+  for (const item of Object.values(state.candidates)) {
+    if (!item.sources.includes('codex') && !known[item.key]?.codex) continue;
+    affected = true;
+    const original = candidate(item, state.threshold);
+    let ledger = item.sourceCounts;
+    const recorded = known[item.key] || {};
+    if (!ledger) {
+      // Hashes are capped. Unattributable legacy runs cannot be called Claude
+      // or Codex, so retain their original record without using them as grants.
+      ledger = {};
+      for (const [source, value] of Object.entries(recorded)) ledger[source] = counts(value);
+    }
+    const retained = {};
+    for (const [source, value] of Object.entries(ledger)) if (source === 'claude') retained[source] = counts(value);
+    const retainedCounts = sumSourceCounts(retained);
+    const knownCounts = sumSourceCounts({ claude: ledger.claude, codex: ledger.codex });
+    const uncertain = counts(Object.fromEntries([...OUTCOMES].map((outcome) =>
+      [outcome, Math.max(0, original.counts[outcome] - knownCounts[outcome])])));
+    state.legacyCodexEvidence[item.key] ||= { candidate: original, retainedCounts, quarantinedCounts: uncertain };
+    if (granted.has(item.key)) state.preservedEvidenceGrants[item.key] ||= {
+      ...original, failureCountAtRebuild: retainedCounts.failed,
+    };
+    item.sourceCounts = retained;
+    item.counts = retainedCounts;
+    item.sources = Object.keys(retained).filter((source) => retained[source].total > 0).sort();
+    refresh(item, state.threshold);
+  }
+  for (const [id, entry] of Object.entries(state.observationHashes)) if (entry.source === 'codex') {
+    delete state.observationHashes[id];
+    affected = true;
+  }
+  for (const [id, entry] of Object.entries(state.cursors)) if (entry.source === 'codex') {
+    state.codexEvidencePendingFiles.push(id);
+    delete state.cursors[id];
+  }
+  state.codexEvidenceRevision = CODEX_EVIDENCE_REVISION;
+  state.codexEvidenceRebuildPending = affected;
+  state.codexEvidenceRebuildStartedAt = affected ? new Date().toISOString() : null;
+}
+
+function refreshEvidenceStatus(state) {
+  for (const item of Object.values(state.candidates)) {
+    item.evidencePending = state.codexEvidenceRebuildPending &&
+      (item.sources.includes('codex') || !!state.legacyCodexEvidence[item.key]);
+    refresh(item, state.threshold);
+  }
+}
+
+function codexEvidenceStatus(state) {
+  const entries = Object.values(state.legacyCodexEvidence);
+  return { revision: state.codexEvidenceRevision, pending: state.codexEvidenceRebuildPending,
+    remainingFiles: state.codexEvidencePendingFiles.length,
+    untimedFailureRuns: state.codexEvidenceUntimedFailureRuns,
+    reasons: [...(state.codexEvidenceRebuildPending ? [state.codexEvidencePendingFiles.length
+      ? 'unfinished-transcripts' : 'history-unavailable'] : []),
+    ...(state.codexEvidenceUntimedFailureRuns ? ['untimed-failures-preserved'] : [])],
+    legacyCandidates: entries.length,
+    uncertainCandidates: entries.filter((entry) => entry.quarantinedCounts.total > 0).length,
+    quarantinedRuns: entries.reduce((sum, entry) => sum + entry.quarantinedCounts.total, 0) };
 }
 // The writer used to write five fields and this reader rebuilt three, so
 // `prunedObservations` vanished on reload: a value the scan reported and the
@@ -641,6 +766,16 @@ function scanStats(value) {
     prunedCandidates: count('prunedCandidates'),
     prunedGrants: count('prunedGrants'),
     blindScan: value.blindScan === true,
+    codexEvidence: object(value.codexEvidence) ? {
+      revision: Math.max(0, Number(value.codexEvidence.revision) || 0), pending: value.codexEvidence.pending === true,
+      legacyCandidates: Math.max(0, Number(value.codexEvidence.legacyCandidates) || 0),
+      uncertainCandidates: Math.max(0, Number(value.codexEvidence.uncertainCandidates) || 0),
+      quarantinedRuns: Math.max(0, Number(value.codexEvidence.quarantinedRuns) || 0),
+      remainingFiles: Math.max(0, Number(value.codexEvidence.remainingFiles) || 0),
+      untimedFailureRuns: Math.max(0, Number(value.codexEvidence.untimedFailureRuns) || 0),
+      reasons: (Array.isArray(value.codexEvidence.reasons) ? value.codexEvidence.reasons : [])
+        .filter((reason) => ['unfinished-transcripts', 'history-unavailable', 'untimed-failures-preserved'].includes(reason)),
+    } : null,
     // "The Codex rollout directory this scan read may no longer be where Codex
     // writes." Persisted with the rest of the scan stats, because a stale
     // directory is exactly as invisible as a blind scan and the numbers beside
@@ -673,10 +808,17 @@ function persistentState(state) {
       risk: item.risk, baseAutoSafe: item.baseAutoSafe,
       complex: item.complex, reasons: item.reasons.slice(), sources: item.sources.slice(),
       counts: { ...item.counts },
+      sourceCounts: item.sourceCounts,
     };
   }
   return {
     version: VERSION, mode: state.mode, threshold: state.threshold, candidates,
+    codexEvidenceRevision: state.codexEvidenceRevision,
+    codexEvidenceRebuildPending: state.codexEvidenceRebuildPending,
+    codexEvidencePendingFiles: state.codexEvidencePendingFiles,
+    codexEvidenceRebuildStartedAt: state.codexEvidenceRebuildStartedAt,
+    codexEvidenceUntimedFailureRuns: state.codexEvidenceUntimedFailureRuns,
+    legacyCodexEvidence: state.legacyCodexEvidence, preservedEvidenceGrants: state.preservedEvidenceGrants,
     observationHashes: state.observationHashes, cursors: state.cursors,
     applied: applied(state.applied), reviewed: applied(state.reviewed),
     codexTargets: codexTargets(state.codexTargets), managedClaude: managedClaude(state.managedClaude),
@@ -693,10 +835,12 @@ function maxRisk(left, right) {
   return RISK_RANK.get(b) > RISK_RANK.get(a) ? b : a;
 }
 function mergeCandidate(existing, fresh, threshold) {
+  if (existing && existing.counts.total === 0 && existing.sources.length === 0) existing = null;
   if (!existing) {
     const created = candidate(fresh, threshold);
     if (!created) return null;
     created.counts = { success: 0, failed: 0, unknown: 0, total: 0 };
+    created.sourceCounts = {};
     return refresh(created, threshold);
   }
   existing.risk = maxRisk(existing.risk, fresh.risk);
@@ -741,6 +885,13 @@ function mergeStoredCandidates(left, right, threshold) {
   winner.reasons = [...new Set([...winner.reasons, ...other.reasons])].sort();
   winner.sources = [...new Set([...winner.sources, ...other.sources])].sort();
   winner.complex = winner.reasons.some((reason) => COMPLEX_REASONS.has(reason));
+  if (winner.sourceCounts && other.sourceCounts) {
+    for (const [source, value] of Object.entries(other.sourceCounts)) {
+      const total = winner.sourceCounts[source] ||= counts();
+      for (const outcome of OUTCOMES) total[outcome] += value[outcome];
+      winner.sourceCounts[source] = counts(total);
+    }
+  } else winner.sourceCounts = null;
   for (const name of OUTCOMES) winner.counts[name] += other.counts[name];
   return refresh(winner, threshold);
 }
@@ -749,8 +900,13 @@ function observedOutcome(item) {
   if (item.counts?.failed === 1) return 'failed';
   return 'unknown';
 }
-function changeOutcome(item, before, after) {
+function changeOutcome(item, before, after, source) {
   if (before === 'failed' && after !== 'failed') return false;
+  item.sourceCounts ||= { unknown: counts(item.counts) };
+  const sourceTotal = item.sourceCounts[source || 'unknown'] ||= counts();
+  if (OUTCOMES.has(before)) sourceTotal[before] = Math.max(0, sourceTotal[before] - 1);
+  if (OUTCOMES.has(after)) sourceTotal[after] += 1;
+  item.sourceCounts[source || 'unknown'] = counts(sourceTotal);
   if (OUTCOMES.has(before)) item.counts[before] = Math.max(0, item.counts[before] - 1);
   if (OUTCOMES.has(after)) item.counts[after] += 1;
   return before !== after;
@@ -967,7 +1123,7 @@ const BACKUP_LIMIT = 200;
 // age would eventually delete the pre-derived copy of the user's CLAUDE.md.
 // Anchored on the kinds `lastApplication` accepts, so a file this module did
 // not write cannot match by accident.
-const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-(?:claude|claude-claims|codex)-[0-9a-f]{8}\.bak$/;
+const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-(?:claude|claude-claims|codex|codex-claims)-[0-9a-f]{8}\.bak$/;
 function pruneCandidates(state, limit, protectedKeys) {
   const keys = Object.keys(state.candidates);
   if (!(limit > 0) || keys.length <= limit) return 0;
@@ -1079,7 +1235,7 @@ function defaultCodexValidator(text, context) {
     // extension point, it is a second way for the check and the write to disagree
     // about which files are visible.
     const ruleSet = codexRuleFileSet({
-      home: context.home, target: context.path, substitute: temp,
+      home: context.home, codexHome: context.codexHome, target: context.path, substitute: temp,
     });
     const rulesArgs = codexRulesArguments(
       ruleSet.effective && ruleSet.effective.length ? ruleSet.effective : [temp],
@@ -1118,8 +1274,13 @@ function defaultCodexValidator(text, context) {
     let parsed = {};
     try { parsed = JSON.parse(result.stdout); } catch {}
     const decision = parsed.decision || parsed.result?.decision || parsed.effective_decision;
-    if (context.command && decision !== 'allow') throw new Error(
-      `codex execpolicy check did not allow generated prefix: ${command.join(' ')}${checked}`,
+    const expectedDecision = context.expectedDecision || 'allow';
+    const severity = { allow: 0, prompt: 1, forbidden: 2 };
+    if (context.command && (expectedDecision === 'allow' ? decision !== 'allow' :
+        !Object.hasOwn(severity, decision) || severity[decision] < severity[expectedDecision])) throw new Error(
+      expectedDecision === 'allow'
+        ? `codex execpolicy check did not allow generated prefix: ${command.join(' ')}${checked}`
+        : `codex execpolicy check did not preserve ${expectedDecision} for prefix: ${command.join(' ')}${checked}`,
     );
     // TWO FIELDS, not six. `ruleFiles`, `checkedFiles`, `ruleSetFailures` and
     // `blindSpots` were returned here and read by nothing -- not production, not
@@ -1138,6 +1299,8 @@ function defaultCodexValidator(text, context) {
 function createAutoLearnManager(options = {}) {
   const aliases = object(options.paths) ? options.paths : {};
   const home = path.resolve(options.home || options.homeDir || os.homedir());
+  const codexHome = resolveCodexHome({ codexHome: options.codexHome,
+    ...(options.home !== undefined || options.homeDir !== undefined ? { home } : {}) });
   const configuredMode = MODES.has(options.mode) ? options.mode : 'recommend';
   const configuredThreshold = positive(options.threshold ?? options.successThreshold, 3);
   const workspaceRoot = options.workspaceRoot ? path.resolve(options.workspaceRoot) : null;
@@ -1165,15 +1328,24 @@ function createAutoLearnManager(options = {}) {
   const codexValue = Object.prototype.hasOwnProperty.call(options, 'codexRulesPath')
     ? options.codexRulesPath : aliases.codexRules;
   const codexRulesPath = configuredPath(home, explicitCodex ? codexValue : undefined,
-    path.join(home, '.codex', 'rules', 'permission-wildcarding.rules'));
+    path.join(codexHome, 'rules', 'permission-wildcarding.rules'));
   const codexTargetId = codexRulesPath
     ? hash(Buffer.from(normalizedPath(codexRulesPath), 'utf8')).slice(0, 16) : null;
+  const codexClaimsPath = codexTargetId ? path.join(userDataDir, `codex-policy-claims.${codexTargetId}.json`) : null;
+  // Inventory remains available when automatic Codex writing is disabled.
+  const inventoryTarget = codexRulesPath || path.join(codexHome, 'rules', 'permission-wildcarding.rules');
+  const inventoryClaims = codexClaimsPath || path.join(userDataDir,
+    `codex-policy-claims.${hash(Buffer.from(normalizedPath(inventoryTarget))).slice(0, 16)}.json`);
+  const codexRemovalPath = path.join(userDataDir,
+    `codex-removals.${hash(Buffer.from(normalizedPath(codexHome))).slice(0, 16)}.json`);
+  const codexBackupPath = path.join(home, '.ai-acolyte', 'backups',
+    `codex-policy.${hash(Buffer.from(normalizedPath(codexHome))).slice(0, 16)}.json`);
   const claudeRoots = configuredRoots(home,
     options.claudeRoots ?? options.claudeHistoryPath ?? aliases.claudeHistory,
     [path.join(home, '.claude', 'projects')]);
   const codexRoots = configuredRoots(home,
     options.codexRoots ?? options.codexHistoryPath ?? aliases.codexHistory,
-    [path.join(home, '.codex', 'sessions')]);
+    [path.join(codexHome, 'sessions')]);
   const historyScanner = typeof options.historyScanner === 'function' ? options.historyScanner : scanHistoryFiles;
   // Injectable for the fixtures that have to make the two stores disagree, and
   // resolved per codex root rather than once from `home`, because a test points
@@ -1192,7 +1364,7 @@ function createAutoLearnManager(options = {}) {
   // silently discarded on every scan -- and had the parameter ever been added,
   // the two would have disagreed about which roots to probe.
   function codexHistoryStore() {
-    const roots = codexRoots.length ? codexRoots : [path.join(home, '.codex', 'sessions')];
+    const roots = codexRoots.length ? codexRoots : [path.join(codexHome, 'sessions')];
     let stale = false;
     let inspected = 'exact';
     const reasons = [];
@@ -1340,14 +1512,57 @@ function createAutoLearnManager(options = {}) {
   // settings.json cannot interleave, and so a wildcarding rewrite cannot land
   // between the settings write and the claims write of one application.
   const { locked } = createPolicyLock({ lockPath, staleMs: lockStaleMs, now });
+  const mcpOptions = { ...(options.codexMcpConfigOptions || {}), home, codexHome, workspaceRoot, codexExecutable };
+  const codexRuleStore = createCodexRuleStore({ codexHome, target: inventoryTarget, workspaceRoot,
+    claimsPath: inventoryClaims, storePath: codexRemovalPath, backupPath: codexBackupPath, snapshot, atomicWrite,
+    afterWrite: afterPolicyWrite,
+    assertExternalReady: () => assertCodexMcpReady(mcpOptions),
+    validate: (file, text, checks = []) => {
+      const commands = checks.flatMap(({ pattern, decision }) => {
+        let expanded = [[]];
+        for (const position of pattern) {
+          const tokens = Array.isArray(position) ? position : [position];
+          if (expanded.length * tokens.length > 256) throw new Error('Codex reviewed rule has too many alternatives.');
+          expanded = expanded.flatMap((prefix) => tokens.map((token) => [...prefix, token]));
+        }
+        return expanded.map((command) => ({ command, expectedDecision: decision }));
+      });
+      for (const check of commands.length ? commands : [{ command: null }]) {
+        const result = codexValidator(text, { path: file, codexExecutable, home, codexHome, ...check });
+        if (result?.then || (result !== true && result?.valid !== true)) throw new Error(
+          `codex execpolicy check rejected rule change${result?.error ? ': ' + clean(result.error, 500) : ''}`);
+        if (check.command && result !== true) {
+          const severity = { allow: 0, prompt: 1, forbidden: 2 };
+          if (!Object.hasOwn(severity, result.decision) || (check.expectedDecision === 'allow'
+            ? result.decision !== 'allow' : severity[result.decision] < severity[check.expectedDecision])) {
+            throw new Error(`codex execpolicy check did not preserve the reviewed ${check.expectedDecision} decision.`);
+          }
+        }
+      }
+    },
+  });
+  const codexInventory = () => locked(() => { codexRuleStore.backup(); return codexRuleStore.inventory(); });
+  const removeCodexRules = (request) => locked(() => codexRuleStore.remove(request));
+  const codexRestoreInventory = () => locked(() => { codexRuleStore.backup(); return codexRuleStore.restoreInventory(); });
+  const restoreCodexRules = (request) => locked(() => codexRuleStore.restore(request));
+  const codexApprovalInventory = (kind) => locked(() => { codexRuleStore.backup(); return codexRuleStore.approvalInventory(kind); });
+  const approveCodexRules = (request) => locked(() => codexRuleStore.approve(request));
+  const mcpReview = createCodexMcpReview({ options: mcpOptions, loadState: load,
+    fingerprint: candidateFingerprint, assertRulesReady: (request) => codexRuleStore.assertReady(undefined, request) });
+  const codexMcpInventory = () => locked(() => mcpReview.inventory());
+  const planCodexMcp = (request) => locked(() => mcpReview.plan(request));
+  const approveCodexMcp = (request) => locked(() => mcpReview.apply(request));
+  const undoCodexMcp = (request) => locked(() => mcpReview.restore(request));
+  const recoverCodexMcp = (request) => locked(() => mcpReview.recover(request));
   // `policy` is a PARAMETER rather than a `managedPolicy()` call, because this
   // runs once per candidate and `managedPolicy()` stats the policy file to
   // check its cache stamp: 36.2 us each, so a listing did N stats where one
   // would do. The verdict cannot change within a single listing anyway.
-  function clone(item, known, policy) {
+  function clone(item, known, policy, removals) {
+    const codexSuppressed = codexRuleStore.suppressed(item.prefix, removals);
     const to = [
       ...(known.claude.has(item.key) ? ['claude'] : []),
-      ...(known.codex.has(item.key) ? ['codex'] : []),
+      ...(known.codex.has(item.key) && !codexSuppressed ? ['codex'] : []),
     ];
     // Managed settings outrank user settings and evaluate ask before allow, so
     // a family a managed ask covers cannot be granted here: writing the rule
@@ -1357,13 +1572,14 @@ function createAutoLearnManager(options = {}) {
     const policyVerdict = assessPermission(policy, item.claudePermission);
     const eligibleTargets = [
       ...(claudeSettingsPath && policyVerdict !== 'inert' && claudeEligible(item, true) ? ['claude'] : []),
-      ...(codexRulesPath && codexEligible(item, true) ? ['codex'] : []),
+      ...(codexRulesPath && !codexSuppressed && !removals.pending && codexEligible(item, true) ? ['codex'] : []),
     ];
     return {
       ...item, prefix: item.prefix.slice(), reasons: item.reasons.slice(),
       sources: item.sources.slice(), permissions: item.permissions.slice(),
       counts: { ...item.counts },
       fingerprint: candidateFingerprint(item), eligibleTargets,
+      codexSuppressed,
       policy: policyVerdict,
       pendingTargets: eligibleTargets.filter((target) => !to.includes(target)),
       applied: to.length > 0, appliedTo: to,
@@ -1374,7 +1590,8 @@ function createAutoLearnManager(options = {}) {
   }
   function candidatesFrom(state, query = {}) {    const known = { claude: new Set(state.applied.claude), codex: new Set(state.applied.codex) };
     const policy = managedPolicy();
-    let result = Object.values(state.candidates).map((item) => clone(item, known, policy));
+    const removals = codexRuleStore.read();
+    let result = Object.values(state.candidates).map((item) => clone(item, known, policy, removals));
     if (query.autoSafe === true) result = result.filter((item) => item.autoSafe);
     if (query.pending === true) result = result.filter((item) => item.pendingTargets.length > 0);
     if (query.disposition) {
@@ -1510,9 +1727,27 @@ function createAutoLearnManager(options = {}) {
   // threshold, which nothing in the module documented.
   function derivedFor(state, request = {}) {
     const current = statusFrom(state);
-    const all = deriveMitigations(current.managed.costliestRules, {
+    const codexManaged = { policy: 'absent', degraded: false, entries: [] };
+    try {
+      const bundle = JSON.parse(fs.readFileSync(options.codexBundlePath || path.join(codexHome, 'cloud-config-bundle-cache.json'), 'utf8'));
+      if (!Array.isArray(bundle?.signed_payload?.bundle?.requirements_toml?.enterprise_managed)) throw new Error('Unsupported Codex managed bundle');
+      const health = enterprisePrefixRuleHealth(bundle);
+      codexManaged.policy = health.degraded ? 'unreadable' : 'present';
+      codexManaged.degraded = health.degraded;
+      if (!health.degraded) for (const item of Object.values(state.candidates)) {
+        const observedRuns = item.sourceCounts?.codex?.success || 0;
+        if (item.evidencePending || !observedRuns) continue;
+        const assessment = enterprisePolicyAssessment(bundle, item.prefix);
+        if (assessment.match?.decision !== 'prompt' || assessment.degraded) continue;
+        codexManaged.entries.push({ agent: 'codex', key: item.key, prefix: item.prefix.slice(),
+          pattern: assessment.match.pattern, decision: 'prompt', observedRuns, evidence: 'codex-runs-current-managed-rule' });
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') Object.assign(codexManaged, { policy: 'unreadable', degraded: true });
+    }
+    const all = [...deriveMitigations(current.managed.costliestRules, {
       threshold: request.threshold, limit: Number.MAX_SAFE_INTEGER,
-    });
+    }), ...deriveCodexMitigations(codexManaged.entries, { threshold: request.threshold, limit: Number.MAX_SAFE_INTEGER })];
     const limit = Number.isFinite(request.limit) ? Math.max(0, request.limit) : DEFAULT_LIMIT;
     const accepted = state.derivedGuidance.accepted;
     const declined = state.derivedGuidance.declined;
@@ -1520,7 +1755,7 @@ function createAutoLearnManager(options = {}) {
     const pending = all.filter((item) => !decided.has(item.id)).slice(0, limit);
     const pendingIds = new Set(pending.map((item) => item.id));
     return {
-      managed: current.managed, all, pending, limit,
+      managed: current.managed, codexManaged, all, pending, limit,
       threshold: Number.isFinite(request.threshold) ? request.threshold : DEFAULT_THRESHOLD,
       // What a reader should see: everything ruled on, plus what is on offer.
       visible: all.filter((item) => decided.has(item.id) || pendingIds.has(item.id)),
@@ -1531,12 +1766,14 @@ function createAutoLearnManager(options = {}) {
     const derived = derivedFor(state, request);
     return {
       threshold: derived.threshold, limit: derived.limit,
-      policy: derived.managed.policy, degraded: Boolean(derived.managed.degraded),
+      policy: [derived.managed.policy, derived.codexManaged.policy].includes('present') ? 'present' : derived.managed.policy,
+      degraded: Boolean(derived.managed.degraded || derived.codexManaged.degraded),
+      policies: { claude: derived.managed.policy, codex: derived.codexManaged.policy },
       mitigations: derived.visible,
       pending: derived.pending,
       accepted: state.derivedGuidance.accepted.slice(),
       declined: state.derivedGuidance.declined.slice(),
-      targets: derivedStatus({ home }),
+      targets: derivedStatus({ home, codexHome, agents: ['claude', 'codex'] }),
     };
   }
 
@@ -1578,16 +1815,20 @@ function createAutoLearnManager(options = {}) {
       // failure costs nothing and is repaired by the next decide. Absence is
       // withheld too: `readPolicy` documents that a machine with no managed
       // policy proves nothing, and this module may withhold but never destroy.
-      if (derived.managed.policy !== 'present') {
+      const selectedPolicy = key.startsWith('codex-') ? derived.codexManaged : derived.managed;
+      if (selectedPolicy.policy !== 'present') {
         return {
           ...result, targets: [],
-          blocked: derived.managed.degraded ? 'managed-policy-unreadable' : 'managed-policy-absent',
+          blocked: selectedPolicy.degraded ? 'managed-policy-unreadable' : 'managed-policy-absent',
         };
       }
       return {
         ...result,
         targets: setDerivedGuidance(derived.all, state.derivedGuidance.accepted,
-          { home, backupDir }),
+          { home, codexHome, backupDir, agents: [
+            ...(derived.managed.policy === 'present' ? ['claude'] : []),
+            ...(derived.codexManaged.policy === 'present' ? ['codex'] : []),
+          ] }),
       };
     });
   }
@@ -1596,9 +1837,13 @@ function createAutoLearnManager(options = {}) {
   }
   function statusFrom(state) {
     const all = Object.values(state.candidates);
-    const appliedKeys = [...new Set([...state.applied.claude, ...state.applied.codex])].sort();
+    const removals = codexRuleStore.read();
+    const visibleApplied = { ...state.applied, codex: state.applied.codex.filter((key) =>
+      !codexRuleStore.suppressed(state.candidates[key]?.prefix || state.preservedEvidenceGrants[key]?.prefix, removals)) };
+    const appliedKeys = [...new Set([...visibleApplied.claude, ...visibleApplied.codex])].sort();
     return {
       version: VERSION, mode: state.mode, threshold: state.threshold,
+      codexEvidence: codexEvidenceStatus(state),
       lastScanAt: state.lastScanAt, lastScan: state.lastScanAt,
       lastScanStats: state.lastScanStats,
       lastApplyAt: state.lastApplication?.at || null,
@@ -1613,11 +1858,11 @@ function createAutoLearnManager(options = {}) {
         review: all.filter((item) => item.disposition === 'review').length,
         observe: all.filter((item) => item.disposition === 'observe').length,
       },
-      applied: applied(state.applied), appliedKeys,
+      applied: applied(visibleApplied), appliedKeys,
       managed: managedSummary(all, state.managedHits),
       paths: {
         state: statePath, claudeSettings: claudeSettingsPath,
-        claudeClaims: claudeClaimsPath, codexRules: codexRulesPath,
+        claudeClaims: claudeClaimsPath, codexRules: codexRulesPath, codexClaims: codexClaimsPath,
       },
     };
   }
@@ -1648,7 +1893,7 @@ function createAutoLearnManager(options = {}) {
     const commands = prefixes.length ? prefixes : [null];
     for (const command of commands) {
       const result = codexValidator(merged, {
-        path: codexRulesPath, codexExecutable, internal, home,
+        path: codexRulesPath, codexExecutable, internal, home, codexHome,
         command: command ? command.slice() : null,
       });
       if (result?.then) throw new Error('Codex validator must be synchronous');
@@ -1661,13 +1906,14 @@ function createAutoLearnManager(options = {}) {
     }
   }
   const claudeEligible = (item, reviewed) =>
-    renderClaudePermissions([item], { includeReviewed: reviewed }).length > 0;
+    !item?.evidencePending && renderClaudePermissions([item], { includeReviewed: reviewed }).length > 0;
   // Rendering a prefix_rule is not the same as being allowed to write one. The
   // merge step refuses text this validator rejects (a bare `curl`, `python` or
   // `git` prefix, a broad PowerShell form), and an application is atomic, so
   // offering such a candidate as eligible meant one unwritable row failed the
   // whole batch and applied nothing. Eligibility asks the writer's question.
   const codexEligible = (item, reviewed) => {
+    if (item?.evidencePending) return false;
     const text = renderCodexRules([item], { includeReviewed: reviewed });
     if (!/\bprefix_rule\s*\(/.test(text)) return false;
     return validateCodexRulesText(text).valid === true;
@@ -1765,6 +2011,9 @@ function createAutoLearnManager(options = {}) {
     if (keys) {
       const missing = keys.filter((key) => !state.candidates[key]);
       if (missing.length) throw new Error(`Unknown Auto Learn candidate key(s): ${missing.join(', ')}`);
+      if (keys.some((key) => state.candidates[key].evidencePending)) {
+        throw new Error('Codex history evidence is being rebuilt; retry after a complete scan');
+      }
       if (includeReviewed && keys.some((key) => !state.candidates[key].meetsThreshold)) {
         throw new Error('Reviewed candidates must meet the configured success threshold');
       }
@@ -1785,9 +2034,17 @@ function createAutoLearnManager(options = {}) {
       (!targets || targets.has('claude'));
     const useCodex = Boolean(codexRulesPath) && request.codex !== false &&
       (!targets || targets.has('codex'));
+    const removals = useCodex ? codexRuleStore.assertReady() : null;
+    if (useCodex) codexRuleStore.backup();
+    const suppressedCodex = (item) => useCodex && codexRuleStore.suppressed(item?.prefix, removals);
     const beforeGrants = grantSnapshot(state);
     const oldClaude = state.applied.claude.slice();
     const oldReviewedClaude = new Set(state.reviewed.claude);
+    // Preservation applies only to existing membership, never eligibility for
+    // another target. Later failed runs return automatic grants to the normal
+    // retention rules; the parser rebuild itself does not revoke permissions.
+    const preserved = (key) => state.preservedEvidenceGrants[key] && state.candidates[key] &&
+      state.candidates[key].counts.failed <= state.preservedEvidenceGrants[key].failureCountAtRebuild;
     // The `?.` on the left proves the candidate can be absent, and the right
     // side then passed the same value in unguarded, so `--learn apply` died
     // with a raw TypeError out of policy-exporters rather than doing anything.
@@ -1802,8 +2059,8 @@ function createAutoLearnManager(options = {}) {
     // Pruning the orphaned keys instead would discard claims-registry
     // provenance, so that stays recorded. See docs/engineering-record.md.
     let nextClaude = useClaude
-      ? oldClaude.filter((key) => state.candidates[key] && (state.candidates[key].autoSafe ||
-        (oldReviewedClaude.has(key) && claudeEligible(state.candidates[key], true))))
+      ? oldClaude.filter((key) => preserved(key) || (state.candidates[key] && (state.candidates[key].autoSafe ||
+        (oldReviewedClaude.has(key) && claudeEligible(state.candidates[key], true)))))
       : oldClaude.slice();
     let nextReviewedClaude = useClaude
       ? state.reviewed.claude.filter((key) => nextClaude.includes(key))
@@ -1814,8 +2071,9 @@ function createAutoLearnManager(options = {}) {
     const oldCodex = record.applied.slice();
     const oldReviewedCodex = new Set(record.reviewed);
     let nextCodex = useCodex
-      ? oldCodex.filter((key) => state.candidates[key]?.autoSafe ||
-        (oldReviewedCodex.has(key) && codexEligible(state.candidates[key], true)))
+      ? oldCodex.filter((key) => !suppressedCodex(preserved(key) ? state.preservedEvidenceGrants[key] : state.candidates[key]) &&
+        (preserved(key) || state.candidates[key]?.autoSafe ||
+        (oldReviewedCodex.has(key) && codexEligible(state.candidates[key], true))))
       : oldCodex.slice();
     let nextReviewedCodex = useCodex
       ? record.reviewed.filter((key) => nextCodex.includes(key))
@@ -1874,6 +2132,11 @@ function createAutoLearnManager(options = {}) {
       if (includeReviewed) nextReviewedClaude.push(item.key);
     }
     if (useCodex) for (const item of selected) {
+      if (suppressedCodex(item)) {
+        withheld.push({ key: item.key, source: 'codex-removal', decision: 'removed',
+          rule: JSON.stringify(item.prefix), permission: item.claudePermission });
+        continue;
+      }
       if (!codexEligible(item, includeReviewed)) continue;
       if (!nextCodex.includes(item.key)) newly.codex.push(item.key);
       nextCodex.push(item.key);
@@ -1894,7 +2157,8 @@ function createAutoLearnManager(options = {}) {
       } catch (error) { throw new Error(`Cannot parse Claude settings: ${error.message}`); }
       if (!object(settings)) throw new Error('Claude settings must be a JSON object');
       let current = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow.slice() : [];
-      const items = nextClaude.map((key) => state.candidates[key]).filter(Boolean);
+      const items = nextClaude.map((key) => oldClaude.includes(key) && preserved(key)
+        ? state.preservedEvidenceGrants[key] : state.candidates[key]).filter(Boolean);
       // A list per key, not one permission. A family that observed both `git`
       // and `git.exe` renders two entries, and taking only the first would
       // write one of them and claim neither the other nor the runs behind it.
@@ -1951,15 +2215,32 @@ function createAutoLearnManager(options = {}) {
         });
       }
     }
-    if (useCodex && (nextCodex.length || fs.existsSync(codexRulesPath))) {
+    if (useCodex && (nextCodex.length || fs.existsSync(codexRulesPath) || fs.existsSync(codexClaimsPath))) {
       const before = snapshot(codexRulesPath);
-      const items = nextCodex.map((key) => state.candidates[key]).filter(Boolean);
-      const generated = renderCodexRules(items, { includeReviewed: true });
+      const claimsBefore = snapshot(codexClaimsPath);
+      const items = nextCodex.map((key) => oldCodex.includes(key) && preserved(key)
+        ? state.preservedEvidenceGrants[key] : state.candidates[key]).filter(Boolean);
+      const nextClaims = updateCodexClaims(
+        readCodexClaims(claimsBefore, normalizedPath(codexRulesPath)), normalizedPath(codexRulesPath),
+        claudeClaimantId, renderCodexRules(items, { includeReviewed: true }),
+        before.exists ? before.content.toString('utf8') : '',
+      );
+      const generated = nextClaims.generated;
       const merged = mergeGeneratedCodexRules(before.exists ? before.content.toString('utf8') : '', generated);
       const content = Buffer.from(merged);
-      if (!before.exists || !content.equals(before.content)) {
+      const claimsContent = Buffer.from(renderCodexClaims(nextClaims.claims));
+      const policyChanged = !before.exists || !content.equals(before.content);
+      const claimsChanged = !claimsBefore.exists || !claimsContent.equals(claimsBefore.content);
+      // Another workspace can claim identical bytes after a neighboring rule
+      // starts blocking them. Ownership still needs the effective policy check.
+      if (policyChanged || claimsChanged) {
         validateCodex(generated, merged, items.map((item) => item.prefix));
+      }
+      if (policyChanged) {
         changes.push({ kind: 'codex', path: codexRulesPath, before, content });
+      }
+      if (claimsChanged) {
+        changes.push({ kind: 'codex-claims', path: codexClaimsPath, before: claimsBefore, content: claimsContent });
       }
     }
     for (const change of changes) if (!unchanged(change.path, change.before)) {
@@ -1994,6 +2275,7 @@ function createAutoLearnManager(options = {}) {
         at: time, targets: backups, grantsBefore: beforeGrants,
         grantsAfter: grantSnapshot(state),
       };
+      if (useCodex) codexRuleStore.backup();
       save(state);
     } catch (error) {
       const conflicts = rollback(written);
@@ -2008,7 +2290,7 @@ function createAutoLearnManager(options = {}) {
       .map((target) => target.backupPath));
     const appliedKeys = [...new Set([...newly.claude, ...newly.codex])].sort();
     const changedTargets = [...new Set(changes.map((item) =>
-      item.kind === 'claude-claims' ? 'claude' : item.kind))];
+      item.kind === 'claude-claims' ? 'claude' : item.kind === 'codex-claims' ? 'codex' : item.kind))];
     return {
       changed: changes.length > 0, changedTargets,
       applied: newly, appliedKeys, appliedCount: appliedKeys.length,
@@ -2132,7 +2414,9 @@ function createAutoLearnManager(options = {}) {
   }
   function scan(request = {}) {
     return locked(() => {
+      codexRuleStore.backup();
       const state = load();
+      const rebuildingCodex = state.codexEvidenceRebuildPending;
       if (request.mode !== undefined) {
         if (!MODES.has(request.mode)) throw new Error(`Invalid Auto Learn mode: ${request.mode}`);
         state.mode = request.mode;
@@ -2167,8 +2451,20 @@ function createAutoLearnManager(options = {}) {
           if (!item) continue;
           state.candidates[fresh.key] = item;
           const source = fresh.sources[0] || clean(observation.source, 32) || 'unknown';
+          if (rebuildingCodex && source === 'codex' && next === 'failed' && previous?.outcome !== 'failed' &&
+              state.preservedEvidenceGrants[fresh.key]) {
+            const observedAt = Date.parse(observation.timestamp);
+            const rebuildAt = Date.parse(state.codexEvidenceRebuildStartedAt);
+            // Replay failures can correct historical evidence without making a
+            // new permission decision. A dated call after the rebuild began is
+            // new evidence; Claude calls are never part of a Codex replay.
+            if (!Number.isFinite(observedAt) || (Number.isFinite(rebuildAt) && observedAt <= rebuildAt)) {
+              state.preservedEvidenceGrants[fresh.key].failureCountAtRebuild += 1;
+              if (!Number.isFinite(observedAt)) state.codexEvidenceUntimedFailureRuns += 1;
+            }
+          }
           if (!previous) {
-            changeOutcome(item, null, next);
+            changeOutcome(item, null, next, source);
             state.observationHashes[id] = { key: fresh.key, outcome: next, source };
             newObservations += 1;
             // Counted once, on first sight, keyed off the same hash that stops
@@ -2188,7 +2484,7 @@ function createAutoLearnManager(options = {}) {
               }
             }
           } else if (previous.key === fresh.key && previous.outcome !== next &&
-              changeOutcome(item, previous.outcome, next)) {
+              changeOutcome(item, previous.outcome, next, source)) {
             state.observationHashes[id] = { key: fresh.key, outcome: next, source };
             updatedObservations += 1;
           }
@@ -2253,7 +2549,8 @@ function createAutoLearnManager(options = {}) {
       const observedFiles = scannedFiles.filter((entry) => entry?.scope !== 'root');
       const blindScan = observedFiles.length === 0 && Object.keys(state.cursors).length > 0;
       if (!blindScan) {
-        state.cursors = {};
+        state.cursors = rebuildingCodex
+          ? Object.fromEntries(Object.entries(state.cursors).filter(([, entry]) => entry.source !== 'codex')) : {};
         for (const [file, value] of Object.entries(result.cursors)) {
           const safe = cursor(value);
           const id = /^path-sha256:[a-f0-9]{24}$/.test(file)
@@ -2261,6 +2558,25 @@ function createAutoLearnManager(options = {}) {
           if (safe) state.cursors[id] = safe;
         }
       }
+      if (rebuildingCodex) {
+        const codexFiles = scannedFiles.filter((entry) => entry.source === 'codex');
+        const incomplete = codexFiles.filter((entry) =>
+          ['error', 'partial', 'unreadable'].includes(entry.mode) || Number(entry.unmatchedResults) > 0);
+        const pendingFiles = new Set(state.codexEvidencePendingFiles);
+        // A missing directory is not proof that the old history was rebuilt.
+        // Failed or skipped bytes must be retried, not blessed on an unchanged
+        // next tick after their cursor already advanced past them.
+        for (const entry of codexFiles) if (entry.path && entry.scope !== 'root') {
+          const id = `path-sha256:${hash(Buffer.from(normalizedPath(entry.path), 'utf8')).slice(0, 24)}`;
+          if (incomplete.includes(entry)) {
+            pendingFiles.add(id);
+            if (entry.mode !== 'partial') delete state.cursors[id];
+          } else pendingFiles.delete(id);
+        }
+        state.codexEvidencePendingFiles = [...pendingFiles].sort();
+        state.codexEvidenceRebuildPending = codexFiles.length === 0 || incomplete.length > 0 || pendingFiles.size > 0;
+      }
+      refreshEvidenceStatus(state);
       // Enforce the cap on the way out, so one scan cannot leave the file
       // holding more rules than the normalizer would accept reading it back.
       state.managedHits = managedHits(state.managedHits);
@@ -2306,13 +2622,14 @@ function createAutoLearnManager(options = {}) {
         // ordinary quiet scan. The signal is in the data -- walk failures carry
         // `scope: 'root'` -- so this only surfaces it.
         blindScan,
+        codexEvidence: codexEvidenceStatus(state),
         codexHistoryStale: codexHistory.stale === true,
         codexHistoryInspected: codexHistory.inspected,
         codexHistoryReasons: codexHistory.reasons,
         codexHistoryNotes: codexHistory.notes,
       };
       save(state);
-      const application = state.mode === 'auto-safe'
+      const application = state.mode === 'auto-safe' && !rebuildingCodex && !state.codexEvidenceRebuildPending
         ? applyUnlocked(state, { includeReviewed: false }) : null;
       return {
         scannedAt: state.lastScanAt, files: state.lastScanStats.files,
@@ -2326,6 +2643,7 @@ function createAutoLearnManager(options = {}) {
         prunedObservations, retainedObservations,
         prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidatesTotal, prunedGrants,
         blindScan,
+        codexEvidence: codexEvidenceStatus(state),
         codexHistoryStale: state.lastScanStats.codexHistoryStale,
         codexHistoryInspected: state.lastScanStats.codexHistoryInspected,
         codexHistoryReasons: state.lastScanStats.codexHistoryReasons,
@@ -2369,6 +2687,26 @@ function createAutoLearnManager(options = {}) {
         changed: false, undone: false, reason: 'No Auto Learn application is available to undo.',
       };
       const restores = [];
+      // A workspace can switch Codex targets between apply and Undo. Historical
+      // transactions do not record their Codex home, so never guess a different
+      // home's removal scope once deliberate removals exist on this user account.
+      const foreignCodexTarget = application.targets.some((target) =>
+        (target.kind === 'codex' && normalizedPath(target.path) !== normalizedPath(inventoryTarget)) ||
+        (target.kind === 'codex-claims' && normalizedPath(target.path) !== normalizedPath(inventoryClaims)));
+      if (foreignCodexTarget && fs.existsSync(userDataDir) && fs.readdirSync(userDataDir)
+        .some((file) => /^codex-removals\.[a-f0-9]{16}\.json$/.test(file))) throw new Error(
+        'Refusing Undo for a different Codex target after explicit removals. Open the Codex home and rule target used by that application.');
+      const removals = application.targets.some((target) => target.kind === 'codex' || target.kind === 'codex-claims')
+        ? codexRuleStore.assertReady() : null;
+      if (!application.targets.some((target) => target.kind === 'codex-claims')) {
+        for (const target of application.targets.filter((entry) => entry.kind === 'codex')) {
+          const id = hash(Buffer.from(normalizedPath(target.path), 'utf8')).slice(0, 16);
+          const claims = readCodexClaims(snapshot(path.join(userDataDir, `codex-policy-claims.${id}.json`)), normalizedPath(target.path));
+          if (claims) throw new Error(
+            'Refusing to undo this legacy application because shared Codex claims were recorded afterwards.',
+          );
+        }
+      }
       let released;
       for (const target of application.targets) {
         const current = snapshot(target.path);
@@ -2376,12 +2714,28 @@ function createAutoLearnManager(options = {}) {
         if (!before.exists || before.hash !== target.beforeHash) throw new Error(
           `Refusing to undo because the Auto Learn backup is missing or changed: ${target.backupPath}`,
         );
-        // An untouched target is restored exactly. A moved one is reconciled,
-        // except the Codex rules file, which nothing else is expected to write.
+        // Codex policy and shared ownership must both match this transaction.
+        // Even an identical rule can gain another claimant without changing
+        // policy bytes; restoring the earlier snapshot would revoke that grant.
         const untouched = current.exists && current.hash === target.afterHash;
         let content = before.content;
         let remove = untouched && !target.existed;
-        if (target.kind === 'codex') {
+        if (target.kind === 'codex' || target.kind === 'codex-claims') {
+          if (removals?.patterns.length) {
+            // Historical snapshots may contain grants explicitly removed later.
+            // Refuse before any restore, even if the policy bytes happen to match.
+            let texts = [content.toString('utf8')];
+            if (target.kind === 'codex-claims' && target.existed) {
+              const oldClaims = readCodexClaims(before, normalizedPath(inventoryTarget));
+              texts = [oldClaims.baseline, ...Object.values(oldClaims.claimants)];
+            } else if (target.kind === 'codex-claims') texts = [];
+            for (const text of texts) {
+              const parsed = parseCodexRules(text);
+              if (!parsed.supported || parsed.rules.some((rule) => rule.decision === 'allow' &&
+                  codexRuleStore.suppressed(rule.pattern, removals))) throw new Error(
+                'Refusing Undo because its snapshot could restore an explicitly removed Codex prefix.');
+            }
+          }
           if (!untouched) throw new Error(
             `Refusing to undo because the policy changed after Auto Learn wrote it: ${target.path}`,
           );
@@ -2438,7 +2792,8 @@ function createAutoLearnManager(options = {}) {
       return {
         changed: true, undone: true,
         restoredTargets: [...new Set(restores.map((item) =>
-          item.target.kind === 'claude-claims' ? 'claude' : item.target.kind))],
+          item.target.kind === 'claude-claims' ? 'claude'
+            : item.target.kind === 'codex-claims' ? 'codex' : item.target.kind))],
         backupsPruned: backupsPruned.removed, backupsKept: backupsPruned.kept,
         backupsUnremovable: backupsPruned.failed,
       };
@@ -2450,9 +2805,12 @@ function createAutoLearnManager(options = {}) {
       home, state: statePath, lock: lockPath, backups: backupDir,
       claudeHistory: claudeRoots.slice(), codexHistory: codexRoots.slice(),
       claudeSettings: claudeSettingsPath, claudeClaims: claudeClaimsPath,
-      codexRules: codexRulesPath,
+      codexRules: codexRulesPath, codexClaims: codexClaimsPath,
+      codexRemovals: codexRemovalPath, codexBackup: codexBackupPath,
     },
-    scan, status, overview, explainManaged, rebuildManagedHits,
+    scan, status, overview, explainManaged, rebuildManagedHits, codexInventory, removeCodexRules,
+    codexRestoreInventory, restoreCodexRules, codexApprovalInventory, approveCodexRules,
+    codexMcpInventory, planCodexMcp, approveCodexMcp, undoCodexMcp, recoverCodexMcp,
     derivedReview, decideDerived,
     // NO ALIASES. `list`, `getStatus` and `getCandidates` were all second names
     // for a function already here under its own. The argument for keeping
@@ -2471,8 +2829,5 @@ function createAutoLearnManager(options = {}) {
   };
 }
 
-// `migrateStateTo` is test-only, not dead: the version floor it carries is
-// unreachable with this module's own one-rung ladder, and driving it with an
-// injected ladder is the only way any input can make that check fail. See the
-// note above the function.
+// Exported for independent coverage of the version floor and missing steps.
 module.exports = { createAutoLearnManager, migrateStateTo };

@@ -81,6 +81,8 @@ function harness(tempHome, overrides = {}) {
   };
   const modulePath = require.resolve('../vscode-extension/memoryLint');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   const intervals = [];
   const originalSetInterval = global.setInterval;
   // Every fs call memoryLint.js itself makes, by name and by argument. Counted rather
@@ -108,6 +110,10 @@ function harness(tempHome, overrides = {}) {
   const loaded = require(modulePath);
   const restore = () => {
     Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     global.setInterval = originalSetInterval;
     delete require.cache[modulePath];
   };
@@ -969,7 +975,7 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
 // this repo, from the pinned-`memory.dir` bug, and is why `memoryStoreDirs`
-// (extension.js:2197) overrides `dir` before calling this.
+// (extension.js:2374) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

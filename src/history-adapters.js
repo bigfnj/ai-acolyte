@@ -477,17 +477,21 @@ function isQuote(char) {
   return typeof char === 'string' && [34, 39, 96].includes(char.charCodeAt(0));
 }
 
-function findCommandProperty(source, objectStart) {
+function findShellProperties(source, objectStart) {
   let index = objectStart + 1;
   let curly = 1;
   let paren = 0;
   let bracket = 0;
   let atPropertyStart = true;
+  const properties = {};
   while (index < source.length && curly > 0) {
     index = skipTrivia(source, index);
     if (index >= source.length) break;
     const char = source[index];
     if (curly === 1 && paren === 0 && bracket === 0 && atPropertyStart) {
+      // Either can replace cmd or shell. Their runtime value is unknowable
+      // without evaluating the script, so a literal earlier property is not proof.
+      if (char === '[' || source.startsWith('...', index)) return null;
       let key;
       let keyEnd = index;
       if (isQuote(char) && char.charCodeAt(0) !== 96) {
@@ -503,16 +507,20 @@ function findCommandProperty(source, objectStart) {
         const colon = skipTrivia(source, keyEnd);
         if (source[colon] === ':') {
           const valueStart = skipTrivia(source, colon + 1);
-          if (NESTED_COMMAND_KEYS.has(key) && isQuote(source[valueStart])) {
+          if (NESTED_COMMAND_KEYS.has(key) || key === 'shell') {
+            if (!isQuote(source[valueStart])) return null;
             const literal = readJsStringLiteral(source, valueStart);
             if (!literal || !literal.valid) return null;
             const afterValue = skipTrivia(source, literal.end);
-            return (source[afterValue] === ',' || source[afterValue] === '}') ? literal.value : null;
+            if (source[afterValue] !== ',' && source[afterValue] !== '}') return null;
+            properties[key] = literal.value;
           }
           index = valueStart;
           atPropertyStart = false;
           continue;
         }
+        // Shorthand and methods named shell/cmd are not literal arguments.
+        if (NESTED_COMMAND_KEYS.has(key) || key === 'shell') return null;
       }
       atPropertyStart = false;
     }
@@ -534,7 +542,10 @@ function findCommandProperty(source, objectStart) {
     else if (char === ',' && curly === 1 && paren === 0 && bracket === 0) atPropertyStart = true;
     index += 1;
   }
-  return null;
+  if (curly !== 0) return null;
+  const command = properties.command ?? properties.cmd;
+  return typeof command === 'string' && command.trim()
+    ? { command, shell: properties.shell } : null;
 }
 
 // Tiny lexer for the generated functions.exec shape. It never evaluates JS;
@@ -562,12 +573,12 @@ const NESTED_COMMAND_KEYS = new Set(['command', 'cmd']);
 // `shell_command`, so a rollout emitting `exec_command` directly yielded no
 // observation at all and looked exactly like a session that ran no shell.
 //
-// NOT VERIFIED AGAINST A REAL SAMPLE. No transcript on this machine carries the
-// non-nested `exec_command` shape, so the argument key is accepted in both
-// spellings the nested form is known to use, and nothing else about the record
-// is assumed. An accepted name that never occurs costs one set lookup; a
-// missing one costs the whole corpus, silently, which is the trade the nested
-// extractor already made for the same reason.
+// Fresh Codex 0.145.0 runs now verify direct `exec_command` and its later
+// `write_stdin` completion, including successful and nonzero exits. The runtime
+// probe is scripts/check-codex-wait-runtime.js; direct `shell_command` has its
+// own earlier runtime coverage. Both argument spellings remain supported.
+// This does not imply support for arbitrary custom tool wrappers or continued
+// functions.exec/functions.wait cells, whose outcomes need separate evidence.
 const CODEX_FUNCTION_SHELL_NAMES = new Set([
   'shell_command', 'functions.shell_command', 'exec_command', 'functions.exec_command',
 ]);
@@ -575,7 +586,7 @@ const NESTED_SHELL_CALL_RE = new RegExp(
   `\\btools\\s*\\.\\s*(?:${[...NESTED_SHELL_METHODS].join('|')})\\s*\\(`,
 );
 
-function extractNestedShellCommands(jsSource) {
+function extractNestedShellCalls(jsSource) {
   const source = typeof jsSource === 'string' ? jsSource : '';
   const commands = [];
   let index = 0;
@@ -604,11 +615,15 @@ function extractNestedShellCommands(jsSource) {
     if (source[cursor] !== '(') { index = method.end; continue; }
     cursor = skipTrivia(source, cursor + 1);
     if (source[cursor] !== '{') { index = cursor; continue; }
-    const command = findCommandProperty(source, cursor);
-    if (typeof command === 'string' && command.trim()) commands.push(command);
+    const call = findShellProperties(source, cursor);
+    if (call) commands.push(call);
     index = cursor + 1;
   }
   return commands;
+}
+
+function extractNestedShellCommands(jsSource) {
+  return extractNestedShellCalls(jsSource).map((call) => call.command);
 }
 
 function maskJsCode(source) {
@@ -645,6 +660,9 @@ function maskJsCode(source) {
 function customExecCanAttributeSuccess(jsSource, commands) {
   if (!Array.isArray(commands) || commands.length !== 1) return false;
   const code = maskJsCode(jsSource);
+  // A second call with dynamic arguments or an unsupported shell is still a
+  // second execution. Dropping it from observations must not bless the first.
+  if ([...code.matchAll(new RegExp(NESTED_SHELL_CALL_RE.source, 'g'))].length !== 1) return false;
   if (/\b(?:catch|class|do|else|exit|finally|for|function|if|switch|try|while|with)\b|&&|\|\||=>|\?/.test(code)) {
     return false;
   }
@@ -733,7 +751,16 @@ function codexItems(record) {
   return items;
 }
 
-function codexTool(options) {
+function codexTool(options, shell) {
+  if (shell !== undefined) {
+    if (typeof shell !== 'string') return null;
+    const executable = shell.trim().replace(/\\/g, '/').split('/').pop().toLowerCase();
+    if (/^bash(?:\.exe)?$/.test(executable)) return 'Bash';
+    if (/^(?:powershell|pwsh)(?:\.exe)?$/.test(executable)) return 'PowerShell';
+    // cmd.exe and other shells have no grammar in the learner. They must not
+    // inherit the host's PowerShell/Bash parser merely because they ran there.
+    return null;
+  }
   if (SHELL_TOOLS.has(options.tool)) return options.tool;
   if (SHELL_TOOLS.has(options.defaultTool)) return options.defaultTool;
   return (options.platform || process.platform) === 'win32' ? 'PowerShell' : 'Bash';
@@ -743,6 +770,123 @@ function classifyCodexOutput(item) {
   return structuredResultStatus(item, { inspectText: true });
 }
 
+function pendingShellResult(value, depth = 0) {
+  if (depth > 8 || value == null) return false;
+  if (typeof value === 'string') {
+    const parsed = jsonObject(value);
+    if (parsed) return pendingShellResult(parsed, depth + 1);
+    return /(?:^|\r?\n)\s*Process running with session ID\s+\d+\b/i.test(value);
+  }
+  if (Array.isArray(value)) return value.some((entry) => pendingShellResult(entry, depth + 1));
+  if (!isObject(value)) return false;
+  // A terminal process result can carry its old session ID. Its stdout is not
+  // another tool result, so do not interpret text inside it as a running process.
+  if (numericExitCode(value.exit_code) !== undefined || numericExitCode(value.exitCode) !== undefined) return false;
+  if (value.session_id != null && Object.prototype.hasOwnProperty.call(value, 'output')) return true;
+  return Object.values(value).some((child) => pendingShellResult(child, depth + 1));
+}
+
+function codexProcessId(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+}
+
+// Direct unified-exec results put process metadata before Output. Stdout can
+// itself contain convincing exit/session lines, so it cannot supply a binding
+// or an outcome for a later write_stdin call.
+function codexProcessResult(value) {
+  const object = jsonObject(value);
+  if (object) {
+    const sessionId = codexProcessId(object.session_id);
+    const exit = object.exit_code ?? object.exitCode;
+    if (Number.isSafeInteger(exit)) return { sessionId, status: exit === 0 ? 'success' : 'failed' };
+    return sessionId !== null && Object.prototype.hasOwnProperty.call(object, 'output')
+      ? { sessionId, pending: true } : null;
+  }
+  if (typeof value !== 'string') return null;
+  const header = value.replace(/\r\n/g, '\n').split(/(?:^|\n)(?:Output|Final output):[^\n]*(?:\n|$)/, 1)[0];
+  if (!/^(?:Chunk ID: [^\n]+\n|Process (?:running|exited) )/.test(header)) return null;
+  const running = [...header.matchAll(/^Process running with session ID (\d+)\s*$/gm)];
+  const exited = [...header.matchAll(/^Process exited with code (-?\d+)\s*$/gm)];
+  if (running.length + exited.length !== 1) return null;
+  if (running.length) {
+    const sessionId = codexProcessId(Number(running[0][1]));
+    return sessionId === null ? null : { sessionId, pending: true };
+  }
+  const exit = Number(exited[0][1]);
+  return Number.isSafeInteger(exit) ? { status: exit === 0 ? 'success' : 'failed' } : null;
+}
+
+function applyCodexProcessResults(directCalls, waitCalls, outputs, observations) {
+  const key = (scope, id) => JSON.stringify([scope, id]);
+  const byCall = new Map();
+  for (const output of outputs) {
+    const callKey = key(output.scope, output.callId);
+    if (!byCall.has(callKey)) byCall.set(callKey, []);
+    byCall.get(callKey).push(output);
+  }
+  const owners = new Map();
+  const groupProcesses = new Map();
+  const directKeys = new Set();
+  const directSignatures = new Map();
+  for (const { scope, callId, command, tool } of directCalls) {
+    const callKey = key(scope, callId);
+    if (!directSignatures.has(callKey)) directSignatures.set(callKey, new Set());
+    directSignatures.get(callKey).add(JSON.stringify([command, tool]));
+  }
+  const ambiguousGroups = new Set();
+  for (const { scope, callId, group } of directCalls) {
+    directKeys.add(key(scope, callId));
+    if (directSignatures.get(key(scope, callId)).size !== 1) ambiguousGroups.add(group);
+    if (group.length !== 1 || group._customExec) continue;
+    for (const output of byCall.get(key(scope, callId)) || []) {
+      if (!output.process?.pending) continue;
+      const processKey = key(scope, output.process.sessionId);
+      if (!owners.has(processKey)) owners.set(processKey, new Set());
+      owners.get(processKey).add(group);
+      if (!groupProcesses.has(group)) groupProcesses.set(group, new Set());
+      groupProcesses.get(group).add(processKey);
+    }
+  }
+  const waits = new Map();
+  for (const wait of waitCalls) {
+    const callKey = key(wait.scope, wait.callId);
+    if (!waits.has(callKey)) waits.set(callKey, []);
+    waits.get(callKey).push(wait);
+  }
+  const processResults = new Map();
+  const unresolved = [];
+  for (const [callKey, definitions] of waits) {
+    const signatures = new Set(definitions.map((wait) => JSON.stringify([wait.sessionId, wait.interactive])));
+    for (const wait of definitions) {
+      const processKey = key(wait.scope, wait.sessionId);
+      if (!processResults.has(processKey)) processResults.set(processKey, { unsafe: false, results: [] });
+      const process = processResults.get(processKey);
+      if (wait.interactive || signatures.size !== 1 || directKeys.has(callKey)) process.unsafe = true;
+      const results = byCall.get(callKey) || [];
+      if (!owners.has(processKey) && results.length) {
+        unresolved.push({ callId: wait.callId, resultEnd: Math.max(...results.map((result) => result.end)) });
+      }
+      for (const result of results) {
+        const metadata = result.process;
+        if (!metadata) continue;
+        if (metadata.sessionId != null && metadata.sessionId !== wait.sessionId) process.unsafe = true;
+        if (metadata.status) process.results.push({ status: metadata.status, offset: result.offset, end: result.end });
+      }
+    }
+  }
+  for (const [processKey, process] of processResults) {
+    const groups = owners.get(processKey);
+    if (process.unsafe || !groups || groups.size !== 1) continue;
+    const [group] = groups;
+    if (ambiguousGroups.has(group) || groupProcesses.get(group).size !== 1) continue;
+    for (const result of process.results) applyResult(group[0], result);
+  }
+  // A wait can be in the overlap while its originating exec is outside it.
+  // This transient parse metadata asks the existing bounded reconciliation to
+  // reach that origin without persisting process IDs, commands or paths.
+  Object.defineProperty(observations, '_codexUnmatchedWaits', { value: unresolved });
+}
+
 function applyCodexGroupResult(group, result) {
   if (!Array.isArray(group) || group.length === 0 || !result) return;
   let effectiveResult = result;
@@ -750,10 +894,10 @@ function applyCodexGroupResult(group, result) {
     const nested = Array.isArray(result.nestedStatuses) ? result.nestedStatuses : [];
     let status = 'unknown';
     if (result.status === 'failed' || nested.includes('failed')) status = 'failed';
-    else if (group._canAttributeSuccess && group.length === 1 &&
+    else if (!result.pending && group._canAttributeSuccess && group.length === 1 &&
         nested.length === 1 && nested[0] === 'success') status = 'success';
     effectiveResult = { ...result, status };
-  } else if (group.length > 1 && result.status !== 'failed') {
+  } else if ((result.pending || group.length > 1) && result.status !== 'failed') {
     effectiveResult = { ...result, status: 'unknown' };
   }
   for (const observation of group) applyResult(observation, effectiveResult);
@@ -773,26 +917,96 @@ function applyCodexSessionState(record, state) {
   return state;
 }
 
+function codexMcpName(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value);
+}
+
+function codexMcpStatus(result) {
+  if (!isObject(result)) return 'unknown';
+  // Rust's MCP result distinguishes transport/rejection errors from a tool's
+  // own isError. Neither the content nor function_call_output preserves this
+  // distinction reliably, so no textual or missing-status fallback is valid.
+  if (Object.prototype.hasOwnProperty.call(result, 'Err')) return 'failed';
+  if (Object.keys(result).length !== 1 || !isObject(result.Ok)) return 'unknown';
+  if (result.Ok.isError === true) return 'failed';
+  return result.Ok.isError === false ? 'success' : 'unknown';
+}
+
+function codexMcpObservation(record, location, state, file) {
+  const payload = record.payload;
+  if (record.type !== 'event_msg' || !isObject(payload) || payload.type !== 'mcp_tool_call_end') return null;
+  const invocation = payload.invocation;
+  if (!isObject(invocation) || !codexMcpName(invocation.server) || !codexMcpName(invocation.tool) ||
+      typeof payload.call_id !== 'string' || !payload.call_id || payload.call_id.length > 512) return null;
+  const observation = {
+    id: `codex:${stableHash('codex-mcp', state.session || file || '<text>', payload.call_id)}`,
+    source: 'codex', kind: 'codex-mcp', tool: 'CodexMCP', command: 'call',
+    mcpServer: invocation.server, mcpTool: invocation.tool,
+    status: codexMcpStatus(payload.result), callId: payload.call_id,
+  };
+  if (record.timestamp !== undefined) observation.timestamp = record.timestamp;
+  if (state.cwd !== undefined) observation.cwd = state.cwd;
+  if (state.session !== undefined) observation.session = state.session;
+  defineParserOffsets(observation, location.offset, location.end);
+  observation._resultOffset = location.offset;
+  observation._resultEnd = location.end;
+  return observation;
+}
+
 function parseCodexJsonl(text, options = {}) {
   const observations = [];
   const callGroups = new Map();
   const results = new Map();
+  const mcpCalls = new Map();
+  const conflictingMcpCalls = new Set();
+  const directProcessCalls = [];
+  const processWaitCalls = [];
+  const processOutputs = [];
   const state = { session: stringValue(options.session), cwd: stringValue(options.cwd) };
   const file = stringValue(options.file) || stringValue(options.path);
-  const tool = codexTool(options);
 
   parseJsonlRecords(text, options, (record, location) => {
     const payload = isObject(record.payload) ? record.payload : {};
     applyCodexSessionState(record, state);
 
+    const mcp = codexMcpObservation(record, location, state, file);
+    if (mcp) {
+      const previous = mcpCalls.get(mcp.id);
+      if (!previous) {
+        mcpCalls.set(mcp.id, mcp);
+        observations.push(mcp);
+      } else {
+        if (previous.mcpServer !== mcp.mcpServer || previous.mcpTool !== mcp.mcpTool) {
+          conflictingMcpCalls.add(mcp.id);
+        }
+        applyResult(previous, { status: mcp.status, offset: location.offset, end: location.end });
+        if (conflictingMcpCalls.has(mcp.id)) previous.status = 'unknown';
+      }
+    }
+
     for (const item of codexItems(record)) {
       if (item.type === 'function_call') {
+        // A namespaced MCP tool may itself be called shell_command. Only the
+        // built-in namespace can authorize interpretation as a shell call.
+        if (item.namespace !== undefined && item.namespace !== 'functions') continue;
         const name = String(item.name || '');
+        if (name === 'write_stdin' || name === 'functions.write_stdin') {
+          const args = jsonObject(item.arguments) || jsonObject(item.input);
+          const sessionId = args && codexProcessId(args.session_id);
+          const callId = stringValue(firstDefined(item.call_id, item.callId, item.id));
+          if (sessionId !== null && callId) processWaitCalls.push({
+            scope: state.session || '', callId, sessionId,
+            interactive: args.chars !== undefined && args.chars !== '',
+          });
+          continue;
+        }
         if (!CODEX_FUNCTION_SHELL_NAMES.has(name)) continue;
         const args = jsonObject(item.arguments) || jsonObject(item.input);
         const commandText = args && typeof args.command === 'string' ? args.command
           : args && typeof args.cmd === 'string' ? args.cmd : '';
         if (!commandText.trim()) continue;
+        const tool = codexTool(options, args.shell);
+        if (!tool) continue;
         const outerCallId = stringValue(firstDefined(item.call_id, item.callId, item.id));
         const observation = createObservation({
           source: 'codex', tool, command: commandText, callId: outerCallId,
@@ -804,6 +1018,9 @@ function parseCodexJsonl(text, options = {}) {
         const groupKey = outerCallId || observation.callId;
         if (!callGroups.has(groupKey)) callGroups.set(groupKey, []);
         const group = callGroups.get(groupKey);
+        if (name === 'exec_command' || name === 'functions.exec_command') {
+          directProcessCalls.push({ scope: state.session || '', callId: outerCallId, group, command: commandText, tool });
+        }
         if (!group.some((entry) => entry.id === observation.id)) {
           group.push(observation);
           observations.push(observation);
@@ -813,19 +1030,23 @@ function parseCodexJsonl(text, options = {}) {
       }
 
       if (item.type === 'custom_tool_call') {
+        if (item.namespace !== undefined && item.namespace !== 'functions') continue;
         const name = String(item.name || '');
         if (name !== 'exec' && name !== 'functions.exec') continue;
         const input = typeof item.input === 'string'
           ? item.input
           : (typeof item.arguments === 'string' ? item.arguments : '');
-        const commands = extractNestedShellCommands(input);
+        const calls = extractNestedShellCalls(input);
+        const commands = calls.map((call) => call.command);
         const outerCallId = stringValue(firstDefined(item.call_id, item.callId, item.id));
         const groupKey = outerCallId || `codex-group-${stableHash(file, state.session, location.offset, input)}`;
         if (!callGroups.has(groupKey)) callGroups.set(groupKey, []);
         const group = callGroups.get(groupKey);
         group._customExec = true;
         group._canAttributeSuccess = customExecCanAttributeSuccess(input, commands);
-        commands.forEach((command, commandIndex) => {
+        calls.forEach(({ command, shell }, commandIndex) => {
+          const tool = codexTool(options, shell);
+          if (!tool) return;
           const observation = createObservation({
             source: 'codex', tool, command, callId: outerCallId,
             timestamp: firstDefined(record.timestamp, payload.timestamp, item.timestamp),
@@ -843,8 +1064,14 @@ function parseCodexJsonl(text, options = {}) {
       if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
         const outerCallId = stringValue(firstDefined(item.call_id, item.callId, item.id));
         if (!outerCallId) continue;
+        const processResult = item.type === 'function_call_output' ? codexProcessResult(item.output) : null;
+        if (item.type === 'function_call_output') processOutputs.push({
+          scope: state.session || '', callId: outerCallId, process: processResult,
+          offset: location.offset, end: location.end,
+        });
         const result = {
-          status: classifyCodexOutput(item), offset: location.offset, end: location.end,
+          status: processResult?.pending ? 'unknown' : classifyCodexOutput(item), offset: location.offset, end: location.end,
+          pending: pendingShellResult(item.output),
           nestedStatuses: item.type === 'custom_tool_call_output'
             ? nestedShellStatuses(item.output) : [],
         };
@@ -861,6 +1088,7 @@ function parseCodexJsonl(text, options = {}) {
       }
     }
   });
+  applyCodexProcessResults(directProcessCalls, processWaitCalls, processOutputs, observations);
   return observations;
 }
 
@@ -1071,7 +1299,7 @@ function continuedFingerprint(prior, size) {
 // `session_meta` line. An append slice starts at `prior.size - overlapBytes`,
 // so the head is absent, both stay undefined, and the manager then drops the
 // observation outright when a workspace root is configured
-// (`src/auto-learn-manager.js:1774`, `within(root, undefined) === false`) --
+// (`src/auto-learn-manager.js:2337`, `within(root, undefined) === false`) --
 // or keeps it under a SECOND identity, because `session` is part of
 // `identityParts` (:75-77). Two ids for one call defeat the `observationHashes`
 // dedupe and inflate `counts.success`, which is what gates auto-safe apply.
@@ -1454,8 +1682,12 @@ function scanHistoryFiles(options = {}) {
           // deliberately not tracked still answers "have we read this call".
           let parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
           let seenCalls = sliceCallIds(entry.source, buffer);
-          let missing = [...resultIds]
-            .filter((id) => !parsedCalls.has(id) && !seenCalls.has(id));
+          const missingResults = () => [...new Set([
+            ...[...resultIds].filter((id) => !parsedCalls.has(id) && !seenCalls.has(id)),
+            ...(parsed._codexUnmatchedWaits || []).filter((wait) => wait.resultEnd > prior.size)
+              .map((wait) => wait.callId),
+          ])];
+          let missing = missingResults();
           if (missing.length) {
             // The bounded overlap did not reach the matching request. Widen
             // BACKWARDS by a bounded amount rather than re-reading the whole
@@ -1486,8 +1718,7 @@ function scanHistoryFiles(options = {}) {
                 });
                 parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
                 seenCalls = sliceCallIds(entry.source, buffer);
-                missing = [...resultIds]
-                  .filter((id) => !parsedCalls.has(id) && !seenCalls.has(id));
+                missing = missingResults();
               }
             }
             // Whatever is still unmatched is REPORTED rather than dropped in

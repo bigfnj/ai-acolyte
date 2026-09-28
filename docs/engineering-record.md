@@ -33,6 +33,153 @@ is unmeasurable at the process level.
 
 ---
 
+## Further Codex outcome closures (2026-09-28, unreleased)
+
+The final combined Stage C has 52 verified files, aggregate
+`3074c8ae9a60623d40c93f32ba6ff6329890a18b3d902917a40731866d41ae73`.
+Its full source suite reports 1,080 passes, two skips and zero failures among 1,082
+tests, with no source/test drift (`acolyte-features-suite-gZjx2V/report.json`).
+Seven actual editor groups pass against this stage, and both fresh native wait outcomes
+pass. The compatibility record links final provenance and transfer of the unchanged
+negative-control modules. Earlier native batches retain their exact staged subjects.
+No release, installation, commit or tag was performed. A final comparison with the old
+backlog found no dropped Codex outcome; broader validation and policy-discovery limits
+remain recorded as open.
+
+CLOSED-VERIFIED: editor-open background learning. Actual completed Codex history was
+ingested by the watcher and by the unchanged one-minute reconciliation timer after a
+deliberately missed notification. Disabling either route failed its native ingestion
+group. This closes an unverified existing outcome, not a previously missing feature.
+
+FIXED in development: after-turn editorless learning; native memory discovery, ambient
+diagnostics and source passage search; reviewed widening of authored stored approvals;
+and reviewed portable project imports. The compatibility record names immutable stages,
+full evidence directories, exact native groups and deliberately failing controls for
+each. No release, tag, package or replacement of the user's working extension was needed.
+
+Native memory testing found a real BOM offset defect: the adapter retained a UTF-8 BOM,
+while VS Code's TextDocument removed it. Stage A found the passage but could not select
+it. Explicit BOM provenance now translates only that known difference; Stage B selects
+both the first and a later passage exactly. Reintroducing the offset error fails only
+that native group after the five earlier groups pass.
+
+The reviewed-rule tests also corrected two fixture assumptions. Codex already allows
+the read-only `git status` command, so zero approval prompts before widening was expected
+runtime behavior, not a product failure. Its proof now checks explicit policy coverage.
+A custom executable supplies the real import prompt transition and restrictive-argument
+control. The planner does not classify `git diff` as auto-safe; stale/recovery fixtures
+now use supported prefixes. All failed preliminary runs remain preserved.
+
+FIXED in development: authoritative MCP outcome ingestion and exact reviewed native
+per-tool approvals. Six actual VS Code groups and seven fresh Codex calls pass; no-op
+approval, Undo and recovery writers each fail their intended group. The immutable subject,
+loaded hashes and witnesses are recorded in
+`D:/.ai-work/scratch/acolyte-validation-mcp-dev-20260928/results.json`. MCP candidates
+remain separate from Claude permissions and shell rules. Semantic retrieval and its
+editor acceptance retain their separate evidence. CPU semantic tests use only synthetic
+sources and the installed CPUExecutionProvider, with no local GPU, model download or
+private-corpus evaluation. Keyword fallback is always identified.
+
+FIXED in development: native semantic recall. Seven CPU groups and four actual editor
+groups cover paraphrase retrieval across registry, rollout and skill sources, exact source
+selection, actual index rebuild and explicit keyword fallback. Semantic bypass, rebuild
+no-op and silent fallback controls each fail the intended native group. The canonical
+record is `acolyte-validation-mcp-recall-dev-20260928/native-recall-results.json` under
+scratch. No general search-quality score or performance improvement is claimed.
+
+The native gate compiler's final review reproduced an actual deletion bug: malformed
+`scope` metadata was treated as a complete zero-section compilation, so automatic refresh
+emptied the installed body. The final helper rejects malformed/unsupported scalars visibly,
+accepts ordinary metadata comments, and preserves valid project/task scope as a distinct
+zero result. Eighteen tests pass, and all five new scalar/metadata controls fail exactly
+their named tests (`acolyte-native-gate-scope-mutations-zGZvpM/evidence.json`). Earlier
+helper checks killed 21 transaction/annotation mutations; UI checks killed 16 more.
+Stage B replaces only that helper in the immutable 52-file Stage A. Six fresh Codex
+processes load full installed/refreshed bodies and verify absence after removal; the
+missing-block control fails at the actual request. Evidence is
+`acolyte-validation-native-gates-dev-20260928/final-runtime-provenance.json`.
+FIXED in development: the same stage passes seven editor groups covering gates and
+read-only MCP receipts, with 16 UI actions/status observations. Install, refresh and
+receipt-visibility controls each fail exactly the intended group. The unchanged Stage A
+also fails its malformed-source group after the first four pass. Full profiles and
+screenshots are retained in that directory's `native-results.json`.
+
+FIXED in development: direct exec_command/write_stdin completion learning. Actual Codex
+runs initially left both success and failure unknown. Exact process attribution and
+header-only terminal metadata now classify both correctly; interactive or ambiguous
+completions remain unknown. Twelve parser mutations fail their intended assertions,
+and disabling the process bridge fails a fresh runtime outcome after the command and
+wait execute. The records are `acolyte-wait-history-mutations-41lYsS/report.json` and
+`acolyte-wait-runtime-validation-61hUMH/report.json`. Revision 3 replays old completed
+cursors once without replacing Claude evidence, policy or Undo; reverting the revision
+fails its named migration test (`acolyte-wait-revision-mutation-JmpPFV/report.json`).
+Custom cell continuation remains outside this measured shape.
+
+One full-suite attempt was stopped after independent native-gate activation jobs consumed
+the lifecycle fixture's synthetic Auto Learn wedge. The fixture now distinguishes those
+jobs, and all 36 lifecycle tests pass. The incomplete run is retained as
+`acolyte-features-suite-4Z06NR/aborted.json`, not counted as a passing suite. New gate
+teardown and deferred-refresh behavior also have their own directly exercised regressions.
+
+### Built-in tools do not inherit the MCP approval proof (2026-09-28)
+
+DECLINED-MEASURED for adding an approval exporter solely to mirror the measured
+`view_image` calls: three fresh Codex 0.145.0 processes requested zero approvals.
+The valid PNG returned structured `input_image` content; invalid bytes still emitted an
+`imageView` completion event, without a success status. Completion therefore cannot be
+treated as successful image processing. Runtime evidence is
+`D:/.ai-work/scratch/acolyte-view-image-probe-hbRWef/evidence.json`; substituting invalid
+bytes for the valid fixture fails the image-output witness, recorded in
+`D:/.ai-work/scratch/acolyte-view-image-mutation-6jSmpc/report.json`.
+
+The hosted-web boundary stays open. A metadata-only read of 64 current-profile rollouts
+found 70 `WebSearch` completion items with result fields but no authoritative outcome
+status, and no direct `web_search_call` or web end records. The report at
+`D:/.ai-work/scratch/acolyte-builtin-metadata-CvcHSs/metadata.json` contains only types,
+field names, status metadata and counts. No prompts, arguments, URLs or result bodies
+were retained. A scripted hosted-search result would not prove actual retrieval or
+approval behavior. No built-in counters, guessed successes or speculative permission
+exports were added. This scoped decision does not establish platform impossibility.
+
+## Codex recovery and derived guidance: FIXED in development (2026-09-28)
+
+The user asked for extension behavior to work with Codex and then asked us to close
+the gaps. This is feature validation, not a separate approval or naming program.
+The seven comparison areas were not seven failures of the existing learning path.
+Reusable learned prefixes and cross-workspace user rules already had real-runtime
+evidence; rewriting stored literal approvals and importing authored project rules
+were distinct work, closed by the later reviewed-rule batch recorded above.
+
+This batch gave two comparison areas FIXED dispositions. Retained literal policy supports
+explicit missing-rule restore, deliberate-removal suppression, preservation of
+surviving claims and a resumable write intent. Codex derived guidance uses current
+managed policy plus successful Codex-only observations, with full-body review and
+separate routing into the active Codex instruction file. The scoped limitations and
+source entry points are recorded in `docs/codex-compatibility.md`.
+
+Recovery Stage B, 38 files, aggregate
+`0bfd4d881ab7aac06545dca9642f06a2fd4aa3e73e530f8b313ebd20da669e2e`, passed nine real
+VS Code groups. The new groups cover four recovery flows and derived Accept/Decline,
+with two fresh Codex instruction checks. A no-op Restore fails exactly group eight;
+a no-op derived Accept fails exactly group nine. Both record the real control click,
+changed source hash and executed mutation witness. The complete pre-modal suite was
+885 tests, 883 passed and two platform skips. The final modal has 51 passing focused
+checks and two mutation failures for truncated content and writing after teardown.
+Standalone recovery checks add ten fresh processes and six execpolicy probes per
+default/custom layout. Central proof is
+`D:/.ai-work/scratch/acolyte-validation-recovery-dev-20260928`.
+
+The first native negative attempt failed on a prior removal flow because the harness
+polled a locking inventory method. It is retained as incomplete evidence, not a
+successful mutation test. Passive byte/journal polling removed that interference.
+The first full-body modal run failed because its observer counted an unlabeled close
+icon as a decision. The corrected observer requires all four labeled actions and the
+full instruction; the product dialog fit visibly throughout.
+
+There was no packaging, installation, version bump, tag or release. Immutable stages
+allow continued development of the hook and memory work without rewriting the test
+subject. Installed 1.5.10 and its existing VSIX remain unchanged.
+
 ## Which of desktop-ai-companion's optimisation learnings transfer here (2026-09-22)
 
 Moved out of BACKLOG.md on 2026-09-22. The question was asked by the owner; this is the
@@ -50,7 +197,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1309`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1346`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 
@@ -83,7 +230,7 @@ skipped, so no failure can be silently lost, and the cursor never has to express
   the same tick it was created. Bumping `VERSION` to carry it resets every existing state file,
   because `STATE_MIGRATIONS` is empty and `migrateState` returns null for an unregistered step.
 - A size ceiling that skips the remainder. **Rejected on safety.** `isAutoSafeCandidate`
-  requires `counts.failed === 0` (`src/auto-learn.js:860`), so a skipped byte range containing
+  requires `counts.failed === 0` (`src/auto-learn.js:876`), so a skipped byte range containing
   the one failure for a family would let that family become auto-safe. Skipping is not a
   performance trade here, it is a permissions trade.
 - Progressive catch-up. **Taken.** Bounded work per tick, honest cursor, nothing lost.
@@ -588,7 +735,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   inert. **A future transform whose side effects are not idempotent must not use
   this writer** — now stated in the code as well.
 - **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
-  but not `settings?.permissions?.allow` at `bin/wildcard-perms:290`,** where the
+  but not `settings?.permissions?.allow` at `bin/wildcard-perms:460`,** where the
   allow array the pass runs on is extracted. Changing *which* field feeds the
   pass would not invalidate existing keys.
 - **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
@@ -800,7 +947,7 @@ Unrebased whole-object writers still outstanding:
 |---|---|
 | `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
 | `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1933-1935`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:1731` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1727`. |
+| `change.before.content` at `src/auto-learn-manager.js:1877` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1873`. |
 | `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2013` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:266` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:205` read → `:266` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
@@ -1403,7 +1550,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:3942` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:3949` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

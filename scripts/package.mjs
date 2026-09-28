@@ -37,6 +37,7 @@ const extMemory = join(ext, 'memory');
 rmSync(extMemory, { recursive: true, force: true });
 mkdirSync(join(extMemory, 'models'), { recursive: true });
 cpSync(join(root, 'memory', 'recall.py'), join(extMemory, 'recall.py'));
+cpSync(join(root, 'memory', 'codex_recall.py'), join(extMemory, 'codex_recall.py'));
 cpSync(join(root, 'memory', 'models', 'bge-small.vocab.txt'),
   join(extMemory, 'models', 'bge-small.vocab.txt'));
 

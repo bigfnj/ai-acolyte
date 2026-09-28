@@ -4,8 +4,31 @@ const { parentPort, workerData } = require('node:worker_threads');
 const { createAutoLearnManager } = require('./auto-learn-manager');
 
 function run(data) {
-  const manager = createAutoLearnManager(data?.options || {});
   const operation = data?.operation;
+  if (['codexNativeGates', 'setCodexNativeGates', 'refreshCodexNativeGates'].includes(operation)) {
+    const { inspectNativeCodexGates, setNativeCodexGates, refreshNativeCodexGates } = require('./codex-memory-gates');
+    const options = data?.options || {};
+    if (operation === 'codexNativeGates') return inspectNativeCodexGates(options);
+    if (operation === 'refreshCodexNativeGates') return refreshNativeCodexGates(options);
+    const request = data?.args?.[0] || {};
+    return setNativeCodexGates(request.enabled, { fingerprint: request.fingerprint }, options);
+  }
+  if (operation === 'codexMemorySearch' || operation === 'rebuildCodexMemory') {
+    const { searchCodexMemory, rebuildCodexMemory } = require('./codex-recall');
+    const supplied = data?.args?.[0] || {};
+    const runtime = Object.fromEntries(['pythonExecutable', 'modelPath', 'recallScript']
+      .filter((key) => supplied.recallOptions?.[key] !== undefined).map((key) => [key, supplied.recallOptions[key]]));
+    const options = { ...(data?.options || {}), ...runtime };
+    return operation === 'codexMemorySearch' ? searchCodexMemory(supplied.query, options) : rebuildCodexMemory(options);
+  }
+  if (operation === 'codexMemory') {
+    const { readCodexMemory, queryCodexMemory } = require('./codex-memory');
+    const memory = readCodexMemory(data?.options || {});
+    const query = data?.args?.[0]?.query;
+    return { ...memory, chunks: typeof query === 'string' && query.trim()
+      ? queryCodexMemory(memory, query, { limit: 30 }) : [] };
+  }
+  const manager = createAutoLearnManager(data?.options || {});
   // `rebuildManagedHits` belongs here even though no UI path calls it yet: it is
   // the one remaining manager operation that both mutates state and does real
   // work (it re-reads the managed policy and re-assesses every candidate), so
@@ -13,7 +36,10 @@ function run(data) {
   // operation, or an in-process call that blocks the extension host. The runner
   // fires onMutation for every operation, so the host's cached manager is
   // invalidated afterwards with no extra wiring.
-  if (!['scan', 'apply', 'undo', 'setMode', 'rebuildManagedHits'].includes(operation)) {
+  if (!['scan', 'apply', 'undo', 'setMode', 'rebuildManagedHits',
+    'codexInventory', 'removeCodexRules', 'codexRestoreInventory', 'restoreCodexRules',
+    'codexApprovalInventory', 'approveCodexRules',
+    'codexMcpInventory', 'planCodexMcp', 'approveCodexMcp', 'undoCodexMcp', 'recoverCodexMcp'].includes(operation)) {
     throw new Error(`Unsupported Auto Learn worker operation: ${operation}`);
   }
   const args = Array.isArray(data?.args) ? data.args : [];

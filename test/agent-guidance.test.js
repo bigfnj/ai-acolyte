@@ -142,6 +142,147 @@ test('a target is only written for an agent that is installed', (t) => {
   assert.deepEqual(guidanceStatusAll(home).map((state) => state.on), [false, false]);
 });
 
+test('default guidance uses CODEX_HOME while explicit home stays isolated', (t) => {
+  const box = scratch();
+  const home = box.root;
+  const profile = path.join(home, 'active-codex-profile');
+  const defaultFile = path.join(home, '.codex', 'AGENTS.md');
+  const customFile = path.join(profile, 'AGENTS.md');
+  fs.mkdirSync(path.dirname(defaultFile), { recursive: true });
+  fs.mkdirSync(profile);
+  fs.writeFileSync(defaultFile, '# Default profile notes\n');
+  fs.writeFileSync(customFile, '# Custom profile notes\n');
+  t.mock.method(os, 'homedir', () => home);
+  const prior = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = profile;
+  t.after(() => {
+    if (prior === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prior;
+  });
+  const active = setGuidanceAll(true).find((result) => result.agent === 'codex');
+  assert.equal(active.path, customFile);
+  assert.equal(active.error, null);
+  assert.equal(guidanceStatusAll().find((state) => state.agent === 'codex').on, true);
+  assert.equal(fs.readFileSync(defaultFile, 'utf8'), '# Default profile notes\n');
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'backups', 'AGENTS.md.pre-guidance')),
+    'default backups belong to the selected user home');
+
+  const explicit = setGuidanceAll(true, { home }).find((result) => result.agent === 'codex');
+  assert.equal(explicit.path, defaultFile, 'explicit home must not follow the ambient profile');
+  assert.ok(hasGuidance(fs.readFileSync(defaultFile, 'utf8')));
+});
+
+test('guidance moves its hidden base block into the active override and removes both copies on off', () => {
+  const box = scratch();
+  const profile = path.join(box.root, 'custom-codex');
+  fs.mkdirSync(profile);
+  const regular = path.join(profile, 'AGENTS.md');
+  const override = path.join(profile, 'AGENTS.override.md');
+  const overrideText = '# Temporary override\nKeep this user instruction.\n';
+  fs.writeFileSync(regular, applyGuidance(USER_TEXT, true).text);
+  fs.writeFileSync(override, overrideText);
+  const options = { home: box.root, codexHome: profile };
+  const before = guidanceStatusAll(options).find((state) => state.agent === 'codex');
+  assert.equal(before.path, override);
+  assert.equal(before.on, false, 'a hidden base block is not active guidance');
+  assert.deepEqual(before.shadowedPaths, [regular]);
+  const enabled = setGuidanceAll(true, options).find((result) => result.agent === 'codex');
+  assert.equal(enabled.error, null);
+  assert.equal(enabled.path, override);
+  assert.equal(enabled.on, true);
+  assert.equal(fs.readFileSync(regular, 'utf8'), USER_TEXT, 'only the hidden managed block is removed');
+  assert.ok(fs.readFileSync(override, 'utf8').startsWith(overrideText));
+  assert.equal(setGuidanceAll(true, options).find((result) => result.agent === 'codex').changed, false);
+  assert.equal(guidanceStatusAll(options).find((state) => state.agent === 'codex').current, true);
+  assert.ok(fs.existsSync(path.join(box.root, '.claude', 'backups', 'AGENTS.override.md.pre-guidance')));
+
+  // A stale base copy from an older installation must not return after off.
+  fs.writeFileSync(regular, applyGuidance(USER_TEXT, true).text);
+  const disabled = setGuidanceAll(false, options).find((result) => result.agent === 'codex');
+  assert.equal(disabled.error, null);
+  assert.equal(disabled.on, false);
+  assert.equal(fs.readFileSync(regular, 'utf8'), USER_TEXT);
+  assert.equal(fs.readFileSync(override, 'utf8'), overrideText);
+});
+
+test('empty overrides remain empty so enabling guidance does not hide base instructions', () => {
+  for (const empty of ['', ' \n\t\n']) {
+    const box = scratch();
+    const profile = path.join(box.root, '.codex');
+    fs.mkdirSync(profile);
+    const regular = path.join(profile, 'AGENTS.md');
+    const override = path.join(profile, 'AGENTS.override.md');
+    fs.writeFileSync(regular, USER_TEXT);
+    fs.writeFileSync(override, empty);
+    const result = setGuidanceAll(true, { home: box.root }).find((row) => row.agent === 'codex');
+    assert.equal(result.path, regular);
+    assert.equal(result.error, null);
+    assert.ok(hasGuidance(fs.readFileSync(regular, 'utf8')));
+    assert.equal(fs.readFileSync(override, 'utf8'), empty);
+  }
+});
+
+test('an unreadable override is reported without writing a hidden fallback block', () => {
+  const box = scratch();
+  const profile = path.join(box.root, '.codex');
+  const override = path.join(profile, 'AGENTS.override.md');
+  const regular = path.join(profile, 'AGENTS.md');
+  // A directory gives a deterministic read error on Windows without ACL changes.
+  fs.mkdirSync(override, { recursive: true });
+  fs.writeFileSync(regular, USER_TEXT);
+  const status = guidanceStatusAll(box.root).find((row) => row.agent === 'codex');
+  assert.equal(status.readable, false);
+  assert.match(status.error, /cannot inspect Codex instruction override/);
+  const result = setGuidanceAll(true, { home: box.root }).find((row) => row.agent === 'codex');
+  assert.equal(result.changed, false);
+  assert.match(result.error, /cannot inspect Codex instruction override/);
+  assert.equal(fs.readFileSync(regular, 'utf8'), USER_TEXT);
+});
+
+test('off clears both files when removing the override block activates the base file', () => {
+  const box = scratch();
+  const profile = path.join(box.root, '.codex');
+  fs.mkdirSync(profile);
+  const regular = path.join(profile, 'AGENTS.md');
+  const override = path.join(profile, 'AGENTS.override.md');
+  fs.writeFileSync(regular, applyGuidance(USER_TEXT, true).text);
+  fs.writeFileSync(override, guidanceBlock());
+  const result = setGuidanceAll(false, { home: box.root }).find((row) => row.agent === 'codex');
+  assert.equal(result.path, regular, 'empty override now falls through to the base');
+  assert.equal(result.on, false);
+  assert.equal(result.error, null);
+  assert.equal(fs.readFileSync(override, 'utf8'), '');
+  assert.equal(fs.readFileSync(regular, 'utf8'), USER_TEXT);
+});
+
+test('guidance cleanup preserves an override that becomes active after discovery', (t) => {
+  const box = scratch();
+  const profile = path.join(box.root, '.codex');
+  fs.mkdirSync(profile);
+  const regular = path.join(profile, 'AGENTS.md');
+  const override = path.join(profile, 'AGENTS.override.md');
+  const newOverride = applyGuidance('# Newly active override\n', true).text;
+  fs.writeFileSync(regular, USER_TEXT);
+  fs.writeFileSync(override, '');
+  const read = fs.readFileSync;
+  let injected = false;
+  t.mock.method(fs, 'readFileSync', function(file, ...args) {
+    const content = read.call(this, file, ...args);
+    if (file === override && !injected && hasGuidance(read(regular, 'utf8'))) {
+      // Discovery receives its previous empty read; another writer then makes
+      // the override active before the inactive-file cleanup takes its lock.
+      injected = true;
+      fs.writeFileSync(override, newOverride);
+    }
+    return content;
+  });
+  const result = setGuidanceAll(true, { home: box.root }).find((row) => row.agent === 'codex');
+  assert.equal(injected, true, 'the selection must actually change during this write');
+  assert.match(result.error, /selection changed during the update/);
+  assert.equal(fs.readFileSync(override, 'utf8'), newOverride,
+    'cleanup must not remove the managed block from the newly active override');
+});
+
 test('setGuidance writes the file, backs up what was there, and reports state', () => {
   const box = scratch();
   fs.writeFileSync(box.file, USER_TEXT, 'utf8');

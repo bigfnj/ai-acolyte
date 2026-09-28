@@ -1,0 +1,15 @@
+{
+  "name": "acolyte-acceptance-driver",
+  "displayName": "Acolyte Isolated Acceptance Driver",
+  "description": "Runs the local acceptance harness in an isolated development host.",
+  "version": "0.0.0",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./driver.js"
+}

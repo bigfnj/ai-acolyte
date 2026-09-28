@@ -2,14 +2,16 @@
 
 Open items, with the evidence that justifies each one.
 
-**Closed items are removed, not struck through.** Git holds the history. Refuted claims,
-retracted figures, measurement hazards and standing decisions live in
-`docs/engineering-record.md`; read that before proposing work, or you will re-propose
-something already disproven there with evidence.
+Every closed item needs a checkable disposition: FIXED, CLOSED-VERIFIED,
+DECLINED-MEASURED or ACCEPTED-RECORDED. Keep the disposition here or link its evidence
+in `docs/engineering-record.md` before removing the open entry. Git history alone is
+not a completion record. Read that engineering record before proposing work, including
+refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
-**Emptied 2026-09-25.** This file was 955 lines and 88 open items. Every one was given a
+**Historical cleanup, 2026-09-25. The current backlog is still open.** This file was
+955 lines and 88 open items. Every one was given a
 disposition: fixed and deleted, proven already done and deleted, or measured and moved to
 the record as a decline. What is below is what survived that, plus what the work itself
 found. The suite went 574 to 731 tests over it.
@@ -33,53 +35,172 @@ entry. Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Codex certification: breadth, not depth
+### Codex compatibility: feature coverage and real-app validation
 
-`docs/codex-certification.md` holds the evidence and the current status, which is
-**conditionally certified for `codex-cli` 0.145.0 on Windows**. What is left:
+`docs/codex-compatibility.md` holds the feature inventory and dated evidence. The
+September 27-28 work closes the original seven feature comparisons for the supported
+outcomes below, with real-host/runtime checks. Broader version, format and CI coverage
+remains open. Dispositions retain the earlier entries so validation progress does not
+silently drop unfinished outcomes.
 
-- **No declared version window that FAILS.** One platform, one contract-tested version.
-  Nothing breaks when Codex moves outside it, so the next breaking change arrives as a
-  silent wrong answer rather than a red test. This is the largest remaining gap.
-  ⚠ **Stronger than this entry said, verified 2026-09-27: there is no version window at
-  all, declared or enforced, and no code path anywhere reads a Codex version.** Searched
-  `src/`, `bin/`, `vscode-extension/`, `scripts/` for min/max version constants, semver
-  comparison and `codexVersion`: the only `MIN_SUPPORTED_VERSION` in the tree is the Auto
-  Learn state-schema version at `src/auto-learn-manager.js:41`, unrelated. `codex
-  --version` is invoked in exactly one place, `test/codex-contract.test.js:38`, and only
-  to build the skip banner. `cli_version` appears solely inside the synthetic fixture
-  `test/fixtures/codex-rollout-sanitized.jsonl`, which nothing in `src/` reads. So the
-  version is observed once, printed, and never compared.
-- **The contract tests cannot run in CI.** GitHub's runners have no `codex` binary and no
-  authentication for one, so they skip with a banner naming the reason. A self-hosted
-  runner is the only way this becomes continuous; until then the evidence is a local
-  artefact with a date on it.
-- **`classifyCodexOutput` never DECIDES for any real rollout on this box.** ⚠ Corrected
-  2026-09-27: "runs only for the direct `function_call` shape" was wrong. It is CALLED on
-  both output shapes (`src/history-adapters.js:847`); on the `_customExec` path its verdict
-  is then discarded and recomputed from `nestedStatuses` in `applyCodexGroupResult`
-  (`src/history-adapters.js:749-755`). It survives only through the `result.status ===
-  'failed'` disjunct, which `nested.includes('failed')` already covers independently — and
-  that double coverage is precisely why the always-`success` mutation survived. Across all
-  53 rollouts here the
-  `function_call` names are `wait`, `spawn_agent`, `wait_agent`, `send_message`,
-  `list_agents`, `followup_task`, `interrupt_agent`; every shell call arrives as
-  `custom_tool_call` name `exec` and takes the `_customExec` branch. A mutation making the
-  function always return `success` survived the fixture. Measured 2026-09-25. A fixture was
-  deliberately NOT invented for a shape nobody has seen. ⚠ The "NOT VERIFIED AGAINST A REAL
-  SAMPLE" comment this entry attributed to the function is not on it — there is no comment
-  above the function at all. It sits at `src/history-adapters.js:565`, on
-  `CODEX_FUNCTION_SHELL_NAMES` (`src/history-adapters.js:565-573`), i.e. on the GATE that
-  fact, anchored one level up.
-- **Qualify the shell-guidance claim.** Official documentation permits splitting simple
-  chains for policy evaluation, while the Windows 0.154 probe did not match the wrapper
-  form the extension currently describes. The guidance text has not been corrected.
-  ⚠ **It has TWO sites, not one** (verified 2026-09-27): the shipped body at
-  `src/agent-guidance.js:89-92` and the module comment restating it at `:44-48`. Correcting
-  one leaves the other, which is the "uniqueness of a string is not coverage of a concept"
-  trap recorded in `docs/engineering-record.md`. Related and unlisted: `:81-86` recommends
-  invoking a wrapper script, while `:89-92` explains a `bash -lc` wrapper defeats Codex
-  argv-prefix matching. Different wrappers, but the block does not distinguish them.
+Version 1.6.0 incorporates the feature changes recorded below as FIXED in development.
+Their dated evidence retains the original stage/version rather than relabelling old runs.
+
+- **FIXED in 1.5.10: shared Codex rule ownership.** Reproduced September 28 in
+  `test/codex-shared-claims.test.js`: applying an unrelated grant from workspace B
+  replaces workspace A's generated rule; claiming the same prefix in B then undoing A
+  removes the rule B still relies on. The initial regression run has two failures and
+  one passing manual-edit refusal control. The shared ledger now retains other owners,
+  records ownership when rule bytes stay identical, rechecks effective policy before a
+  claim-only grant, and refuses a conflicting Undo without writes. Twelve regressions and
+  eight killed mutations cover the fix. The old installed extension also fails the fresh
+  runtime retention check; the updated writer passes it. See the 1.5.10 record in the
+  compatibility document for baseline preservation and mixed-version limitations.
+- **FIXED in development: literal Codex inventory/prune.** A separate
+  Codex inventory and confirmed allow-rule removal now have source paths. Shared
+  suppression blocks recreation by other workspaces and ordinary Undo; unsupported
+  computed files and ambiguous generated ownership are read-only. Interrupted removals
+  preserve an intent and expose explicit recovery. Fifteen regressions and ten killed
+  manager/store mutations cover removal behavior; parser/UI checks have their own
+  controls. Actual staged VS Code passes seven acceptance groups, including six inventory
+  flows covering Cancel, Remove, read-only decisions/files and interrupted-removal recovery.
+  Eighteen fresh Codex checks across default/custom homes prove prompting after removal,
+  suppression across workspaces and unrelated grants surviving. Disabling suppression
+  recreates the rule and a fresh Codex process runs it without approval; the check fails.
+  A no-op actual Remove route fails exactly its native acceptance group.
+  A no-op Finish removal route also fails that group after its other five flows pass,
+  retaining the pending intent despite the deliberately false success result.
+  No release or installation was needed. Details, mutation witnesses and limits are in
+  the development batch section of `docs/codex-compatibility.md`.
+- **Original seven feature comparisons: dispositions by user outcome.** These counted Claude
+  implementation paths without a full Codex counterpart, not seven established failures
+  in the working Codex workflow. Do not automatically turn a Claude-specific mechanism
+  into another feature to build. Establish the missing user outcome and whether an
+  existing Codex path supplies it; record that evidence before closing or implementing.
+  Existing-approval generalization adds broader coverage while preserving authored approvals: Codex
+  Auto Learn already emits reusable prefixes (`src/policy-exporters.js:350`). Project-local
+  promotion originally lacked a Codex migration path; the reviewed import below closes
+  that gap. Generated rules already defaulted to user scope, so sharing was not absent.
+  Immediate hook integration means a post-tool callback; Codex already has transcript
+  watchers and periodic scans (`vscode-extension/extension.js:1978`). CLOSED-VERIFIED
+  September 28: actual editor-open ingestion works without a Scan command, and the
+  unchanged one-minute reconciliation timer catches a deliberately missed notification.
+  Disabling either route fails its corresponding real-host ingestion check. Evidence:
+  `acolyte-validation-background-dev-20260928/results.json` under the scratch directory.
+  This proves the preexisting outcome; it does not claim immediate per-tool timing.
+  Full high-water
+  backup/restore remains separate from the existing Auto Learn snapshots and Undo.
+  FIXED in development, September 28: retained literal declarations, explicit
+  missing-rule restore, suppression, shared ownership preservation and recovery intent.
+  Twenty fresh Codex cases and twelve execpolicy probes pass across default/custom
+  layouts. Final staged VS Code passes all nine acceptance groups, including four
+  recovery flows. Disabling the actual Restore write fails exactly group eight.
+  Non-shell learning, native memory source/index/recall integration, and derived guidance
+  were additional comparisons: shell learning and shared memory-gate installation
+  already work. Derived guidance now has Codex-only run evidence, current managed-policy
+  matching and agent-specific instruction routing. FIXED in development, September 28:
+  actual Accept/Decline, full-body review and fresh Codex instruction loading/removal
+  pass; a no-op Accept fails exactly group nine. Two modal/teardown mutations also fail.
+  FIXED in development, September 28: native memory discovery, passage search, ambient
+  lint and the after-turn hook. The hook passes default/custom-profile runtime checks
+  with the editor closed; actual Configure/Cancel/Remove, memory creation/repair/deletion,
+  search/inspection and UTF-8 BOM source selections pass six native VS Code groups.
+  Disabling each write/watch/selection route fails its intended native group.
+  Evidence: `acolyte-validation-features-dev-20260928` and
+  `acolyte-validation-native-memory-dev-20260928` under scratch; the compatibility
+  record names immutable stages and controls. FIXED in development: semantic recall,
+  exact passage selection and index rebuild pass four real-editor groups; disabling
+  semantic retrieval, rebuild or the fallback warning fails its intended group.
+  Evidence: `acolyte-validation-mcp-recall-dev-20260928/native-recall-results.json`.
+  FIXED in development: native gate compilation has six fresh Codex instruction-loading
+  checks and seven passing editor groups covering gates and read-only MCP receipts.
+  Install, automatic refresh and receipt-visibility controls fail their intended groups;
+  the original malformed-scope compiler also fails the preserved real-editor case.
+  Evidence: `acolyte-validation-native-gates-dev-20260928/native-results.json`.
+  FIXED in development, September 28: stored-approval widening
+  and project-rule import pass six real-editor groups, including Cancel, source preservation,
+  restrictive dependencies, stale review refusal and interrupted-write recovery. Fresh Codex
+  uses the imported user rule while its restrictive argument still prompts. Writer and recovery
+  no-ops fail exactly their intended native groups. Evidence:
+  `acolyte-validation-approvals-dev-20260928/results.json` under scratch. MCP ingestion
+  now has real outcome evidence. FIXED in development: exact MCP tool review, native
+  config write, Undo, stale refusal and interrupted-write recovery pass six editor groups
+  and seven fresh Codex processes. All three no-op writer controls fail their intended
+  groups (`acolyte-validation-mcp-dev-20260928/results.json`). Built-in image viewing
+  requested no approval in three measured calls. Hosted-web outcomes remain unverified;
+  completion records are not counted as successful calls.
+  These records establish neither Codex platform impossibility nor that every missing
+  mechanism needs a literal port. The FIXED dispositions above have their own
+  code, tests and deliberately failing controls in the compatibility record.
+  Any future backup restore must honor the shared deliberate-removal record. Computed
+  Starlark remains explicitly read-only rather than being treated as a union of literals.
+- **Core acceptance chain: CLOSED-VERIFIED; external prompt causes remain bounded.** Real VS Code configuration events and
+  Codex-only synthetic-history scan/safe-apply/undo now have checks. Separate fresh Codex
+  processes demonstrate approval reuse, a neighboring prompt, rule removal and instruction
+  loading/removal. CLOSED-VERIFIED on September 28: the installed extension learns real
+  Codex executions, deduplicates a repeat scan, grants through the actual Review checkbox
+  and Grant dialog, and Undo restores prompting in a fresh process. The optional
+  `drive-vscode --review-runtime yes` case records this chain. CLOSED-VERIFIED for
+  actual diagnostic UI against those visible-rule transitions: reviewed allow, unrelated
+  command declined, and post-Undo decline. A false-allow diagnostic mutation fails the
+  actual dialog check; selected rule paths and blind spots are also asserted.
+  CLOSED-VERIFIED in 1.5.9 for dashboard instruction toggles: Add, Cancel and Remove
+  preserve both agents' user text, independent blocks and persisted settings. The check
+  includes installation into both empty files. CLOSED-VERIFIED for dashboard Auto Learn
+  button routes: Scan/rescan with background learning disabled, Review/Grant, Undo and
+  three Why dialogs all reach independently checked state and fresh-process outcomes.
+  Five no-op route mutations, including only the second Scan, each fail exactly the
+  intended acceptance group with an execution witness and the changed package hash.
+  Prompt causes outside visible policy remain open.
+  The previous September 24 requirement remains traceable to this combined evidence.
+- **Historical evidence migration implemented in 1.5.8; broader acceptance remains.**
+  Revisioned source counts invalidate old Codex cursors and reread available history.
+  Original mixed counts are archived; uncertain attribution is excluded from new automatic
+  approvals rather than assigned to an invented source. Grant definitions and prior undo
+  records survive. Tests reproduce false pending-process successes and preserve Claude
+  evidence. CLOSED-VERIFIED for the installed upgrade/undo workflow in default and custom
+  homes: disabling migration leaves three false successes and fails exactly its host
+  assertion. An isolated copy of the existing saved state also normalizes without errors
+  and preserves original counts. Large, partially missing real history still needs
+  representative acceptance coverage; no saved-state wipe is used.
+- **Declare and exercise a supported version window.** The new runtime harness records
+  Codex and host versions, but no range is declared or enforced. Current fresh-session
+  evidence covers Codex 0.145.0 on Windows. Earlier CLI-only evidence also exercised
+  0.154.0. Source schema versioning at `src/auto-learn-manager.js:39` is unrelated.
+- **Provision Codex in CI.** Contract tests still skip with an explicit reason when the
+  binary is absent. They use the local rule checker and do not require provider auth.
+  New real-host/runtime checks have not been wired into continuous validation.
+- **Expand direct-shell evidence beyond the observed shape.** The old 53-rollout corpus
+  contained only nested `exec` shell calls. Its always-success classifier mutation
+  survived because nested statuses independently determined the verdict. CLOSED-VERIFIED
+  for the missing real `shell_command` sample: the September 27 runtime harness now
+  parses actual successful and declined transcripts with the packaged parser. Broader
+  formats remain bounded; no universal parser claim follows. A September 28 actual
+  `exec_command` plus later `write_stdin` reproduction found that both success and failure
+  stayed unknown. The development parser now joins exact process identity within one
+  rollout, checks terminal metadata before stdout and withholds ambiguous or interactive
+  outcomes. FIXED in development: fresh success and nonzero-exit runs now classify
+  correctly, and disabling the process bridge fails the same runtime check. Twelve
+  parser controls fail their intended assertions. Evidence:
+  `acolyte-wait-runtime-validation-61hUMH/report.json` and
+  `acolyte-wait-history-mutations-41lYsS/report.json` under scratch. Revision 3 reopens
+  old completed cursors once while preserving Claude counts, grants and Undo; reverting
+  the revision fails its migration test. Custom `functions.exec`/`functions.wait`
+  continuation and other unobserved formats remain outside this proof.
+- **Finish guidance coverage across Codex configurations.** The emitted body and its
+  module comment now distinguish simple shell splitting from complex wrappers; the full
+  corrected body is checked in a fresh session's outbound request. This addresses the old
+  wording defect. Version 1.5.8 adds custom `CODEX_HOME` and active `AGENTS.override.md`
+  support across history, rules, instructions and diagnostics. A representative matrix
+  of shell wrappers remains open. Policy enumeration still omits automatic discovery
+  of trusted project rule directories (`src/codex-policy.js:380`).
+- **FIXED in 1.5.9: partial instruction badges disagreed with their cards.** When only
+  Codex had the managed block, collapsed guidance said `not installed` and gates said
+  `<count> waiting`, while the expanded cards correctly said `PARTIAL`. Both badges now
+  say `partially installed`. The dashboard regression uses actual Codex-only instruction
+  files plus both-off and both-on controls. Removing either partial-label branch or the
+  guidance warning condition causes exactly one named failure. The corrected labels are
+  also visible in the isolated real VS Code dashboard.
 
 ### The `file:line` gate catches less than it looks like it catches
 
@@ -162,7 +283,7 @@ Fixing it is one line in `SOURCE_EXT`, and it will raise the reference count.
 Not a bug; the hook covers what the card misses. It is a UI blind spot, which is the class
 where a control reports on something other than what is running.
 
-`drainableRoots()` (`vscode-extension/extension.js:2772`) enumerates every workspace folder,
+`drainableRoots()` (`vscode-extension/extension.js:2842`) enumerates every workspace folder,
 but `localSettingsPath` (`src/local-settings.js:42-46`) is a single non-recursive join, so the
 extension drains one file per open FOLDER and never a subdirectory. The CLI hook drains the
 Claude Code session's own cwd on every tool call (`bin/wildcard-perms:501-515`, reading
@@ -198,7 +319,7 @@ so the card still reads zeros and the conclusion survives — but the premise "n
 exists" does not, and the one that does exist sits exactly where the card looks.
 
 If recursive discovery is ever built, the walker to copy is `findJsonlFiles`
-(`src/history-adapters.js:903-998`), the only production recursive walk in the repo: iterative
+(`src/history-adapters.js:934-1029`), the only production recursive walk in the repo: iterative
 rather than recursive, cycle-safe on `fs.realpathSync.native` keys (`path.resolve` was tried
 and is NOT enough — it preserves 8.3 short names so one directory got two keys), and it
 handles Windows junctions, which report neither `isDirectory()` nor `isFile()`. It is not
@@ -371,7 +492,7 @@ reads*, said to catch nine of fourteen dead-code findings. Those fourteen were f
 whole tree are a test NAME and prose. Three weaker candidates have no production `.prop`
 reader but are load-bearing anyway (see FP-4 below): `bypassDisabled` and
 `forcedDefaultMode` at `src/policy-guard.js:151,153`, and `skippedCount` at
-`src/auto-learn-manager.js:2031`.
+`src/auto-learn-manager.js:2273`.
 
 **The naive form of the rule is unsound before it is even run.** Of 231 returned-object-
 literal sites carrying 920 (site, key) pairs, **176 of 315 distinct names appear at more
@@ -432,7 +553,7 @@ ranked by what a reversion costs:
 
 | Site | Mutant | Consequence |
 |---|---|---|
-| post-lock `reportAlreadyOptimal` (`vscode-extension/extension.js:2716`) | branch to `if (false)` | `backupPolicy` never runs on the "someone else generalized it while we waited" path, so **a deleted backup is not rebuilt** — the one property its comment promises |
+| post-lock `reportAlreadyOptimal` (`vscode-extension/extension.js:2786`) | branch to `if (false)` | `backupPolicy` never runs on the "someone else generalized it while we waited" path, so **a deleted backup is not rebuilt** — the one property its comment promises |
 | toast counts | revert to the probe's `after`/`before` | wrong added/removed numbers shown |
 | `lastRun` assignment | delete it | the dashboard's "last run" never advances |
 | probe read guard | delete `if (!settings)` | reports "already optimal" over an unreadable settings.json |
@@ -445,18 +566,18 @@ ranked by what a reversion costs:
 and is closed. Still open, each leaving an unreachable branch:
 
 - `managedPolicyPath` — read at `src/auto-learn-manager.js:1244`, `:1259`; no supplier anywhere, tests included.
-- `defaultTool` — read at `src/history-adapters.js:738` (moved from `:718`); makes that early return unreachable.
-- `priorCursors` — `src/history-adapters.js:1250`, the second leg of `options.cursors || options.priorCursors`.
-- `homeDir` and `successThreshold` — unreachable because `vscode-extension/extension.js:1085-1086` sets BOTH spellings on the same object literal, so the `||` and `??` legs at `src/auto-learn-manager.js:1140` and `:1142` never fire.
+- `defaultTool` — read at `src/history-adapters.js:765` (moved from `:718`); makes that early return unreachable.
+- `priorCursors` — `src/history-adapters.js:1281`, the second leg of `options.cursors || options.priorCursors`.
+- `homeDir` and `successThreshold` — unreachable because `vscode-extension/extension.js:1087-1088` sets BOTH spellings on the same object literal, so the `||` and `??` legs at `src/auto-learn-manager.js:1288` and `:1292` never fire.
 
 **Suspected, each with the reason it could not be closed:**
 
 - ~~**Cancelling the model download inside the redirect window**~~ **REFUTED 2026-09-27.**
-  The early return at `vscode-extension/extension.js:710` is real and IS reached — 
+  The early return at `vscode-extension/extension.js:728` is real and IS reached.
   `test/extension-lifecycle-async.test.js:1604-1620` drives exactly it. But it does not leak:
-  the only way `handle.cancelled` becomes true is `handle.destroy(err)` (`:703`), which also
+  the only way `handle.cancelled` becomes true is `handle.destroy(err)` (`:721`), which also
   calls `handle.req.destroy(err)`, and a destroyed request emits `'error'`, which reaches
-  `onResponse(null, err)` at `:714` and runs `fail()`. The test asserts the promise settles.
+  `onResponse(null, err)` at `:732` and runs `fail()`. The test asserts the promise settles.
   Both destroy callers supply an Error, so the event always fires. Of the two readings this
   entry could not separate, **the first one was right**. The `liveTransfers` half of the claim
   stands — it holds only the request handle, not the write stream — so the premise was sound
@@ -543,6 +664,7 @@ trust gap, the two stat-keyed caches, the text-only privacy gate, and the transc
 backup, which is now a scheduled mirror rather than an open question.
 
 **Standing limits** are stated where they bite rather than tracked here: Codex managed
-requirements are read only from the local bundle cache, `~/.codex/rules` is the only rule
-directory enumerated, and Codex account identity is deliberately never read because that
+requirements are read only from the local bundle cache; rule inventory follows the selected
+`CODEX_HOME/rules` and explicit extra directories, without automatic discovery of every
+trusted project directory; and Codex account identity is deliberately never read because that
 would mean opening `~/.codex/auth.json`.

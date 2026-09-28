@@ -42,7 +42,7 @@ const LEARN_USAGE = 'usage: wildcard-perms --learn scan|status|apply|undo|hits '
 // trust (which is what actually decides whether Codex loads a workspace rule
 // file at all). Writing an allow rule into a repository on the strength of the
 // first two is a capability whose trust model could not be stated, so it was
-// removed rather than certified. See docs/codex-certification.md.
+// withdrawn pending runtime validation. See docs/codex-compatibility.md.
 //
 // The flag VALUE stays parseable so an existing script reaches this message
 // instead of silently landing in user scope and writing rules to a different
@@ -62,19 +62,20 @@ const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
   '       wildcard-perms --guidance derived\n' +
   '       wildcard-perms --guidance accept|decline|reset <id>\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n';
+const CODEX_HOOK_USAGE = 'usage: wildcard-perms --codex-hook on|off|status\n';
 
 // Every active verb, the two retired MAX flags, and the one-way cleanup for
 // withdrawn Codex workspace rules. Keeping the retired flags in dispatch is a
 // safety boundary: an old invocation must reach a read-only or cleanup handler,
 // never fall through to hook mode and rewrite settings.json.
 const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
-  '--codex-max', '--max', '--bypass', '--codex-workspace-rules'];
+  '--codex-max', '--max', '--bypass', '--codex-workspace-rules', '--codex-hook'];
 const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex permissions\n\n' +
   'Run with NO arguments to act as a PostToolUse hook (reads a JSON event on stdin).\n\n' +
   LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
   'usage: wildcard-perms --seed\n' +
   'usage: wildcard-perms --bypass on|off|status\n' +
-  WORKSPACE_RULES_USAGE +
+  WORKSPACE_RULES_USAGE + CODEX_HOOK_USAGE +
   'usage: wildcard-perms --help | --version\n';
 
 const argv = process.argv.slice(2);
@@ -113,6 +114,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
   bypass(argv);
 } else if (argv.includes('--codex-workspace-rules')) {
   codexWorkspaceRules(argv);
+} else if (argv.includes('--codex-hook')) {
+  codexHook(argv);
 } else {
   // Hook mode. Claude Code sends a JSON context on stdin, and one field of it
   // matters: `cwd` names the project whose settings.local.json may have just
@@ -287,6 +290,7 @@ function workspaceRootFor(args, createAutoLearnManager) {
 }
 
 function learn(args) {
+  const { resolveCodexHome } = require('../src/codex-paths');
   // Keep the PostToolUse hot path independent of the optional learner stack.
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
   const index = args.indexOf('--learn');
@@ -321,11 +325,12 @@ function learn(args) {
     if (threshold !== null && (!Number.isInteger(threshold) || threshold < 1)) {
       throw new Error('--threshold must be a positive integer');
     }
+    const codexHome = resolveCodexHome();
     const codexRulesPath = codexScope === 'off' ? null
-      : path.join(os.homedir(), '.codex', 'rules', 'permission-wildcarding.rules');
+      : path.join(codexHome, 'rules', 'permission-wildcarding.rules');
     const manager = createAutoLearnManager({
       workspaceRoot,
-      codexRulesPath,
+      codexHome, codexRulesPath,
       codexExecutable: learnOption(args, '--codex-executable', 'codex'),
       mode: mode || 'recommend',
       threshold: threshold || 3,
@@ -810,11 +815,8 @@ function guidance(args) {
   // erasing someone's decisions is not what "off" was asked to do.
   if (cmd === 'off') {
     const { setDerivedGuidance } = require('../src/derived-guidance');
-    // No options, and that is now correct rather than an omission. The default
-    // `backupDir` is the learner's `~/.claude/wildcarding/backups`, which is
-    // where `decideDerived` puts the same `.pre-derived` copy — see the note on
-    // setDerivedGuidance for why the two used to disagree and what it cost.
-    for (const target of setDerivedGuidance([], [])) {
+    // Remove accepted blocks from both agents; keep the shared backup directory.
+    for (const target of setDerivedGuidance([], [], { agents: ['claude', 'codex'] })) {
       if (target.error) {
         process.stderr.write(
           `wildcard-perms --guidance off [${target.agent}]: derived blocks were left in `
@@ -1050,6 +1052,32 @@ function bypass(args) {
 // `.codex/rules/permission-wildcarding.rules` with no markers is somebody's hand
 // written file that happens to share the name, and it is left byte-for-byte
 // alone — the same rule, for the same reason, as the retired MAX cleanup below.
+function codexHook(args) {
+  const cmd = args[1] || 'status';
+  if (args[0] !== '--codex-hook' || args.length > 2 || !['on', 'off', 'status'].includes(cmd)) {
+    process.stderr.write(CODEX_HOOK_USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    const { inspectCodexHook, setCodexHook } = require('../src/codex-hook-install');
+    const result = cmd === 'status' ? inspectCodexHook() : setCodexHook(cmd === 'on');
+    process.stdout.write(JSON.stringify({
+      status: result.status, path: result.path, configured: result.configured,
+      changed: !!result.changed, trust: result.trust,
+      reviewRequired: result.reviewRequired,
+      message: result.configured
+        ? 'Configured for completed Codex turns. Review this exact hook in Codex /hooks before it can run. Auto Learn keeps its current mode.'
+        : result.reason || 'Codex after-turn learning hook is not configured.',
+      backupPath: result.backupPath || null,
+    }, null, 2) + '\n');
+    if (!result.writable) process.exitCode = 1;
+  } catch (error) {
+    process.stderr.write(`wildcard-perms --codex-hook: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
 function codexWorkspaceRules(args) {
   const { removeGeneratedCodexRules } = require('../src/policy-exporters');
   const cmd = String(args[args.indexOf('--codex-workspace-rules') + 1] || 'status').toLowerCase();

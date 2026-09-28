@@ -14,7 +14,7 @@
 //   - `autoLearnBusy` left true, which short-circuits every later scan.
 //
 // Its own mocks, again: this needs to count spawns, kills and watcher callbacks,
-// and the standing decision in this suite (test/extension-activation.test.js:141)
+// and the standing decision in this suite (test/extension-activation.test.js:311)
 // is that duplicating a mock is cheaper than breaking one that works.
 
 const test = require('node:test');
@@ -167,6 +167,8 @@ function harness(tempHome, options = {}) {
   // actually offered, and every output channel ever created. All four exist for
   // the post-teardown continuation tests at the bottom of this file.
   const pendingWarnings = [];
+  const pendingInformation = [];
+  const informationCalls = [];
   const quickPickAnswers = [];
   const quickPickCalls = [];
   const outputChannels = [];
@@ -238,7 +240,12 @@ function harness(tempHome, options = {}) {
       registerWebviewViewProvider(_id, instance) { provider = instance; return disposable(); },
       setStatusBarMessage(message) { statuses.push(String(message)); },
       showErrorMessage(message) { errors.push(String(message)); },
-      showInformationMessage(message) { infos.push(String(message)); return Promise.resolve(undefined); },
+      showInformationMessage(message, config, ...actions) {
+        infos.push(String(message));
+        informationCalls.push({ message: String(message), config, actions });
+        if (config?.modal && options.deferInformation) return new Promise((resolve) => pendingInformation.push(resolve));
+        return Promise.resolve(config?.modal ? options.informationChoice : undefined);
+      },
       showWarningMessage(message) {
         warnings.push(String(message));
         // DEFERRED, on request. Six write paths in this extension resume from an
@@ -306,6 +313,8 @@ function harness(tempHome, options = {}) {
 
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
@@ -341,7 +350,13 @@ function harness(tempHome, options = {}) {
           // behaviour. `timeoutMs: 0` would disable it, which is NOT what an
           // unset option means — hence the explicit undefined.
           timeoutMs: options.workerTimeoutMs,
-          workerFactory: () => {
+          workerFactory: (_filename, workerOptions) => {
+            // These fixtures wedge/count the requested Auto Learn operations.
+            // Native gate reconciliation is an independent activation job; let
+            // it complete so it cannot consume the scan's synthetic wedge or
+            // leave the scan queued behind a worker the fixture never releases.
+            if (['codexNativeGates', 'setCodexNativeGates', 'refreshCodexNativeGates']
+              .includes(workerOptions.workerData.operation)) return new FakeWorker();
             const worker = options.wedgeWorker ? new WedgedWorker() : new FakeWorker();
             workers.push(worker);
             return worker;
@@ -449,6 +464,7 @@ function harness(tempHome, options = {}) {
     extension,
     httpsRequests,
     infos,
+    informationCalls,
     progressRuns,
     warnings,
     memoryDirs,
@@ -462,6 +478,12 @@ function harness(tempHome, options = {}) {
     // waiting, so a test cannot pass by resolving a prompt that never fired.
     answerWarning(choice) {
       const resolve = pendingWarnings.shift();
+      if (!resolve) return false;
+      resolve(choice);
+      return true;
+    },
+    answerInformation(choice) {
+      const resolve = pendingInformation.shift();
       if (!resolve) return false;
       resolve(choice);
       return true;
@@ -519,6 +541,10 @@ function harness(tempHome, options = {}) {
       for (const entry of intervals) clearInterval(entry.handle);
       global.setInterval = originalSetInterval;
       Module._load = originalLoad;
+      for (const [key, value] of Object.entries(originalHomeEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       purge();
     },
   };
@@ -1942,18 +1968,26 @@ function derivedGuidanceHome(t) {
   return home;
 }
 
+// Killing mutations: truncate the full-body modal; remove its post-response
+// teardown guard. Each must fail this test after the live Accept write is proved.
 test('derived guidance accepted after teardown writes no instruction file', TEST_TIMEOUT, async (t) => {
   const home = derivedGuidanceHome(t);
   const settings = { 'autoLearn.enabled': true, 'guidance.enabled': false, 'gates.enabled': false };
 
-  const live = harness(home, { settings: { ...settings } });
+  const live = harness(home, { settings: { ...settings }, informationChoice: 'Accept' });
   let notes;
   try {
     notes = readClaudeMd(home);
-    live.quickPickAnswers.push('batch-file-edits', 'Accept');
+    live.quickPickAnswers.push('batch-file-edits');
     await live.commands.get('permission-wildcarding.derivedGuidance')();
-    assert.ok(live.quickPickCalls.length >= 2,
-      `witness:derived-teardown -- the second QuickPick never appeared: ${live.quickPickCalls.length} shown`);
+    const modal = live.informationCalls.find((call) => call.config?.modal);
+    assert.ok(modal, 'witness:derived-teardown -- the full-body decision modal must appear');
+    const offered = live.quickPickCalls[0].find((item) => item.id === 'batch-file-edits');
+    assert.equal(modal.config.detail, offered.detail + '\n\nCurrently not yet decided. '
+      + 'Accept installs this instruction; Decline removes it and stops offering it; '
+      + 'Reset removes it and makes it undecided.',
+      'witness:derived-teardown -- the entire standing instruction must be visible before Accept');
+    assert.deepEqual(modal.actions, ['Accept', 'Decline', 'Reset']);
     assert.match(readClaudeMd(home), /batch-file-edits \(derived\)/,
       'witness:derived-teardown -- the live command wrote no derived block, so this test cannot '
       + 'tell a guard from a path that never reaches the write');
@@ -1962,17 +1996,46 @@ test('derived guidance accepted after teardown writes no instruction file', TEST
   }
 
   fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), notes);
-  const app = harness(home, { settings: { ...settings } });
+  const app = harness(home, { settings: { ...settings }, deferInformation: true });
   try {
+    app.quickPickAnswers.push('batch-file-edits');
+    const command = app.commands.get('permission-wildcarding.derivedGuidance')();
+    await tick(0);
+    assert.ok(app.informationCalls.some((call) => call.config?.modal),
+      'witness:derived-teardown -- the decision must be awaiting an actual modal response');
     await app.extension.deactivate();
-    app.quickPickAnswers.push('batch-file-edits', 'Accept');
-    await app.commands.get('permission-wildcarding.derivedGuidance')();
+    assert.equal(app.answerInformation('Accept'), true,
+      'witness:derived-teardown -- the deferred full-body modal must still be waiting');
+    await command;
     assert.equal(readClaudeMd(home), notes,
       'witness:derived-teardown -- a torn-down host built a fresh Auto Learn manager and wrote a '
       + 'standing instruction into CLAUDE.md through it');
   } finally {
     await app.dispose();
   }
+});
+
+test('Codex hook confirmation after extension deactivation cannot install the callback', TEST_TIMEOUT, async (t) => {
+  const home = tempHome(t);
+  const file = path.join(home, '.codex', 'hooks.json');
+  const live = harness(home, { informationChoice: 'Configure hook' });
+  try {
+    await live.commands.get('permission-wildcarding.codexHook')();
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).hooks.Stop.length, 1,
+      'WITNESS live extension command must install the configured hook');
+  } finally { await live.dispose(); }
+  fs.unlinkSync(file);
+  const app = harness(home, { deferInformation: true });
+  try {
+    const pending = app.commands.get('permission-wildcarding.codexHook')();
+    await tick(0);
+    assert.match(app.informationCalls.find((call) => call.config?.modal)?.config.detail || '', /codex-stop-hook\.js/);
+    await app.extension.deactivate();
+    assert.equal(app.answerInformation('Configure hook'), true);
+    await pending;
+    assert.equal(fs.existsSync(file), false,
+      'WITNESS deactivation must dispose the hook UI before a late confirmation can write');
+  } finally { await app.dispose(); }
 });
 
 // The two arms of the managed-policy prompt. It fires from activation and both

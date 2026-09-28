@@ -108,16 +108,22 @@ const PENDING_REMOVAL = {
 // caller shows up here instead of looking unchanged.
 const TEST_ONLY = {
   'src/agent-gates.js': ['GATES_BEGIN', 'GATES_END', 'makeGatesBlock'],
-  'src/agent-guidance.js': ['BEGIN', 'END', 'GUIDANCE_BODY', 'applyGuidance', 'escapeMarker', 'guidanceBlock', 'guidanceTargets', 'hasGuidance', 'instructionLockPath', 'isCurrent'],
+  'src/agent-guidance.js': ['BEGIN', 'END', 'GUIDANCE_BODY', 'applyGuidance', 'guidanceBlock', 'guidanceStatus', 'hasGuidance', 'instructionLockPath', 'isCurrent', 'setGuidance'],
   'src/auto-learn-manager.js': ['migrateStateTo'],
   'src/auto-learn-worker.js': ['run'],
+  // These are exercised inside their own production modules; exporting them
+  // lets tests pin command quoting and the standalone stdin adapter separately.
+  'src/codex-hook-config.js': ['codexStopHookDefinition'],
+  'src/codex-stop-hook.js': ['runCodexStopHook'],
+  // Production wraps this read-only primitive in the reviewed proposal API.
+  'src/codex-mcp-config.js': ['inspectCodexMcpTool'],
   'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'classifyInvocation', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
   // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
   // consumer when the managed-requirements parser was rewritten on 2026-09-24:
   // production now asks enterprisePolicyAssessment, which answers with the degraded
   // state as well as the decision. Both are kept as a stable surface and both are
   // exercised; this census is what noticed, on the merge.
-  'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRuleHealth', 'enterprisePrefixRules', 'enterpriseRequirements'],
+  'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRules', 'enterpriseRequirements'],
   'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'markersFor', 'reconcileDerived', 'renderMitigation'],
   'src/exec-resolve.js': ['quoteForCommandProcessor', 'resolveExecutable'],
   'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
@@ -131,12 +137,8 @@ const TEST_ONLY = {
   // list. test/bypass-round-trip.test.js is the only caller and is the whole reason the
   // `--bypass off` restore can fail a build.
   'src/permissions.js': ['coverIndexKeyCacheStats', 'coverKeyCacheStats', 'readBypassState'],
-  // CODEX_BEGIN_MARKER joined this list on 2026-09-24 when removeGeneratedCodexRules
-  // moved into this module: the marker's only production reader is now its own file,
-  // and the workspace-rules cleanup in bin/wildcard-perms asks that function rather
-  // than matching the marker itself. That is the right direction -- ownership is
-  // proved in one place -- but it does leave the constant test-only.
-  'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'CODEX_BEGIN_MARKER', 'normalizePermissionSpelling'],
+  // The shared Codex claims reader now consumes CODEX_BEGIN_MARKER in production.
+  'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
   'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
@@ -192,6 +194,8 @@ function loadModule(moduleFile) {
   const extensionPath = path.join(ROOT, 'vscode-extension', 'extension.js');
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-exports-'));
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: sandbox, USERPROFILE: sandbox, CODEX_HOME: path.join(sandbox, '.codex') });
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscodeStub();
     if (request === 'os' || request === 'node:os') return { ...os, homedir: () => sandbox };
@@ -213,6 +217,10 @@ function loadModule(moduleFile) {
     return Object.keys(require(modulePath)).sort();
   } finally {
     Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     purge();
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

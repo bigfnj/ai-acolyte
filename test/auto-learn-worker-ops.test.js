@@ -41,6 +41,16 @@ test('rebuildManagedHits reaches the manager on the worker thread', (t) => {
   assert.equal(result.prompts, 0);
 });
 
+test('Codex inventory and interrupted-removal recovery reach the worker manager', (t) => {
+  const settings = options(t);
+  fs.mkdirSync(path.dirname(settings.codexRulesPath), { recursive: true });
+  fs.writeFileSync(settings.codexRulesPath, 'prefix_rule(pattern=["git", "status"], decision="allow")\n');
+  const inventory = run({ operation: 'codexInventory', options: settings });
+  assert.equal(inventory.rules.length, 1);
+  assert.deepEqual(inventory.rules[0].pattern, ['git', 'status']);
+  assert.equal(run({ operation: 'removeCodexRules', args: [{ resume: true }], options: settings }).changed, false);
+});
+
 test('an unlisted manager method is refused before it runs', (t) => {
   // `status` exists on the manager and is deliberately NOT routed through the
   // worker: it is cheap, read-only, and the UI calls it synchronously. The gate
@@ -49,6 +59,18 @@ test('an unlisted manager method is refused before it runs', (t) => {
     () => run({ operation: 'status', options: options(t) }),
     /Unsupported Auto Learn worker operation: status/,
   );
+});
+
+test('Codex restore inventory and interrupted-restore recovery reach the worker manager', (t) => {
+  const settings = options(t);
+  settings.codexHome = path.join(settings.home, '.codex');
+  fs.mkdirSync(path.dirname(settings.codexRulesPath), { recursive: true });
+  fs.writeFileSync(settings.codexRulesPath, 'prefix_rule(pattern=["git", "status"], decision="allow")\n');
+  run({ operation: 'codexInventory', options: settings });
+  fs.unlinkSync(settings.codexRulesPath);
+  const inventory = run({ operation: 'codexRestoreInventory', options: settings });
+  assert.equal(inventory.files[0].restore.length, 1, 'WITNESS worker restore inventory reaches retained policy');
+  assert.equal(run({ operation: 'restoreCodexRules', args: [{ resume: true }], options: settings }).changed, false);
 });
 
 test('an operation that does not exist at all is refused', (t) => {
@@ -62,4 +84,27 @@ test('an operation that does not exist at all is refused', (t) => {
     () => run({ options: options(t) }),
     /Unsupported Auto Learn worker operation: undefined/,
   );
+});
+
+test('reviewed Codex inventory and explicit recovery reach the worker manager', (t) => {
+  const settings = options(t);
+  settings.codexHome = path.join(settings.home, '.codex');
+  fs.mkdirSync(path.dirname(settings.codexRulesPath), { recursive: true });
+  fs.writeFileSync(settings.codexRulesPath, 'prefix_rule(pattern=["git", "status", "--short"], decision="allow")\n');
+  const inventory = run({ operation: 'codexApprovalInventory', args: ['stored-widening'], options: settings });
+  assert.equal(inventory.plans.length, 1, 'WITNESS worker reaches stored approval proposal');
+  assert.deepEqual(inventory.plans[0].target.pattern, ['git', 'status']);
+  assert.equal(run({ operation: 'approveCodexRules', args: [{ resume: true }], options: settings }).changed, false);
+});
+
+test('Codex MCP worker routes reach distinct evidence and recovery checks without starting a model', (t) => {
+  const settings = options(t);
+  settings.codexHome = path.join(settings.home, '.codex');
+  const view = run({ operation: 'codexMcpInventory', options: settings });
+  assert.deepEqual(view, { candidates: [], receipts: [], pending: null });
+  for (const operation of ['planCodexMcp', 'approveCodexMcp']) {
+    assert.throws(() => run({ operation, args: [{ key: 'not-observed' }], options: settings }), /not a reviewable Codex MCP candidate/);
+  }
+  assert.throws(() => run({ operation: 'undoCodexMcp', args: [{}], options: settings }), /Select a saved Codex MCP approval/);
+  assert.throws(() => run({ operation: 'recoverCodexMcp', args: [{ id: 'missing', acceptedHash: 'no' }], options: settings }), /pending selection changed/);
 });

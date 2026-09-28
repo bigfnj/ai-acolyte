@@ -27,7 +27,7 @@ function runHook(home, event) {
     cwd: home, encoding: 'utf8', windowsHide: true,
     input: JSON.stringify(event ?? {}),
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -152,7 +152,7 @@ function runVerb(home, args) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd: home, encoding: 'utf8', windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -268,7 +268,7 @@ function runVerbWithShim(home, shim, args) {
   return spawnSync(process.execPath, ['--require', shim, CLI, ...args], {
     cwd: home, encoding: 'utf8', windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -491,7 +491,7 @@ test('the hook loads no generalizer at all on a cache hit', (t) => {
   const out = path.join(home, 'probe.txt');
   const root = path.parse(home).root;
   const env = {
-    ...process.env, HOME: home, USERPROFILE: home, PW_PROBE_OUT: out,
+    ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), PW_PROBE_OUT: out,
     HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
   };
 
@@ -537,7 +537,7 @@ function runArgs(home, args) {
     cwd: home, encoding: 'utf8', windowsHide: true,
     input: JSON.stringify({ cwd: home, tool_name: 'Bash' }),
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -600,7 +600,7 @@ test('an unrecognized flag never reads stdin, and never waits for it', async (t)
   const child = spawn(process.execPath, [CLI, '--gate'], {
     cwd: os.tmpdir(), windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -895,7 +895,7 @@ function runHookWithSettingsRace(home, { afterRead, replacement }) {
     cwd: home, encoding: 'utf8', windowsHide: true,
     input: JSON.stringify({ tool_name: 'Bash' }),
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
       PW_RACE_TARGET: path.join(home, '.claude', 'settings.json'),
       PW_RACE_AFTER: String(afterRead),
@@ -959,7 +959,7 @@ function runHookChunked(home, event, slices = 12) {
   const child = spawn(process.execPath, [CLI], {
     cwd: os.tmpdir(), windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -1025,7 +1025,7 @@ test('a hook event that does not parse says so instead of skipping the drain in 
     cwd: os.tmpdir(), encoding: 'utf8', windowsHide: true,
     input: whole.slice(0, whole.length - 8),
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });

@@ -58,7 +58,7 @@ function settle(ms = 140) {
 }
 
 // Copied from test/policy-backup.test.js rather than shared. That is a standing
-// decision in this suite (test/extension-activation.test.js:141-143: "Kept as its
+// decision in this suite (test/extension-activation.test.js:311: "Kept as its
 // own mock rather than sharing the one above… duplicating a mock is far cheaper
 // than breaking the activation test that already works"), and this file needs two
 // things that one does not: the provider instance, and a count of how many times
@@ -164,6 +164,8 @@ function harness(tempHome, opts = {}) {
   const memoryReports = { count: 0 };
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
@@ -235,6 +237,13 @@ function harness(tempHome, opts = {}) {
     }
     if (parent?.filename === extensionPath && request.startsWith('./src/')) {
       return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
+    }
+    // Count only pushes driven by this fixture. The native gate controller's
+    // startup refresh and watchers are covered in codex-memory-gates-ui.test.js.
+    if (request === './codexMemoryGatesUi' && parent?.filename === extensionPath) {
+      return { createCodexMemoryGatesUi: () => ({
+        activate() {}, dispose() {}, review() {}, status() { return {}; },
+      }) };
     }
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
@@ -308,6 +317,10 @@ function harness(tempHome, opts = {}) {
       for (const entry of timers) clearTimeout(entry.handle);
       global.setTimeout = originalSetTimeout;
       Module._load = originalLoad;
+      for (const [key, value] of Object.entries(originalHomeEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       // Purge the whole tree, not just the entry. Every src/ module that
       // defaults a home resolves it against its OWN `os` binding, frozen at
       // first require — so leaving them cached hands the next harness this
@@ -421,6 +434,16 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['toggleGuidance', 'permission-wildcarding.toggleGuidance'],
       ['toggleGates', 'permission-wildcarding.toggleGates'],
       ['showWildcards', 'permission-wildcarding.showWildcards'],
+      ['showCodexRules', 'permission-wildcarding.showCodexRules'],
+      ['restoreCodexRules', 'permission-wildcarding.restoreCodexRules'],
+      ['codexHook', 'permission-wildcarding.codexHook'],
+      ['reviewCodexApprovals', 'permission-wildcarding.reviewCodexApprovals'],
+      ['reviewCodexMcp', 'permission-wildcarding.reviewCodexMcp'],
+      ['importCodexRules', 'permission-wildcarding.importCodexRules'],
+      ['searchCodexMemory', 'permission-wildcarding.searchCodexMemory'],
+      ['rebuildCodexMemory', 'permission-wildcarding.rebuildCodexMemory'],
+      ['codexMemoryGates', 'permission-wildcarding.codexMemoryGates'],
+      ['inspectCodexMemory', 'permission-wildcarding.inspectCodexMemory'],
     ];
     for (const [type, command] of routes) {
       app.executed.length = 0;
@@ -604,7 +627,7 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:2674 -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:2734 -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -1919,3 +1942,154 @@ function renderDashboard(provider, data) {
   const text = (id) => node(id).textContent;
   return { alScanHealth: text('alScanHealth'), stAutoLearn: text('stAutoLearn'), node };
 }
+
+test('Codex evidence rebuild and uncertain legacy counts remain visible beside actionable review counts', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = structuredClone(ui.posted.at(-1));
+    data.autoLearn.counts.review = 3;
+    data.autoLearn.scan = { ...SCAN_SEED, codexHistoryInspected: 'skipped' };
+    data.autoLearn.codexEvidence = { pending: true, uncertainCandidates: 2, quarantinedRuns: 17, remainingFiles: 4, untimedFailureRuns: 2 };
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.node('alsub').textContent, /rebuilding older Codex evidence/);
+    assert.match(rendered.node('alsub').textContent, /4 transcripts still need a complete read/);
+    assert.match(rendered.node('alsub').textContent, /17 older runs excluded from new approvals/);
+    assert.match(rendered.node('alsub').textContent, /2 failed Codex runs could not be dated during rebuild; existing approvals retained/);
+    assert.equal(rendered.stAutoLearn, '3 to review', 'migration notes must not suppress the actionable count');
+
+    data.autoLearn.codexEvidence = { pending: false, uncertainCandidates: 0, quarantinedRuns: 0 };
+    const complete = renderDashboard(app.provider, data);
+    assert.doesNotMatch(complete.node('alsub').textContent, /rebuilding|older runs excluded|could not be dated/);
+    assert.equal(complete.stAutoLearn, '3 to review');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('the dashboard receives migration status from actual legacy learner state', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    const { createAutoLearnManager } = require('../src/auto-learn-manager');
+    const workspaceRoot = path.join(env.tempHome, 'workspace');
+    const manager = createAutoLearnManager({ home: env.tempHome, workspaceRoot,
+      historyScanner: () => ({ cursors: {}, files: [{ source: 'codex', mode: 'full' }],
+        observations: ['claude', 'claude', 'codex', 'codex', 'codex'].map((source, index) => ({
+          id: `legacy-dashboard-${index}`, source, tool: 'PowerShell', command: 'git status',
+          status: 'success', cwd: workspaceRoot,
+        })),
+      }),
+    });
+    manager.scan();
+    const state = JSON.parse(fs.readFileSync(manager.paths.state, 'utf8'));
+    state.version = 1;
+    for (const key of ['codexEvidenceRevision', 'codexEvidenceRebuildPending', 'legacyCodexEvidence', 'preservedEvidenceGrants']) delete state[key];
+    for (const candidate of Object.values(state.candidates)) delete candidate.sourceCounts;
+    for (const source of ['claude', 'codex']) {
+      const [id] = Object.entries(state.observationHashes).find(([, entry]) => entry.source === source);
+      delete state.observationHashes[id];
+    }
+    fs.writeFileSync(manager.paths.state, JSON.stringify(state));
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.codexEvidence.pending, true, 'pending rebuild must reach the dashboard');
+    assert.equal(data.autoLearn.codexEvidence.uncertainCandidates, 1);
+    assert.equal(data.autoLearn.codexEvidence.quarantinedRuns, 2, 'unattributable counts must reach the dashboard');
+    assert.match(renderDashboard(app.provider, data).node('alsub').textContent, /2 older runs excluded/);
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('unreadable Codex override discovery is visible in both instruction cards', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const codex = path.join(env.tempHome, '.codex');
+  fs.mkdirSync(path.join(codex, 'AGENTS.override.md'), { recursive: true });
+  fs.writeFileSync(path.join(codex, 'AGENTS.md'), '# Keep the base unchanged\n');
+  fs.writeFileSync(path.join(env.tempHome, '.claude', 'gates.generated.md'), '# Fixture compiled gate\n');
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.ok(data.guidance.errors.some((message) => message.includes('AGENTS.override.md')),
+      'discovery failure must reach the guidance payload');
+    assert.ok(data.gates.errors.some((message) => message.includes('AGENTS.override.md')),
+      'discovery failure must reach the gates payload');
+    const rendered = renderDashboard(app.provider, data);
+    const guidanceError = data.guidance.errors.find((message) => message.includes('AGENTS.override.md'));
+    const gatesError = data.gates.errors.find((message) => message.includes('AGENTS.override.md'));
+    assert.ok(rendered.node('gdsub').textContent.includes(guidanceError),
+      'the guidance card must explain the error, not merely display the target path');
+    assert.ok(rendered.node('mgsub').textContent.includes(gatesError),
+      'the gates card must explain the error, not merely display the target path');
+    assert.equal(fs.readFileSync(path.join(codex, 'AGENTS.md'), 'utf8'), '# Keep the base unchanged\n');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('partial Codex instruction installation is reported consistently in cards and collapsed badges', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const claude = path.join(env.tempHome, '.claude', 'CLAUDE.md');
+  const codex = path.join(env.tempHome, '.codex', 'AGENTS.md');
+  fs.mkdirSync(path.dirname(codex), { recursive: true });
+  const own = '# Fixture user instructions\n';
+  fs.writeFileSync(claude, own);
+  fs.writeFileSync(codex, own);
+  fs.writeFileSync(path.join(env.tempHome, '.claude', 'gates.generated.md'),
+    '## Standing gates (1 memories, managed)\n- Fixture resident instruction.\n');
+  const app = harness(env.tempHome, { settings: { 'guidance.enabled': false, 'gates.enabled': false } });
+  try {
+    const { applyGuidance } = require('../src/agent-guidance');
+    const { makeGatesBlock } = require('../src/agent-gates');
+    const installed = makeGatesBlock(env.tempHome).apply(applyGuidance(own, true).text, true).text;
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    for (const state of [
+      { claude: false, codex: false, guidance: 'not installed', gates: '1 waiting', body: 'OFF' },
+      { claude: false, codex: true, guidance: 'partially installed', gates: '1 partially installed', body: 'PARTIAL' },
+      { claude: true, codex: true, guidance: 'on', gates: '1 active', body: 'ON' },
+    ]) {
+      fs.writeFileSync(claude, state.claude ? installed : own);
+      fs.writeFileSync(codex, state.codex ? installed : own);
+      app.provider.refresh();
+      await settle();
+      const data = ui.posted.at(-1);
+      const partial = state.claude !== state.codex;
+      assert.equal(data.guidance.partial, partial, 'real file discovery must reach the guidance payload');
+      assert.equal(data.gates.partial, partial, 'real file discovery must reach the gates payload');
+      assert.equal(data.gates.count, 1);
+      if (partial) {
+        assert.deepEqual(data.guidance.agents, ['codex']);
+        assert.deepEqual(data.gates.agents, ['codex']);
+      }
+      const rendered = renderDashboard(app.provider, data);
+      assert.ok(rendered.node('gdtext').textContent.startsWith('Shell-style guidance: ' + state.body));
+      assert.ok(rendered.node('mgtext').textContent.startsWith('Memory gates: ' + state.body));
+      assert.equal(rendered.node('stGuidance').textContent, state.guidance,
+        'WITNESS guidance badge must distinguish partial installation from fully off and on');
+      assert.equal(rendered.node('stGates').textContent, state.gates,
+        'WITNESS gates badge must distinguish partial installation from fully off and on');
+      if (partial) {
+        assert.equal(rendered.node('stGuidance').className, 'rowstate warn',
+          'WITNESS partial guidance badge must have warning tone');
+        assert.equal(rendered.node('stGates').className, 'rowstate warn',
+          'WITNESS partial gates badge must have warning tone');
+      }
+    }
+  } finally {
+    await app.dispose();
+  }
+});

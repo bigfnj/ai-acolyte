@@ -70,7 +70,7 @@ function applicationSummary(...results) {
   // then applies again produces two prunes and one toast. A `.bak` that could not be
   // deleted is the one outcome of backup pruning worth a word — the manager counts
   // it rather than throwing, because by then the policy is already written and a
-  // locked file is not worth failing an apply over (src/auto-learn-manager.js:1605).
+  // locked file is not worth failing an apply over (src/auto-learn-manager.js:1850).
   // It had no reader until 2026-09-25, so "counted rather than thrown" meant
   // "swallowed".
   let backupsUnremovable = 0;
@@ -116,7 +116,7 @@ function policyTargetLabel(value) {
 // A `.bak` the pruner could not delete is counted rather than thrown, deliberately:
 // by the time pruneBackups runs the policy file is already written, and failing an
 // apply over a locked backup would be the worse outcome
-// (src/auto-learn-manager.js:1605, which says the count exists "so a degraded run says
+// (src/auto-learn-manager.js:1850, which says the count exists "so a degraded run says
 // so instead of reporting a clean prune"). Counting it and then telling nobody is a
 // third, separate thing, and it is what the code did until 2026-09-25: returned on
 // every apply, read by nothing outside the tests.
@@ -144,6 +144,82 @@ function backupPruneSuffix(summary) {
 function codexRestartSuffix(value) {
   return uniqueTargets(value).includes('codex')
     ? ' Restart Codex to load the changed rules.' : '';
+}
+
+function codexInventorySummary(inventory = {}) {
+  const files = Array.isArray(inventory.files) ? inventory.files : [];
+  const rules = Array.isArray(inventory.rules) ? inventory.rules : [];
+  const suppressed = Math.max(0, Number(inventory.suppressionCount) || 0);
+  return [
+    `${rules.length} Codex rule${rules.length === 1 ? '' : 's'} in ${files.length} file${files.length === 1 ? '' : 's'}.`,
+    `Current Auto Learn builds exclude grants overlapping ${suppressed} removed prefix${suppressed === 1 ? '' : 'es'} across workspaces.`,
+    ...(inventory.pendingRemoval ? ['A Codex removal was interrupted. Finish it before changing other rules.'] : []),
+    ...(inventory.pendingRestore ? ['A Codex restore was interrupted. Finish it in Restore Codex rules before changing other rules.'] : []),
+    ...(Array.isArray(inventory.blindSpots) ? inventory.blindSpots.filter((note) => typeof note === 'string') : []),
+  ].join('\n\n');
+}
+
+// The picker includes rules that cannot be removed, rather than making an
+// unsupported file look empty. Selection of one of those rows only opens its
+// explanation. A decision other than allow never gains a Remove action, even
+// if a malformed worker response says it is removable.
+function codexInventoryItems(inventory = {}, displayPath = (file) => file) {
+  const files = Array.isArray(inventory.files) ? inventory.files : [];
+  const rules = Array.isArray(inventory.rules) ? inventory.rules : [];
+  const items = rules.map((rule) => {
+    const file = files.find((entry) => entry.path === rule.path);
+    const removable = !inventory.pendingRemoval && rule.decision === 'allow' && rule.removable === true && file?.supported === true;
+    const reason = inventory.pendingRemoval ? 'Finish the interrupted removal before changing rules.' : removable ? null : rule.reason || file?.reason ||
+      (rule.decision !== 'allow' ? 'Only allow rules can be removed here.' : 'This rule is read-only.');
+    return {
+      label: JSON.stringify(rule.pattern),
+      description: `Codex · ${rule.decision} · ${rule.owned ? 'Acolyte' : 'existing rule'}${removable ? '' : ' · read-only'}`,
+      detail: `${displayPath(rule.path)}${reason ? ' · ' + reason : ''}`,
+      rule, removable, reason,
+    };
+  });
+  for (const file of files.filter((entry) => !entry.supported)) items.push({
+    label: displayPath(file.path), description: 'Codex · read-only file',
+    detail: file.reason || 'This file cannot be safely edited here.', file, removable: false,
+  });
+  if (inventory.pendingRemoval) items.unshift({
+    label: 'Finish interrupted Codex removal', description: 'Codex · removal needs attention',
+    detail: inventory.reason || 'Finish the removal you already confirmed before changing other rules.',
+    resume: true, removable: false,
+  });
+  items.push({ label: 'About this Codex inventory', description: 'Scope and removed prefixes',
+    detail: codexInventorySummary(inventory), about: true, removable: false });
+  return items;
+}
+
+function codexInventoryDetail(item, inventory, displayPath = (file) => file) {
+  if (item.resume) return [item.detail,
+    'This finishes the previously confirmed removal. If the affected files have changed, review them before trying again.',
+    'Restart Codex after removal; active sessions may cache rules.', codexInventorySummary(inventory)].join('\n\n');
+  if (item.about) return codexInventorySummary(inventory);
+  if (item.file) return [displayPath(item.file.path), item.detail, codexInventorySummary(inventory)].join('\n\n');
+  const rule = item.rule;
+  return [
+    `Codex prefix: ${JSON.stringify(rule.pattern)}`,
+    `Decision: ${rule.decision}`,
+    `File: ${displayPath(rule.path)}`,
+    `Source: ${rule.owned ? 'Acolyte' : 'existing file rule'}`,
+    item.removable
+      ? 'Current Auto Learn builds will not re-add overlapping prefixes in any workspace. Other matching rules can still allow the command. Restart Codex after removal; active sessions may cache rules.'
+      : item.reason,
+    !item.removable && codexInventorySummary(inventory),
+  ].filter(Boolean).join('\n\n');
+}
+
+function codexRemovalExplanation(candidate) {
+  return candidate?.codexSuppressed === true
+    ? 'Codex grant withheld because this command family overlaps a removed prefix. Current Auto Learn builds will not re-add it.'
+    : null;
+}
+
+function codexRemovalNote(candidates) {
+  const count = (Array.isArray(candidates) ? candidates : []).filter((candidate) => candidate.codexSuppressed === true).length;
+  return count ? ` (${count} command ${count === 1 ? 'family' : 'families'} excluded from Codex by a prior rule removal)` : '';
 }
 
 // Delegates to the shared matcher so the dashboard reads policy the same way
@@ -317,17 +393,20 @@ function managedBlockedDetail(managed) {
 // cost enough prompts yet, which is the good outcome and should read that way.
 function derivedGuidanceSummary(review) {
   const value = review || {};
-  if (value.degraded) return 'managed policy unreadable, so nothing could be derived';
-  if (value.policy !== 'present') return 'no managed policy, so there is nothing to mitigate';
   const pending = Array.isArray(value.pending) ? value.pending : [];
   const accepted = Array.isArray(value.accepted) ? value.accepted : [];
+  if (value.degraded && (!value.policies || (!pending.length && !accepted.length))) return 'managed policy unreadable, so nothing could be derived';
+  if (value.policy !== 'present') return 'no managed policy, so there is nothing to mitigate';
   if (!pending.length && !accepted.length) {
     const threshold = Number.isFinite(value.threshold) ? value.threshold : 50;
-    return `no managed rule has cost ${threshold} prompts, so there is nothing worth a standing instruction`;
+    return value.policies?.codex === 'present'
+      ? `no known mitigation has reached ${threshold} observed runs or Claude prompts`
+      : `no managed rule has cost ${threshold} prompts, so there is nothing worth a standing instruction`;
   }
   const parts = [];
   if (pending.length) parts.push(`${pending.length} to review`);
   if (accepted.length) parts.push(`${accepted.length} installed`);
+  if (value.degraded) parts.push('some managed policy could not be read');
   return parts.join(', ');
 }
 
@@ -346,9 +425,9 @@ function derivedGuidanceItems(review) {
       return {
         id: item.id,
         label: item.title || item.id,
-        description: `${item.prompts} prompts — ${state}`,
+        description: item.agent === 'codex' ? `Codex · ${item.observedRuns} observed runs · ${state}` : `${item.prompts} prompts — ${state}`,
         detail: item.body || '',
-        rule: item.rule,
+        rule: item.agent === 'codex' ? 'Codex' : item.rule,
         state,
       };
     });
@@ -392,6 +471,10 @@ module.exports = {
   codexCheckVariants,
   codexExecpolicyArgs,
   codexRestartSuffix,
+  codexInventoryItems,
+  codexInventoryDetail,
+  codexRemovalExplanation,
+  codexRemovalNote,
   derivedGuidanceItems,
   derivedGuidanceSummary,
   isCandidateComplete,

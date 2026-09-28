@@ -29,6 +29,7 @@ const os = require('os');
 const path = require('path');
 
 const { writeFileAtomicSync } = require('./permissions');
+const { resolveCodexHome } = require('./codex-paths');
 
 const BEGIN = '<!-- BEGIN permission-wildcarding: shell style (managed) -->';
 const END = '<!-- END permission-wildcarding: shell style -->';
@@ -37,27 +38,50 @@ function guidancePath(home = os.homedir()) {
   return path.join(home, '.claude', 'CLAUDE.md');
 }
 
-function codexGuidancePath(home = os.homedir()) {
-  return path.join(home, '.codex', 'AGENTS.md');
+function targetOptions(homeOrOptions) {
+  return typeof homeOrOptions === 'string' ? { home: homeOrOptions } : (homeOrOptions || {});
+}
+
+function codexGuidanceTarget(options) {
+  const directory = resolveCodexHome(options);
+  const override = path.join(directory, 'AGENTS.override.md');
+  const regular = path.join(directory, 'AGENTS.md');
+  const candidates = [override, regular];
+  // Codex loads the first nonempty global file. Filling an empty override would
+  // hide the user's regular AGENTS.md, so leave it empty and update the base.
+  // https://learn.chatgpt.com/docs/agent-configuration/agents-md
+  try {
+    if (fs.readFileSync(override, 'utf8').trim()) {
+      return { agent: 'codex', path: override, candidates };
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return { agent: 'codex', path: override, candidates,
+        error: `cannot inspect Codex instruction override ${override}: ${error.code || error.message}` };
+    }
+  }
+  return { agent: 'codex', path: regular, candidates };
 }
 
 // Both agents load a user-scope instruction file, and both are hurt by the same
-// habit for different reasons — Claude Code stores the approved command *string*,
-// while Codex policy is an argv prefix for the program it actually executes, so a
-// `bash -lc "cd x && build"` call is a `bash` invocation and a rule for the real
-// tool never applies to it. One block, both files.
-function guidanceTargets(home = os.homedir()) {
+// habit for different reasons. Claude Code stores approval patterns; Codex uses
+// argv prefixes and may split simple shell chains before matching. Expansions
+// and redirections can leave the wrapper as the command being checked. A script
+// file needs its own permission; a rule for an inner tool does not cover it.
+function guidanceTargets(homeOrOptions) {
+  const options = targetOptions(homeOrOptions);
+  const home = options.home ?? os.homedir();
   return [
     { agent: 'claude', path: guidancePath(home) },
-    { agent: 'codex', path: codexGuidancePath(home) },
+    codexGuidanceTarget(options),
   ];
 }
 
 // Only write for an agent that is actually installed: the file may not exist yet
 // (that is fine, it gets created), but its config directory must, or this would
 // conjure a ~/.codex on a machine that has never run Codex.
-function installedGuidanceTargets(home = os.homedir()) {
-  return guidanceTargets(home).filter((target) =>
+function installedGuidanceTargets(homeOrOptions) {
+  return guidanceTargets(homeOrOptions).filter((target) =>
     fs.existsSync(target.path) || fs.existsSync(path.dirname(target.path)));
 }
 
@@ -66,9 +90,9 @@ function installedGuidanceTargets(home = os.homedir()) {
 // each one traceable to something the generalizer cannot do after the fact.
 const GUIDANCE_BODY = `## Shell style that does not re-prompt
 
-An approval is stored as the command *string* that was approved. One command per
-call becomes a reusable wildcard (\`Bash(git *)\`); a compound command is stored
-verbatim and never matches anything again, so every variation prompts afresh.
+Claude Code stores command approval patterns; Codex stores argv prefix rules.
+One simple command per call makes either approval easier to reuse. Compound
+scripts can need an exact approval that does not cover the next variation.
 
 - **One command per tool call.** No \`&&\`, \`;\` or \`|\` chains, and no
   multi-statement PowerShell (\`$x = ...; if (...) { ... }\`). A chain built only
@@ -76,20 +100,20 @@ verbatim and never matches anything again, so every variation prompts afresh.
   the cost lands when a chain needs a *new* approval.
 - **Use the tool's own path flag, not \`cd\`.** \`git -C <path> status\`,
   \`npm --prefix <dir> run build\`, \`dotnet build <path>\`, \`rg <pat> <path>\`,
-  \`tail -n 50 <file>\`. \`cd <path> && <cmd>\` keys the stored approval on
-  \`cd\`, so the half that mattered never becomes a wildcard.
-- **Call executables by bare name.** A quoted absolute path
-  (\`& "C:\\Program Files\\App\\app.exe"\`) cannot be wildcarded at all — put its
-  directory on PATH, or invoke a wrapper script.
-- **Put multi-step work in a script and run the script.** One permission,
-  reusable forever (\`./run-gate.ps1\`, \`./build.sh\`). This is the right answer
-  whenever a build or a full verify needs several steps in order.
-- \`VAR=value <cmd>\` prefixes are fine; they are stripped before matching.
+  \`tail -n 50 <file>\`. Avoid coupling a directory change to the command
+  whose approval you want to reuse.
+- **Call executables by bare name.** A bare executable name
+  is easier for this project's Claude generalizer to recognize than a quoted
+  absolute path. Put its directory on PATH, or give a wrapper its own approval.
+- **Put multi-step work in a script and run the script.** Use a stable invocation
+  (\`./run-gate.ps1\`, \`./build.sh\`) that can receive its own reusable approval.
+- The Claude generalizer strips \`VAR=value <cmd>\` prefixes. For Codex,
+  verify the actual shell invocation before expecting a prefix rule to cover it.
 
-Why both agents care: Claude Code stores the approved command *string*, and Codex
-policy is an argv prefix for the program actually executed — so
-\`bash -lc "cd x && build"\` is a \`bash\` call, and a rule for the real tool never
-applies to it.
+Codex can split simple shell chains before checking argv prefix rules. Complex
+shell syntax, including expansions and redirections, may leave the whole wrapper
+as the checked command. Verify the actual invocation with Codex; a permission
+for an inner tool does not automatically approve its wrapper or a script file.
 
 Managed by permission-wildcarding. Remove this block, or turn it off with
 \`wildcard-perms --guidance off\`.`;
@@ -302,8 +326,13 @@ function setGuidance(on, {
   // each other's pre-change copy in the shared backup directory.
   backupName = 'CLAUDE.md.pre-guidance',
   block = SHELL_BLOCK,
+  validateTarget,
 } = {}) {
   return withInstructionLock(file, () => {
+    // Selection can change while waiting for this file's lock. In particular an
+    // override created after discovery must not be removed as an inactive copy.
+    const selectionError = typeof validateTarget === 'function' ? validateTarget() : null;
+    if (selectionError) return { changed: false, path: file, on: false, error: selectionError };
     const text = readGuidanceFile(file);
     if (text === null) return { changed: false, error: `cannot read ${file}`, path: file, on: false };
 
@@ -330,32 +359,76 @@ function setGuidance(on, {
 // Every installed agent's file, as one call — what the CLI and the extension
 // actually drive. Each target is independent: an unreadable or failed one is
 // reported in its own row rather than aborting the others.
-function guidanceStatusAll(home = os.homedir()) {
-  return installedGuidanceTargets(home).map((target) => ({
-    agent: target.agent,
-    ...guidanceStatus(target.path),
-  }));
+function guidanceStatusAll(homeOrOptions, block = SHELL_BLOCK) {
+  return installedGuidanceTargets(homeOrOptions).map((target) => {
+    if (target.error) return { agent: target.agent, path: target.path, readable: false,
+      on: false, current: false, error: target.error };
+    const status = { agent: target.agent, ...guidanceStatus(target.path, block) };
+    const shadowed = (target.candidates || []).filter((file) => file !== target.path)
+      .map((file) => guidanceStatus(file, block));
+    const unreadable = shadowed.find((state) => !state.readable);
+    if (unreadable) return { ...status, readable: false, current: false,
+      error: `cannot inspect inactive Codex instruction file ${unreadable.path}` };
+    const shadowedPaths = shadowed.filter((state) => state.on).map((state) => state.path);
+    return shadowedPaths.length ? { ...status, current: false, shadowedPaths } : status;
+  });
 }
 
-function setGuidanceAll(on, { home = os.homedir(), backupDir } = {}) {
-  return installedGuidanceTargets(home).map((target) => ({
-    agent: target.agent,
-    ...setGuidance(on, {
-      file: target.path,
-      ...(backupDir ? { backupDir } : {}),
-      backupName: `${path.basename(target.path)}.pre-guidance`,
-    }),
-  }));
+function setGuidanceAll(on, options = {}) {
+  const home = options.home ?? os.homedir();
+  const backupDir = options.backupDir || path.join(home, '.claude', 'backups');
+  const block = options.block || SHELL_BLOCK;
+  const backupSuffix = options.backupSuffix || 'pre-guidance';
+  return installedGuidanceTargets(options).map((target) => {
+    const results = [];
+    const validateTarget = () => {
+      if (!on || target.agent !== 'codex') return null;
+      const selected = codexGuidanceTarget(options);
+      return selected.error || (selected.path !== target.path
+        ? 'Codex instruction selection changed during the update; retry' : null);
+    };
+    const finish = (error = null) => {
+      const active = target.agent === 'codex' ? codexGuidanceTarget(options) : target;
+      return { agent: target.agent, path: active.path,
+        changed: results.some((result) => result.changed),
+        on: !active.error && guidanceStatus(active.path, block).on,
+        error: error || active.error || validateTarget() || null };
+    };
+    if (target.error) return finish(target.error);
+    const write = (file, enabled) => {
+      const result = setGuidance(enabled, { file, backupDir, block, validateTarget,
+        backupName: `${path.basename(file)}.${backupSuffix}` });
+      results.push(result);
+      return result;
+    };
+    if (on) {
+      const active = write(target.path, true);
+      if (active.error) return finish(active.error);
+      // A concurrently created override must not turn the sibling cleanup into
+      // removal of the newly active block. Report the changed selection instead.
+      if (target.agent === 'codex') {
+        const selected = codexGuidanceTarget(options);
+        if (selected.error) return finish(selected.error);
+        if (selected.path !== target.path) return finish('Codex instruction selection changed during the update; retry');
+      }
+    }
+    // Clear inactive copies on enable, and both candidates on disable. An old
+    // managed block must not return when the user later removes the override.
+    const cleanup = on ? (target.candidates || []).filter((file) => file !== target.path)
+      : [...new Set([target.path, ...(target.candidates || [])])];
+    for (const file of cleanup) {
+      const state = guidanceStatus(file, block);
+      if (!state.readable) return finish(`cannot read ${file}`);
+      if (!state.on) continue;
+      const removed = write(file, false);
+      if (removed.error) return finish(removed.error);
+    }
+    return finish();
+  });
 }
 
-// Three names came off this list, and none of their bodies went with them.
-// `guidancePath` and `codexGuidancePath` are the default arguments of
-// guidanceTargets, guidanceStatus and setGuidance, all of which ARE exported and
-// tested; `SHELL_BLOCK` is already reachable from outside through the four
-// delegates below it (guidanceBlock, hasGuidance, isCurrent, applyGuidance),
-// which is how every caller and every test has always reached it. Nothing
-// outside this file destructured any of the three or touched them through a
-// namespace require.
+// The path-selection details stay private; callers use the same selection for
+// status and writes. SHELL_BLOCK is exposed through the existing delegates.
 module.exports = {
   BEGIN, END, GUIDANCE_BODY,
   guidanceTargets, installedGuidanceTargets,

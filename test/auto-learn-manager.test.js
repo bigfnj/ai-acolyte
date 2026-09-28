@@ -398,7 +398,7 @@ test('reviewed apply requires a current fingerprint and rejects a risk change af
 // This one moves `permissions` and NOTHING else, by editing the persisted state between the
 // review and the apply. `Bash(git.exe status *)` normalises to the same identity as
 // `Bash(git status *)` (src/auto-learn.js:703 strips a `.exe` root), so
-// permissionSpellings keeps it (src/auto-learn-manager.js:233) and the family really does
+// permissionSpellings keeps it (src/auto-learn-manager.js:249) and the family really does
 // render two allow entries where the reviewer saw one.
 //
 // THE MUTATION THIS KILLS: drop `permissions: item.permissions` from candidateFingerprint

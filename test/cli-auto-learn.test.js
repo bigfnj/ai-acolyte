@@ -24,7 +24,7 @@ function runCli(home, args, cwd = home) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd, encoding: 'utf8', windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -128,7 +128,7 @@ test('CLI --learn honors explicit workspace partition and Codex off scope', (t) 
   ], {
     cwd: path.dirname(workspace), encoding: 'utf8', windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });

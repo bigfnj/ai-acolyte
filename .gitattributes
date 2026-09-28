@@ -35,6 +35,12 @@ bin/wildcard-perms text eol=lf
 # exactly the drift this file's header describes, regressed for a file added after
 # that fix landed. Nothing guards this; no test mentions .gitattributes.
 scripts/check-line-refs.js text eol=lf
+scripts/check-codex-runtime.js text eol=lf
+scripts/check-codex-shared-runtime.js text eol=lf
+scripts/check-codex-prune-runtime.js text eol=lf
+scripts/drive-installed.js text eol=lf
+scripts/drive-vscode.js text eol=lf
+scripts/vscode-acceptance/renderer.js text eol=lf
 
 # The retired approve-all.js, kept verbatim so the cleanup path can prove a file is
 # OURS before deleting it. src/legacy-max-cleanup.js compares a SHA-256 of the bytes

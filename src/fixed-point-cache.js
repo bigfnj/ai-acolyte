@@ -62,7 +62,7 @@ const CACHE_VERSION = 1;
 const KEY_SHAPE = /^\d+:[0-9a-f]{8}:\d+:[0-9a-f]{8}$/;
 
 // Resolved at call time, never captured at require time — the discipline
-// src/agent-gates.js:64-66 and src/agent-guidance.js:36 document, because the tests
+// src/agent-gates.js:64-66 and src/agent-guidance.js:37 document, because the tests
 // substitute the home directory and a module-level constant would freeze whatever
 // os.homedir() said at require time and then write to the real ~/.claude.
 //

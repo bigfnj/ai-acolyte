@@ -175,3 +175,55 @@ test('the gates backup name cannot collide with the guidance one', () => {
   assert.equal(fs.readFileSync(path.join(backupDir, 'CLAUDE.md.pre-guidance'), 'utf8'), USER_TEXT);
   assert.ok(fs.readFileSync(path.join(backupDir, 'CLAUDE.md.pre-gates'), 'utf8').includes(BEGIN));
 });
+
+test('gates use an explicit Codex profile and migrate only their block into its override', () => {
+  const home = fakeHome();
+  const profile = path.join(home, 'alternate-codex-profile');
+  fs.mkdirSync(profile);
+  const regular = path.join(profile, 'AGENTS.md');
+  const override = path.join(profile, 'AGENTS.override.md');
+  const shellText = applyGuidance(USER_TEXT, true).text;
+  const block = makeGatesBlock(home);
+  fs.writeFileSync(regular, block.apply(shellText, true).text);
+  fs.writeFileSync(override, shellText);
+  const options = { home, codexHome: profile };
+  const before = gatesStatusAll(options).find((state) => state.agent === 'codex');
+  assert.equal(before.on, false);
+  assert.deepEqual(before.shadowedPaths, [regular]);
+  const enabled = setGatesAll(true, options).find((result) => result.agent === 'codex');
+  assert.equal(enabled.path, override);
+  assert.equal(enabled.on, true);
+  assert.equal(enabled.error, null);
+  assert.equal(fs.readFileSync(regular, 'utf8'), shellText, 'shell guidance in the base is untouched');
+  assert.ok(fs.readFileSync(override, 'utf8').includes(COMPILED));
+  assert.equal(gatesStatusAll(options).find((state) => state.agent === 'codex').current, true);
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'backups', 'AGENTS.override.md.pre-gates')));
+  const disabled = setGatesAll(false, options).find((result) => result.agent === 'codex');
+  assert.equal(disabled.on, false);
+  assert.equal(fs.readFileSync(override, 'utf8'), shellText, 'gates off preserves the complete shell block');
+  assert.equal(fs.existsSync(path.join(home, '.codex')), false, 'a custom profile must not create the default one');
+});
+
+test('default gate writes and status follow CODEX_HOME without changing the compiled source home', (t) => {
+  const home = fakeHome();
+  const profile = path.join(home, 'active-codex-profile');
+  fs.mkdirSync(profile);
+  const override = path.join(profile, 'AGENTS.override.md');
+  fs.writeFileSync(override, USER_TEXT);
+  t.mock.method(os, 'homedir', () => home);
+  const prior = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = profile;
+  t.after(() => {
+    if (prior === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prior;
+  });
+  const result = setGatesAll(true).find((row) => row.agent === 'codex');
+  assert.equal(result.path, override);
+  assert.equal(result.error, null);
+  assert.ok(fs.readFileSync(override, 'utf8').includes(COMPILED));
+  const state = gatesStatusAll().find((row) => row.agent === 'codex');
+  assert.equal(state.path, override);
+  assert.equal(state.compiled, true);
+  assert.equal(state.on, true);
+  assert.equal(fs.existsSync(path.join(home, '.codex')), false);
+});

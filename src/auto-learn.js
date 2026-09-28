@@ -829,6 +829,22 @@ function maxRisk(left, right) {
 
 function expandObservation(observation) {
   if (!observation || typeof observation !== 'object') return [];
+  if (observation.kind === 'codex-mcp') {
+    const { mcpServer: server, mcpTool: action } = observation;
+    if (observation.source !== 'codex' || observation.tool !== 'CodexMCP' ||
+        typeof server !== 'string' || typeof action !== 'string' ||
+        !/^[A-Za-z0-9_.-]{1,128}$/.test(server) || !/^[A-Za-z0-9_.-]{1,128}$/.test(action)) return [];
+    // Reuse the non-shell candidate container without Claude's MCP name parser:
+    // its lowercased key and claudePermission are different policy semantics.
+    // A tuple key keeps case and delimiter-containing names unambiguous.
+    return [{
+      kind: 'tool', tool: 'CodexMCP', source: 'codex', shell: null, argv: [], command: '',
+      key: `codex-mcp:${JSON.stringify([server, action])}`, root: server, prefix: [server, action],
+      claudePermission: null, autoSafe: false, complex: false, attribution: 'both',
+      risk: 'unknown', reasons: ['codex-mcp-tool', 'opaque-capability'],
+      status: ['success', 'failed', 'unknown'].includes(observation.status) ? observation.status : 'unknown',
+    }];
+  }
   // A non-shell tool has no command line to split; one call is one family.
   if (observation.kind === 'tool' || (observation.tool && isLearnableTool(observation.tool))) {
     const invocation = toolInvocation(observation.tool, observation.command ?? observation.target,

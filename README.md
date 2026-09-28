@@ -3,16 +3,15 @@
 *Formerly Permission Wildcarding. The extension ID, every command ID and every setting key
 are unchanged, so an existing install upgrades in place.*
 
-**Stop re-approving the same command.** Claude Code and Codex ask before running
-things. Approve `Bash(git status)` and you will be asked again for `git log`, then
-`git diff`, then `git show`. This collapses each approval into the *family* it
-belongs to, so one decision covers the whole family from then on.
+**Reduce repeated approval prompts.** AI Acolyte is a VS Code extension plus a CLI.
+For Claude Code it watches `~/.claude/settings.json` and generalizes individual
+approvals into command families. Auto Learn reads Claude Code and Codex history
+and emits policy in each agent's native format.
 
-It is a VS Code extension plus a CLI. The Claude Code path watches and rewrites
-`~/.claude/settings.json`; cross-agent Auto Learn reads Claude Code and Codex
-history and emits policy in each agent's native format. The Codex path is
-**conditionally certified** for `codex-cli` 0.145.0 on Windows; what is proven and
-what is not are in [`docs/codex-certification.md`](docs/codex-certification.md).
+**Version 1.6.0 adds core Codex feature coverage.** Real extension-host and fresh-session
+checks cover the supported workflows below. Broader version/history coverage and some
+policy-discovery boundaries remain open. The feature inventory and evidence
+are in [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
 ![Wildcarding status card](img/01-wildcarding.png)
 
@@ -38,7 +37,7 @@ the extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension permission-wildcarding-1.5.6.vsix
+code --install-extension permission-wildcarding-1.6.0.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -62,32 +61,47 @@ inspect or remove old state, and `on` always fails without writing.
 
 # What it does
 
-Seven things, each with its own card on the dashboard. Every screenshot below is the
+The dashboard groups the features below into cards. Every screenshot below is the
 real UI.
 
-"Works with Claude Code and Codex" is true of the product and false of most of its
-features, so here is the split. The two agents do not share a policy mechanism: Claude
-Code has an allow list this tool generalizes in place, Codex has execpolicy rule files
-this tool generates and then asks `codex execpolicy check` to validate. A shared
-dashboard is not a shared mechanism.
+Claude Code and Codex use separate policy mechanisms. The table describes the
+current implementation and tested outcomes. The compatibility record states which
+inputs and configurations were exercised and which boundaries remain open.
 
 | Capability | Claude Code | Codex |
 |---|---|---|
-| Wildcard generalization of the allow list | yes | no equivalent |
-| Project-local approvals promoted to user scope | yes | no equivalent |
-| Auto Learn backup before every apply, with undo | yes | yes |
-| High-water allow/deny backup with restore-from-backup | yes | no equivalent |
-| Tracked-wildcard inventory | yes | no equivalent |
-| `PostToolUse` hook | yes | no equivalent |
-| Auto Learn over session history | yes | yes |
-| Reviewed and auto-safe policy output | allow-list entries | validated execpolicy rules |
-| Wildcardable shell style in the instruction file | `CLAUDE.md` | `AGENTS.md` |
-| Memory gates | yes | yes |
-| "Why did this prompt?" diagnostics | yes | yes |
+| Generalize existing approvals | implemented for allow-list entries | reviewed widening of stored literal approvals passes editor checks |
+| Promote project-local approvals to user scope | implemented | reviewed import preserves source rules and accompanying restrictions; editor/runtime checks pass |
+| Auto Learn backup before apply, with undo | implemented | real-host apply/undo checked with synthetic history |
+| High-water allow/deny backup and restore | implemented | retained literal rules and reviewed restoration; fresh-process checks pass |
+| Tracked-wildcard inventory and prune | implemented | literal local rule inventory, confirmed allow-rule removal and shared suppression |
+| Post-tool approval hook | `PostToolUse` hook | Stop callback learns completed turns with the editor closed; Codex hook review required |
+| Auto Learn over session history | implemented | shell learning implemented; actual runtime transcripts parsed |
+| Reviewed and auto-safe policy output | allow-list entries | safe apply checked; generated rules exercised in fresh sessions |
+| Shell-style guidance | `CLAUDE.md` writer | active Codex instruction file; custom home and override support |
+| Memory gates | instruction-file writer | explicit native global sections compile to a separately reviewed Codex block; automatic updates, overrides and removal verified in the editor and fresh Codex sessions |
+| Memory index and lint | Claude memory directories | native discovery, diagnostics, semantic search and index rebuild pass real-editor checks; unavailable models visibly fall back to keywords |
+| Derived guidance for recurring friction | implemented | reviewed Codex advice based on current managed policy and observed Codex runs |
+| "Why did this prompt?" diagnostics | implemented | partial: local rules and cached managed requirements |
 
-Codex rule export is **experimental**. Its certification status, the Codex versions it
-has actually been exercised against, and what remains unproven are in
-[`docs/codex-certification.md`](docs/codex-certification.md).
+Codex rule export remains **experimental**. The feature-by-feature acceptance
+matrix and dated evidence are in
+[`docs/codex-compatibility.md`](docs/codex-compatibility.md).
+
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2219`).
+It lists local rules and confirms removal of a selected literal allow declaration
+(`vscode-extension/extension.js:3517`). Current Auto Learn builds remember removals across
+workspaces. Computed policy remains read-only. This feature is included in the
+1.6.0 package; development checks used isolated staging before release preparation.
+
+Version 1.6.0 also adds **Restore Codex rules**
+(`vscode-extension/extension.js:3439`). Restore preserves current rules and deliberate
+removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
+(`src/auto-learn-manager.js:1341`). Codex derived guidance has separate policy and run
+evidence (`src/auto-learn-manager.js:1728`); observed runs are not reported as measured
+approval prompts. Actual restore and guidance controls now pass in a staged VS Code
+host, with deliberate no-op controls that fail the intended checks. The detailed
+development evidence and supported boundaries remain in the compatibility document.
 
 ## 1. Wildcarding (Claude Code)
 
@@ -151,9 +165,10 @@ prompted.
 > **Buys you:** fewer prompts created in the first place, by teaching the agent to
 > write commands that can be generalized.
 
-This installs a short managed block into `~/.claude/CLAUDE.md` and
-`~/.codex/AGENTS.md`. It is one toggle, and removing it takes the block back out
-without touching a byte of your own text.
+This installs a short managed block into `~/.claude/CLAUDE.md` and the active Codex
+user instruction file. Codex paths follow `CODEX_HOME` when set, otherwise `~/.codex`.
+A nonempty `AGENTS.override.md` takes precedence over `AGENTS.md`; an empty override
+stays empty. One toggle removes the managed block while preserving your own text.
 
 ## 5. Memory gates (both agents)
 
@@ -317,7 +332,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2298`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2309`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
@@ -404,7 +419,7 @@ which `wildcard-perms --version` prints. `test/installers.test.js:511` asserts t
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
-node --test                         # 731 tests; `npm test` runs the same thing
+node --test                         # `npm test` runs the same suite
 npm run smoke                       # scripts/smoke.sh, against the LIVE ~/.claude
 node scripts/drive-installed.js     # activates the INSTALLED VSIX and drives it
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN

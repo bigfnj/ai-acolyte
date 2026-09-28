@@ -1,8 +1,8 @@
 {
   "name": "permission-wildcarding",
   "displayName": "AI Acolyte",
-  "description": "Cuts agent approval friction, with a different mechanism per agent. Claude Code only: generalizes approved permissions into command-family wildcards on change, drains project-local approvals into user scope, and backs up policy before every write. Codex only: exports execpolicy prefix rules, validated by codex execpolicy check before anything is written. Shared: Auto Learn over both agents' history, a wildcardable shell style for the agent, memory gates, memory-index diagnostics, and prompt diagnostics. Codex has no wildcarding pass and no project-local promotion. Codex rule export is experimental.",
-  "version": "1.5.6",
+  "description": "Reduces approval friction in Claude Code and Codex with history-based learning, reviewed permission changes, policy recovery, shell guidance, memory diagnostics and recall. Codex uses native prefix rules and reviewed MCP settings. Codex support remains experimental.",
+  "version": "1.6.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -50,6 +50,16 @@
         "command": "permission-wildcarding.showWildcards",
         "title": "AI Acolyte: Show all tracked wildcards",
         "icon": "$(list-filter)"
+      },
+      {
+        "command": "permission-wildcarding.showCodexRules",
+        "title": "AI Acolyte: Show Codex rules",
+        "icon": "$(list-filter)"
+      },
+      {
+        "command": "permission-wildcarding.restoreCodexRules",
+        "title": "AI Acolyte: Restore Codex rules",
+        "icon": "$(history)"
       },
       {
         "command": "permission-wildcarding.scanHistory",
@@ -103,17 +113,57 @@
       },
       {
         "command": "permission-wildcarding.toggleGuidance",
-        "title": "AI Acolyte: Toggle shell-style guidance in ~/.claude/CLAUDE.md",
+        "title": "AI Acolyte: Toggle shell-style guidance for Claude Code and Codex",
         "icon": "$(book)"
       },
       {
         "command": "permission-wildcarding.toggleGates",
-        "title": "AI Acolyte: Toggle memory gates in ~/.claude/CLAUDE.md",
+        "title": "AI Acolyte: Toggle memory gates for Claude Code and Codex",
         "icon": "$(law)"
       },
       {
         "command": "permission-wildcarding.lintMemory",
         "title": "AI Acolyte: Lint memory index (MEMORY.md bloat + broken links)",
+        "icon": "$(book)"
+      },
+      {
+        "command": "permission-wildcarding.codexHook",
+        "title": "AI Acolyte: Configure Codex after-turn learning",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "permission-wildcarding.reviewCodexApprovals",
+        "title": "Review Codex Approvals",
+        "category": "AI Acolyte"
+      },
+      {
+        "command": "permission-wildcarding.reviewCodexMcp",
+        "title": "Review Codex MCP Approvals",
+        "category": "AI Acolyte"
+      },
+      {
+        "command": "permission-wildcarding.importCodexRules",
+        "title": "Import Project Codex Rules",
+        "category": "AI Acolyte"
+      },
+      {
+        "command": "permission-wildcarding.searchCodexMemory",
+        "title": "AI Acolyte: Search Codex native memory",
+        "icon": "$(search)"
+      },
+      {
+        "command": "permission-wildcarding.rebuildCodexMemory",
+        "title": "Rebuild Codex Memory Recall Index",
+        "category": "AI Acolyte"
+      },
+      {
+        "command": "permission-wildcarding.codexMemoryGates",
+        "title": "Review Native Codex Memory Gates",
+        "category": "AI Acolyte"
+      },
+      {
+        "command": "permission-wildcarding.inspectCodexMemory",
+        "title": "AI Acolyte: Inspect Codex native memory",
         "icon": "$(book)"
       },
       {
@@ -216,7 +266,7 @@
         "permissionWildcarding.guidance.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Maintain a short managed block in each installed agent’s user-scope instruction file (`~/.claude/CLAUDE.md`, and `~/.codex/AGENTS.md` when Codex is installed) telling the agent to write one command per tool call. An approval is stored as the command *string*: a single command becomes a reusable wildcard, while a compound command (`cd x && build`, multi-statement PowerShell) is stored verbatim and never matches again — the friction no generalizer can fix after the fact. Codex needs it for a different reason: its policy is an argv prefix for the program actually executed, so a `bash -lc` wrapper around `cd x && build` is a `bash` invocation that no rule for the real tool can match. Marker-fenced, so turning it off removes exactly what was added."
+          "markdownDescription": "Maintain a managed shell-style block in each installed agent's user instruction file (`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`). Simple commands make Claude approval patterns and Codex argv-prefix rules easier to reuse. Codex may split simple shell chains; expansions, redirections, and other complex syntax can instead require a rule for the complete wrapper. Script files need their own approval. Turning this off removes the managed block and preserves your text."
         },
         "permissionWildcarding.gates.enabled": {
           "type": "boolean",

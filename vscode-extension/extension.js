@@ -15,6 +15,7 @@ const {
   processAllowList, writeFileAtomicSync,
 } = require('./src/permissions');
 const { createAutoLearnManager } = require('./src/auto-learn-manager');
+const { resolveCodexHome } = require('./src/codex-paths');
 const {
   createPolicyLock, POLICY_LOCK_CODE, POLICY_LOCK_PATH, POLICY_LOCK_BUSY_MESSAGE,
 } = require('./src/policy-lock');
@@ -35,12 +36,16 @@ const {
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
 const { commandLaunch } = require('./src/exec-resolve');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
+const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
+const { CodexMemoryLint } = require('./codexMemoryLint');
+const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, readCompiled, compiledPath } = require('./src/agent-gates');
 const {
   applicationSummary, backupPruneSuffix, candidatePendingTargets, claudeDecisionExplanation,
   claudePermissionDecision, codexCheckVariants, codexExecpolicyArgs, codexRestartSuffix,
+  codexInventoryItems, codexInventoryDetail, codexRemovalExplanation, codexRemovalNote,
   derivedGuidanceItems, derivedGuidanceSummary,
   isCandidateComplete, managedBlockedDetail, managedBlockedNote, managedPromptExplanation,
   policyTargetLabel, reviewableCandidates, selectionsNeedingConfirmation,
@@ -66,9 +71,10 @@ const LATEST_BACKUP = path.join(BACKUP_DIR, 'allow-list.latest.json');
 // home); point the setting at another volume to survive more than a reset.
 const MIRROR_BACKUP_DEFAULT = path.join(os.homedir(), '.permission-wildcarding', 'allow-list.latest.json');
 const PROJECTS_DIR  = path.join(os.homedir(), '.claude', 'projects');
-const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
+const CODEX_HOME_DIR = resolveCodexHome();
+const CODEX_SESSIONS_DIR = path.join(CODEX_HOME_DIR, 'sessions');
 // Codex WORKSPACE scope is withdrawn; see the note in autoLearnConfig() and
-// docs/codex-certification.md. Held as a constant because the dashboard card,
+// docs/codex-compatibility.md. Held as a constant because the dashboard card,
 // the scope warning and the settings description must all say the same thing.
 const WORKSPACE_SCOPE_WITHDRAWN_NOTE =
   'Codex workspace scope is withdrawn: its trust model could not be stated, because VS Code ' +
@@ -126,6 +132,10 @@ let dashboardBounce = null;     // debounce for dashboard pushes (see refresh())
 // The memory linter instance. Module-scoped so onDidChangeConfiguration can
 // reach it; see the memory branch of the listener.
 let memoryLint = null;
+let codexMemoryLint = null;
+let codexMemoryReport = null;
+let codexMemoryGatesUi = null;
+let codexFeatureUi = null;
 let deactivated = false;
 // Bumped by every activate(). deactivate() captures it before awaiting the Auto
 // Learn drain so a continuation that resumes after a same-realm re-activate can
@@ -670,6 +680,14 @@ function recallModelDir() {
   return '';
 }
 
+function codexRecallOptions() {
+  const modelDir = recallModelDir();
+  const recallScript = recallScriptPath();
+  return { pythonExecutable: toolboxPython(),
+    ...(modelDir ? { modelPath: path.join(modelDir, RECALL_MODEL_FILE) } : {}),
+    ...(recallScript ? { recallScript } : {}) };
+}
+
 // A vocab to seed the model home from. Small and git-tracked, so the bundled copy is
 // always available even on a machine that has never held the model.
 function recallVocabSource() {
@@ -994,7 +1012,7 @@ function memoryCardData(precomputed = null) {
     // did not exist and VS Code answered "command not found". That justification
     // outlived its truth: memoryLint.js:352-360 registers the command
     // UNCONDITIONALLY, above the enabled check, showReport() answers for the disabled
-    // case itself (memoryLint.js:649-655), and test/memory-lint-watchers.test.js:388
+    // case itself (memoryLint.js:649-655), and test/memory-lint-watchers.test.js:394
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
@@ -1042,7 +1060,7 @@ function autoLearnConfig() {
   const mode = cfg.get('autoLearn.mode', 'recommend');
   const codexScope = cfg.get('autoLearn.codexScope', 'user');
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  let codexRulesPath = path.join(os.homedir(), '.codex', 'rules', 'permission-wildcarding.rules');
+  let codexRulesPath = path.join(CODEX_HOME_DIR, 'rules', 'permission-wildcarding.rules');
   let scopeWarning = '';
   if (codexScope === 'off') codexRulesPath = null;
   else if (codexScope === 'workspace') {
@@ -1082,7 +1100,7 @@ function autoLearnConfig() {
 
 function autoLearnManagerOptions(cfg = autoLearnConfig()) {
   return {
-    home: os.homedir(), homeDir: os.homedir(), mode: cfg.mode,
+    home: os.homedir(), homeDir: os.homedir(), codexHome: CODEX_HOME_DIR, mode: cfg.mode,
     threshold: cfg.threshold, successThreshold: cfg.threshold,
     codexRulesPath: cfg.codexRulesPath, codexExecutable: cfg.codexExecutable,
     workspaceRoot: cfg.workspaceRoot,
@@ -1098,7 +1116,7 @@ function autoLearnManagerOptions(cfg = autoLearnConfig()) {
 function getAutoLearnManager() {
   const cfg = autoLearnConfig();
   const key = JSON.stringify({
-    home: os.homedir(), mode: cfg.mode, threshold: cfg.threshold,
+    home: os.homedir(), codexHome: CODEX_HOME_DIR, mode: cfg.mode, threshold: cfg.threshold,
     codexRulesPath: cfg.codexRulesPath, codexExecutable: cfg.codexExecutable,
     workspaceRoot: cfg.workspaceRoot,
   });
@@ -1295,6 +1313,7 @@ function autoLearnCardData() {
       candidates, status, cfg.codexRulesPath ? ['claude', 'codex'] : ['claude'], cfg.mode, readSettings(),
     ),
     scan: autoLearnScanHealth(status.lastScanStats),
+    codexEvidence: status.codexEvidence || null,
     canUndo: Boolean(status.canUndo || status.lastApplication),
   };
 }
@@ -1446,8 +1465,10 @@ async function reviewAutoLearnCandidates() {
   const status = managerStatus(manager);
   const requiredTargets = cfg.codexRulesPath ? ['claude', 'codex'] : ['claude'];
   const settingsNow = readSettings();
+  const allCandidates = managerCandidates(manager);
+  const removalNote = codexRemovalNote(allCandidates);
   const { covered, candidates } = reviewableCandidates(
-    managerCandidates(manager), status, requiredTargets, settingsNow,
+    allCandidates, status, requiredTargets, settingsNow,
   );
   const coveredNote = covered.length
     ? ` (${covered.length} already covered by existing allow rules — hidden)`
@@ -1470,12 +1491,12 @@ async function reviewAutoLearnCandidates() {
     if (scanSummary.appliedCount || scanSummary.changedTargets.length) notifyScanApplication();
     else if (blockedCount || managed.degraded) {
       vscode.window.showInformationMessage(
-        `Auto Learn: no candidates are ready for review${coveredNote}${blockedNote}.`,
+        `Auto Learn: no candidates are ready for review${coveredNote}${blockedNote}${removalNote}.`,
         'Show blocked'
       ).then((choice) => { if (choice === 'Show blocked') showBlockedDetail(); });
     } else {
       vscode.window.showInformationMessage(
-        `Auto Learn: no candidates are ready for review${coveredNote}.`
+        `Auto Learn: no candidates are ready for review${coveredNote}${removalNote}.`
       );
     }
     return;
@@ -1491,6 +1512,7 @@ async function reviewAutoLearnCandidates() {
     label: `${candidate.claudePermission || candidate.prefix?.join(' ') || candidate.key} [pending: ${policyTargetLabel(candidatePendingTargets(candidate, status, requiredTargets))}]`,
     description: `${candidate.counts?.success ?? candidate.successfulRuns ?? 0} successes · ${candidate.risk}`,
     detail: [overrideOf(candidate) ? `policy ${overrideOf(candidate)} overrides this grant` : null,
+      codexRemovalExplanation(candidate),
       candidate.autoSafe ? 'safe' : 'manual review',
       (candidate.sources || []).join(' + '), (candidate.reasons || []).join(', ')]
       .filter(Boolean).join(' · '),
@@ -1498,7 +1520,7 @@ async function reviewAutoLearnCandidates() {
   })), {
     canPickMany: true,
     ignoreFocusOut: true,
-    title: `Auto Learn candidates${coveredNote}${blockedNote}`,
+    title: `Auto Learn candidates${coveredNote}${blockedNote}${removalNote}`,
     placeHolder: 'Select command families to add to Claude permissions and validated Codex rules',
   });
   if (!picks?.length) { notifyScanApplication(); return; }
@@ -1620,7 +1642,7 @@ function execFileCaptured(executable, args) {
 // to answer the same question or "Why did this prompt?" names a cause the write
 // never checked.
 function codexRuleFileSetFor(cfg) {
-  return codexRuleFileSet({ home: os.homedir(), target: cfg.codexRulesPath || null });
+  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null });
 }
 
 // `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
@@ -1635,6 +1657,9 @@ function learnedCandidateExplanation(invocation, learned, target, threshold) {
   if (!learned) return `${label}: no correlated history evidence has been learned yet.`;
   const success = learned.counts?.success ?? learned.successfulRuns ?? 0;
   const failed = learned.counts?.failed ?? learned.failedRuns ?? 0;
+  if (target === 'codex' && learned.codexSuppressed) {
+    return `${label}: ${success} successful, ${failed} failed; ${codexRemovalExplanation(learned)}`;
+  }
   const pending = candidatePendingTargets(learned, {}, [target]);
   const state = learned.autoSafe ? 'auto-safe'
     : learned.disposition === 'review' ? 'review required' : `observing until ${threshold} successes`;
@@ -1709,20 +1734,18 @@ async function showDerivedGuidance() {
   }
   const pick = await vscode.window.showQuickPick(items, {
     title: `Derived guidance — ${derivedGuidanceSummary(review)}`,
-    placeHolder: 'Behaviour that reduces a prompt no allow rule can stop',
+    placeHolder: 'Review advice based on managed policy and observed activity',
     matchOnDetail: true,
   });
-  if (!pick) return;
+  if (!pick || deactivated) return;
 
-  const choices = [
-    { label: 'Accept', value: 'accept', description: `Write this into your instruction file (${pick.rule})` },
-    { label: 'Decline', value: 'decline', description: 'Never offer this one again' },
-    { label: 'Reset', value: 'reset', description: 'Back to undecided, and remove it if installed' },
-  ];
-  const decision = await vscode.window.showQuickPick(choices, {
-    title: pick.label, placeHolder: `Currently ${pick.state}`,
-  });
-  if (!decision) return;
+  // Quick-pick detail is truncated. Show the complete standing instruction at
+  // the decision point so accepting it means reviewing the text being written.
+  const action = await vscode.window.showInformationMessage(pick.label, {
+    modal: true, detail: `${pick.detail}\n\nCurrently ${pick.state}. Accept installs this instruction; Decline removes it and stops offering it; Reset removes it and makes it undecided.`,
+  }, 'Accept', 'Decline', 'Reset');
+  if (!['Accept', 'Decline', 'Reset'].includes(action)) return;
+  const decision = { value: action.toLowerCase() };
   // THE SHARPEST OF THE SIX, because the usual retainer check does not help here.
   // deactivate() nulls `autoLearnManager`, and getAutoLearnManager() BUILDS A NEW
   // ONE when the slot is empty — so a continuation arriving after teardown does
@@ -1965,7 +1988,7 @@ function resetAutoLearnTimer() {
 function registerAutoLearnWatchers(context) {
   for (const [base, pattern] of [
     [path.join(os.homedir(), '.claude'), 'projects/**/*.jsonl'],
-    [path.join(os.homedir(), '.codex'), 'sessions/**/*.jsonl'],
+    [CODEX_HOME_DIR, 'sessions/**/*.jsonl'],
   ]) {
     try {
       const watcher = vscode.workspace.createFileSystemWatcher(
@@ -2050,6 +2073,7 @@ function registerLocalWatchers(context) {
         // a false -> true flip, and a stale gauge on true -> false. The card
         // then asserted a feature was on when it was off.
         memoryLint?.reconfigure();
+        codexMemoryLint?.reconfigure();
         dashboard?.refresh();
       }
     }));
@@ -2191,7 +2215,9 @@ function activate(context) {
   // is not the right shape — reachable from the palette and from the sidebar's
   // "and N more" affordance.
   context.subscriptions.push(
-    vscode.commands.registerCommand('permission-wildcarding.showWildcards', () => showWildcardPicker())
+    vscode.commands.registerCommand('permission-wildcarding.showWildcards', () => showWildcardPicker()),
+    vscode.commands.registerCommand('permission-wildcarding.showCodexRules', () => showCodexRulePicker()),
+    vscode.commands.registerCommand('permission-wildcarding.restoreCodexRules', () => showCodexRestorePicker())
   );
 
   // Keep the legacy command id as an alias; Auto Learn is the only history scanner.
@@ -2208,6 +2234,50 @@ function activate(context) {
   );
 
   // Rebuild the recall (CPU bge-small) vector cache from the Memory card.
+  const codexFeatures = createCodexFeaturesUi(vscode, {
+    profileOptions: { home: os.homedir(), codexHome: CODEX_HOME_DIR },
+    readMemory: (query) => query ? runAutoLearnWorker('codexMemorySearch', { query, recallOptions: codexRecallOptions() })
+      : runAutoLearnWorker('codexMemory'),
+    rebuildMemory: () => runAutoLearnWorker('rebuildCodexMemory', { recallOptions: codexRecallOptions() }),
+    runRules: (operation, request) => runAutoLearnWorker(operation, request),
+    refresh: () => dashboard?.refresh(),
+  });
+  codexFeatureUi = codexFeatures;
+  codexMemoryGatesUi = createCodexMemoryGatesUi(vscode, {
+    codexHome: CODEX_HOME_DIR,
+    run: (operation, request) => runAutoLearnWorker(operation, request),
+    refresh: () => { if (!deactivated) dashboard?.refresh(); },
+  });
+  context.subscriptions.push(codexMemoryGatesUi,
+    vscode.commands.registerCommand('permission-wildcarding.codexMemoryGates', () => codexMemoryGatesUi?.review()));
+  codexMemoryGatesUi.activate();
+  context.subscriptions.push(codexFeatures,
+    vscode.commands.registerCommand('permission-wildcarding.codexHook', () => codexFeatures.configureHook()),
+    vscode.commands.registerCommand('permission-wildcarding.searchCodexMemory', () => codexFeatures.searchMemory()),
+    vscode.commands.registerCommand('permission-wildcarding.rebuildCodexMemory', () => codexFeatures.rebuildMemoryIndex()),
+    vscode.commands.registerCommand('permission-wildcarding.inspectCodexMemory', () => codexFeatures.inspectMemory()),
+    vscode.commands.registerCommand('permission-wildcarding.reviewCodexApprovals', () => codexFeatures.reviewRules('stored-widening')),
+    vscode.commands.registerCommand('permission-wildcarding.reviewCodexMcp', () => codexFeatures.reviewMcp()),
+    vscode.commands.registerCommand('permission-wildcarding.importCodexRules', () => codexFeatures.reviewRules('project-import'))
+  );
+  try {
+    const nativeLint = new CodexMemoryLint(vscode, {
+      codexHome: CODEX_HOME_DIR,
+      readMemory: () => runAutoLearnWorker('codexMemory'),
+      enabled: () => memoryConf().enabled !== false,
+      onRefresh: (report) => {
+        if (deactivated || codexMemoryLint !== nativeLint) return;
+        codexMemoryReport = report;
+        dashboard?.refresh();
+      },
+    });
+    codexMemoryLint = nativeLint;
+    context.subscriptions.push(nativeLint);
+    nativeLint.activate();
+  } catch (error) {
+    codexMemoryReport = { error: `Native Codex memory diagnostics could not start: ${error.message}` };
+    console.error('AI Acolyte:', codexMemoryReport.error);
+  }
   context.subscriptions.push(
     vscode.commands.registerCommand('permission-wildcarding.rebuildRecall', () => rebuildRecall())
   );
@@ -2929,7 +2999,8 @@ function ensureGuidance(announce = false) {
     if (!states.length) return;
     // Nothing to do when every installed agent already matches the setting — and
     // when it is on, already has the current wording.
-    if (states.every((state) => state.on === want && (!want || state.current))) return;
+    if (states.every((state) => state.on === want &&
+        (want ? state.current : !state.shadowedPaths?.length))) return;
     const changed = setGuidanceAll(want).filter((result) => result.changed);
     if (!changed.length) return;
     if (announce || want) {
@@ -2963,9 +3034,9 @@ async function toggleGuidance() {
       'Remove shell-style guidance?',
       {
         modal: true,
-        detail: `Deletes the managed block from ${files}. Approvals stop generalizing, so `
-          + 'compound commands prompt again on every variation. Your own text is left '
-          + 'untouched and a backup is written first, and you can re-add it any time.',
+        detail: `Deletes the managed block from ${files}. Future sessions will no longer receive `
+          + 'this shell-style guidance. Your own text is left untouched and a backup is written '
+          + 'first, and you can re-add it any time.',
       },
       'Remove');
     if (choice !== 'Remove') return;
@@ -3015,6 +3086,7 @@ function guidanceCardData() {
       readable: states.some((state) => state.readable),
       agents: states.filter((state) => state.on).map((state) => state.agent),
       targets: states.map((state) => state.agent),
+      errors: states.filter((state) => state.error).map((state) => state.agent + ': ' + state.error),
       path: states.map((state) => state.path.replace(os.homedir(), '~')).join(', '),
     };
   } catch {
@@ -3150,7 +3222,8 @@ function ensureGates(announce = false) {
     // Never install without a compile. setGatesAll refuses anyway, and reporting success
     // here would leave the card claiming ON while enforcing nothing.
     if (want && !states.some((state) => state.compiled)) return;
-    if (states.every((state) => state.on === want && (!want || state.current))) return;
+    if (states.every((state) => state.on === want &&
+        (want ? state.current : !state.shadowedPaths?.length))) return;
     const changed = setGatesAll(want).filter((result) => result.changed);
     if (!changed.length) return;
     if (announce || want) {
@@ -3266,6 +3339,7 @@ function gatesCardData(precomputed = null) {
       })(),
       agents: states.filter((state) => state.on).map((state) => state.agent),
       targets: states.map((state) => state.agent),
+      errors: states.filter((state) => state.error).map((state) => state.agent + ': ' + state.error),
       path: states.map((state) => state.path.replace(os.homedir(), '~')).join(', '),
     };
   } catch {
@@ -3362,6 +3436,107 @@ async function showWildcardPicker() {
   if (removeAllowEntry(pick.label)) dashboard?.refresh();
 }
 
+async function showCodexRestorePicker() {
+  try {
+    const inventory = await runAutoLearnWorker('codexRestoreInventory');
+    if (deactivated) return;
+    if (inventory.pendingApproval) {
+      await vscode.window.showInformationMessage('Finish the interrupted reviewed change in Review Codex approvals first.');
+      return;
+    }
+    if (inventory.pendingRemoval) {
+      await vscode.window.showInformationMessage('Finish the interrupted removal in Show Codex rules before restoring rules.');
+      return;
+    }
+    let request;
+    if (inventory.pendingRestore) {
+      const choice = await vscode.window.showWarningMessage('Finish interrupted Codex restore?',
+        { modal: true, detail: 'Finish the restore you already confirmed. Changed files are preserved and will need review. Restart Codex after restoring rules.' }, 'Finish restore');
+      if (choice !== 'Finish restore' || deactivated) return;
+      request = { resume: true };
+    } else {
+      const rows = inventory.files.flatMap((file) => [
+        ...(file.restore || []).map((rule) => ({ label: JSON.stringify(rule.pattern),
+          description: `Codex · ${rule.decision} · missing rule`, detail: file.path, file, rule })),
+        ...(!file.supported ? [{ label: file.path, description: 'Read-only', detail: file.reason }] : []),
+        ...(file.suppressed || []).map((rule) => ({ label: JSON.stringify(rule.pattern), description: 'Excluded by an intentional removal', detail: file.path })),
+        ...(file.conflicts || []).map((rule) => ({ label: JSON.stringify(rule.pattern), description: 'Changed rule needs review', detail: rule.reason })),
+      ]);
+      if (!rows.length) {
+        await vscode.window.showInformationMessage('No missing Codex rules to restore.', { modal: true,
+          detail: `Saved rules: ${inventory.backupPath}\nRules are saved during Auto Learn scans, grants, and inventory views.` });
+        return;
+      }
+      const pick = await vscode.window.showQuickPick(rows, { title: 'Restore Codex rules',
+        placeHolder: 'Choose a missing rule to restore; excluded or changed rules are read-only', matchOnDescription: true, matchOnDetail: true });
+      if (!pick || deactivated) return;
+      if (!pick.rule || !pick.file?.supported) {
+        await vscode.window.showInformationMessage(pick.description, { modal: true, detail: pick.detail });
+        return;
+      }
+      const choice = await vscode.window.showWarningMessage('Restore this Codex rule?', { modal: true,
+        detail: `Prefix: ${JSON.stringify(pick.rule.pattern)}\nDecision: ${pick.rule.decision}\nFile: ${pick.file.path}\n\nThis adds the missing declaration while preserving current rules. Restart Codex to load it.` }, 'Restore');
+      if (choice !== 'Restore' || deactivated) return;
+      request = { path: pick.file.path, expectedHash: pick.file.beforeHash, expectedExists: pick.file.exists, ids: [pick.rule.id] };
+    }
+    const result = await runAutoLearnWorker('restoreCodexRules', request);
+    if (deactivated) return;
+    if (!result.changed || !Number.isInteger(result.restoredCount) || result.restoredCount < 1) {
+      vscode.window.showWarningMessage('ai-acolyte: no Codex rule was restored. Open Restore Codex rules again to refresh it.');
+      return;
+    }
+    vscode.window.showInformationMessage(`ai-acolyte: restored ${result.restoredCount} Codex rule${result.restoredCount === 1 ? '' : 's'}. Restart Codex to load the changed rules.`);
+    dashboard?.refresh();
+  } catch (error) {
+    vscode.window.showErrorMessage(`ai-acolyte: Codex restore failed: ${error.message}`);
+  }
+}
+
+async function showCodexRulePicker() {
+  try {
+    const inventory = await runAutoLearnWorker('codexInventory');
+    if (deactivated) return;
+    if (inventory.pendingApproval) {
+      await vscode.window.showInformationMessage('Finish the interrupted reviewed change in Review Codex approvals first.');
+      return;
+    }
+    const displayPath = (file) => file.replace(os.homedir(), '~');
+    const pick = await vscode.window.showQuickPick(codexInventoryItems(inventory, displayPath), {
+      title: 'Codex rules',
+      placeHolder: 'Filter by prefix or file; choose a rule to inspect or remove',
+      matchOnDescription: true, matchOnDetail: true,
+    });
+    if (!pick || deactivated) return;
+    const detail = codexInventoryDetail(pick, inventory, displayPath);
+    if (!pick.removable && !pick.resume) {
+      await vscode.window.showInformationMessage(pick.about ? 'About this Codex inventory' : 'Codex rule (read-only)',
+        { modal: true, detail });
+      return;
+    }
+    const action = pick.resume ? 'Finish removal' : 'Remove';
+    const choice = await vscode.window.showWarningMessage(pick.resume ? 'Finish interrupted Codex removal?' : 'Remove this Codex allow rule?',
+      { modal: true, detail }, action);
+    if (choice !== action || deactivated) return;
+    // The file hash and declaration id belong to the displayed inventory. The
+    // worker rejects either changing while the picker or confirmation was open.
+    const request = pick.resume ? { resume: true } : { rules: [{
+      id: pick.rule.id, path: pick.rule.path, fileHash: pick.rule.fileHash,
+    }] };
+    const result = await runAutoLearnWorker('removeCodexRules', request);
+    if (deactivated) return;
+    if (!result.changed || !Number.isFinite(result.removedCount) || result.removedCount < 1) {
+      vscode.window.showWarningMessage('ai-acolyte: no Codex rule was removed. Open the inventory again to refresh it.');
+      return;
+    }
+    vscode.window.showInformationMessage(
+      `ai-acolyte: removed ${result.removedCount} Codex allow rule${result.removedCount === 1 ? '' : 's'}. ` +
+      'Current Auto Learn builds will not re-add overlapping prefixes. Restart Codex; active sessions may cache rules.');
+    dashboard?.refresh();
+  } catch (error) {
+    if (!deactivated) vscode.window.showErrorMessage(`ai-acolyte: Codex rules could not be updated: ${error.message}`);
+  }
+}
+
 // ── dashboard (Activity Bar webview) ────────────────────────────────────────────
 
 // Short enough to read as instant, long enough to collapse a watcher pair. The
@@ -3402,6 +3577,16 @@ class WildcardingViewProvider {
         case 'toggleGuidance': vscode.commands.executeCommand('permission-wildcarding.toggleGuidance'); break;
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
         case 'showWildcards': vscode.commands.executeCommand('permission-wildcarding.showWildcards'); break;
+        case 'showCodexRules': vscode.commands.executeCommand('permission-wildcarding.showCodexRules'); break;
+        case 'restoreCodexRules': vscode.commands.executeCommand('permission-wildcarding.restoreCodexRules'); break;
+        case 'codexHook': vscode.commands.executeCommand('permission-wildcarding.codexHook'); break;
+        case 'reviewCodexApprovals': vscode.commands.executeCommand('permission-wildcarding.reviewCodexApprovals'); break;
+        case 'reviewCodexMcp': vscode.commands.executeCommand('permission-wildcarding.reviewCodexMcp'); break;
+        case 'importCodexRules': vscode.commands.executeCommand('permission-wildcarding.importCodexRules'); break;
+        case 'searchCodexMemory': vscode.commands.executeCommand('permission-wildcarding.searchCodexMemory'); break;
+        case 'rebuildCodexMemory': vscode.commands.executeCommand('permission-wildcarding.rebuildCodexMemory'); break;
+        case 'codexMemoryGates': vscode.commands.executeCommand('permission-wildcarding.codexMemoryGates'); break;
+        case 'inspectCodexMemory': vscode.commands.executeCommand('permission-wildcarding.inspectCodexMemory'); break;
         case 'refresh':      this.refresh(); break;
         case 'remove':       this._remove(msg.value); break;
       }
@@ -3563,6 +3748,13 @@ class WildcardingViewProvider {
       lastRun,
       autoLearn,
       memory: memoryCardData(memory),
+      codexMemory: {
+        ...codexFeatureStatus({ home: os.homedir(), codexHome: CODEX_HOME_DIR }),
+        lintEnabled: memoryConf().enabled !== false,
+        issues: codexMemoryReport?.diagnostics?.length || 0,
+        error: codexMemoryReport?.error || codexMemoryReport?.watchError || null,
+        gates: codexMemoryGatesUi?.status(),
+      },
       local: localCardData(),
       guidance: guidanceCardData(),
       gates: gatesCardData(memory),
@@ -3722,6 +3914,12 @@ class WildcardingViewProvider {
 
     <button class="run" id="runNow">⟳  Wildcard Now</button>
     <button class="restore" id="restore" title="Merge your saved backup back into the allow list">⤺  Restore prunes from backup</button>
+    <button class="restore" id="codexRules">View / remove Codex rules…</button>
+    <button class="restore" id="codexRestore">Restore Codex rules…</button>
+    <button class="restore" id="codexHook">Configure Codex after-turn learning…</button>
+    <button class="restore" id="reviewCodexApprovals">Review Codex approvals…</button>
+    <button class="restore" id="reviewCodexMcp">Review Codex MCP approvals…</button>
+    <button class="restore" id="importCodexRules">Import project Codex rules…</button>
     <div class="muted sub" id="lastRun"></div>
     <div class="muted" id="backup"></div>
   </div>
@@ -3794,6 +3992,24 @@ class WildcardingViewProvider {
         <div class="status"><span id="mgdot" class="dot idle"></span><span id="mgtext">Memory gates</span></div>
         <div class="muted sub" id="mgsub"></div>
         <button class="managed-action" id="gatesBtn">Compile and add</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="row" id="codexMemoryCard">
+    <div class="rowhead" data-row="codexMemory">
+      <span class="chev">▸</span><span class="glyph">◈</span>
+      <span class="rowname">Codex memory</span><span class="rowstate" id="stCodexMemory"></span>
+    </div>
+    <div class="rowbody" id="bodyCodexMemory" hidden>
+      <div class="card">
+        <div class="muted sub" id="codexMemoryDir"></div>
+        <div class="muted sub" id="codexMemoryStatus"></div>
+        <button class="restore" id="searchCodexMemory">Search native memory…</button>
+        <button class="restore" id="rebuildCodexMemory">Rebuild Codex recall index…</button>
+        <button class="restore" id="inspectCodexMemory">Inspect memory sources…</button>
+        <div class="muted sub" id="codexMemoryGatesStatus"></div>
+        <button class="managed-action" id="codexMemoryGates">Review native memory gates…</button>
       </div>
     </div>
   </section>
@@ -3907,13 +4123,15 @@ class WildcardingViewProvider {
     }
 
     const g = d.guidance || {};
-    setState('stGuidance', !g.on ? 'not installed' : (g.current ? 'on' : 'older wording'),
-      !g.on || g.current ? null : 'warn');
+    setState('stGuidance', g.partial ? 'partially installed'
+      : !g.on ? 'not installed' : (g.current ? 'on' : 'older wording'),
+      g.partial || (g.on && !g.current) ? 'warn' : null);
 
     const gt = d.gates || {};
     setState('stGates', !gt.compiled ? 'nothing compiled'
-      : !gt.on ? gt.count + ' waiting'
-        : (gt.current ? gt.count + ' active' : 'stale — refresh'),
+      : gt.partial ? gt.count + ' partially installed'
+        : !gt.on ? gt.count + ' waiting'
+          : (gt.current ? gt.count + ' active' : 'stale — refresh'),
       !gt.compiled ? null : (!gt.on || !gt.current ? 'warn' : null));
 
     const m = d.memory || {};
@@ -3969,6 +4187,17 @@ class WildcardingViewProvider {
     if (counts.covered) notes.push(counts.covered + ' already covered');
     if (a.busy) notes.unshift('scanning…');
     if (a.scopeWarning) notes.push(a.scopeWarning);
+    if (a.codexEvidence?.pending) {
+      notes.push('rebuilding older Codex evidence' + (a.codexEvidence.remainingFiles
+        ? ': ' + a.codexEvidence.remainingFiles + ' transcripts still need a complete read'
+        : a.codexEvidence.reasons?.includes('history-unavailable') ? ': history is unavailable' : ''));
+    }
+    if (a.codexEvidence?.uncertainCandidates) {
+      notes.push(a.codexEvidence.quarantinedRuns + ' older runs excluded from new approvals because their source cannot be verified');
+    }
+    if (a.codexEvidence?.untimedFailureRuns) {
+      notes.push(a.codexEvidence.untimedFailureRuns + ' failed Codex runs could not be dated during rebuild; existing approvals retained');
+    }
     if (a.error) notes.push('error: ' + a.error);
     $('alsub').textContent = notes.join(' · ');
     $('alsafe').textContent = counts.safe || 0;
@@ -4116,6 +4345,21 @@ class WildcardingViewProvider {
     }
   }
 
+  function renderCodexMemory(m) {
+    m = m || {};
+    setState('stCodexMemory', m.state === 'absent' ? 'no files yet'
+      : (m.files || 0) + ' files' + (m.state === 'unreadable' ? ' · partly unreadable' : '')
+        + (m.issues ? ' · ' + m.issues + ' issues' : '') + (m.error ? ' · diagnostics unavailable' : ''),
+      m.state === 'unreadable' || m.issues || m.error ? 'warn' : null);
+    $('codexMemoryDir').textContent = m.root || '';
+    $('codexMemoryStatus').textContent = m.error || (m.lintEnabled === false ? 'Native diagnostics are disabled. ' : '')
+      + 'Codex feature enablement is not inferred. Search reads the current files.';
+    var g = m.gates || {};
+    $('codexMemoryGatesStatus').textContent = g.error || g.watchError || (g.on
+      ? 'Native memory gates: ' + (g.count == null ? '?' : g.count) + ' sections; ' + (g.current ? 'current' : 'update pending') + '.'
+      : 'Native memory gates are off. Only explicitly marked global sections can be installed.');
+  }
+
   function renderLocal(l) {
     const card = $('localCard');
     if (!l) { card.style.display = 'none'; return; }
@@ -4153,8 +4397,9 @@ class WildcardingViewProvider {
       + (g.agents.length ? ' — ' + g.agents.join(' + ') : '');
     $('gdtext').style.fontWeight = '600';
     $('gdsub').textContent = g.on || g.partial
-      ? 'one command per call → every approval generalizes · ' + g.path
-      : 'teach ' + g.targets.join(' + ') + ' to write approvals that can be wildcarded';
+      ? 'simple commands make approvals easier to reuse · ' + g.path
+      : 'teach ' + g.targets.join(' + ') + ' to write reusable command invocations';
+    if (g.errors?.length) $('gdsub').textContent += ' · ' + g.errors.join(' · ');
     const btn = $('guidanceBtn');
     btn.disabled = !g.readable;
     btn.classList.toggle('on', !!g.on);
@@ -4183,6 +4428,7 @@ class WildcardingViewProvider {
       : g.on || g.partial
         ? 'your standing orders, resident every session · ' + g.path
         : g.count + ' compiled gate' + (g.count === 1 ? '' : 's') + ' waiting to be installed';
+    if (g.errors?.length) $('mgsub').textContent += ' · ' + g.errors.join(' · ');
     const btn = $('gatesBtn');
     // Nothing compiled AND no memory the compiler could take: offering "Compile
     // gates" here spent a modal, a compile and a warning toast to end up saying
@@ -4216,6 +4462,7 @@ class WildcardingViewProvider {
     renderGuidance(d.guidance);
     renderGates(d.gates);
     renderMemory(d.memory);
+    renderCodexMemory(d.codexMemory);
     $('lastRun').textContent = timeAgo(d.lastRun);
     $('backup').textContent = d.backupCount
       ? 'backup: ' + d.backupCount + ' entries saved'
@@ -4279,6 +4526,16 @@ class WildcardingViewProvider {
   $('alUndo').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnUndo' }));
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
   $('restore').addEventListener('click', () => vscode.postMessage({ type: 'restore' }));
+  $('codexRules').addEventListener('click', () => vscode.postMessage({ type: 'showCodexRules' }));
+  $('codexRestore').addEventListener('click', () => vscode.postMessage({ type: 'restoreCodexRules' }));
+  $('codexHook').addEventListener('click', () => vscode.postMessage({ type: 'codexHook' }));
+  $('reviewCodexApprovals').addEventListener('click', () => vscode.postMessage({ type: 'reviewCodexApprovals' }));
+  $('reviewCodexMcp').addEventListener('click', () => vscode.postMessage({ type: 'reviewCodexMcp' }));
+  $('importCodexRules').addEventListener('click', () => vscode.postMessage({ type: 'importCodexRules' }));
+  $('searchCodexMemory').addEventListener('click', () => vscode.postMessage({ type: 'searchCodexMemory' }));
+  $('rebuildCodexMemory').addEventListener('click', () => vscode.postMessage({ type: 'rebuildCodexMemory' }));
+  $('codexMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'codexMemoryGates' }));
+  $('inspectCodexMemory').addEventListener('click', () => vscode.postMessage({ type: 'inspectCodexMemory' }));
   $('rebuild').addEventListener('click', () => vscode.postMessage({ type: 'rebuildRecall' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
@@ -4297,6 +4554,13 @@ async function deactivate() {
   // First, before anything is awaited: everything below this line is racing the
   // continuations it is trying to stop.
   deactivated = true;
+  codexFeatureUi?.dispose();
+  codexFeatureUi = null;
+  codexMemoryLint?.dispose();
+  codexMemoryGatesUi?.dispose();
+  codexMemoryGatesUi = null;
+  codexMemoryLint = null;
+  codexMemoryReport = null;
   clearTimeout(debounceTimer);
   clearTimeout(policyBounce);
   clearTimeout(localDrainBounce);

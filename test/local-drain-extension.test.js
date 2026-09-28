@@ -94,6 +94,8 @@ function harness(tempHome, { guidance = true, localDrain = true } = {}) {
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => tempHome };
@@ -133,6 +135,10 @@ function harness(tempHome, { guidance = true, localDrain = true } = {}) {
     async dispose() {
       await extension.deactivate();
       Module._load = originalLoad;
+      for (const [key, value] of Object.entries(originalHomeEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       delete require.cache[extensionPath];
     },
   };

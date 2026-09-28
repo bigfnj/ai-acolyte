@@ -5,10 +5,10 @@
 // config.toml or offer an approval-policy toggle.
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const { resolveCodexHome } = require('./codex-paths');
 
-const CODEX_BUNDLE_CACHE = path.join(os.homedir(), '.codex', 'cloud-config-bundle-cache.json');
+const CODEX_BUNDLE_CACHE = path.join(resolveCodexHome(), 'cloud-config-bundle-cache.json');
 
 function readEnterpriseBundle(bundlePath = CODEX_BUNDLE_CACHE) {
   try { return JSON.parse(fs.readFileSync(bundlePath, 'utf8')); }
@@ -377,8 +377,8 @@ function enterpriseDecisionFor(bundle, argv) {
 
 const CODEX_RULE_EXTENSION = '.rules';
 
-function codexRuleDirectories(home = os.homedir()) {
-  return [path.join(home, '.codex', 'rules')];
+function codexRuleDirectories(options = {}) {
+  return [path.join(resolveCodexHome(options), 'rules')];
 }
 
 // `substitute` stands the pending text IN PLACE OF a deployed file rather than
@@ -386,9 +386,8 @@ function codexRuleDirectories(home = os.homedir()) {
 // visible too, and two files carrying the same prefix rule is not the state the
 // write produces.
 function codexRuleFileSet(options = {}) {
-  const home = options.home || os.homedir();
   const directories = [
-    ...codexRuleDirectories(home),
+    ...codexRuleDirectories(options),
     ...(Array.isArray(options.directories) ? options.directories : []),
   ].map((directory) => path.resolve(directory));
   const failures = [];

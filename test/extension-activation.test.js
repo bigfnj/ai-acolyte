@@ -50,6 +50,89 @@ function assertFreshProjectCache(extensionPath, rootSrc) {
     + `will resolve an earlier home: ${stale.join(', ')}`);
 }
 
+test('off settings remove shadowed Codex guidance and gates on activation and configuration events', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-shadowed-instructions-'));
+  const home = path.join(root, 'home');
+  const codexHome = path.join(root, 'custom-codex');
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.mkdirSync(codexHome);
+  fs.writeFileSync(path.join(home, '.claude', 'gates.generated.md'), '## Standing gates (1 memories, managed)\n- Fixture gate\n');
+  const regular = path.join(codexHome, 'AGENTS.md');
+  const override = path.join(codexHome, 'AGENTS.override.md');
+  const userText = '# Base user instructions\nKeep this text.\n';
+  const overrideText = '# Active override instructions\nKeep this too.\n';
+  const { applyGuidance } = require('../src/agent-guidance');
+  const { makeGatesBlock } = require('../src/agent-gates');
+  const hidden = makeGatesBlock(home).apply(applyGuidance(userText, true).text, true).text;
+  fs.writeFileSync(regular, hidden);
+  fs.writeFileSync(override, overrideText);
+  const configurationHandlers = [];
+  const off = new Set(['guidance.enabled', 'gates.enabled', 'autoLearn.enabled']);
+  const vscode = {
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    RelativePattern: class RelativePattern { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
+    StatusBarAlignment: { Right: 2 }, ThemeColor: class ThemeColor {},
+    Uri: { file: (fsPath) => ({ fsPath }) },
+    commands: { registerCommand: disposable, executeCommand() {} },
+    window: {
+      createStatusBarItem: () => ({ hide() {}, show() {}, dispose() {} }),
+      registerWebviewViewProvider: disposable, setStatusBarMessage() {},
+      showErrorMessage() {}, showInformationMessage() {}, showWarningMessage() {},
+    },
+    workspace: {
+      isTrusted: true, workspaceFolders: [{ uri: { fsPath: path.join(root, 'workspace') } }],
+      createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
+      getConfiguration: () => ({ get: (key, fallback) => off.has(key) ? false : fallback,
+        inspect: () => ({}), update: async () => {} }),
+      onDidChangeConfiguration(handler) { configurationHandlers.push(handler); return disposable(); },
+      onDidChangeWorkspaceFolders: disposable,
+    },
+  };
+  const extensionPath = require.resolve('../vscode-extension/extension');
+  const rootSrc = path.resolve(__dirname, '..', 'src');
+  const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, CODEX_HOME: codexHome });
+  Module._load = function load(request, parent, isMain) {
+    if (request === 'vscode') return vscode;
+    if (request === 'os') return { ...os, homedir: () => home };
+    if (parent?.filename === extensionPath && request.startsWith('./src/')) {
+      return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
+    }
+    if (request === './memoryLint' && parent?.filename === extensionPath) return {
+      MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
+      memoryReport: () => ({ conf: {}, dir: null, report: null }), discoverDirs: () => [],
+      cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
+    };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  let extension;
+  try {
+    purgeProjectModules(extensionPath, rootSrc);
+    assertFreshProjectCache(extensionPath, rootSrc);
+    extension = require(extensionPath);
+    extension.activate({ subscriptions: [] });
+    assert.equal(fs.readFileSync(regular, 'utf8'), userText,
+      'WITNESS activation must remove both hidden managed blocks even when the active override is off');
+    assert.equal(fs.readFileSync(override, 'utf8'), overrideText);
+    fs.writeFileSync(regular, hidden);
+    for (const handler of configurationHandlers) handler({ affectsConfiguration: (name) =>
+      name === 'permissionWildcarding.guidance' || name === 'permissionWildcarding.gates' });
+    assert.equal(fs.readFileSync(regular, 'utf8'), userText,
+      'configuration events must also remove both hidden managed blocks while off');
+    assert.equal(fs.readFileSync(override, 'utf8'), overrideText);
+    assert.equal(fs.existsSync(path.join(home, '.codex')), false, 'custom profile reconciliation leaves the default profile absent');
+  } finally {
+    try { await extension?.deactivate?.(); } catch { /* always release deferred work */ }
+    Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    purgeProjectModules(extensionPath, rootSrc);
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test('extension activates with mocked VS Code and deactivates without live policy access', async () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-extension-'));
   const commands = new Map();
@@ -106,6 +189,8 @@ test('extension activates with mocked VS Code and deactivates without live polic
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   // Timer bookkeeping, because the autoLearn configuration listener has no
   // return value and no vscode-facing effect this mock can see — its whole job
   // is timers. Intervals as well as timeouts: resetAutoLearnTimer's periodic
@@ -213,6 +298,10 @@ test('extension activates with mocked VS Code and deactivates without live polic
     global.setInterval = realSetInterval;
     global.clearInterval = realClearInterval;
     Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     purgeProjectModules(extensionPath, rootSrc);
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
@@ -282,6 +371,8 @@ test('activation does not leak channels, watchers or timers', async () => {
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: tempHome, USERPROFILE: tempHome, CODEX_HOME: path.join(tempHome, '.codex') });
   const realSetTimeout = global.setTimeout;
   const realClearTimeout = global.clearTimeout;
   global.setTimeout = (...args) => { timers.created += 1; return realSetTimeout(...args); };
@@ -363,6 +454,10 @@ test('activation does not leak channels, watchers or timers', async () => {
     global.setTimeout = realSetTimeout;
     global.clearTimeout = realClearTimeout;
     Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     purgeProjectModules(extensionPath, rootSrc);
     fs.rmSync(tempHome, { recursive: true, force: true });
   }

@@ -37,8 +37,8 @@ const RULE_LIMIT = 200;
 // user's own instruction file. The remote-settings cache it arrives in is local and
 // client-refreshed, so any local process that can write it picks that string. Both
 // suppliers of costliestRules now apply clean: the managed-hits side runs
-// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2173`, and the
-// inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1448`. But that only
+// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2372`, and the
+// inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1659`. But that only
 // collapses control characters; it knows nothing about a code span. Sanitising HERE,
 // at the interpolation, is what escapes the backtick and the comment opener.
 //
@@ -203,13 +203,76 @@ function deriveMitigations(costliestRules, options = {}) {
   for (const group of groups.values()) {
     if (derived.length >= limit) break;
     derived.push({
-      id: group.mitigation.id, rule: group.rule, rules: group.rules.slice(),
+      id: group.mitigation.id, agent: 'claude', rule: group.rule, rules: group.rules.slice(),
       decision: group.decision, prompts: group.prompts, tool: group.tool,
       tools: group.tools.slice(), title: group.mitigation.title,
       body: group.mitigation.body(group),
     });
   }
   return derived;
+}
+
+// Codex history supplies successful runs, not approval-dialog events. The caller
+// joins source-specific evidence to the CURRENT readable managed bundle, using
+// enterprisePolicyAssessment's most restrictive match. Recheck that prefix
+// grammar here before deriving: neither a Claude permission string nor an
+// unrelated managed rule establishes Codex friction.
+const CODEX_EVIDENCE = 'codex-runs-current-managed-rule';
+const REPOSITORY_QUERIES = new Set(['status', 'diff', 'log', 'show', 'ls-files']);
+const codexRoot = (value) => value.replace(/\\/g, '/').split('/').pop().toLowerCase().replace(/\.exe$/, '');
+
+function codexPatternMatches(pattern, prefix) {
+  if (!Array.isArray(pattern) || !pattern.length || pattern.length > prefix.length) return false;
+  return pattern.every((position, index) => {
+    const values = position?.kind === 'token' ? [position.value]
+      : position?.kind === 'any_of' ? position.values : null;
+    if (!Array.isArray(values) || !values.length || values.some((value) =>
+      typeof value !== 'string' || !value || /[\u0000-\u001f\u007f]/.test(value))) return false;
+    return index === 0 ? values.some((value) => codexRoot(value) === codexRoot(prefix[0]))
+      : values.includes(prefix[index]);
+  });
+}
+
+function deriveCodexMitigations(entries, options = {}) {
+  const threshold = Number.isFinite(options.threshold)
+    ? Math.max(1, Math.floor(options.threshold)) : DEFAULT_THRESHOLD;
+  const limit = Number.isFinite(options.limit)
+    ? Math.max(0, Math.floor(options.limit)) : DEFAULT_LIMIT;
+  if (!limit) return [];
+  const eligible = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (entry?.agent !== 'codex' || entry.evidence !== CODEX_EVIDENCE || entry.decision !== 'prompt') continue;
+    if (!Number.isSafeInteger(entry.observedRuns) || entry.observedRuns < threshold) continue;
+    const prefix = entry.prefix;
+    if (!Array.isArray(prefix) || prefix.length !== 2 || prefix.some((value) => typeof value !== 'string' || !value)) continue;
+    if (codexRoot(prefix[0]) !== 'git' || !REPOSITORY_QUERIES.has(prefix[1])) continue;
+    if (!codexPatternMatches(entry.pattern, prefix)) continue;
+    const identity = typeof entry.key === 'string' && entry.key ? entry.key : JSON.stringify(prefix);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const rule = cleanRule(JSON.stringify(entry.pattern.map((position) =>
+      position.kind === 'token' ? position.value : position.values)));
+    eligible.push({ rule, prefix: prefix.slice(), observedRuns: entry.observedRuns });
+  }
+  if (!eligible.length) return [];
+  eligible.sort((a, b) => b.observedRuns - a.observedRuns || a.rule.localeCompare(b.rule));
+  const observedRuns = eligible.reduce((total, entry) => total + entry.observedRuns, 0);
+  if (!Number.isSafeInteger(observedRuns)) return [];
+  const rules = [...new Set(eligible.map((entry) => entry.rule))];
+  const prefixes = [...new Map(eligible.map((entry) => [JSON.stringify(entry.prefix), entry.prefix])).values()];
+  const extra = rules.length > 1 ? ` and ${plural(rules.length - 1, 'other managed prefix')}` : '';
+  return [{
+    id: 'codex-reuse-repository-queries', agent: 'codex', decision: 'prompt',
+    rule: rules[0], rules, prefixes, observedRuns, evidence: CODEX_EVIDENCE,
+    title: 'Reuse unchanged repository query results in Codex',
+    body: `The current cached Codex managed policy marks \`${rules[0]}\`${extra} as \`prompt\`. ` +
+      `${plural(observedRuns, 'observed successful Codex run')} of repository queries match these current rules; ` +
+      'this is not a count of historical approval prompts. Before repeating git status, diff, log, show or ls-files, ' +
+      'reuse the result already obtained unless files, repository state or the requested scope changed. ' +
+      'Choose the needed query and scope before calling it. Keep required approvals; do not switch executables, ' +
+      'wrap the command or change policy to avoid them. Other policy, sandbox and session decisions remain outside this evidence.',
+  }];
 }
 
 // One marker pair per mitigation, so `--guidance off` and an undo can remove
@@ -301,25 +364,31 @@ function readFileOrEmpty(file) {
   catch (error) { return error.code === 'ENOENT' ? '' : null; }
 }
 
-// Claude only, unlike the static shell-style block. That block is about writing
-// one command per tool call, which is true for any agent. These mitigations are
-// not: the evidence comes from Claude transcripts and a Claude managed policy,
-// the precedence argument in every body is Claude's, and the advice names Claude
-// tools. Writing "a managed `ask` outranks every user allow entry" into
-// ~/.codex/AGENTS.md describes a model Codex does not have.
-function derivedTargets(home) {
-  return installedGuidanceTargets(home).filter((target) => target.agent === 'claude');
+// Legacy callers only derived Claude evidence. A caller that has joined Codex
+// evidence to a readable managed bundle opts into Codex explicitly; healthy
+// Claude policy alone must not trigger reconciliation of Codex instructions.
+function derivedTargets(options) {
+  const agents = new Set(Array.isArray(options.agents) ? options.agents : ['claude']);
+  return installedGuidanceTargets(options).filter((target) => agents.has(target.agent));
 }
 
 // Which derived blocks the instruction file currently carries. Read-only, and an
 // unreadable file says so rather than reporting an empty list, because "no
 // blocks" and "cannot tell" lead to opposite next actions.
-function derivedStatus({ home = os.homedir() } = {}) {
-  return derivedTargets(home).map((target) => {
+function derivedStatus(options = {}) {
+  return derivedTargets({ ...options, home: options.home ?? os.homedir() }).map((target) => {
     const text = readFileOrEmpty(target.path);
+    const inactive = (target.candidates || []).filter((file) => file !== target.path)
+      .map((file) => ({ path: file, text: readFileOrEmpty(file) }));
+    const unreadable = inactive.find((file) => file.text === null);
+    const error = target.error || (text === null ? `cannot read ${target.path}` : null)
+      || (unreadable ? `cannot read ${unreadable.path}` : null);
     return {
-      agent: target.agent, path: target.path, readable: text !== null,
+      agent: target.agent, path: target.path, readable: !error,
       installed: text === null ? [] : installedDerivedIds(text),
+      ...(error ? { error } : {}),
+      ...(inactive.some((file) => installedDerivedIds(file.text).length)
+        ? { shadowedPaths: inactive.filter((file) => installedDerivedIds(file.text).length).map((file) => file.path) } : {}),
     };
   });
 }
@@ -350,45 +419,74 @@ function derivedStatus({ home = os.homedir() } = {}) {
 // built around it: `src/auto-learn-manager.js:886` anchors the backup pruner on
 // the names `backup()` writes precisely so a sweep by age cannot delete the
 // `.pre-derived` copy sitting beside them, and that is this directory.
-function setDerivedGuidance(mitigations, accepted, {
-  home = os.homedir(),
-  backupDir = path.join(home, '.claude', 'wildcarding', 'backups'),
-} = {}) {
-  return derivedTargets(home).map((target) => withInstructionLock(target.path, () => {
-    const base = { agent: target.agent, path: target.path };
-    const text = readFileOrEmpty(target.path);
-    if (text === null) {
-      return { ...base, changed: false, error: `cannot read ${target.path}`,
+function setDerivedGuidance(mitigations, accepted, options = {}) {
+  const home = options.home ?? os.homedir();
+  const backupDir = options.backupDir || path.join(home, '.claude', 'wildcarding', 'backups');
+  const targetOptions = { ...options, home };
+  const acceptedIds = new Set(Array.isArray(accepted) ? accepted.map(String) : []);
+  return derivedTargets(targetOptions).map((target) => {
+    const relevant = (Array.isArray(mitigations) ? mitigations : []).filter((item) =>
+      item && (item.agent || 'claude') === target.agent);
+    const installing = relevant.some((item) => acceptedIds.has(String(item.id)));
+    const selected = () => installedGuidanceTargets(targetOptions).find((item) => item.agent === target.agent);
+    const selectionError = () => {
+      if (target.agent !== 'codex' || !installing) return null;
+      const current = selected();
+      return current?.error || (current?.path !== target.path ? 'Codex instruction selection changed during the update; retry' : null);
+    };
+    const write = (file, wanted) => withInstructionLock(file, () => {
+      const error = target.error || selectionError();
+      if (error) return { agent: target.agent, path: file, changed: false, error,
         added: [], updated: [], removed: [], installed: [] };
-    }
-    const result = reconcileDerived(text, mitigations, { accepted });
-    if (!result.changed) {
-      return { ...base, changed: false, error: null,
-        added: [], updated: [], removed: [], installed: installedDerivedIds(text) };
-    }
-    try {
-      if (text.length) {
-        fs.mkdirSync(backupDir, { recursive: true });
-        writeFileAtomicSync(path.join(backupDir, `${path.basename(target.path)}.pre-derived`), text);
+      const base = { agent: target.agent, path: file };
+      const text = readFileOrEmpty(file);
+      if (text === null) {
+        return { ...base, changed: false, error: `cannot read ${file}`,
+          added: [], updated: [], removed: [], installed: [] };
       }
-      fs.mkdirSync(path.dirname(target.path), { recursive: true });
-      writeFileAtomicSync(target.path, result.text);
-    } catch (error) {
-      return { ...base, changed: false, error: error.message,
-        added: [], updated: [], removed: [], installed: installedDerivedIds(text) };
+      const result = reconcileDerived(text, wanted, { accepted });
+      if (!result.changed) {
+        return { ...base, changed: false, error: null,
+          added: [], updated: [], removed: [], installed: installedDerivedIds(text) };
+      }
+      try {
+        if (text.length) {
+          fs.mkdirSync(backupDir, { recursive: true });
+          writeFileAtomicSync(path.join(backupDir, `${path.basename(file)}.pre-derived`), text);
+        }
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        writeFileAtomicSync(file, result.text);
+      } catch (error) {
+        return { ...base, changed: false, error: error.message,
+          added: [], updated: [], removed: [], installed: installedDerivedIds(text) };
+      }
+      return { ...base, changed: true, error: null,
+        added: result.added, updated: result.updated, removed: result.removed,
+        installed: installedDerivedIds(result.text) };
+    }, (busy) => ({ agent: target.agent, path: file, changed: false, error: busy,
+      added: [], updated: [], removed: [], installed: [] }));
+    const primary = write(target.path, relevant);
+    if (primary.error || target.agent !== 'codex') return primary;
+    const cleaned = [];
+    for (const file of (target.candidates || []).filter((file) => file !== target.path)) {
+      const result = write(file, []);
+      cleaned.push(result);
+      if (result.error) break;
     }
-    return { ...base, changed: true, error: null,
-      added: result.added, updated: result.updated, removed: result.removed,
-      installed: installedDerivedIds(result.text) };
-  }, (busy) => ({ agent: target.agent, path: target.path, changed: false, error: busy,
-    added: [], updated: [], removed: [], installed: [] })));
+    const current = selected();
+    return { ...primary, path: current?.path || target.path,
+      changed: primary.changed || cleaned.some((result) => result.changed),
+      error: cleaned.find((result) => result.error)?.error || current?.error || selectionError() || null,
+      removed: [...new Set([...primary.removed, ...cleaned.flatMap((result) => result.removed)])],
+      installed: current?.error ? [] : installedDerivedIds(readFileOrEmpty(current?.path || target.path)) };
+  });
 }
 
 // `mitigationBlock` is not exported: reconcileDerived is its only caller, and
 // reconcileDerived is exported and directly tested, including the removal path
 // that drives mitigationBlock with a title and body this module no longer has.
 module.exports = {
-  deriveMitigations, markersFor, renderMitigation, cleanRule,
+  deriveMitigations, deriveCodexMitigations, markersFor, renderMitigation, cleanRule,
   installedDerivedIds, reconcileDerived,
   derivedStatus, setDerivedGuidance,
   DEFAULT_THRESHOLD, DEFAULT_LIMIT,

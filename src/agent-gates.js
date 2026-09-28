@@ -27,7 +27,7 @@ const os = require('os');
 const path = require('path');
 
 const {
-  createManagedBlock, installedGuidanceTargets, guidanceStatus, setGuidance,
+  createManagedBlock, guidanceStatusAll, setGuidanceAll,
 } = require('./agent-guidance');
 
 const GATES_BEGIN = '<!-- BEGIN permission-wildcarding: memory gates (managed) -->';
@@ -65,18 +65,15 @@ function makeGatesBlock(home = os.homedir()) {
 // a home, and a block built at require time would freeze whatever os.homedir() said then --
 // which is how a test with a mocked home ends up writing to the real ~/.claude.
 
-function gatesStatus(file, home = os.homedir()) {
-  return { ...guidanceStatus(file, makeGatesBlock(home)), compiled: !!readCompiled(home) };
+function gatesStatusAll(homeOrOptions) {
+  const options = typeof homeOrOptions === 'string' ? { home: homeOrOptions } : (homeOrOptions || {});
+  const home = options.home ?? os.homedir();
+  const compiled = !!readCompiled(home);
+  return guidanceStatusAll(options, makeGatesBlock(home)).map((state) => ({ ...state, compiled }));
 }
 
-function gatesStatusAll(home = os.homedir()) {
-  return installedGuidanceTargets(home).map((target) => ({
-    agent: target.agent,
-    ...gatesStatus(target.path, home),
-  }));
-}
-
-function setGatesAll(on, { home = os.homedir(), backupDir } = {}) {
+function setGatesAll(on, options = {}) {
+  const home = options.home ?? os.homedir();
   // Refuse to install an empty block. Without this, a missing compile would fence off
   // nothing, report success, and leave a card reading "gates ON" forever — the exact
   // silent-failure shape this whole feature exists to avoid.
@@ -86,24 +83,11 @@ function setGatesAll(on, { home = os.homedir(), backupDir } = {}) {
       error: 'no compiled gates: run `recall.py --gates-compile` first',
     }];
   }
-  return installedGuidanceTargets(home).map((target) => ({
-    agent: target.agent,
-    ...setGuidance(on, {
-      file: target.path,
-      ...(backupDir ? { backupDir } : {}),
-      // `.pre-gates`, not `.pre-guidance`: the two blocks share a backup directory and
-      // must not overwrite each other's pre-change copy.
-      backupName: `${path.basename(target.path)}.pre-gates`,
-      block: makeGatesBlock(home),
-    }),
-  }));
+  // Share discovery, override migration and removal with the shell block. The
+  // distinct backup suffix keeps the two features' pre-change copies separate.
+  return setGuidanceAll(on, { ...options, block: makeGatesBlock(home), backupSuffix: 'pre-gates' });
 }
 
-// `gatesStatus` is NOT exported: its only caller is gatesStatusAll, two lines
-// below it, and no file outside this module ever destructured it or reached it
-// through a namespace require. The function stays — removing the export is free,
-// removing a function is not, and test/agent-gates.test.js exercises this one
-// through gatesStatusAll.
 module.exports = {
   GATES_BEGIN, GATES_END, makeGatesBlock,
   compiledPath, readCompiled, gatesStatusAll, setGatesAll,

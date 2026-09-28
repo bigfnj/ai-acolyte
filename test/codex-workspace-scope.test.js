@@ -8,7 +8,7 @@
 // the EDITOR may run code from this folder. The CLI's `--codex-scope workspace`
 // was unguarded and asked nothing at all. Codex's own project trust is what
 // actually governs whether a workspace rule file is loaded. A capability whose
-// trust model cannot be stated does not get certified.
+// trust model cannot be stated stays withdrawn.
 //
 // Follows the MAX retirement precedent in this repo: the surface stays
 // reachable and refuses. An old invocation must never fall through to user scope
@@ -31,7 +31,7 @@ function runCli(home, args, cwd = home) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd, encoding: 'utf8', windowsHide: true,
     env: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
     },
   });
@@ -384,6 +384,8 @@ test('the extension writes no Codex rules while the setting still says workspace
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex') });
   Module._load = function load(request, parent, isMain) {
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => home };
@@ -411,8 +413,12 @@ test('the extension writes no Codex rules while the setting still says workspace
     await commands.get('permission-wildcarding.autoLearnScan')();
     await commands.get('permission-wildcarding.autoLearnApplySafe')();
   } finally {
-    Module._load = originalLoad;
     try { await extension?.deactivate?.(); } catch { /* teardown only */ }
+    Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     delete require.cache[extensionPath];
   }
 

@@ -83,7 +83,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:2197) overrides `dir` before it calls this.
+// (extension.js:2374) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive

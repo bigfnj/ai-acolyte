@@ -4,23 +4,23 @@ Watches `~/.claude/settings.json` and live-generalizes approved Claude Code
 permissions to depth-aware wildcards. Adds an Activity Bar dashboard: a hero card
 with the "Active" / "Idle" state, the version, the approved total and the
 wildcards / specific split, plus **Wildcard Now** and **Restore prunes from
-backup**; then six collapsible rows, closed by default and summarised on the
+backup**; then collapsible rows, closed by default and summarised on the
 right: **Auto Learn**, **Project-local**, **Shell-style guidance**, **Memory
 gates**, **Memory**, and **Wildcards tracked**. That last
 row lists each tracked wildcard with a one-click prune, capped at a 12-entry
-preview so it cannot become the panel.
+preview so it cannot become the panel. A separate **Codex memory** row provides native
+memory search, diagnostics and gate controls.
 
-Claude Code policy handling is the established path. Codex history ingestion,
-reviewed rule export, AGENTS guidance, memory gates, and prompt diagnostics are
-available, and the Codex path is **conditionally certified** for `codex-cli` 0.145.0
-on Windows. What is proven against the real binary, and what is still missing, are in
-[`docs/codex-certification.md`](../docs/codex-certification.md). What remains open is
-tracked under "Codex certification: breadth, not depth" in the repository
-`BACKLOG.md`.
+Version **1.6.0** supports Codex history-based learning, reviewed rule changes, recovery,
+MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
+Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
+tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
+matrix records the evidence and remaining boundaries in
+[`docs/codex-compatibility.md`](../docs/codex-compatibility.md). Open work is tracked
+under "Codex compatibility: feature coverage and real-app validation" in `BACKLOG.md`.
 
-Because it is a VS Code extension rather than a Claude Code hook, none of this
-depends on a hook being allowed to fire, so it keeps working where a managed
-policy disables user hooks.
+File watching and manual dashboard actions run in the extension and do not require
+a Claude Code hook. The optional Codex after-turn hook has its own review requirement.
 
 On every write it also saves a high-water-mark backup of the allow list **and the
 deny list** to `~/.claude/backups/allow-list.latest.json`, so a managed-settings
@@ -87,11 +87,11 @@ a `;`, newline or pipe chain. A `||` branch and an ambiguous failure credit noth
 and here-string bodies are masked before splitting, so file contents and commit prose never
 become commands.
 
-Beyond the shell, the same transcripts feed three Claude-only families that are **never applied
-automatically**: an MCP call proposes the exact `mcp__server__tool` observed and never a server
-wildcard; a web fetch proposes `WebFetch(domain:host)` from the observed URL; and file tools are
-counted per tool with no path and no inferred rule at all. The review list also marks a
-candidate that the current deny or ask policy would override.
+For Claude Code, non-shell transcripts supply exact MCP tool proposals, observed
+`WebFetch(domain:host)` proposals and file-tool counts without an inferred path rule.
+These families are never applied automatically. Codex MCP tools use a separate reviewed
+native approval setting, described below; they do not become Claude permissions or shell
+prefix rules. The review list also marks policy overrides.
 
 The extension scans at startup, watches both agents' JSONL history, and reconciles every five
 minutes by default. Incremental reconciliation, stable observation IDs and deduplication are
@@ -133,8 +133,8 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 ### Review and policy output
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
-they post four of the **fourteen** message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:3391`. This sentence has now been wrong three times: twice it
+they post four of the message arms the webview host handles; the switch is at
+`vscode-extension/extension.js:3567`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -152,14 +152,20 @@ bin/wildcard-perms --learn undo
 The CLI uses its current directory as the workspace partition and user Codex rules by
 default. Run it from the same workspace as VS Code, or pass `--workspace <path>` plus
 `--codex-scope user|off`, `--threshold <count>`, `--mode`, and `--codex-executable` to
-mirror the extension settings. **Workspace Codex scope was WITHDRAWN, not merely left
-uncertified.** Three different trust notions were in play (VS Code workspace trust, the CLI
+mirror the extension settings. **Workspace Codex scope is withdrawn.** Three different
+trust notions were in play (VS Code workspace trust, the CLI
 accepting the flag unguarded, and Codex project trust, which is neither), so the capability
 was removed rather than shipped with a trust model nobody could state. `--codex-scope
 workspace` now parses, refuses, names the reason and changes nothing;
 `wildcard-perms --codex-workspace-rules status|remove` is the one-way cleanup.
 
-Codex rules default to `~/.codex/rules/permission-wildcarding.rules`. The
+Codex history, generated rules, managed-policy cache and user instructions follow
+`CODEX_HOME` when set, otherwise `~/.codex`. Guidance and gates use the nonempty
+`AGENTS.override.md` when present, otherwise `AGENTS.md`. Enabling a feature removes
+its old managed block from the inactive sibling; disabling removes it from both files.
+User text and the other feature block are preserved. An unreadable override is reported.
+
+Codex rules default to `<Codex home>/rules/permission-wildcarding.rules`. The
 `permissionWildcarding.autoLearn.codexScope` setting is `user` or `off`; `off` learns without
 exporting Codex policy. The `workspace` value was withdrawn and the manifest enum no longer
 offers it. Setting it by hand turns Codex export OFF and says so, and never falls back to user
@@ -179,6 +185,36 @@ managed/system policy, session approval state, and sandbox restrictions are outs
 See the official Codex [rules](https://learn.chatgpt.com/docs/agent-configuration/rules) and
 [permissions](https://learn.chatgpt.com/docs/permissions) documentation.
 
+### Codex workflows
+
+**Review Codex approvals** proposes supported literal widenings of stored approvals.
+**Import project Codex rules** proposes portable declarations from the workspace's
+`.codex/rules` files for user scope, including overlapping project restrictions. Review
+shows the source, destination and complete proposed declarations. Both preserve original
+declarations and refuse stale proposals ([reviewRules](codexFeaturesUi.js#L121),
+[prepare](../src/codex-reviewed-plans.js#L214)). This reviewed import is separate from the withdrawn
+automatic workspace export setting.
+
+**Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
+removal applies only to supported allow declarations (`vscode-extension/extension.js:3495`).
+Auto Learn remembers removals across workspaces. **Restore Codex rules**
+adds captured missing declarations while preserving current rules and excluding deliberate
+removals (`vscode-extension/extension.js:3439`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+policy stays read-only. Interrupted writes offer an explicit completion step.
+
+**Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
+that tool's native user configuration; different future arguments are covered, and the tool
+is not classified as safe. **Undo approval** restores the saved prior setting; changed
+configuration requires review ([reviewMcp](codexFeaturesUi.js#L174),
+[restoreCodexMcpApproval](../src/codex-mcp-config.js#L324)). Other tools, server settings and project trust are preserved.
+
+**Configure Codex after-turn learning** adds a Stop hook using the current Auto Learn mode,
+so completed turns can be learned while the editor is closed. Configuration alone does
+not activate it: review the exact definition in Codex `/hooks`
+([configureHook](codexFeaturesUi.js#L26)). This supplies after-turn learning, not immediate
+per-tool timing. Reviewed rules, MCP approval/Undo and hook controls have staged real-editor
+and fresh-runtime evidence in the compatibility document.
+
 The other Auto Learn settings are `permissionWildcarding.autoLearn.enabled` (default
 **true**), `permissionWildcarding.autoLearn.intervalMinutes` (default **5**),
 `permissionWildcarding.autoLearn.debounceSeconds` (default **20** — the quiet window a
@@ -191,8 +227,8 @@ settings is at the end of this file.
 Auto Learn is currently pure Node and does not call a model. CPU BGE embeddings for clustering
 and local Ollama labels or explanations are future advisory extension points; neither is wired
 into Auto Learn today. If added, they will not override deterministic parsing, risk
-classification, or `codex execpolicy check`. The separate Memory card can rebuild the
-standalone `memory/recall.py` BGE index; that index does not participate in Auto Learn.
+classification, or `codex execpolicy check`. The separate Claude and Codex memory controls
+use CPU BGE recall indexes; neither index participates in Auto Learn approval decisions.
 
 ## Memory-index lint
 
@@ -216,11 +252,11 @@ works under a managed policy.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:38`), and `recallScriptPath`
-(`extension.js:616`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:619`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing `<name>.tmp`
 and renaming on success. **Cancel** or any failure unlinks that partial inside `close()`'s
-callback — `fs.unlinkSync(tmp)` (`extension.js:799`) — and resolves only after it, so a
+callback — `fs.unlinkSync(tmp)` (`extension.js:815`) — and resolves only after it, so a
 cancelled download leaves nothing behind. Unlinking *beside* the close raced the still-open
 write handle and lost on Windows, which orphaned every cancelled transfer. See the Memory
 card section below.
@@ -229,7 +265,7 @@ card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:685`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:701`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -257,6 +293,39 @@ Separately, the gate compiler spawns
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
 dev/source layout is auto-detected. The status probe works regardless of the path.
+
+### Native Codex memory
+
+The separate **Codex memory** row reads `memory_summary.md`, `MEMORY.md`,
+`rollout_summaries/*.md` and `skills/*/SKILL.md` under the selected Codex home's `memories`
+directory. Raw inputs, sessions and SQLite are excluded ([discoverCodexMemory](../src/codex-memory.js#L96)).
+Ambient diagnostics refresh when sources are created, edited or deleted
+([codexMemoryLint](codexMemoryLint.js#L66)). Codex line counts are informational; Claude's
+index-line budget is not imposed on the native registry. The extension reports absent or
+unreadable sources and does not infer feature enablement, generate memories or rewrite
+native files ([inspectMemory](codexFeaturesUi.js#L106)).
+
+**Search native memory** combines CPU BGE similarity with keyword matching and opens the
+exact current source passage. **Rebuild Codex recall index** re-embeds selected passages
+into a private cache scoped to the Codex home ([cacheLocation](../src/codex-recall.js#L64),
+[rebuildMemoryIndex](codexFeaturesUi.js#L91)). These actions use the existing Python/model
+assets without downloading a model or using the GPU. When semantic retrieval is unavailable,
+search reports the reason and offers keyword matches ([searchMemory fallback](codexFeaturesUi.js#L62)).
+Actual editor checks cover semantic passage selection, BOM offsets, rebuild and the visible
+fallback. Rebuild reports failure rather than claiming a keyword-only result rebuilt vectors.
+
+**Review native memory gates** is implemented separately from the shared Memory gates
+switch. It compiles deliberate extension annotations: leading `scope: global` frontmatter
+and paired `<!-- gate -->` / `<!-- /gate -->` sections. Review shows the full body before
+installation into the active Codex instruction file. An installed marker opts in to automatic
+refresh; Remove stops it. Incomplete sources retain the installed body, and native sources
+and shared gate blocks are preserved ([refreshNativeCodexGates](../src/codex-memory-gates.js#L309),
+[native gate review](codexMemoryGatesUi.js#L82)). Fresh Codex instruction loading is verified.
+The staged editor run passed all seven native-gate/MCP-receipt groups. Install and refresh
+no-ops, and hiding a changed-config MCP receipt, each failed the intended check; the older
+helper also failed the malformed-scope retention check. The compatibility document records
+`acolyte-validation-native-gates-dev-20260928/native-results.json` and its evidence.
+Codex is not claimed to generate these annotations. Start a new session to load instruction changes.
 
 ## Install
 
@@ -332,8 +401,8 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-All 17, as registered in `contributes.commands`. Each is prefixed
-`Acolyte:` in the Command Palette. Selected commands also appear as
+The v1.6.0 manifest registers 27 commands under AI Acolyte in the
+Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
 | Command | What it does |
@@ -341,6 +410,8 @@ dashboard title-bar buttons.
 | Wildcard Now | Run the generalization pass over `~/.claude/settings.json` once |
 | Restore prunes from backup | Merge the saved allow **and** deny backup back in |
 | Show all tracked wildcards | The full list with a filter box, past the card's 12-entry preview; picking one removes it after a confirm |
+| Show Codex rules | Inspect local literal rules and confirm supported allow-rule removal |
+| Restore Codex rules | Review captured missing declarations while retaining current rules and deliberate removals |
 | Auto Learn - Scan now | Read new Claude Code and Codex transcript history |
 | Auto Learn - Scan now (compatibility command) | The same action under the pre-rename command id, so an existing binding still resolves |
 | Auto Learn - Review candidates | Tick the families to grant, with policy overrides labelled |
@@ -351,10 +422,18 @@ dashboard title-bar buttons.
 | Auto Learn - Show families blocked by managed policy | Families whose prompt no user rule can stop, with the rule |
 | Derived guidance - review mitigations for prompts no rule can stop | Accept / decline each measured mitigation by id |
 | Drain project-local approvals into user scope | Promote, verify, then prune `.claude/settings.local.json` |
-| Toggle shell-style guidance in `~/.claude/CLAUDE.md` | The marker-fenced block that stops un-generalizable approvals |
-| Toggle memory gates in `~/.claude/CLAUDE.md` | Install or remove your compiled standing orders |
+| Review Codex Approvals | Review supported widenings of stored literal approvals |
+| Import Project Codex Rules | Review portable project declarations and accompanying restrictions for user scope |
+| Review Codex MCP Approvals | Approve one exact server/tool pair or undo a saved approval |
+| Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
+| Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
+| Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Rebuild recall index | Force a full CPU bge-small re-embed |
+| Search Codex native memory | Search by meaning and keywords, with a visible keyword fallback |
+| Rebuild Codex Memory Recall Index | Force CPU embedding of selected native passages into the profile's private cache |
+| Inspect Codex native memory | Open source availability and diagnostic details |
+| Review Native Codex Memory Gates | Review, install, refresh or remove the separate native gate block |
 
 ## Every setting
 
@@ -380,8 +459,8 @@ teardown open forever.
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation |
 | `gates.enabled` | `true` | Keep the memory-gates block installed on activation |
-| `memory.enabled` | `true` | The `MEMORY.md` lint, gauge and diagnostics |
-| `memory.dir` | `""` | Pin one memory store instead of auto-discovering |
+| `memory.enabled` | `true` | Claude index lint/gauge and native Codex diagnostics; native gate refresh has a separate installed-marker opt-in |
+| `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home |
 | `memory.lineBudget` | `300` | Characters one index hook line may use |
 | `memory.maxLines` | `200` | Lines Claude Code actually loads from `MEMORY.md` |
 | `memory.totalBudget` | `12000` | Byte budget for the whole always-loaded index |

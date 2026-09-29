@@ -209,7 +209,7 @@ rather than something that edits your settings behind your back.
 > file.
 
 Backups are taken before every write. Expand **Permission tools** and choose
-**Restore Claude permissions from backup** to recover entries a pass removed.
+**Restore permissions**, then **Claude Code**, to recover entries a pass removed.
 
 ---
 

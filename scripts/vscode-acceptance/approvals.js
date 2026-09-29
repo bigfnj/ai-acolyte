@@ -76,7 +76,7 @@ exports.run = async function run() {
     const ack = await waitFor(() => fs.existsSync(ackPath) && JSON.parse(fs.readFileSync(ackPath, 'utf8')), `${caseId} UI acknowledgement`, 60000);
     assert.equal(ack.caseId, caseId);
     assert.equal(ack.status, 'passed', ack.error || 'actual reviewed-rule UI failed');
-    assert.equal(ack.clicked, details.kind === 'project-import' ? 'importCodexRules' : 'reviewCodexApprovals');
+    assert.equal(ack.clicked, details.kind === 'project-import' ? 'permissionsImport' : 'runNow');
     approvals.steps.push(ack);
     return ack;
   };
@@ -152,11 +152,24 @@ exports.run = async function run() {
       return `VS Code ${vscode.version}; host ${process.version}; runtime workspace is separate from the project source workspace.`;
     });
     if (failed()) return;
-    await check('actual stored-approval Cancel preserves bytes and Apply adds a reusable user rule consumed by fresh Codex', async () => {
+    await check('the shared primary action runs Claude optimization and reviewed Codex widening with accurate saved-rule totals', async () => {
+      // The launcher retains its generated migration-fixture grant. It is a
+      // real saved declaration and must be included in the shared count.
+      const generatedPath = path.join(userRules, 'permission-wildcarding.rules');
+      const generatedBefore = fs.readFileSync(generatedPath, 'utf8');
+      const generated = parseCodexRules(generatedBefore);
+      assert.equal(generated.supported, true);
+      assert.deepEqual(generated.rules.map(({ pattern, decision }) => ({ pattern, decision })),
+        [{ pattern: ['git', 'ls-files'], decision: 'allow' }],
+        'WITNESS established generated native fixture contributes exactly one saved allow declaration');
       const original = '# Original approval and its inline tests stay untouched.\n'
         + 'prefix_rule(pattern = ["git","status","--short"], decision = "allow", match = ["git status --short"], not_match = ["git diff"])\n';
       fs.writeFileSync(stored, original);
       fs.writeFileSync(destination, initialDestination);
+      const restrictions = path.join(userRules, `acolyte-count-restrictions-${suffix}.rules`);
+      const restrictionText = declaration([`acolyte-count-prompt-${suffix}`], 'prompt') + '\n'
+        + declaration([`acolyte-count-forbidden-${suffix}`], 'forbidden') + '\n';
+      fs.writeFileSync(restrictions, restrictionText);
       const plan = manager.codexApprovalInventory('stored-widening').plans.find((item) => JSON.stringify(item.target.pattern) === '["git","status"]');
       assert.ok(plan, 'literal stored git status approval must offer a shorter safe prefix');
       checkPolicy('stored-before-review', ['git', 'status', '--porcelain'], 'none');
@@ -164,15 +177,45 @@ exports.run = async function run() {
       // explicit checker proves rule coverage; this runtime baseline is retained
       // so a successful call is never misreported as a newly suppressed prompt.
       await runRuntime('stored-before-review-builtin-allow', 'git', 'status --porcelain', approvals.gitWitness, true);
+      const settingsFile = path.join(home, '.claude', 'settings.json');
+      const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+      const seed = ['Bash(git status)', 'Bash(git status --short)', 'Read'];
+      const expectedClaude = ['Bash(git status *)', 'Read'];
+      settings.permissions = { ...settings.permissions, allow: seed,
+        ask: ['Bash(git push *)'], deny: ['Bash(rm *)'] };
+      fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+      // The settings watcher is an independent writer. Let it settle, then the
+      // native manual-only status witness proves the primary button also calls
+      // Claude rather than taking credit for the earlier automatic write.
+      await waitFor(() => JSON.stringify(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).permissions.allow.slice().sort())
+        === JSON.stringify(expectedClaude.slice().sort()), 'normal Claude watcher generalizes the non-wildcard fixture');
+      let stableSnapshot, stableSince = Date.now();
+      await waitFor(() => {
+        const current = JSON.stringify(snapshot());
+        if (current !== stableSnapshot) { stableSnapshot = current; stableSince = Date.now(); }
+        return Date.now() - stableSince >= 1000;
+      }, 'Claude watcher and backup bytes settle before the shared manual action');
       const before = snapshot();
-      await ask('widen-cancel', plan, 'Cancel');
+      const initialCounts = { total: '4', claude: '2', codex: '2' };
+      const cancel = await ask('widen-cancel', plan, 'Cancel', {
+        requireManualClaude: true, expectedCounts: initialCounts, expectedCountsAfter: initialCounts,
+      });
+      assert.match(cancel.manualClaude, /ai-acolyte: Claude permissions already optimal/,
+        'WITNESS shared primary button reaches the manual Claude leg before Codex review');
       assert.deepEqual(snapshot(), before, 'WITNESS reviewed approval Cancel preserves policy, learner, claims and backup bytes');
-      await ask('widen-apply', plan, 'Apply change');
+      await ask('widen-apply', plan, 'Apply change', {
+        expectedCounts: initialCounts, expectedCountsAfter: { total: '5', claude: '2', codex: '3' },
+      });
       await waitFor(() => fs.readFileSync(destination, 'utf8').includes(plan.target.text)
         && fs.existsSync(manager.paths.codexRemovals)
         && JSON.parse(fs.readFileSync(manager.paths.codexRemovals, 'utf8')).pending === null,
       'WITNESS actual reviewed Apply writes the wider user prefix');
       assert.equal(fs.readFileSync(stored, 'utf8'), original, 'stored approval source and inline tests changed');
+      assert.equal(fs.readFileSync(generatedPath, 'utf8'), generatedBefore, 'shared review preserves the counted generated baseline');
+      assert.equal(fs.readFileSync(restrictions, 'utf8'), restrictionText, 'counted prompt/forbidden rules remain unchanged');
+      const finalClaude = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).permissions;
+      assert.deepEqual({ ...finalClaude, allow: finalClaude.allow.slice().sort() },
+        { ...settings.permissions, allow: expectedClaude.slice().sort() }, 'shared primary action preserves Claude ask and deny entries');
       assert.equal(fs.readFileSync(destination, 'utf8'), initialDestination + plan.target.text + '\n');
       const record = JSON.parse(fs.readFileSync(manager.paths.codexRemovals, 'utf8'));
       assert.equal(record.pending, null); assert.equal(record.lastApproval.proposalKind, 'stored-widening');
@@ -180,7 +223,10 @@ exports.run = async function run() {
       checkPolicy('stored-after-review', ['git', 'status', '--porcelain'], 'allow');
       await runRuntime('stored-after-review', 'git', 'status --porcelain', approvals.gitWitness, true);
       checkPolicy('stored-neighbor', ['git', 'diff', '--stat'], 'none');
-      return 'Actual Cancel preserves bytes; Apply adds only git status to the user destination. Actual explicit policy changes from no match to allow and excludes git diff. Fresh Codex succeeds before and after because its built-in read-only assessment already permits git status; no prompt-reduction claim is made for that command.';
+      approvals.sharedPrimary = { seed, watcherGeneralized: expectedClaude, manualWitness: cancel.manualClaude,
+        generatedBaseline: { path: generatedPath, hash: hash(generatedBefore), allow: 1 },
+        countsBefore: initialCounts, countsAfter: { total: '5', claude: '2', codex: '3' }, prompt: 1, forbidden: 1 };
+      return 'The normal watcher generalizes the Claude seed, then the actual shared primary click independently emits the manual-only Claude status and opens Codex review. Saved allow totals show Claude 2 + Codex 2, then Codex 3 after Apply, including the preserved generated git ls-files baseline; prompt/forbidden stay excluded. Cancel preserves all bytes; Apply adds only git status. Fresh Codex succeeds before and after through its built-in read-only assessment; no prompt-reduction claim is made for that command.';
     });
     if (failed()) return;
     await check('actual project import preserves source files and carries an overlapping prompt into fresh cross-workspace Codex', async () => {
@@ -281,9 +327,9 @@ exports.run = async function run() {
     });
   } finally {
     approvals.status = failed() ? 'failed' : 'passed';
-    const artifacts = ['extension.js', 'package.json', 'codexFeaturesUi.js', 'autoLearnWorkerRunner.js',
+    const artifacts = ['extension.js', 'package.json', 'codexFeaturesUi.js', 'permissionActions.js', 'autoLearnWorkerRunner.js',
       'src/auto-learn-manager.js', 'src/auto-learn-worker.js', 'src/codex-rule-store.js', 'src/codex-reviewed-plans.js',
-      'src/codex-approval-plans.js', 'src/codex-rule-inventory.js', 'src/codex-policy.js'];
+      'src/codex-approval-plans.js', 'src/codex-rule-inventory.js', 'src/codex-policy.js', 'src/permission-summary.js'];
     const artifactHashes = Object.fromEntries(artifacts.filter((file) => fs.existsSync(path.join(extensionDir, file)))
       .map((file) => [file, hash(fs.readFileSync(path.join(extensionDir, file)))]));
     fs.writeFileSync(reportPath, JSON.stringify({ vscodeVersion: vscode.version, nodeVersion: process.version, extensionDir,

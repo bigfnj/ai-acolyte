@@ -1,12 +1,18 @@
 # AI Acolyte (VS Code extension)
 
 Watches `~/.claude/settings.json` and live-generalizes approved Claude Code
-permissions to depth-aware wildcards. Adds an Activity Bar dashboard: a hero card
-with the "Active" / "Idle" state, the version, the approved total and the
-wildcards / specific split, plus **Wildcard Now** and **Restore prunes from
-backup**; then collapsible rows, closed by default and summarised on the
-right: **Auto Learn**, **Project-local**, **Shell-style guidance**, **Memory
-gates**, **Memory**, and **Wildcards tracked**. That last
+permissions to depth-aware wildcards. The Activity Bar dashboard has one shared
+**Optimize permissions** action: it generalizes Claude entries, then opens the
+existing review for wider Codex prefixes. Codex changes still require confirmation.
+The saved-rule total combines Claude allow entries and local Codex shell allow
+declarations, with a per-agent breakdown. It excludes Codex prompt/forbidden rules
+and native MCP settings; it does not measure effective command access. Unreadable
+or unsupported inputs produce an incomplete count instead of a false zero.
+
+**Permission tools** starts collapsed. View/remove, restore and project import each
+have one entry that asks which agent to manage. Codex hook and native MCP configuration
+remain specific to Codex. Other collapsible rows include **Auto Learn**, **Project-local**,
+**Shell-style guidance**, **Memory gates**, **Memory**, and **Claude wildcards**. That last
 row lists each tracked wildcard with a one-click prune, capped at a 12-entry
 preview so it cannot become the panel. A separate **Codex memory** row provides native
 memory search, diagnostics and gate controls.
@@ -25,9 +31,9 @@ a Claude Code hook. The optional Codex after-turn hook has its own review requir
 On every write it also saves a high-water-mark backup of the allow list **and the
 deny list** to `~/.claude/backups/allow-list.latest.json`, so a managed-settings
 refresh that resets `settings.json` can't lose your accumulated wildcards or your
-safety boundary. Recover both with **Restore Claude permissions from backup** under
-the dashboard's collapsed **Permission tools** section, the title-bar `history` icon,
-or the `Acolyte: Restore prunes from backup` command.
+safety boundary. Choose **Restore permissions**, then **Claude Code**, under
+**Permission tools** or through the title-bar `history` icon. The
+`Acolyte: Restore prunes from backup` command remains available.
 
 deny is restored alongside allow deliberately: every other feature here ends its
 safety argument at "deny still wins", so bringing permissions back without the
@@ -390,9 +396,8 @@ Four buttons: **Scan now**, **Review (N)**, **Undo**, **Why prompt?**
 
 **Review** shows a live count of candidates the picker will actually offer —
 candidates an existing allow rule already covers are excluded from the count, since
-approving them changes no prompt. **Wildcard Now (N)** in the title bar shows how
-many allow entries the wildcarding pass would change; it reads 0 when your policy
-is already fully generalized.
+approving them changes no prompt. **Optimize permissions** handles existing saved
+permissions in both agents; Auto Learn Review handles history-derived proposals.
 
 **Apply safe** and **Cycle mode** were dropped from the card and remain in the
 Command Palette. Apply safe is a no-op wherever nothing is auto-safe — which, once
@@ -407,7 +412,11 @@ dashboard title-bar buttons.
 
 | Command | What it does |
 | --- | --- |
-| Wildcard Now | Run the generalization pass over `~/.claude/settings.json` once |
+| Optimize permissions (Claude + Codex) | Generalize Claude permissions, then review supported wider Codex prefixes |
+| View / remove permissions | Choose an agent, then open its existing inventory |
+| Restore permissions | Choose an agent, then open its existing recovery action |
+| Import project permissions | Choose an agent, then use Claude local promotion or reviewed Codex import |
+| Wildcard Claude permissions | Run only the Claude generalization pass |
 | Restore prunes from backup | Merge the saved allow **and** deny backup back in |
 | Show all tracked wildcards | The full list with a filter box, past the card's 12-entry preview; picking one removes it after a confirm |
 | Show Codex rules | Inspect local literal rules and confirm supported allow-rule removal |

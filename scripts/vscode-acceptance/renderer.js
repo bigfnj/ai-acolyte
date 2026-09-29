@@ -112,7 +112,8 @@ function inspectUi(expectedTitle) {
   const editors = [...document.querySelectorAll('.monaco-editor .view-lines')].filter(visible)
     .map((element) => String(element.innerText || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, ''));
   const notifications = [...document.querySelectorAll('.notification-list-item')].filter(visible).map(text);
-  return { windowTitle: document.title, pickers, dialogs, editors, notifications };
+  const statusbar = [...document.querySelectorAll('.statusbar-item')].filter(visible).map(text);
+  return { windowTitle: document.title, pickers, dialogs, editors, notifications, statusbar };
 }
 
 function diagnosticChecks(detail) {
@@ -172,8 +173,8 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
   const doc = frame?.contentDocument;
   if (!doc) return { ready: false, reason: 'active-frame document is not available', url: location.href };
   const ids = ['guidanceCard', 'gatesCard', 'guidanceBtn', 'gatesBtn', 'autoLearnCard', 'alScan', 'alReview', 'alUndo', 'alWhy',
-    'codexRules', 'codexRestore', 'codexHook', 'codexMemoryCard', 'searchCodexMemory', 'inspectCodexMemory',
-    'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates', 'claudeRules', 'restore'];
+    'runNow', 'permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'codexMemoryCard',
+    'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'];
   if (scrollTo) {
     let element;
     if (ids.includes(scrollTo)) element = doc.getElementById(scrollTo);
@@ -230,26 +231,27 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
     result.autoLearn.buttons[id] = { text: text(button), enabled: !button.disabled,
       buttonPoint: point(button), buttonHit: hit(button) };
   }
-  for (const id of ['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates']) {
+  for (const id of ['runNow', 'permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates']) {
     const button = doc.getElementById(id);
     result[id] = button ? { text: text(button), enabled: !button.disabled, visible: visible(button),
       buttonPoint: point(button), buttonHit: hit(button) } : null;
   }
   const toolsHead = doc.getElementById('permissionToolsToggle');
   const toolsBody = doc.getElementById('bodyPermissionTools');
-  const toolGroups = [];
-  for (const element of toolsBody?.children || []) {
-    if (element.matches('h3.permission-group')) toolGroups.push({ label: text(element), visible: visible(element), buttonIds: [] });
-    else if (element.tagName === 'BUTTON' && toolGroups.length) toolGroups[toolGroups.length - 1].buttonIds.push(element.id);
-  }
   result.permissionTools = toolsHead && toolsBody ? {
     text: text(toolsHead.querySelector('.rowname')), visible: visible(toolsHead),
     expanded: visible(toolsBody), hidden: toolsBody.hidden, ariaExpanded: toolsHead.getAttribute('aria-expanded'),
     controls: toolsHead.getAttribute('aria-controls'), focused: doc.activeElement === toolsHead,
     buttonIds: [...toolsBody.querySelectorAll('button')].map((button) => button.id),
-    groups: toolGroups,
+    groupCount: toolsBody.querySelectorAll('h3.permission-group').length,
     headPoint: point(toolsHead), headHit: hit(toolsHead),
   } : null;
+  result.permissions = {
+    total: text(doc.getElementById('total')), claude: text(doc.getElementById('claudeTotal')),
+    codex: text(doc.getElementById('codexTotal')), coverage: text(doc.getElementById('permissionCoverage')),
+    totalTitle: doc.getElementById('total')?.title, claudeTitle: doc.getElementById('claudeTotal')?.title,
+    codexTitle: doc.getElementById('codexTotal')?.title,
+  };
   const memoryHead = doc.querySelector('.rowhead[data-row="codexMemory"]');
   result.codexMemory = { visible: visible(doc.getElementById('codexMemoryCard')),
     expanded: visible(doc.getElementById('bodyCodexMemory')), badge: text(doc.getElementById('stCodexMemory')),
@@ -357,7 +359,7 @@ async function main() {
       return rows[0];
     });
     await click(row.point);
-    report.observations.push({ phase: 'diagnostic-picker-selected', caseId: activeDiagnostic.caseId, title, label });
+    if (activeDiagnostic) report.observations.push({ phase: 'diagnostic-picker-selected', caseId: activeDiagnostic.caseId, title, label });
   }
   function ackDiagnostic(value) {
     assert.equal(path.dirname(path.resolve(activeDiagnostic.ackPath)), path.dirname(options.progress),
@@ -473,9 +475,10 @@ async function main() {
         if (result.ready) {
           assert.ok(result.activeFrame.unscaled, 'dashboard inner iframe has an unsupported CSS transform');
           result.outerFrame = frame;
-          const entries = [result.guidance, result.gates, result.autoLearn, result.permissionTools, result.claudeRules, result.restore, result.codexRules, result.codexRestore,
+          const entries = [result.guidance, result.gates, result.autoLearn, result.permissionTools,
+            result.runNow, result.permissionsView, result.permissionsRestore, result.permissionsImport,
             result.codexHook, result.codexMemory, result.searchCodexMemory, result.inspectCodexMemory,
-            result.reviewCodexApprovals, result.importCodexRules, result.reviewCodexMcp, result.rebuildCodexMemory, result.codexMemoryGates,
+            result.reviewCodexMcp, result.rebuildCodexMemory, result.codexMemoryGates,
             ...Object.values(result.autoLearn.buttons)].filter(Boolean);
           for (const entry of entries) {
             for (const key of ['headPoint', 'buttonPoint']) {
@@ -501,11 +504,20 @@ async function main() {
     return null;
   }
   async function dashboardClick(control, part) {
-    if (['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'reviewCodexApprovals', 'reviewCodexMcp', 'importCodexRules'].includes(control)) {
+    const route = {
+      codexRules: ['permissionsView', 'View / remove permissions', 'Codex'],
+      codexRestore: ['permissionsRestore', 'Restore permissions', 'Codex'],
+      importCodexRules: ['permissionsImport', 'Import project permissions', 'Codex'],
+      claudeRules: ['permissionsView', 'View / remove permissions', 'Claude Code'],
+      restore: ['permissionsRestore', 'Restore permissions', 'Claude Code'],
+      reviewCodexApprovals: ['runNow'],
+    }[control];
+    if (route) control = route[0];
+    if (['permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'reviewCodexMcp'].includes(control)) {
       await permissionToolsReady();
     }
     const autoButton = control === 'autoLearn' && part !== 'head';
-    const directButton = ['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'].includes(control) && part === 'button';
+    const directButton = ['runNow', 'permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'].includes(control) && part === 'button';
     assert.ok(await dashboardState(directButton ? control : autoButton ? part : control + (part === 'head' ? 'Head' : 'Btn')),
       'dashboard became unavailable before the click');
     let movedPoint;
@@ -540,21 +552,31 @@ async function main() {
     });
     report.observations.push({ phase: 'dashboard-control-click', ...ready });
     await click(ready.point);
+    if (route?.[1]) {
+      const picker = await exactPicker(route[1]);
+      assert.deepEqual(picker.rows.map((row) => row.label).sort(), ['Claude Code', 'Codex'],
+        'WITNESS shared permission action offers both agents');
+      await selectSingle(route[1], route[2]);
+      await waitFor('waiting for the shared agent picker to close', async () => {
+        const current = await ui();
+        return current.pickers.every((entry) => entry.title !== route[1]) ? current : null;
+      });
+      report.observations.push({ phase: 'permission-agent-selected', control, title: route[1], agent: route[2] });
+    }
+    return control;
   }
   async function permissionToolsReady() {
-    const ids = ['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'reviewCodexApprovals', 'reviewCodexMcp', 'importCodexRules'];
+    const ids = ['permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'reviewCodexMcp'];
     const inspect = (state, expanded) => {
       const menu = state?.permissionTools;
       assert.ok(menu?.visible, 'WITNESS the actual Permission tools disclosure is visible');
       assert.equal(menu.text, 'Permission tools');
       assert.equal(menu.controls, 'bodyPermissionTools');
-      assert.deepEqual(menu.buttonIds, ids, 'WITNESS Permission tools contains exactly the eight Claude and Codex controls');
-      assert.deepEqual(menu.groups, [
-        { label: 'Claude Code', visible: expanded, buttonIds: ids.slice(0, 2) },
-        { label: 'Codex', visible: expanded, buttonIds: ids.slice(2) },
-      ], 'WITNESS Permission tools separates Claude Code and Codex actions under their visible headings');
-      assert.equal(state.claudeRules.text, 'View / remove Claude wildcards…');
-      assert.ok(state.restore.text.endsWith('Restore Claude permissions from backup'));
+      assert.deepEqual(menu.buttonIds, ids, 'WITNESS Permission tools contains exactly the five shared or agent-specific controls');
+      assert.equal(menu.groupCount, 0, 'WITNESS shared permission actions are not duplicated in agent groups');
+      assert.equal(state.permissionsView.text, 'View / remove permissions…');
+      assert.equal(state.permissionsRestore.text, 'Restore permissions…');
+      assert.equal(state.permissionsImport.text, 'Import project permissions…');
       assert.equal(menu.expanded, expanded, 'WITNESS Permission tools has the expected visible state');
       assert.equal(menu.hidden, !expanded);
       assert.equal(menu.ariaExpanded, String(expanded), 'WITNESS Permission tools announces its actual expanded state');
@@ -590,7 +612,7 @@ async function main() {
       const state = await dashboardState(); return state?.permissionTools?.expanded ? state : null;
     });
     inspect(reopened, true);
-    report.permissionTools = { status: 'passed', buttonIds: ids, groups: reopened.permissionTools.groups, initialCollapsed: true,
+    report.permissionTools = { status: 'passed', buttonIds: ids, initialCollapsed: true,
       mouseExpanded: true, keyboardCollapsed: true, keyboardExpanded: true, retainedAcrossActions: 0,
       closedScreenshot, openScreenshot };
   }
@@ -810,10 +832,10 @@ async function main() {
       fixture.expectedDetailIncludes.every((text) => typeof text === 'string' && text.length), 'modal detail assertions are required');
     const dashboard = await waitFor('waiting for actual Codex inventory dashboard button', async () => {
       const state = await dashboardState();
-      return state?.codexRules ? state : null;
+      return state?.permissionsView ? state : null;
     });
-    assert.equal(dashboard.codexRules.text, 'View / remove Codex rules…', 'unexpected Codex inventory button label');
-    assert.equal(dashboard.codexRules.enabled, true, 'Codex inventory button must be enabled');
+    assert.equal(dashboard.permissionsView.text, 'View / remove permissions…', 'unexpected shared inventory button label');
+    assert.equal(dashboard.permissionsView.enabled, true, 'shared inventory button must be enabled');
     await dashboardClick('codexRules', 'button');
     const picker = await exactPicker('Codex rules');
     await fillInput(picker, filter);
@@ -908,10 +930,10 @@ async function main() {
       fixture.expectedDetailIncludes.every((text) => typeof text === 'string' && text.length), 'restore detail assertions are required');
     const dashboard = await waitFor('waiting for actual Codex restore dashboard button', async () => {
       const state = await dashboardState();
-      return state?.codexRestore ? state : null;
+      return state?.permissionsRestore ? state : null;
     });
-    assert.equal(dashboard.codexRestore.text, 'Restore Codex rules…');
-    assert.equal(dashboard.codexRestore.enabled, true);
+    assert.equal(dashboard.permissionsRestore.text, 'Restore permissions…');
+    assert.equal(dashboard.permissionsRestore.enabled, true);
     await dashboardClick('codexRestore', 'button');
     let selected = null;
     if (!resume) {
@@ -1390,13 +1412,36 @@ async function main() {
     if (fixture.caseId.startsWith('import-')) assert.equal(fixture.expectedLabel, JSON.stringify([`acolyte-import-${fixture.suffix}.cmd`]));
     if (fixture.caseId === 'stale-apply') assert.equal(fixture.expectedLabel, '["git","rev-parse"]');
     if (fixture.caseId === 'inspect-unsupported') assert.equal(fixture.expectedLabel, fixture.expectedPath);
-    const button = fixture.kind === 'project-import' ? 'importCodexRules' : 'reviewCodexApprovals';
+    const button = fixture.kind === 'project-import' ? 'permissionsImport' : 'runNow';
     const title = fixture.kind === 'project-import' ? 'Import project Codex rules' : 'Review Codex approvals';
     const before = await waitFor('waiting for reviewed-rule dashboard controls', async () => {
       const value = await dashboardState(); return value?.[button] ? value : null;
     });
-    assert.equal(before[button].enabled, true); assert.equal(before[button].text, title + '…');
-    await dashboardClick(button, 'button');
+    assert.equal(before[button].enabled, true);
+    if (fixture.kind === 'project-import') assert.equal(before[button].text, 'Import project permissions…');
+    else assert.match(before[button].text, /^⟳\s+Optimize permissions$/);
+    let countsBefore;
+    if (fixture.expectedCounts) {
+      const counted = await waitFor('waiting for actual shared permission totals', async () => {
+        const current = await dashboardState();
+        return current && Object.entries(fixture.expectedCounts).every(([name, value]) => current.permissions[name] === String(value)) ? current : null;
+      });
+      countsBefore = counted.permissions;
+      assert.match(countsBefore.totalTitle, /not a count of commands or effective access/);
+      assert.match(countsBefore.codexTitle, /1 prompt and 1 forbidden declarations are excluded/,
+        'WITNESS restrictive Codex declarations are described but excluded from saved allow totals');
+      assert.equal(countsBefore.coverage, '');
+      report.permissionSummaryScreenshot = await dashboardScreenshot('shared-permission-counts');
+    }
+    const manualText = 'ai-acolyte: Claude permissions already optimal';
+    if (fixture.requireManualClaude) assert.equal((await ui()).statusbar.some((text) => text.includes(manualText)), false,
+      'WITNESS manual Claude status must be absent before the shared primary click');
+    const clicked = await dashboardClick(fixture.kind === 'project-import' ? 'importCodexRules' : 'runNow', 'button');
+    let manualClaude;
+    if (fixture.requireManualClaude) {
+      manualClaude = await waitFor('waiting for the shared primary action to run Claude optimization', async () =>
+        (await ui()).statusbar.find((text) => text.includes(manualText)) || null);
+    }
     let selected;
     let dialog;
     let screenshot;
@@ -1452,7 +1497,15 @@ async function main() {
       });
       screenshot = await dashboardScreenshot('codex-approval-' + fixture.caseId + '-warning');
     }
-    const evidence = { status: 'passed', clicked: button, selectedLabel: selected?.label || null,
+    let countsAfter;
+    if (fixture.expectedCountsAfter) {
+      const counted = await waitFor('waiting for shared counts after reviewed action', async () => {
+        const current = await dashboardState();
+        return current && Object.entries(fixture.expectedCountsAfter).every(([name, value]) => current.permissions[name] === String(value)) ? current : null;
+      });
+      countsAfter = counted.permissions;
+    }
+    const evidence = { status: 'passed', clicked, manualClaude, countsBefore, countsAfter, selectedLabel: selected?.label || null,
       selectedText: selected?.text || null, modalDecision: fixture.expectedDecision, dialogText: dialog?.detail || null, warning, screenshot };
     report.codexApprovals.push({ caseId: fixture.caseId, ...evidence });
     ackApproval(evidence); activeApproval = null;
@@ -1579,11 +1632,11 @@ async function main() {
       if (label && buttons.length === 1) { await click(buttons[0].point); report.failureUiDismissed = dialog.title; }
     } else if (!state.dialogs.length && state.pickers.length === 1 &&
         (/^(Auto Learn candidates|Which agent showed the approval prompt\?|Which shell syntax should Auto Learn parse\?|Why did Codex prompt\?)/.test(state.pickers[0].title) ||
-          (activePrune && state.pickers[0].title === 'Codex rules') ||
-          (activeRestore && state.pickers[0].title === 'Restore Codex rules') ||
+          (activePrune && ['Codex rules', 'View / remove permissions'].includes(state.pickers[0].title)) ||
+          (activeRestore && ['Restore Codex rules', 'Restore permissions'].includes(state.pickers[0].title)) ||
           (activeDerived && (/^Derived guidance\b/.test(state.pickers[0].title) || state.pickers[0].title === activeDerived.expectedLabel)) ||
           (activeFeature?.kind === 'search' && ['AI Acolyte: Search Codex memory', 'AI Acolyte: Codex memory matches'].includes(state.pickers[0].title)) ||
-          (activeApproval && ['Review Codex approvals', 'Import project Codex rules'].includes(state.pickers[0].title)) ||
+          (activeApproval && ['Review Codex approvals', 'Import project Codex rules', 'Import project permissions'].includes(state.pickers[0].title)) ||
           (activeMcp && state.pickers[0].title === 'Review Codex MCP approvals') ||
           (activeRecall && ['AI Acolyte: Search Codex memory', 'AI Acolyte: Codex memory matches', 'AI Acolyte: Codex memory matches by meaning and keywords'].includes(state.pickers[0].title)) ||
           (activeNativeGates?.kind === 'mcp-readonly' && state.pickers[0].title === 'Review Codex MCP approvals'))) {

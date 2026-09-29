@@ -39,6 +39,8 @@ const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
 const { CodexMemoryLint } = require('./codexMemoryLint');
 const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
+const { createPermissionActions } = require('./permissionActions');
+const { readCodexPermissionSummary } = require('./src/permission-summary');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, readCompiled, compiledPath } = require('./src/agent-gates');
@@ -2200,8 +2202,16 @@ function activate(context) {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(WildcardingViewProvider.viewId, dashboard)
   );
+  const codexRulesWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(vscode.Uri.file(CODEX_HOME_DIR), 'rules/*.rules')
+  );
+  const refreshPermissionCounts = () => { if (!deactivated) dashboard?.refresh(); };
+  codexRulesWatcher.onDidChange(refreshPermissionCounts);
+  codexRulesWatcher.onDidCreate(refreshPermissionCounts);
+  codexRulesWatcher.onDidDelete(refreshPermissionCounts);
+  context.subscriptions.push(codexRulesWatcher);
 
-  // Manual trigger — from the Command Palette or the view's title-bar button.
+  // Claude-only compatibility command; the dashboard action coordinates both agents.
   context.subscriptions.push(
     vscode.commands.registerCommand('permission-wildcarding.runNow', () => runWildcarding(true))
   );
@@ -2243,6 +2253,25 @@ function activate(context) {
     refresh: () => dashboard?.refresh(),
   });
   codexFeatureUi = codexFeatures;
+  const permissionActions = createPermissionActions({
+    runClaude: () => runWildcarding(true),
+    reviewCodex: () => codexFeatures.reviewRules('stored-widening'),
+    isActive: () => !deactivated,
+  });
+  context.subscriptions.push(permissionActions,
+    vscode.commands.registerCommand('permission-wildcarding.optimizePermissions', async () => {
+      try { await permissionActions.optimize(); }
+      catch (error) {
+        if (!deactivated) vscode.window.showErrorMessage(`AI Acolyte: permission optimization failed: ${error.message}`);
+      }
+    }),
+    vscode.commands.registerCommand('permission-wildcarding.viewPermissions', () =>
+      choosePermissionAgent('View / remove permissions', showWildcardPicker, showCodexRulePicker)),
+    vscode.commands.registerCommand('permission-wildcarding.restorePermissions', () =>
+      choosePermissionAgent('Restore permissions', restoreFromBackup, showCodexRestorePicker)),
+    vscode.commands.registerCommand('permission-wildcarding.importPermissions', () =>
+      choosePermissionAgent('Import project permissions', () => drainLocal(true), () => codexFeatures.reviewRules('project-import')))
+  );
   codexMemoryGatesUi = createCodexMemoryGatesUi(vscode, {
     codexHome: CODEX_HOME_DIR,
     run: (operation, request) => runAutoLearnWorker(operation, request),
@@ -2679,7 +2708,7 @@ function runWildcarding(manual = false) {
   // first reaches the backup.
   const reportAlreadyOptimal = (list, deny) => {
     backupPolicy(list, deny);
-    if (manual) vscode.window.setStatusBarMessage('$(shield) ai-acolyte: already optimal', 4000);
+    if (manual) vscode.window.setStatusBarMessage('$(shield) ai-acolyte: Claude permissions already optimal', 4000);
     dashboard?.refresh(wildcardingHint(list));
   };
 
@@ -3539,6 +3568,16 @@ async function showCodexRulePicker() {
 
 // ── dashboard (Activity Bar webview) ────────────────────────────────────────────
 
+async function choosePermissionAgent(title, claude, codex) {
+  const pick = await vscode.window.showQuickPick([
+    { label: 'Claude Code', description: 'Claude settings and saved permissions', agent: 'claude' },
+    { label: 'Codex', description: 'Native command-prefix rules', agent: 'codex' },
+  ], { title, placeHolder: 'Choose the permissions to manage' });
+  if (deactivated || !pick) return;
+  if (pick.agent === 'claude') return claude();
+  if (pick.agent === 'codex') return codex();
+}
+
 // Short enough to read as instant, long enough to collapse a watcher pair. The
 // other bounces in this file are 200ms–2s because they debounce *work*; this one
 // debounces a render, so it is sized to the burst and nothing more.
@@ -3565,8 +3604,10 @@ class WildcardingViewProvider {
 
     view.webview.onDidReceiveMessage((msg) => {
       switch (msg?.type) {
-        case 'runNow':       vscode.commands.executeCommand('permission-wildcarding.runNow'); break;
-        case 'restore':      vscode.commands.executeCommand('permission-wildcarding.restoreBackup'); break;
+        case 'optimizePermissions': vscode.commands.executeCommand('permission-wildcarding.optimizePermissions'); break;
+        case 'viewPermissions': vscode.commands.executeCommand('permission-wildcarding.viewPermissions'); break;
+        case 'restorePermissions': vscode.commands.executeCommand('permission-wildcarding.restorePermissions'); break;
+        case 'importPermissions': vscode.commands.executeCommand('permission-wildcarding.importPermissions'); break;
         case 'autoLearnScan': vscode.commands.executeCommand('permission-wildcarding.autoLearnScan'); break;
         case 'autoLearnReview': vscode.commands.executeCommand('permission-wildcarding.autoLearnReview'); break;
         case 'autoLearnUndo': vscode.commands.executeCommand('permission-wildcarding.autoLearnUndo'); break;
@@ -3577,12 +3618,8 @@ class WildcardingViewProvider {
         case 'toggleGuidance': vscode.commands.executeCommand('permission-wildcarding.toggleGuidance'); break;
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
         case 'showWildcards': vscode.commands.executeCommand('permission-wildcarding.showWildcards'); break;
-        case 'showCodexRules': vscode.commands.executeCommand('permission-wildcarding.showCodexRules'); break;
-        case 'restoreCodexRules': vscode.commands.executeCommand('permission-wildcarding.restoreCodexRules'); break;
         case 'codexHook': vscode.commands.executeCommand('permission-wildcarding.codexHook'); break;
-        case 'reviewCodexApprovals': vscode.commands.executeCommand('permission-wildcarding.reviewCodexApprovals'); break;
         case 'reviewCodexMcp': vscode.commands.executeCommand('permission-wildcarding.reviewCodexMcp'); break;
-        case 'importCodexRules': vscode.commands.executeCommand('permission-wildcarding.importCodexRules'); break;
         case 'searchCodexMemory': vscode.commands.executeCommand('permission-wildcarding.searchCodexMemory'); break;
         case 'rebuildCodexMemory': vscode.commands.executeCommand('permission-wildcarding.rebuildCodexMemory'); break;
         case 'codexMemoryGates': vscode.commands.executeCommand('permission-wildcarding.codexMemoryGates'); break;
@@ -3690,7 +3727,15 @@ class WildcardingViewProvider {
       settingsState = liveState.state;
       if (liveState.state === SETTINGS_PRESENT) settings = liveState.settings;
     } catch { settingsState = SETTINGS_UNREADABLE; }
-    const allow = Array.isArray(settings?.permissions?.allow) ? settings.permissions.allow : [];
+    const allow = Array.isArray(settings?.permissions?.allow) ? settings.permissions.allow.filter((entry) => typeof entry === 'string') : [];
+    const permissions = settings?.permissions;
+    const validPermissionsContainer = permissions === undefined || (permissions !== null && typeof permissions === 'object' && !Array.isArray(permissions));
+    const claudePermissionsComplete = settingsState !== SETTINGS_UNREADABLE && validPermissionsContainer && ['allow', 'ask', 'deny'].every((key) => {
+      const entries = settings?.permissions?.[key];
+      return entries === undefined || (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'));
+    });
+    const codexPermissions = readCodexPermissionSummary({ home: os.homedir(), codexHome: CODEX_HOME_DIR,
+      target: autoLearnConfig().codexRulesPath });
     const wildcards = allow.filter((p) => p.includes('*')).sort();
     // What Wildcard Now would actually change. The "specific" tally is not that
     // number: an entry with no `*` is often one the pass can never generalize
@@ -3740,6 +3785,8 @@ class WildcardingViewProvider {
       version: extensionVersion(),
       codexWatching,
       total: allow.length,
+      claudePermissionsComplete,
+      codexPermissions,
       wildcardCount: wildcards.length,
       specificCount: allow.length - wildcards.length,
       pendingWildcard,
@@ -3896,7 +3943,6 @@ class WildcardingViewProvider {
   .rowbody[hidden] { display: none; }
   #bodyPermissionTools:not([hidden]) { display: grid; gap: 6px; }
   #bodyPermissionTools button.restore { margin: 0; }
-  .permission-group { margin: 4px 0 0; font-size: 11px; color: var(--vscode-descriptionForeground); }
   /* The card markup inside a row keeps its ids and its JS untouched, and simply
      stops drawing itself as a card. */
   .row .card { background: none; border: none; border-radius: 0; padding: 0; margin: 0 0 8px; }
@@ -3909,15 +3955,17 @@ class WildcardingViewProvider {
 </head>
 <body>
   <div class="hero">
-    <div class="status"><span id="dot" class="dot"></span><span id="statusText">Active</span><span id="version" class="ver"></span></div>
+    <div class="status"><span id="dot" class="dot"></span><span id="statusText">Permissions</span><span id="version" class="ver"></span></div>
     <div class="muted sub" id="watching">watching settings.json</div>
 
-    <div class="heronum"><span id="total">–</span> <small>approved</small></div>
+    <div class="heronum"><span id="total">–</span> <small>saved allow rules</small></div>
     <div class="herosub">
-      <span id="wildcards">–</span> wildcards · <span id="specific">–</span> specific
+      <span id="claudeTotal">–</span> Claude · <span id="codexTotal">–</span> Codex
     </div>
+    <div class="muted" id="permissionCoverage"></div>
 
-    <button class="run" id="runNow">⟳  Wildcard Claude permissions</button>
+    <button class="run" id="runNow" title="Optimize Claude permissions, then review wider Codex command prefixes">⟳  Optimize permissions</button>
+    <div class="muted sub">Claude wildcards + reviewed Codex prefixes</div>
     <div class="muted sub" id="lastRun"></div>
     <div class="muted" id="backup"></div>
   </div>
@@ -3929,16 +3977,11 @@ class WildcardingViewProvider {
       <span class="rowname">Permission tools</span>
     </button>
     <div class="rowbody" id="bodyPermissionTools" hidden>
-      <h3 class="permission-group">Claude Code</h3>
-      <button class="restore" id="claudeRules">View / remove Claude wildcards…</button>
-      <button class="restore" id="restore" title="Merge saved Claude allow and deny entries back into settings.json">⤺  Restore Claude permissions from backup</button>
-      <h3 class="permission-group">Codex</h3>
-      <button class="restore" id="codexRules">View / remove Codex rules…</button>
-      <button class="restore" id="codexRestore">Restore Codex rules…</button>
+      <button class="restore" id="permissionsView">View / remove permissions…</button>
+      <button class="restore" id="permissionsRestore">Restore permissions…</button>
+      <button class="restore" id="permissionsImport">Import project permissions…</button>
       <button class="restore" id="codexHook">Configure Codex after-turn learning…</button>
-      <button class="restore" id="reviewCodexApprovals">Review Codex approvals…</button>
       <button class="restore" id="reviewCodexMcp">Review Codex MCP approvals…</button>
-      <button class="restore" id="importCodexRules">Import project Codex rules…</button>
     </div>
   </section>
 
@@ -4466,12 +4509,10 @@ class WildcardingViewProvider {
   }
 
   function render(d) {
-    $('dot').className = 'dot' + (d.active ? '' : ' idle');
-    // Was a two-way d.active branch, which told a user whose file
-    // was corrupt that it did not exist. Two different faults, two different fixes.
-    $('statusText').textContent = d.settingsState === 'unreadable'
-      ? 'settings.json unreadable — writes are refused'
-      : (d.active ? 'Active' : 'Idle — settings.json not found');
+    const countsComplete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable'
+      && d.codexPermissions?.complete === true;
+    $('dot').className = 'dot' + (countsComplete ? '' : ' idle');
+    $('statusText').textContent = countsComplete ? 'Permissions' : 'Permissions · count incomplete';
     // Empty string when the manifest could not be read, which renders as nothing
     // rather than as 'v' or 'undefined'.
     $('version').textContent = d.version ? 'v' + d.version : '';
@@ -4482,22 +4523,33 @@ class WildcardingViewProvider {
     renderGates(d.gates);
     renderMemory(d.memory);
     renderCodexMemory(d.codexMemory);
-    $('lastRun').textContent = timeAgo(d.lastRun);
+    $('lastRun').textContent = d.lastRun ? 'Claude ' + timeAgo(d.lastRun) : '';
     $('backup').textContent = d.backupCount
-      ? 'backup: ' + d.backupCount + ' entries saved'
-      : 'backup: none yet';
-    $('total').textContent = d.total;
-    $('wildcards').textContent = d.wildcardCount;
-    $('specific').textContent = d.specificCount;
+      ? 'Claude backup: ' + d.backupCount + ' entries saved'
+      : 'Claude backup: none yet';
+    const codex = d.codexPermissions || { allow: 0, complete: false, issues: [] };
+    const claudeComplete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable';
+    const countText = (count, complete) => complete ? String(count) : count ? count + '+' : '?';
+    $('claudeTotal').textContent = countText(d.total, claudeComplete);
+    $('codexTotal').textContent = countText(codex.allow, codex.complete);
+    $('total').textContent = countText(d.total + codex.allow, claudeComplete && codex.complete);
+    $('total').title = 'Saved Claude allow entries plus local Codex shell allow declarations; not a count of commands or effective access.';
+    $('claudeTotal').title = d.wildcardCount + ' wildcards; ' + d.specificCount + ' specific entries';
+    $('codexTotal').title = (codex.prompt || 0) + ' prompt and ' + (codex.forbidden || 0)
+      + ' forbidden declarations are excluded. MCP, project, managed and session approvals are outside this count.';
+    $('permissionCoverage').textContent = [
+      !claudeComplete ? 'Claude count incomplete.' : '',
+      !codex.complete ? 'Codex count incomplete.' : '',
+    ].filter(Boolean).join(' ');
+    $('permissionCoverage').title = (codex.issues || []).map((issue) => issue.reason).join(' · ');
     $('wcount').textContent = d.wildcardCount + ' total';
-    $('runNow').textContent = '⟳  Wildcard Claude permissions' + (d.pendingWildcard > 0 ? ' (' + d.pendingWildcard + ')' : '');
 
     const list = $('list');
     list.innerHTML = '';
     if (!d.wildcards.length) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'No wildcards yet — approve some commands, or click Wildcard Now.';
+      li.textContent = 'No Claude wildcards yet: approve some commands, or click Optimize permissions.';
       list.appendChild(li);
     } else {
       // Capped, because this list is a symptom of the tool WORKING: on this
@@ -4539,19 +4591,16 @@ class WildcardingViewProvider {
     renderRowStates(d);
   }
 
-  $('runNow').addEventListener('click', () => vscode.postMessage({ type: 'runNow' }));
+  $('runNow').addEventListener('click', () => vscode.postMessage({ type: 'optimizePermissions' }));
   $('alScan').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnScan' }));
   $('alReview').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnReview' }));
   $('alUndo').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnUndo' }));
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
-  $('restore').addEventListener('click', () => vscode.postMessage({ type: 'restore' }));
-  $('claudeRules').addEventListener('click', () => vscode.postMessage({ type: 'showWildcards' }));
-  $('codexRules').addEventListener('click', () => vscode.postMessage({ type: 'showCodexRules' }));
-  $('codexRestore').addEventListener('click', () => vscode.postMessage({ type: 'restoreCodexRules' }));
+  $('permissionsView').addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions' }));
+  $('permissionsRestore').addEventListener('click', () => vscode.postMessage({ type: 'restorePermissions' }));
+  $('permissionsImport').addEventListener('click', () => vscode.postMessage({ type: 'importPermissions' }));
   $('codexHook').addEventListener('click', () => vscode.postMessage({ type: 'codexHook' }));
-  $('reviewCodexApprovals').addEventListener('click', () => vscode.postMessage({ type: 'reviewCodexApprovals' }));
   $('reviewCodexMcp').addEventListener('click', () => vscode.postMessage({ type: 'reviewCodexMcp' }));
-  $('importCodexRules').addEventListener('click', () => vscode.postMessage({ type: 'importCodexRules' }));
   $('searchCodexMemory').addEventListener('click', () => vscode.postMessage({ type: 'searchCodexMemory' }));
   $('rebuildCodexMemory').addEventListener('click', () => vscode.postMessage({ type: 'rebuildCodexMemory' }));
   $('codexMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'codexMemoryGates' }));

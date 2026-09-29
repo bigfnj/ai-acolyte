@@ -422,8 +422,10 @@ test('every dashboard message reaches its command, and nothing else does', async
     // both arms stayed alive through three audits. The palette commands they targeted still
     // exist and are still covered by extension-activation.test.js.
     const routes = [
-      ['runNow', 'permission-wildcarding.runNow'],
-      ['restore', 'permission-wildcarding.restoreBackup'],
+      ['optimizePermissions', 'permission-wildcarding.optimizePermissions'],
+      ['viewPermissions', 'permission-wildcarding.viewPermissions'],
+      ['restorePermissions', 'permission-wildcarding.restorePermissions'],
+      ['importPermissions', 'permission-wildcarding.importPermissions'],
       ['autoLearnScan', 'permission-wildcarding.autoLearnScan'],
       ['autoLearnReview', 'permission-wildcarding.autoLearnReview'],
       ['autoLearnUndo', 'permission-wildcarding.autoLearnUndo'],
@@ -434,12 +436,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['toggleGuidance', 'permission-wildcarding.toggleGuidance'],
       ['toggleGates', 'permission-wildcarding.toggleGates'],
       ['showWildcards', 'permission-wildcarding.showWildcards'],
-      ['showCodexRules', 'permission-wildcarding.showCodexRules'],
-      ['restoreCodexRules', 'permission-wildcarding.restoreCodexRules'],
       ['codexHook', 'permission-wildcarding.codexHook'],
-      ['reviewCodexApprovals', 'permission-wildcarding.reviewCodexApprovals'],
       ['reviewCodexMcp', 'permission-wildcarding.reviewCodexMcp'],
-      ['importCodexRules', 'permission-wildcarding.importCodexRules'],
       ['searchCodexMemory', 'permission-wildcarding.searchCodexMemory'],
       ['rebuildCodexMemory', 'permission-wildcarding.rebuildCodexMemory'],
       ['codexMemoryGates', 'permission-wildcarding.codexMemoryGates'],
@@ -515,6 +513,84 @@ test('every dashboard message reaches its command, and nothing else does', async
   } finally {
     await app.dispose();
   }
+});
+
+test('shared permissions count includes both agents without counting Codex restrictions as approvals', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git *)', 'Edit'], deny: ['Bash(rm *)'] } });
+  const rules = path.join(env.tempHome, '.codex', 'rules');
+  fs.mkdirSync(rules, { recursive: true });
+  fs.writeFileSync(path.join(rules, 'user.rules'), [
+    'prefix_rule(pattern=["git", "status"], decision="allow")',
+    'prefix_rule(pattern=["rg"], decision="allow")',
+    'prefix_rule(pattern=["git", "push"], decision="prompt")',
+    'prefix_rule(pattern=["rm"], decision="forbidden")', '',
+  ].join('\n'));
+  const app = harness(env.tempHome, { settings: { 'autoLearn.codexScope': 'off' } });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.equal(data.total, 2);
+    assert.equal(data.codexPermissions.allow, 2, 'inventory remains visible while Codex auto-export is off');
+    const rendered = renderDashboard(app.provider, data);
+    assert.equal(rendered.node('total').textContent, '4', 'WITNESS combined count must include both native stores');
+    assert.equal(rendered.node('claudeTotal').textContent, '2');
+    assert.equal(rendered.node('codexTotal').textContent, '2');
+    assert.equal(rendered.node('permissionCoverage').textContent, '');
+    assert.match(rendered.node('codexTotal').title, /1 prompt and 1 forbidden/);
+  } finally { await app.dispose(); }
+});
+
+test('shared permission count shows incomplete sources instead of treating unreadable data as zero', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Edit'], deny: [] } });
+  const rules = path.join(env.tempHome, '.codex', 'rules');
+  fs.mkdirSync(rules, { recursive: true });
+  fs.writeFileSync(path.join(rules, 'computed.rules'), 'for item in commands:\n    prefix_rule(pattern=item, decision="allow")\n');
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    const rendered = renderDashboard(app.provider, data);
+    assert.equal(rendered.node('total').textContent, '1+');
+    assert.equal(rendered.node('codexTotal').textContent, '?');
+    assert.equal(rendered.node('permissionCoverage').textContent, 'Codex count incomplete.',
+      'WITNESS unsupported Codex data must remain visible beside the known count');
+    const unknown = structuredClone(data);
+    unknown.total = 0;
+    unknown.settingsState = 'unreadable';
+    unknown.claudePermissionsComplete = false;
+    const both = renderDashboard(app.provider, unknown);
+    assert.equal(both.node('total').textContent, '?');
+    assert.equal(both.node('claudeTotal').textContent, '?');
+    assert.equal(both.node('permissionCoverage').textContent, 'Claude count incomplete. Codex count incomplete.');
+  } finally { await app.dispose(); }
+});
+
+test('malformed Claude permission containers stay incomplete', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    for (const permissions of [42, [], null, 'invalid']) {
+      env.write({ permissions });
+      app.provider.refresh();
+      await settle();
+      const data = ui.posted.at(-1);
+      assert.equal(data.claudePermissionsComplete, false,
+        'WITNESS malformed permissions container cannot be a complete zero');
+      const rendered = renderDashboard(app.provider, data);
+      assert.equal(rendered.node('claudeTotal').textContent, '?');
+      assert.match(rendered.node('permissionCoverage').textContent, /Claude count incomplete/);
+    }
+  } finally { await app.dispose(); }
 });
 
 test('a hide/show race disposes the dead view, never the live one', async (t) => {

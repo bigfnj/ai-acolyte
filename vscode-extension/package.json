@@ -37,8 +37,26 @@
     },
     "commands": [
       {
+        "command": "permission-wildcarding.optimizePermissions",
+        "title": "AI Acolyte: Optimize permissions (Claude + Codex)",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "permission-wildcarding.viewPermissions",
+        "title": "AI Acolyte: View / remove permissions"
+      },
+      {
+        "command": "permission-wildcarding.restorePermissions",
+        "title": "AI Acolyte: Restore permissions",
+        "icon": "$(history)"
+      },
+      {
+        "command": "permission-wildcarding.importPermissions",
+        "title": "AI Acolyte: Import project permissions"
+      },
+      {
         "command": "permission-wildcarding.runNow",
-        "title": "AI Acolyte: Wildcard Now",
+        "title": "AI Acolyte: Wildcard Claude permissions",
         "icon": "$(sync)"
       },
       {
@@ -175,7 +193,7 @@
     "menus": {
       "view/title": [
         {
-          "command": "permission-wildcarding.runNow",
+          "command": "permission-wildcarding.optimizePermissions",
           "when": "view == permissionWildcarding.dashboard",
           "group": "navigation@1"
         },
@@ -185,7 +203,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "permission-wildcarding.restoreBackup",
+          "command": "permission-wildcarding.restorePermissions",
           "when": "view == permissionWildcarding.dashboard",
           "group": "navigation@3"
         }

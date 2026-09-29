@@ -39,9 +39,11 @@ async function harness(t, options = {}) {
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   fs.mkdirSync(path.join(home, 'workspace'));
   fs.writeFileSync(rulesPath, '# isolated UI fixture\n');
-  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), '{"permissions":{"allow":["Bash(git *)"]}}\n');
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+    permissions: { allow: options.allow || ['Bash(git *)'] },
+  }) + '\n');
   const rule = { id: 'declaration-1', path: rulesPath, fileHash: 'a'.repeat(64), pattern: ['git', 'status'],
-    decision: 'allow', owned: true, removable: true };
+    start: 0, decision: 'allow', owned: true, removable: true };
   const inventory = { files: [{ path: rulesPath, fileHash: rule.fileHash, supported: true }],
     rules: [rule], suppressionCount: 2,
     blindSpots: ['Managed and system rules are not listed.', 'Session approvals and sandbox restrictions are outside this inventory.'],
@@ -61,6 +63,7 @@ async function harness(t, options = {}) {
   const pendingWarnings = [];
   const pendingRestores = [];
   const executed = [];
+  const executedArgs = [];
   let provider;
   const vscode = {
     ConfigurationTarget: { Global: 1 }, StatusBarAlignment: { Right: 2 },
@@ -68,7 +71,7 @@ async function harness(t, options = {}) {
     Uri: { file: (fsPath) => ({ fsPath }) },
     commands: {
       registerCommand(id, callback) { commands.set(id, callback); return disposable(); },
-      executeCommand(id) { executed.push(id); },
+      executeCommand(id, ...args) { executed.push(id); executedArgs.push(args); },
     },
     window: {
       createStatusBarItem() { return { hide() {}, show() {}, dispose() {} }; },
@@ -109,7 +112,10 @@ async function harness(t, options = {}) {
       createAutoLearnWorkerRunner: ({ optionsProvider, onMutation }) => ({
         async run(operation, ...args) {
           calls.push({ operation, args, options: optionsProvider() });
-          if (operation === 'codexInventory') return inventory;
+          if (operation === 'codexInventory') {
+            if (options.inventoryError) throw new Error(options.inventoryError);
+            return inventory;
+          }
           if (operation === 'codexRestoreInventory') return restoreInventory;
           if (operation === 'restoreCodexRules') {
             if (options.restoreError) throw new Error(options.restoreError);
@@ -159,9 +165,89 @@ async function harness(t, options = {}) {
   extension.activate({ subscriptions });
   assert.ok(commands.has('permission-wildcarding.showCodexRules'), 'Codex inventory command must be registered');
   return { home, codexHome, rule, rulesPath, inventory, restoreRule, restoreFile, restoreInventory,
-    commands, calls, pickers, messages, pendingWarnings, pendingRestores, executed,
+    commands, calls, pickers, messages, pendingWarnings, pendingRestores, executed, executedArgs,
     extension, provider, run: () => commands.get('permission-wildcarding.showCodexRules')(),
+    shared: (selection) => commands.get('permission-wildcarding.viewPermissions')(selection),
     restore: () => commands.get('permission-wildcarding.restoreCodexRules')() };
+}
+
+test('shared saved permissions picker mixes agents and removes the selected Codex snapshot', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'WebSearch'], choice: 'Remove' });
+  await app.shared();
+  assert.equal(app.pickers.length, 1, 'WITNESS the shared command must open the combined list without an agent chooser');
+  const picker = app.pickers[0];
+  assert.equal(picker.config.title, 'Saved permissions · Claude + Codex');
+  assert.equal(picker.config.matchOnDescription, true);
+  assert.equal(picker.config.matchOnDetail, true);
+  assert.deepEqual(picker.items.filter((item) => item.agent === 'claude').map((item) => [item.label, item.description]),
+    [['Bash(git *)', 'Claude · allow'], ['WebSearch', 'Claude · allow']],
+    'WITNESS Claude specific approvals belong beside wildcards in the shared list');
+  const codex = picker.items.find((item) => item.rule);
+  assert.equal(codex.agent, 'codex');
+  assert.match(codex.description, /Codex · allow/);
+  assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory', 'removeCodexRules']);
+  assert.deepEqual(app.calls[1].args, [{ rules: [{ id: app.rule.id, path: app.rulesPath, fileHash: app.rule.fileHash }] }],
+    'WITNESS the mixed picker must retain the Codex declaration identity and displayed file hash');
+  assert.equal(app.messages.find((item) => item.level === 'warning').message, 'Remove this Codex allow rule?');
+});
+
+test('shared picker reaches Claude specific permission removal and cancellation leaves both agents unchanged', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'WebSearch'],
+    pick: (items) => items.find((item) => item.label === 'WebSearch') });
+  const settingsPath = path.join(app.home, '.claude', 'settings.json');
+  const before = fs.readFileSync(settingsPath, 'utf8');
+  await app.shared();
+  const modal = app.messages.find((item) => item.level === 'warning');
+  assert.ok(modal, 'WITNESS selecting a specific Claude approval must reach the removal confirmation');
+  assert.match(modal.config.detail, /WebSearch/);
+  assert.match(modal.config.detail, /Claude Code/);
+  assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory'],
+    'WITNESS selecting Claude must not enter Codex removal');
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), before, 'WITNESS cancelling the Claude confirmation must preserve settings');
+});
+
+for (const [name, options, unavailableLabel] of [
+  ['an interrupted Codex approval', { inventory: { pendingApproval: true } }, 'Codex change needs attention'],
+  ['a failed Codex inventory read', { inventoryError: 'Fixture policy store is unavailable.' }, 'Codex permissions unavailable'],
+]) {
+  test(`shared picker keeps Claude approvals available during ${name}`, async (t) => {
+    const app = await harness(t, { ...options, allow: ['WebSearch'],
+      pick: (items) => items.find((item) => item.agent === 'claude') });
+    await app.shared();
+    assert.equal(app.pickers.length, 1, 'WITNESS Codex failure must not abort the shared picker');
+    const issue = app.pickers[0].items.find((item) => item.label === unavailableLabel);
+    assert.ok(issue?.unavailable, 'WITNESS the Codex condition must remain visible beside Claude approvals');
+    assert.equal(app.messages.find((item) => item.level === 'warning')?.message, 'Remove this Claude permission?',
+      'WITNESS a Codex condition must not block inspection of the selected Claude approval');
+    assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory']);
+  });
+}
+
+test('Codex sidebar selector rereads inventory and selects the exact declaration with its fresh snapshot', async (t) => {
+  const app = await harness(t, { choice: 'Remove' });
+  const fresh = { ...app.rule, id: 'fresh-declaration', fileHash: 'f'.repeat(64), start: 90 };
+  app.inventory.files[0].fileHash = fresh.fileHash;
+  app.inventory.rules = [{ ...app.rule, fileHash: fresh.fileHash }, fresh];
+  await app.shared({ agent: 'codex', path: fresh.path, pattern: fresh.pattern, start: fresh.start,
+    id: 'stale-sidebar-id', fileHash: 'stale-sidebar-hash' });
+  assert.equal(app.pickers.length, 0, 'WITNESS a current sidebar selector should inspect its row directly');
+  assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory', 'removeCodexRules'],
+    'WITNESS a sidebar hint must reread inventory before offering removal');
+  assert.deepEqual(app.calls[1].args, [{ rules: [{ id: fresh.id, path: fresh.path, fileHash: fresh.fileHash }] }],
+    'WITNESS duplicate patterns must select by declaration position and use the fresh inventory identity');
+});
+
+for (const [field, staleValue] of [['path', 'different.rules'], ['pattern', ['git', 'diff']], ['start', 1]]) {
+  test(`a stale Codex sidebar ${field} falls back to the shared picker without removing another rule`, async (t) => {
+    const app = await harness(t, { pick: false, choice: 'Remove' });
+    await app.shared({ agent: 'codex', path: app.rule.path, pattern: app.rule.pattern, start: app.rule.start,
+      [field]: staleValue });
+    assert.equal(app.pickers.length, 1, 'WITNESS a changed sidebar selector must reopen the current list');
+    assert.equal(app.pickers[0].config.title, 'Saved permissions · Claude + Codex');
+    assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory'],
+      'WITNESS a stale selector must not dispatch removal for a nearby declaration');
+    assert.equal(app.messages.length, 0);
+  });
 }
 
 test('Codex inventory confirmation names the exact rule and source before sending the displayed snapshot', async (t) => {
@@ -272,15 +358,15 @@ test('empty inventory exposes suppression and scope information', async (t) => {
   assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory']);
 });
 
-test('dashboard Codex inventory route is distinct from the existing Claude wildcard command', async (t) => {
+test('dashboard permission route opens the shared command and keeps legacy agent commands available', async (t) => {
   const app = await harness(t, { pick: false });
   let receive;
   const view = { visible: true, webview: { options: {}, html: '', postMessage() {},
     onDidReceiveMessage(callback) { receive = callback; return disposable(); } },
   onDidDispose() {}, onDidChangeVisibility() {} };
   app.provider.resolveWebviewView(view);
-  assert.match(view.webview.html, /id="codexRules"/);
-  assert.match(view.webview.html, /View \/ remove Codex rules/);
+  assert.match(view.webview.html, /id="permissionsView"/);
+  assert.match(view.webview.html, /View \/ remove permissions/);
   const script = view.webview.html.match(/<script\b[^>]*>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script, 'dashboard script must be reachable');
   const listeners = new Map();
@@ -289,11 +375,20 @@ test('dashboard Codex inventory route is distinct from the existing Claude wildc
   }) };
   const api = { getState() {}, setState() {}, postMessage: (message) => receive(message) };
   new Function('document', 'window', 'acquireVsCodeApi', script)(document, { addEventListener() {} }, () => api);
-  assert.ok(listeners.has('codexRules/click'), 'Codex inventory button must register its click handler');
-  listeners.get('codexRules/click')();
+  assert.ok(listeners.has('permissionsView/click'), 'Shared permissions button must register its click handler');
+  listeners.get('permissionsView/click')();
+  const selection = { agent: 'codex', path: app.rulesPath, pattern: app.rule.pattern, start: app.rule.start };
+  receive({ type: 'viewPermissions', selection });
   receive({ type: 'showWildcards' });
-  assert.deepEqual(app.executed, ['permission-wildcarding.showCodexRules', 'permission-wildcarding.showWildcards'],
-    'WITNESS the dashboard click must route to Codex inventory while the Claude route remains intact');
+  assert.deepEqual(app.executed, ['permission-wildcarding.viewPermissions', 'permission-wildcarding.viewPermissions',
+    'permission-wildcarding.showWildcards'],
+    'WITNESS the dashboard must route to the shared list while the Claude compatibility route remains intact');
+  assert.deepEqual(app.executedArgs[1], [selection],
+    'WITNESS the sidebar selector must survive the webview-to-command boundary');
+  await app.shared();
+  assert.equal(app.pickers.at(-1).config.title, 'Saved permissions · Claude + Codex');
+  await app.run();
+  assert.equal(app.pickers.at(-1).config.title, 'Codex rules', 'Codex inventory remains available');
   await app.commands.get('permission-wildcarding.showWildcards')();
   assert.equal(app.pickers.at(-1).config.title, 'Tracked wildcards (1 of 1 allow entries)', 'Claude inventory remains available');
 });
@@ -476,15 +571,15 @@ test('a restore completed after deactivation does not emit a stale success notif
     'WITNESS restore completion after teardown must not claim success in a successor host');
 });
 
-test('dashboard restore button routes to the Codex restore command', async (t) => {
-  const app = await harness(t, { pick: false });
+test('dashboard restore button reaches the shared restore command and selected Codex inventory', async (t) => {
+  const app = await harness(t, { pick: (items) => items.find((item) => item.agent === 'codex' || item.rule) });
   let receive;
   const view = { visible: true, webview: { options: {}, html: '', postMessage() {},
     onDidReceiveMessage(callback) { receive = callback; return disposable(); } },
   onDidDispose() {}, onDidChangeVisibility() {} };
   app.provider.resolveWebviewView(view);
-  assert.match(view.webview.html, /id="codexRestore"/);
-  assert.match(view.webview.html, /Restore Codex rules/);
+  assert.match(view.webview.html, /id="permissionsRestore"/);
+  assert.match(view.webview.html, /Restore permissions/);
   const script = view.webview.html.match(/<script\b[^>]*>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
   const listeners = new Map();
@@ -493,8 +588,13 @@ test('dashboard restore button routes to the Codex restore command', async (t) =
   }) };
   const api = { getState() {}, setState() {}, postMessage: (message) => receive(message) };
   new Function('document', 'window', 'acquireVsCodeApi', script)(document, { addEventListener() {} }, () => api);
-  assert.ok(listeners.has('codexRestore/click'));
-  listeners.get('codexRestore/click')();
-  assert.deepEqual(app.executed, ['permission-wildcarding.restoreCodexRules'],
-    'WITNESS the dashboard restore click must reach the registered Codex restore route');
+  assert.ok(listeners.has('permissionsRestore/click'));
+  listeners.get('permissionsRestore/click')();
+  assert.deepEqual(app.executed, ['permission-wildcarding.restorePermissions'],
+    'WITNESS the dashboard restore click must reach the registered shared restore route');
+  await app.commands.get(app.executed[0])();
+  assert.deepEqual(app.pickers[0].items.map((item) => item.agent), ['claude', 'codex']);
+  assert.equal(app.pickers[1].config.title, 'Restore Codex rules');
+  assert.deepEqual(app.calls.map((call) => call.operation), ['codexRestoreInventory'],
+    'WITNESS choosing Codex must read Codex restore inventory and cancellation must not restore it');
 });

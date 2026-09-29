@@ -174,10 +174,12 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
   if (!doc) return { ready: false, reason: 'active-frame document is not available', url: location.href };
   const ids = ['guidanceCard', 'gatesCard', 'guidanceBtn', 'gatesBtn', 'autoLearnCard', 'alScan', 'alReview', 'alUndo', 'alWhy',
     'runNow', 'permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'codexMemoryCard',
-    'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'];
+    'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates', 'list'];
   if (scrollTo) {
     let element;
     if (ids.includes(scrollTo)) element = doc.getElementById(scrollTo);
+    else if (scrollTo === 'savedPermissionsHead') element = doc.querySelector('.rowhead[data-row="list"]');
+    else if (scrollTo === 'savedMore') element = doc.querySelector('#list li.more');
     else if (['guidanceHead', 'gatesHead', 'autoLearnHead', 'codexMemoryHead', 'permissionToolsHead'].includes(scrollTo)) {
       element = doc.querySelector('.rowhead[data-row="' + scrollTo.replace('Head', '') + '"]');
     } else throw new Error('unexpected dashboard scroll target');
@@ -252,6 +254,17 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
     totalTitle: doc.getElementById('total')?.title, claudeTitle: doc.getElementById('claudeTotal')?.title,
     codexTitle: doc.getElementById('codexTotal')?.title,
   };
+  const savedHead = doc.querySelector('.rowhead[data-row="list"]');
+  const savedMore = doc.querySelector('#list li.more');
+  result.savedPermissions = { title: text(savedHead?.querySelector('.rowname')),
+    expanded: visible(doc.getElementById('bodyList')), count: text(doc.getElementById('wcount')),
+    headPoint: point(savedHead), headHit: hit(savedHead),
+    rows: [...doc.querySelectorAll('#list li')].filter((row) => row.querySelector('code')).map((row) => ({
+      label: text(row.querySelector('code')), agent: text(row.querySelector('.agent')),
+      remove: !!row.querySelector('button.x'), inspect: !!row.querySelector('button.inspect'),
+    })) };
+  result.savedMore = savedMore ? { text: text(savedMore), visible: visible(savedMore),
+    buttonPoint: point(savedMore), buttonHit: hit(savedMore) } : null;
   const memoryHead = doc.querySelector('.rowhead[data-row="codexMemory"]');
   result.codexMemory = { visible: visible(doc.getElementById('codexMemoryCard')),
     expanded: visible(doc.getElementById('bodyCodexMemory')), badge: text(doc.getElementById('stCodexMemory')),
@@ -477,7 +490,7 @@ async function main() {
           result.outerFrame = frame;
           const entries = [result.guidance, result.gates, result.autoLearn, result.permissionTools,
             result.runNow, result.permissionsView, result.permissionsRestore, result.permissionsImport,
-            result.codexHook, result.codexMemory, result.searchCodexMemory, result.inspectCodexMemory,
+            result.codexHook, result.codexMemory, result.savedPermissions, result.savedMore, result.searchCodexMemory, result.inspectCodexMemory,
             result.reviewCodexMcp, result.rebuildCodexMemory, result.codexMemoryGates,
             ...Object.values(result.autoLearn.buttons)].filter(Boolean);
           for (const entry of entries) {
@@ -505,10 +518,10 @@ async function main() {
   }
   async function dashboardClick(control, part) {
     const route = {
-      codexRules: ['permissionsView', 'View / remove permissions', 'Codex'],
+      codexRules: ['permissionsView'],
       codexRestore: ['permissionsRestore', 'Restore permissions', 'Codex'],
       importCodexRules: ['permissionsImport', 'Import project permissions', 'Codex'],
-      claudeRules: ['permissionsView', 'View / remove permissions', 'Claude Code'],
+      claudeRules: ['permissionsView'],
       restore: ['permissionsRestore', 'Restore permissions', 'Claude Code'],
       reviewCodexApprovals: ['runNow'],
     }[control];
@@ -517,7 +530,7 @@ async function main() {
       await permissionToolsReady();
     }
     const autoButton = control === 'autoLearn' && part !== 'head';
-    const directButton = ['runNow', 'permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'].includes(control) && part === 'button';
+    const directButton = ['runNow', 'permissionsView', 'permissionsRestore', 'permissionsImport', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates', 'savedMore'].includes(control) && part === 'button';
     assert.ok(await dashboardState(directButton ? control : autoButton ? part : control + (part === 'head' ? 'Head' : 'Btn')),
       'dashboard became unavailable before the click');
     let movedPoint;
@@ -689,6 +702,59 @@ async function main() {
     activeDashboard = fixture;
     assert.ok(dashboardEnabled, 'dashboard UI actions require ACOLYTE_ACCEPTANCE_DASHBOARD_UI=1');
     assert.equal(path.dirname(path.resolve(fixture.ackPath)), path.dirname(options.progress));
+    if (fixture.phase === 'dashboard-saved-permissions') {
+      assert.equal(fixture.caseId, 'saved-permissions-mixed');
+      assert.equal(fixture.expectedRows.length, 12, 'mixed fixture must exercise the capped preview');
+      assert.deepEqual([...new Set(fixture.expectedRows.map((row) => row.agent))].sort(), ['Claude', 'Codex']);
+      let before = await waitFor('waiting for the mixed saved permissions preview', async () => {
+        const state = await dashboardState('savedPermissionsHead');
+        if (!state) return null;
+        const actual = state.savedPermissions.rows.map(({ label, agent }) => [agent, label]);
+        const expected = fixture.expectedRows.map(({ label, agent }) => [agent, label]);
+        return JSON.stringify(actual) === JSON.stringify(expected) ? state : null;
+      });
+      assert.equal(before.savedPermissions.title, 'Saved permissions');
+      assert.equal(before.savedPermissions.count, '17 total');
+      if (!before.savedPermissions.expanded) await dashboardClick('savedPermissions', 'head');
+      before = await dashboardState('list');
+      assert.equal(before.savedPermissions.expanded, true, 'WITNESS combined saved permission rows are visibly expanded');
+      for (const row of before.savedPermissions.rows) {
+        assert.equal(row.remove, row.agent === 'Claude', 'WITNESS only Claude rows expose immediate removal');
+        assert.equal(row.inspect, row.agent === 'Codex', 'WITNESS Codex rows expose rule inspection');
+      }
+      assert.match(before.savedMore?.text || '', /5 more/);
+      assert.match(before.savedMore.text, /17/);
+      const listScreenshot = await dashboardScreenshot('saved-permissions-mixed');
+      await dashboardClick('savedMore', 'button');
+      const title = 'Saved permissions · Claude + Codex';
+      const filters = [];
+      for (const expected of fixture.pickerFilters) {
+        const picker = await exactPicker(title);
+        await fillInput(picker, expected.query);
+        const matched = await waitFor(`waiting for saved permissions filter ${expected.query}`, async () => {
+          const current = await exactPicker(title);
+          if (current.inputValue !== expected.query) return null;
+          if (JSON.stringify(current.rows.map((row) => row.label).sort()) !== JSON.stringify([...expected.labels].sort())) return null;
+          for (const row of current.rows) {
+            assert.ok(row.text.includes(expected.agent), 'WITNESS filtered permission row identifies its agent');
+            assert.equal(row.checkbox, null, 'saved permissions uses a single-choice inventory');
+          }
+          return current;
+        });
+        filters.push({ query: expected.query, rows: matched.rows.map(({ label, text }) => ({ label, text })),
+          screenshot: await dashboardScreenshot('saved-permissions-filter-' + expected.agent.toLowerCase()) });
+      }
+      await key('Escape', 'Escape', 27);
+      await waitFor('waiting for the saved permission picker to dismiss without selection', async () => !(await ui()).pickers.length);
+      const after = await dashboardState('list');
+      assert.deepEqual(after.savedPermissions.rows, before.savedPermissions.rows, 'searching the unified inventory must preserve preview rows');
+      const evidence = { status: 'passed', before, after, clicked: 'savedMore', filters,
+        screenshots: [listScreenshot, ...filters.map((filter) => filter.screenshot)] };
+      report.dashboard.push({ caseId: fixture.caseId, ...evidence });
+      ackDashboard(evidence);
+      activeDashboard = null;
+      return;
+    }
     if (fixture.phase === 'dashboard-open') {
       assert.equal(fixture.caseId, 'partial-codex-only');
       assert.deepEqual(fixture.expected, { guidance: 'partial', gates: 'partial' });
@@ -837,10 +903,10 @@ async function main() {
     assert.equal(dashboard.permissionsView.text, 'View / remove permissions…', 'unexpected shared inventory button label');
     assert.equal(dashboard.permissionsView.enabled, true, 'shared inventory button must be enabled');
     await dashboardClick('codexRules', 'button');
-    const picker = await exactPicker('Codex rules');
+    const picker = await exactPicker('Saved permissions · Claude + Codex');
     await fillInput(picker, filter);
     const selected = await waitFor(`waiting for exact Codex inventory row ${fixture.caseId}`, async () => {
-      const current = await exactPicker('Codex rules');
+      const current = await exactPicker('Saved permissions · Claude + Codex');
       const rows = current.rows.filter((row) => row.label === fixture.expectedLabel);
       assert.ok(rows.length <= 1, 'multiple exact Codex inventory rows are ambiguous');
       if (!rows.length) return null;
@@ -1632,7 +1698,7 @@ async function main() {
       if (label && buttons.length === 1) { await click(buttons[0].point); report.failureUiDismissed = dialog.title; }
     } else if (!state.dialogs.length && state.pickers.length === 1 &&
         (/^(Auto Learn candidates|Which agent showed the approval prompt\?|Which shell syntax should Auto Learn parse\?|Why did Codex prompt\?)/.test(state.pickers[0].title) ||
-          (activePrune && ['Codex rules', 'View / remove permissions'].includes(state.pickers[0].title)) ||
+          ((activePrune || activeDashboard?.caseId === 'saved-permissions-mixed') && state.pickers[0].title === 'Saved permissions · Claude + Codex') ||
           (activeRestore && ['Restore Codex rules', 'Restore permissions'].includes(state.pickers[0].title)) ||
           (activeDerived && (/^Derived guidance\b/.test(state.pickers[0].title) || state.pickers[0].title === activeDerived.expectedLabel)) ||
           (activeFeature?.kind === 'search' && ['AI Acolyte: Search Codex memory', 'AI Acolyte: Codex memory matches'].includes(state.pickers[0].title)) ||
@@ -1842,7 +1908,7 @@ async function main() {
         await driveDiagnostic(diagnostic);
         completedDiagnostics.add(diagnostic.caseId);
       }
-      if (['dashboard-open', 'dashboard-action'].includes(progress?.phase) && !completedDashboard.has(progress.caseId)) {
+      if (['dashboard-open', 'dashboard-action', 'dashboard-saved-permissions'].includes(progress?.phase) && !completedDashboard.has(progress.caseId)) {
         const action = { ...progress };
         await driveDashboard(action);
         completedDashboard.add(action.caseId);
@@ -1874,8 +1940,8 @@ async function main() {
     }
     if (dashboardEnabled) assert.deepEqual([...completedDashboard].sort(),
       ['gates-add', 'gates-add-from-off', 'gates-cancel', 'gates-remove', 'gates-remove-after-off-add',
-        'guidance-add', 'guidance-add-from-off', 'guidance-cancel', 'guidance-remove', 'guidance-remove-after-off-add', 'partial-codex-only'],
-      'passing requires the actual partial dashboard and all ten instruction actions');
+        'guidance-add', 'guidance-add-from-off', 'guidance-cancel', 'guidance-remove', 'guidance-remove-after-off-add', 'partial-codex-only', 'saved-permissions-mixed'],
+      'passing requires the actual partial dashboard, all ten instruction actions and mixed saved permissions');
     if (pruneEnabled) assert.deepEqual([...completedPrune].sort(),
       ['cancel-allow', 'finish-interrupted', 'inspect-forbidden', 'inspect-prompt', 'inspect-unsupported', 'remove-allow'],
       'passing requires actual inventory Cancel, Remove, all three read-only dialogs and interrupted-removal recovery');

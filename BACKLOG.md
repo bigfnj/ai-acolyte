@@ -82,7 +82,7 @@ Their dated evidence retains the original stage/version rather than relabelling 
   promotion originally lacked a Codex migration path; the reviewed import below closes
   that gap. Generated rules already defaulted to user scope, so sharing was not absent.
   Immediate hook integration means a post-tool callback; Codex already has transcript
-  watchers and periodic scans (`vscode-extension/extension.js:1978`). CLOSED-VERIFIED
+  watchers and periodic scans (`vscode-extension/extension.js:1987`). CLOSED-VERIFIED
   September 28: actual editor-open ingestion works without a Scan command, and the
   unchanged one-minute reconciliation timer catches a deliberately missed notification.
   Disabling either route fails its corresponding real-host ingestion check. Evidence:

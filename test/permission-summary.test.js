@@ -36,6 +36,12 @@ test('Codex summary counts saved declarations once, including grouped alternativ
   assert.deepEqual(counts(summary), { allow: 3, prompt: 1, forbidden: 1, total: 5, complete: true },
     'WITNESS each declaration is counted once and prompt/forbidden are never allow approvals');
   assert.equal(summary.files.length, 2);
+  assert.deepEqual(summary.allowRules.map(({ pattern }) => pattern), [
+    [['git', 'git.exe'], ['status', 'diff']], ['git', 'status'], ['git', 'status'],
+  ], 'saved-list rows retain grouped prefixes and duplicate declarations but exclude restrictions');
+  assert.notEqual(summary.allowRules[1].path, summary.allowRules[2].path,
+    'matching prefixes from different files remain individually inspectable');
+  assert.ok(summary.allowRules.every((entry) => Number.isInteger(entry.start)));
   assert.deepEqual(summary.issues, []);
   assert.ok(summary.blindSpots.some((text) => text.includes('Managed and system-scope')));
   assert.deepEqual(fs.readdirSync(f.rules).map((name) => [name, fs.readFileSync(path.join(f.rules, name), 'hex')]), before);
@@ -50,6 +56,8 @@ test('unsupported files contribute no partial-file count while supported sibling
   assert.deepEqual(counts(summary), { allow: 1, prompt: 1, forbidden: 0, total: 2, complete: false },
     'WITNESS an unsupported file cannot inflate known counts or erase readable siblings');
   assert.equal(summary.issues.length, 1);
+  assert.deepEqual(summary.allowRules.map(({ pattern }) => pattern), [['rg']],
+    'an unsupported file contributes no misleading partial preview');
   assert.equal(summary.issues[0].path, unknown);
   assert.match(summary.issues[0].reason, /Unsupported/);
   assert.equal(summary.files.find((file) => file.path === unknown).supported, false);

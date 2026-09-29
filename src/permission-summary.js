@@ -9,7 +9,7 @@ const { parseCodexRules } = require('./codex-rule-inventory');
 
 function readCodexPermissionSummary(options = {}) {
   const set = codexRuleFileSet(options);
-  const result = { allow: 0, prompt: 0, forbidden: 0, total: 0, files: [], complete: true,
+  const result = { allow: 0, prompt: 0, forbidden: 0, total: 0, files: [], allowRules: [], complete: true,
     issues: [], directories: set.directories, blindSpots: set.blindSpots };
   const issue = (file, reason) => {
     result.complete = false;
@@ -45,6 +45,7 @@ function readCodexPermissionSummary(options = {}) {
       for (const rule of parsed.rules) {
         result[rule.decision] += 1;
         result.total += 1;
+        if (rule.decision === 'allow') result.allowRules.push({ path: file, pattern: rule.pattern, start: rule.start });
       }
       result.files.push({ path: file, supported: true });
     } catch (error) {

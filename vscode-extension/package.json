@@ -2,7 +2,7 @@
   "name": "permission-wildcarding",
   "displayName": "AI Acolyte",
   "description": "Reduces approval friction in Claude Code and Codex with history-based learning, reviewed permission changes, policy recovery, shell guidance, memory diagnostics and recall. Codex uses native prefix rules and reviewed MCP settings. Codex support remains experimental.",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "publisher": "local",
   "license": "MIT",
   "repository": {

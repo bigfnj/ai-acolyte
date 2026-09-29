@@ -2265,8 +2265,7 @@ function activate(context) {
         if (!deactivated) vscode.window.showErrorMessage(`AI Acolyte: permission optimization failed: ${error.message}`);
       }
     }),
-    vscode.commands.registerCommand('permission-wildcarding.viewPermissions', () =>
-      choosePermissionAgent('View / remove permissions', showWildcardPicker, showCodexRulePicker)),
+    vscode.commands.registerCommand('permission-wildcarding.viewPermissions', (selection) => showSavedPermissionPicker(selection)),
     vscode.commands.registerCommand('permission-wildcarding.restorePermissions', () =>
       choosePermissionAgent('Restore permissions', restoreFromBackup, showCodexRestorePicker)),
     vscode.commands.registerCommand('permission-wildcarding.importPermissions', () =>
@@ -3442,16 +3441,19 @@ async function showWildcardPicker() {
       matchOnDescription: true,
     });
   if (!pick) return;
+  await confirmClaudePermissionRemoval(pick.label);
+}
 
+async function confirmClaudePermissionRemoval(permission) {
   // Confirmed, unlike the sidebar's hover-revealed ✕, because Enter on a
   // filtered list is easy to mis-hit and this is NOT recoverable: the prune
   // deliberately drops the entry from the high-water-mark backup too, so
   // "Restore prunes from backup" will not bring it back.
   const choice = await vscode.window.showWarningMessage(
-    'Remove this wildcard?',
+    permission.includes('*') ? 'Remove this wildcard?' : 'Remove this Claude permission?',
     {
       modal: true,
-      detail: `${pick.label}\n\nIt is dropped from settings.json and from the backup, so a `
+      detail: `${permission}\n\nIt is dropped from settings.json and from the backup, so a `
         + 'later restore will not reinstate it. Claude Code will prompt again for commands '
         + 'this covered.',
     },
@@ -3462,7 +3464,7 @@ async function showWildcardPicker() {
   // is not recoverable. A prune that lands after teardown is the same write with
   // nobody left to report it.
   if (deactivated) return;
-  if (removeAllowEntry(pick.label)) dashboard?.refresh();
+  if (removeAllowEntry(permission)) dashboard?.refresh();
 }
 
 async function showCodexRestorePicker() {
@@ -3521,6 +3523,60 @@ async function showCodexRestorePicker() {
   }
 }
 
+async function showSavedPermissionPicker(selection) {
+  try {
+    const settings = readSettingsState();
+    const allow = Array.isArray(settings.settings?.permissions?.allow)
+      ? settings.settings.permissions.allow.filter((entry) => typeof entry === 'string') : [];
+    const items = allow.sort().map((permission) => ({
+      label: permission, description: 'Claude · allow', agent: 'claude',
+    }));
+    const permissions = settings.settings?.permissions;
+    const claudeComplete = settings.state !== SETTINGS_UNREADABLE
+      && (permissions === undefined || (permissions !== null && typeof permissions === 'object' && !Array.isArray(permissions)))
+      && ['allow', 'ask', 'deny'].every((key) => permissions?.[key] === undefined
+        || (Array.isArray(permissions[key]) && permissions[key].every((entry) => typeof entry === 'string')));
+    if (!claudeComplete) items.push({
+      label: 'Claude permissions unavailable', description: 'Claude · read-only',
+      detail: 'Claude settings.json could not be fully read as permission lists. Known entries are shown; check the file and reload this list.', unavailable: true,
+    });
+    let inventory;
+    try {
+      inventory = await runAutoLearnWorker('codexInventory');
+      if (inventory.pendingApproval) items.push({
+        label: 'Codex change needs attention', description: 'Codex · read-only',
+        detail: 'Finish the interrupted reviewed change in Review Codex approvals first.', unavailable: true,
+      });
+      else items.push(...codexInventoryItems(inventory, (file) => file.replace(os.homedir(), '~'))
+        .map((item) => ({ ...item, agent: 'codex' })));
+    } catch (error) {
+      items.push({ label: 'Codex permissions unavailable', description: 'Codex · read-only',
+        detail: String(error.message || error), unavailable: true });
+    }
+    if (deactivated) return;
+    // A sidebar row is a read-only hint. Re-read the inventory before reviewing
+    // it so ownership, pending changes and the removal hash are current.
+    let pick = selection?.agent === 'codex' && items.find((item) => item.rule
+      && item.rule.path === selection.path && item.rule.start === selection.start
+      && JSON.stringify(item.rule.pattern) === JSON.stringify(selection.pattern));
+    if (!pick) pick = await vscode.window.showQuickPick(items, {
+      title: 'Saved permissions · Claude + Codex',
+      placeHolder: 'Filter by command, agent or file; choose an entry to inspect or remove',
+      matchOnDescription: true, matchOnDetail: true,
+    });
+    if (!pick || deactivated) return;
+    if (pick.unavailable) {
+      await vscode.window.showInformationMessage(pick.label, { modal: true, detail: pick.detail });
+    } else if (pick.agent === 'claude') {
+      await confirmClaudePermissionRemoval(pick.label);
+    } else {
+      await inspectCodexPermission(pick, inventory);
+    }
+  } catch (error) {
+    if (!deactivated) vscode.window.showErrorMessage(`AI Acolyte: saved permissions could not be updated: ${error.message}`);
+  }
+}
+
 async function showCodexRulePicker() {
   try {
     const inventory = await runAutoLearnWorker('codexInventory');
@@ -3536,7 +3592,14 @@ async function showCodexRulePicker() {
       matchOnDescription: true, matchOnDetail: true,
     });
     if (!pick || deactivated) return;
-    const detail = codexInventoryDetail(pick, inventory, displayPath);
+    await inspectCodexPermission(pick, inventory);
+  } catch (error) {
+    if (!deactivated) vscode.window.showErrorMessage(`ai-acolyte: Codex rules could not be updated: ${error.message}`);
+  }
+}
+
+async function inspectCodexPermission(pick, inventory) {
+    const detail = codexInventoryDetail(pick, inventory, (file) => file.replace(os.homedir(), '~'));
     if (!pick.removable && !pick.resume) {
       await vscode.window.showInformationMessage(pick.about ? 'About this Codex inventory' : 'Codex rule (read-only)',
         { modal: true, detail });
@@ -3561,9 +3624,6 @@ async function showCodexRulePicker() {
       `ai-acolyte: removed ${result.removedCount} Codex allow rule${result.removedCount === 1 ? '' : 's'}. ` +
       'Current Auto Learn builds will not re-add overlapping prefixes. Restart Codex; active sessions may cache rules.');
     dashboard?.refresh();
-  } catch (error) {
-    if (!deactivated) vscode.window.showErrorMessage(`ai-acolyte: Codex rules could not be updated: ${error.message}`);
-  }
 }
 
 // ── dashboard (Activity Bar webview) ────────────────────────────────────────────
@@ -3605,7 +3665,7 @@ class WildcardingViewProvider {
     view.webview.onDidReceiveMessage((msg) => {
       switch (msg?.type) {
         case 'optimizePermissions': vscode.commands.executeCommand('permission-wildcarding.optimizePermissions'); break;
-        case 'viewPermissions': vscode.commands.executeCommand('permission-wildcarding.viewPermissions'); break;
+        case 'viewPermissions': vscode.commands.executeCommand('permission-wildcarding.viewPermissions', msg.selection); break;
         case 'restorePermissions': vscode.commands.executeCommand('permission-wildcarding.restorePermissions'); break;
         case 'importPermissions': vscode.commands.executeCommand('permission-wildcarding.importPermissions'); break;
         case 'autoLearnScan': vscode.commands.executeCommand('permission-wildcarding.autoLearnScan'); break;
@@ -3787,6 +3847,10 @@ class WildcardingViewProvider {
       total: allow.length,
       claudePermissionsComplete,
       codexPermissions,
+      savedPermissions: [
+        ...allow.map((permission) => ({ agent: 'claude', label: permission, value: permission })),
+        ...codexPermissions.allowRules.map((rule) => ({ agent: 'codex', label: JSON.stringify(rule.pattern), ...rule })),
+      ],
       wildcardCount: wildcards.length,
       specificCount: allow.length - wildcards.length,
       pendingWildcard,
@@ -3888,7 +3952,11 @@ class WildcardingViewProvider {
   li { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 4px; }
   li:hover { background: var(--vscode-list-hoverBackground); }
   li code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px;
-            flex: 1 1 auto; word-break: break-all; }
+            flex: 1 1 auto; min-width: 0; word-break: break-all; }
+  li .agent { flex: 0 0 auto; font-size: 10px; color: var(--vscode-descriptionForeground);
+              border: 1px solid var(--vscode-widget-border, #555); border-radius: 3px; padding: 1px 4px; }
+  li .inspect { flex: 0 0 auto; border: none; background: transparent; cursor: pointer;
+                color: var(--vscode-textLink-foreground); padding: 2px 5px; }
   li .x { flex: 0 0 auto; cursor: pointer; border: none; background: transparent;
           color: var(--vscode-descriptionForeground); font-size: 14px; line-height: 1;
           padding: 2px 5px; border-radius: 4px; visibility: hidden; }
@@ -4099,7 +4167,7 @@ class WildcardingViewProvider {
   <section class="row">
     <div class="rowhead" data-row="list" title="Click to collapse / expand">
       <span class="chev">▸</span><span class="glyph">✱</span>
-      <span class="rowname">Claude wildcards</span><span class="rowstate" id="wcount"></span>
+      <span class="rowname">Saved permissions</span><span class="rowstate" id="wcount"></span>
     </div>
     <div class="rowbody" id="bodyList" hidden><ul id="list"></ul></div>
   </section>
@@ -4224,7 +4292,10 @@ class WildcardingViewProvider {
     else if (pending) setState('stLocal', pending + ' to drain', 'warn');
     else setState('stLocal', 'drained');
 
-    setState('wcount', d.wildcardCount + ' total');
+    const complete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable'
+      && d.codexPermissions?.complete === true;
+    const known = (d.savedPermissions || []).length;
+    setState('wcount', complete ? known + ' total' : (known ? known + '+' : '?') + ' known');
   }
 
   function timeAgo(ts) {
@@ -4542,50 +4613,60 @@ class WildcardingViewProvider {
       !codex.complete ? 'Codex count incomplete.' : '',
     ].filter(Boolean).join(' ');
     $('permissionCoverage').title = (codex.issues || []).map((issue) => issue.reason).join(' · ');
-    $('wcount').textContent = d.wildcardCount + ' total';
-
     const list = $('list');
     list.innerHTML = '';
-    if (!d.wildcards.length) {
+    const saved = d.savedPermissions || [];
+    if (!saved.length && countsComplete) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'No Claude wildcards yet: approve some commands, or click Optimize permissions.';
+      li.textContent = 'No saved permissions yet: approve some commands, or click Optimize permissions.';
       list.appendChild(li);
     } else {
-      // Capped, because this list is a symptom of the tool WORKING: on this
-      // machine it is 404 of 423 entries and the longest is 137 characters,
-      // which wraps to three lines in a 320px sidebar — 10,796 px of list
-      // inside a panel the wrong shape for it. The full set gets a QuickPick,
-      // where the window is wide and there is a filter box.
-      //
-      // Ordered for the PREVIEW, not alphabetically. The list arrives sorted,
-      // and quoted absolute paths sort ahead of letters, so a plain slice showed
-      // twelve quoted-absolute-path blobs — the least
-      // recognisable entries in the set, making the panel look like noise, which
-      // is the exact complaint the cap exists to answer. Bare command families
-      // first, everything else after, each half still alphabetical.
-      const simple = (p) => /^[A-Za-z]+\([A-Za-z][\w.-]*[ :]\*\)$/.test(p);
-      const preview = [...d.wildcards.filter(simple), ...d.wildcards.filter((p) => !simple(p))]
-        .slice(0, LIST_CAP);
-      for (const w of preview) {
+      // Alternate agents so either remains visible when the other has hundreds
+      // of entries. Keep short Claude command families first in the preview.
+      const simple = (entry) => /^[A-Za-z]+\\([A-Za-z][\\w.-]*[ :]\\*\\)$/.test(entry.label);
+      const claude = saved.filter((entry) => entry.agent === 'claude').sort((a, b) =>
+        Number(simple(b)) - Number(simple(a)) || a.label.localeCompare(b.label));
+      const codexRows = saved.filter((entry) => entry.agent === 'codex').sort((a, b) => a.label.localeCompare(b.label));
+      const preview = [];
+      for (let i = 0; preview.length < LIST_CAP && i < Math.max(claude.length, codexRows.length); i++) {
+        if (claude[i]) preview.push(claude[i]);
+        if (codexRows[i] && preview.length < LIST_CAP) preview.push(codexRows[i]);
+      }
+      for (const entry of preview) {
         const li = document.createElement('li');
         const code = document.createElement('code');
-        code.textContent = w;
+        code.textContent = entry.label;
+        const agent = document.createElement('span');
+        agent.className = 'agent'; agent.textContent = entry.agent === 'codex' ? 'Codex' : 'Claude';
         const x = document.createElement('button');
-        x.className = 'x'; x.textContent = '✕'; x.title = 'Remove this entry';
-        x.addEventListener('click', () => vscode.postMessage({ type: 'remove', value: w }));
-        li.appendChild(code); li.appendChild(x);
+        if (entry.agent === 'codex') {
+          li.title = entry.path;
+          x.className = 'inspect'; x.textContent = '…'; x.title = 'Inspect or remove this Codex rule';
+          x.addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions',
+            selection: { agent: 'codex', path: entry.path, pattern: entry.pattern, start: entry.start } }));
+        } else {
+          x.className = 'x'; x.textContent = '✕'; x.title = 'Remove this Claude permission';
+          x.addEventListener('click', () => vscode.postMessage({ type: 'remove', value: entry.value }));
+        }
+        li.appendChild(code); li.appendChild(agent); li.appendChild(x);
         list.appendChild(li);
       }
-      const hidden = d.wildcards.length - LIST_CAP;
+      const hidden = saved.length - preview.length;
       if (hidden > 0) {
         const li = document.createElement('li');
         li.className = 'more';
         li.title = 'Open the full list with a filter box';
-        li.textContent = 'and ' + hidden + ' more — search all ' + d.wildcards.length + ' →';
-        li.addEventListener('click', () => vscode.postMessage({ type: 'showWildcards' }));
+        li.textContent = 'and ' + hidden + ' more - search all ' + saved.length + ' →';
+        li.addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions' }));
         list.appendChild(li);
       }
+    }
+    if (!countsComplete) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'Saved permissions incomplete. Open View / remove permissions for details.';
+      list.appendChild(li);
     }
     applyRows();
     renderRowStates(d);

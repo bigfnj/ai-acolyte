@@ -9,15 +9,17 @@ declarations, with a per-agent breakdown. It excludes Codex prompt/forbidden rul
 and native MCP settings; it does not measure effective command access. Unreadable
 or unsupported inputs produce an incomplete count instead of a false zero.
 
-**Permission tools** starts collapsed. View/remove, restore and project import each
-have one entry that asks which agent to manage. Codex hook and native MCP configuration
+**Permission tools** starts collapsed. View/remove opens one searchable list for Claude
+and Codex; restore and project import ask which agent to manage. Codex hook and native MCP configuration
 remain specific to Codex. Other collapsible rows include **Auto Learn**, **Project-local**,
-**Shell-style guidance**, **Memory gates**, **Memory**, and **Claude wildcards**. That last
-row lists each tracked wildcard with a one-click prune, capped at a 12-entry
-preview so it cannot become the panel. A separate **Codex memory** row provides native
+**Shell-style guidance**, **Memory gates**, **Memory**, and **Saved permissions**. That last
+row combines Claude allow entries and local Codex allow rules, labels each agent, and
+alternates agents in a 12-entry preview. Claude entries retain one-click removal;
+Codex entries open their existing rule review. The overflow link searches both agents.
+A separate **Codex memory** row provides native
 memory search, diagnostics and gate controls.
 
-Version **1.6.0** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.6.1** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -271,7 +273,7 @@ card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:701`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:705`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -406,19 +408,19 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The v1.6.0 manifest registers 27 commands under AI Acolyte in the
+The manifest registers 27 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
 | Command | What it does |
 | --- | --- |
 | Optimize permissions (Claude + Codex) | Generalize Claude permissions, then review supported wider Codex prefixes |
-| View / remove permissions | Choose an agent, then open its existing inventory |
+| View / remove permissions | Search Claude and Codex permissions together; inspect or remove a selected entry |
 | Restore permissions | Choose an agent, then open its existing recovery action |
 | Import project permissions | Choose an agent, then use Claude local promotion or reviewed Codex import |
 | Wildcard Claude permissions | Run only the Claude generalization pass |
 | Restore prunes from backup | Merge the saved allow **and** deny backup back in |
-| Show all tracked wildcards | The full list with a filter box, past the card's 12-entry preview; picking one removes it after a confirm |
+| Show all tracked wildcards | Search Claude wildcard entries only; picking one offers removal confirmation |
 | Show Codex rules | Inspect local literal rules and confirm supported allow-rule removal |
 | Restore Codex rules | Review captured missing declarations while retaining current rules and deliberate removals |
 | Auto Learn - Scan now | Read new Claude Code and Codex transcript history |

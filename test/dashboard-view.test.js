@@ -70,6 +70,7 @@ function settle(ms = 140) {
 function harness(tempHome, opts = {}) {
   const commands = new Map();
   const executed = [];
+  const executedArgs = [];
   const passes = { count: 0 };
   // Every policy-lock acquisition, plus a hook that runs after the lock is held
   // but BEFORE the guarded work — i.e. inside the read-to-write window. Nothing
@@ -112,7 +113,7 @@ function harness(tempHome, opts = {}) {
     Uri: { file: (fsPath) => ({ fsPath }) },
     commands: {
       registerCommand(id, handler) { commands.set(id, handler); return disposable(); },
-      executeCommand(id) { executed.push(id); },
+      executeCommand(id, ...args) { executed.push(id); executedArgs.push({ id, args }); },
     },
     window: {
       createStatusBarItem() { return { hide() {}, show() {}, dispose() {} }; },
@@ -296,6 +297,7 @@ function harness(tempHome, opts = {}) {
   return {
     commands,
     executed,
+    executedArgs,
     extension,
     memoryReports,
     passes,
@@ -395,6 +397,9 @@ test('resolveWebviewView wires the webview and pushes one debounced payload', as
     assert.equal(data.active, true);
     assert.equal(data.total, 1);
     assert.deepEqual(data.wildcards, ['Bash(git status *)']);
+    assert.deepEqual(data.savedPermissions, [
+      { agent: 'claude', label: 'Bash(git status *)', value: 'Bash(git status *)' },
+    ]);
     assert.equal(data.wildcardCount, 1);
     assert.equal(data.specificCount, 0);
     assert.equal(data.pendingWildcard, 0, 'an already-optimal list badges no pending work');
@@ -448,6 +453,13 @@ test('every dashboard message reaches its command, and nothing else does', async
       ui.on.message({ type });
       assert.deepEqual(app.executed, [command], `${type} routes to ${command}`);
     }
+
+    const selection = { agent: 'codex', path: path.join(env.tempHome, '.codex', 'rules', 'user.rules'),
+      pattern: ['git', 'status'], start: 0 };
+    ui.on.message({ type: 'viewPermissions', selection });
+    assert.deepEqual(app.executedArgs.at(-1), {
+      id: 'permission-wildcarding.viewPermissions', args: [selection],
+    }, 'a Codex sidebar row reaches the shared picker with its native rule identity');
 
     // The old ids remain unadvertised cleanup aliases for installations that
     // carried MAX state across the upgrade. They must not regain a dashboard
@@ -534,6 +546,10 @@ test('shared permissions count includes both agents without counting Codex restr
     const data = ui.posted.at(-1);
     assert.equal(data.total, 2);
     assert.equal(data.codexPermissions.allow, 2, 'inventory remains visible while Codex auto-export is off');
+    assert.deepEqual(data.savedPermissions.filter((entry) => entry.agent === 'claude').map((entry) => entry.value).sort(),
+      ['Bash(git *)', 'Edit'], 'the shared list includes specific Claude permissions as well as wildcards');
+    assert.deepEqual(data.savedPermissions.filter((entry) => entry.agent === 'codex').map((entry) => entry.pattern),
+      [['git', 'status'], ['rg']], 'prompt and forbidden rules do not become saved approvals');
     const rendered = renderDashboard(app.provider, data);
     assert.equal(rendered.node('total').textContent, '4', 'WITNESS combined count must include both native stores');
     assert.equal(rendered.node('claudeTotal').textContent, '2');
@@ -548,6 +564,7 @@ test('shared permission count shows incomplete sources instead of treating unrea
   env.write({ permissions: { allow: ['Edit'], deny: [] } });
   const rules = path.join(env.tempHome, '.codex', 'rules');
   fs.mkdirSync(rules, { recursive: true });
+  fs.writeFileSync(path.join(rules, 'user.rules'), 'prefix_rule(pattern=["git", "status"], decision="allow")\n');
   fs.writeFileSync(path.join(rules, 'computed.rules'), 'for item in commands:\n    prefix_rule(pattern=item, decision="allow")\n');
   const app = harness(env.tempHome);
   try {
@@ -556,16 +573,24 @@ test('shared permission count shows incomplete sources instead of treating unrea
     await settle();
     const data = ui.posted.at(-1);
     const rendered = renderDashboard(app.provider, data);
-    assert.equal(rendered.node('total').textContent, '1+');
-    assert.equal(rendered.node('codexTotal').textContent, '?');
+    assert.equal(rendered.node('total').textContent, '2+');
+    assert.equal(rendered.node('codexTotal').textContent, '1+');
     assert.equal(rendered.node('permissionCoverage').textContent, 'Codex count incomplete.',
       'WITNESS unsupported Codex data must remain visible beside the known count');
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    assert.equal(panel.dom.byId.get('wcount').textContent, '2+ known');
+    const rows = panel.dom.byId.get('list').children;
+    assert.deepEqual(rows.filter((row) => row.children.length).map((row) => row.children[1].textContent).sort(),
+      ['Claude', 'Codex'], 'known approvals stay visible when another Codex file is incomplete');
+    assert.equal(rows.at(-1).className, 'empty');
+    assert.match(rows.at(-1).textContent, /incomplete/i);
     const unknown = structuredClone(data);
     unknown.total = 0;
     unknown.settingsState = 'unreadable';
     unknown.claudePermissionsComplete = false;
     const both = renderDashboard(app.provider, unknown);
-    assert.equal(both.node('total').textContent, '?');
+    assert.equal(both.node('total').textContent, '1+');
     assert.equal(both.node('claudeTotal').textContent, '?');
     assert.equal(both.node('permissionCoverage').textContent, 'Claude count incomplete. Codex count incomplete.');
   } finally { await app.dispose(); }
@@ -1049,9 +1074,15 @@ function runPanelScript(html) {
   };
 }
 
-test('the sidebar renders twelve wildcards and defers the rest to the picker', async (t) => {
+test('the sidebar previews both agents and sends overflow and Codex review to the shared picker', async (t) => {
   const env = setup(t);
   env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const rulesFile = path.join(env.tempHome, '.codex', 'rules', 'user.rules');
+  fs.mkdirSync(path.dirname(rulesFile), { recursive: true });
+  fs.writeFileSync(rulesFile, [
+    'prefix_rule(pattern=["git", "status"], decision="allow")',
+    'prefix_rule(pattern=["rg"], decision="allow")', '',
+  ].join('\n'));
   const app = harness(env.tempHome);
   try {
     const ui = fakeView();
@@ -1064,22 +1095,57 @@ test('the sidebar renders twelve wildcards and defers the rest to the picker', a
 
     const rows = panel.dom.byId.get('list').children;
     assert.equal(rows.length, 13, 'twelve entries plus one deferral row');
+    assert.equal(panel.dom.byId.get('wcount').textContent, '17 total');
 
-    const shown = rows.slice(0, 12).map((row) => row.children[0].textContent);
-    assert.deepEqual(shown, [...FIFTEEN].sort().slice(0, 12));
+    const preview = rows.slice(0, 12);
+    const claudeRows = preview.filter((row) => row.children[1].textContent === 'Claude');
+    const codexRows = preview.filter((row) => row.children[1].textContent === 'Codex');
+    assert.equal(claudeRows.length, 10);
+    assert.equal(codexRows.length, 2, 'a full Claude list must not crowd Codex out of the preview');
+    assert.deepEqual(claudeRows.map((row) => row.children[0].textContent), [...FIFTEEN].sort().slice(0, 10));
+    assert.deepEqual(codexRows.map((row) => row.children[0].textContent), ['["git","status"]', '["rg"]'],
+      'Codex argv prefixes are displayed without inventing a trailing wildcard');
 
     const more = rows[12];
     assert.equal(more.className, 'more');
-    assert.equal(more.textContent, 'and 3 more — search all 15 →');
+    assert.equal(more.textContent, 'and 5 more - search all 17 →');
 
-    // The deferral opens the QuickPick, and each row's ✕ prunes that entry.
+    const codexEntry = ui.posted[0].savedPermissions.find((entry) => entry.agent === 'codex');
     panel.posted.length = 0;
     more.click();
-    rows[0].children[1].click();
+    claudeRows[0].children[2].click();
+    codexRows[0].children[2].click();
     assert.deepEqual(panel.posted, [
-      { type: 'showWildcards' },
+      { type: 'viewPermissions' },
       { type: 'remove', value: [...FIFTEEN].sort()[0] },
+      { type: 'viewPermissions', selection: {
+        agent: 'codex', path: rulesFile, pattern: ['git', 'status'], start: codexEntry.start,
+      } },
     ]);
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a Codex-only saved list is populated while Claude has no permissions', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const rulesFile = path.join(env.tempHome, '.codex', 'rules', 'user.rules');
+  fs.mkdirSync(path.dirname(rulesFile), { recursive: true });
+  fs.writeFileSync(rulesFile, 'prefix_rule(pattern=["git", "status"], decision="allow")\n');
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(ui.posted[0]);
+    assert.equal(panel.dom.byId.get('wcount').textContent, '1 total');
+    const rows = panel.dom.byId.get('list').children;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].children[0].textContent, '["git","status"]');
+    assert.equal(rows[0].children[1].textContent, 'Codex');
+    assert.notEqual(rows[0].className, 'empty', 'absence of Claude wildcards must not erase Codex approvals');
   } finally {
     await app.dispose();
   }

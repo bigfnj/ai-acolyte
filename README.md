@@ -8,7 +8,8 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.6.0 adds core Codex feature coverage.** Real extension-host and fresh-session
+**Version 1.6.1 combines Claude and Codex in one Saved permissions list**, with agent
+labels and shared search. Version 1.6.0 adds core Codex feature coverage. Real extension-host and fresh-session
 checks cover the supported workflows below. Broader version/history coverage and some
 policy-discovery boundaries remain open. The feature inventory and evidence
 are in [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
@@ -37,7 +38,7 @@ the extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v160.vsix
+code --install-extension ai-acolyte-v161.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -198,12 +199,11 @@ It runs on bge-small ONNX fused with BM25, and only changed files re-embed. The 
 also lints the index: size against the budget that is actually loaded every session,
 broken links, and gates that were written but never compiled.
 
-## 7. What it is tracking (Claude Code)
+## 7. Saved permissions (Claude Code and Codex)
 
-![Tracked wildcards](img/08-tracking.png)
-
-The receipts. Every wildcard currently in force, viewable, so the tool is auditable
-rather than something that edits your settings behind your back.
+The **Saved permissions** row combines Claude allow entries and local Codex allow
+rules, with an agent label on each entry. Its 12-entry preview alternates agents;
+the overflow link and **View / remove permissions** open one searchable list.
 
 > **Buys you:** the ability to answer "why is this allowed?" without reading a JSON
 > file.

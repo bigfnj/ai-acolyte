@@ -583,9 +583,46 @@ exports.run = async function run() {
           { guidance: 'off', gates: 'on' }, { guidance: 'off', gates: 'off' }, [false, false, false, false], [false, false]);
         for (const file of instructionFiles) assert.equal(fs.readFileSync(file, 'utf8'), ownInstructions);
         assertInactiveCodexPaths();
+        const savedSettingsFile = path.join(home, '.claude', 'settings.json');
+        const savedRulesFile = path.join(codexHome, 'rules', 'saved-permissions-fixture.rules');
+        const savedSettingsBefore = fs.readFileSync(savedSettingsFile);
+        assert.equal(fs.existsSync(savedRulesFile), false, 'saved permission fixture must not replace an existing rules file');
+        const claudeLabels = Array.from({ length: 15 }, (_, index) => `Bash(acolyte-saved-${String(index + 1).padStart(2, '0')}:*)`);
+        const codexPatterns = [['acolyte-saved-prefix-one.cmd'], ['acolyte-saved-prefix-two.cmd']];
+        const codexLabels = codexPatterns.map((pattern) => JSON.stringify(pattern));
+        const expectedRows = [
+          { agent: 'Claude', label: claudeLabels[0] }, { agent: 'Codex', label: codexLabels[0] },
+          { agent: 'Claude', label: claudeLabels[1] }, { agent: 'Codex', label: codexLabels[1] },
+          ...claudeLabels.slice(2, 10).map((label) => ({ agent: 'Claude', label })),
+        ];
+        try {
+          const savedSettings = JSON.parse(savedSettingsBefore.toString('utf8'));
+          savedSettings.permissions = { ...savedSettings.permissions, allow: claudeLabels };
+          fs.writeFileSync(savedSettingsFile, JSON.stringify(savedSettings, null, 2) + '\n');
+          fs.writeFileSync(savedRulesFile, codexPatterns.map((pattern) =>
+            `prefix_rule(pattern = ${JSON.stringify(pattern)}, decision = "allow")`).join('\n') + '\n');
+          const seeded = { settings: fs.readFileSync(savedSettingsFile), rules: fs.readFileSync(savedRulesFile) };
+          const learnerBefore = state();
+          await vscode.commands.executeCommand('workbench.action.closeSidebar');
+          await vscode.commands.executeCommand('permissionWildcarding.dashboard.focus');
+          const saved = await exchange('dashboard-saved-permissions', 'saved-permissions-mixed', {
+            expectedRows, pickerFilters: [
+              { query: claudeLabels[14], agent: 'Claude', labels: [claudeLabels[14]] },
+              { query: 'Codex', agent: 'Codex', labels: [...codexLabels, 'About this Codex inventory'] },
+            ],
+          });
+          assert.equal(saved.clicked, 'savedMore', 'mixed inventory must open through the preview footer');
+          assert.deepEqual(fs.readFileSync(savedSettingsFile), seeded.settings, 'searching saved permissions changed Claude policy');
+          assert.deepEqual(fs.readFileSync(savedRulesFile), seeded.rules, 'searching saved permissions changed Codex policy');
+          assert.deepEqual(state(), learnerBefore, 'searching saved permissions changed learner state');
+          dashboardUi.steps.push({ caseId: 'saved-permissions-mixed', ui: saved });
+        } finally {
+          fs.writeFileSync(savedSettingsFile, savedSettingsBefore);
+          if (fs.existsSync(savedRulesFile)) fs.unlinkSync(savedRulesFile);
+        }
         dashboardUi.status = 'passed';
         progress('ui-complete', { dashboardSteps: dashboardUi.steps.length, codexPruneExpected: !!codexPrune, ...followups });
-        return 'Both Codex-only partial badges observed; actual Add from partial and both-off states, Cancel and Remove preserve user text, independent blocks, inactive base and persisted settings';
+        return 'Both Codex-only partial badges observed; actual Add from partial and both-off states, Cancel and Remove preserve user text, independent blocks, inactive base and persisted settings; mixed Saved permissions preview identifies both agents and its full picker finds a hidden Claude row and filters Codex without changing policy';
       } catch (error) {
         dashboardUi.status = 'failed';
         dashboardUi.failure = error.stack || error.message;

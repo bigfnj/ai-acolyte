@@ -208,8 +208,8 @@ rather than something that edits your settings behind your back.
 > **Buys you:** the ability to answer "why is this allowed?" without reading a JSON
 > file.
 
-Backups are taken before every write, and `Restore prunes from backup` on the first
-card puts back anything a pass removed.
+Backups are taken before every write. Expand **Permission tools** and choose
+**Restore Claude permissions from backup** to recover entries a pass removed.
 
 ---
 

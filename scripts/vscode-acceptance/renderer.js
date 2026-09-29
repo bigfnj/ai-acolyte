@@ -173,11 +173,11 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
   if (!doc) return { ready: false, reason: 'active-frame document is not available', url: location.href };
   const ids = ['guidanceCard', 'gatesCard', 'guidanceBtn', 'gatesBtn', 'autoLearnCard', 'alScan', 'alReview', 'alUndo', 'alWhy',
     'codexRules', 'codexRestore', 'codexHook', 'codexMemoryCard', 'searchCodexMemory', 'inspectCodexMemory',
-    'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'];
+    'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates', 'claudeRules', 'restore'];
   if (scrollTo) {
     let element;
     if (ids.includes(scrollTo)) element = doc.getElementById(scrollTo);
-    else if (['guidanceHead', 'gatesHead', 'autoLearnHead', 'codexMemoryHead'].includes(scrollTo)) {
+    else if (['guidanceHead', 'gatesHead', 'autoLearnHead', 'codexMemoryHead', 'permissionToolsHead'].includes(scrollTo)) {
       element = doc.querySelector('.rowhead[data-row="' + scrollTo.replace('Head', '') + '"]');
     } else throw new Error('unexpected dashboard scroll target');
     if (!element) throw new Error('dashboard scroll control is absent');
@@ -230,11 +230,26 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
     result.autoLearn.buttons[id] = { text: text(button), enabled: !button.disabled,
       buttonPoint: point(button), buttonHit: hit(button) };
   }
-  for (const id of ['codexRules', 'codexRestore', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates']) {
+  for (const id of ['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates']) {
     const button = doc.getElementById(id);
-    result[id] = button ? { text: text(button), enabled: !button.disabled,
+    result[id] = button ? { text: text(button), enabled: !button.disabled, visible: visible(button),
       buttonPoint: point(button), buttonHit: hit(button) } : null;
   }
+  const toolsHead = doc.getElementById('permissionToolsToggle');
+  const toolsBody = doc.getElementById('bodyPermissionTools');
+  const toolGroups = [];
+  for (const element of toolsBody?.children || []) {
+    if (element.matches('h3.permission-group')) toolGroups.push({ label: text(element), visible: visible(element), buttonIds: [] });
+    else if (element.tagName === 'BUTTON' && toolGroups.length) toolGroups[toolGroups.length - 1].buttonIds.push(element.id);
+  }
+  result.permissionTools = toolsHead && toolsBody ? {
+    text: text(toolsHead.querySelector('.rowname')), visible: visible(toolsHead),
+    expanded: visible(toolsBody), hidden: toolsBody.hidden, ariaExpanded: toolsHead.getAttribute('aria-expanded'),
+    controls: toolsHead.getAttribute('aria-controls'), focused: doc.activeElement === toolsHead,
+    buttonIds: [...toolsBody.querySelectorAll('button')].map((button) => button.id),
+    groups: toolGroups,
+    headPoint: point(toolsHead), headHit: hit(toolsHead),
+  } : null;
   const memoryHead = doc.querySelector('.rowhead[data-row="codexMemory"]');
   result.codexMemory = { visible: visible(doc.getElementById('codexMemoryCard')),
     expanded: visible(doc.getElementById('bodyCodexMemory')), badge: text(doc.getElementById('stCodexMemory')),
@@ -309,8 +324,9 @@ async function main() {
     await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
     await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
   }
-  async function key(keyName, code, virtualKey) {
-    await client.call('Input.dispatchKeyEvent', { type: 'keyDown', key: keyName, code, windowsVirtualKeyCode: virtualKey });
+  async function key(keyName, code, virtualKey, text) {
+    await client.call('Input.dispatchKeyEvent', { type: 'keyDown', key: keyName, code, windowsVirtualKeyCode: virtualKey,
+      ...(text === undefined ? {} : { text, unmodifiedText: text }) });
     await client.call('Input.dispatchKeyEvent', { type: 'keyUp', key: keyName, code, windowsVirtualKeyCode: virtualKey });
   }
   async function fillInput(picker, value) {
@@ -457,7 +473,7 @@ async function main() {
         if (result.ready) {
           assert.ok(result.activeFrame.unscaled, 'dashboard inner iframe has an unsupported CSS transform');
           result.outerFrame = frame;
-          const entries = [result.guidance, result.gates, result.autoLearn, result.codexRules, result.codexRestore,
+          const entries = [result.guidance, result.gates, result.autoLearn, result.permissionTools, result.claudeRules, result.restore, result.codexRules, result.codexRestore,
             result.codexHook, result.codexMemory, result.searchCodexMemory, result.inspectCodexMemory,
             result.reviewCodexApprovals, result.importCodexRules, result.reviewCodexMcp, result.rebuildCodexMemory, result.codexMemoryGates,
             ...Object.values(result.autoLearn.buttons)].filter(Boolean);
@@ -485,8 +501,11 @@ async function main() {
     return null;
   }
   async function dashboardClick(control, part) {
+    if (['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'reviewCodexApprovals', 'reviewCodexMcp', 'importCodexRules'].includes(control)) {
+      await permissionToolsReady();
+    }
     const autoButton = control === 'autoLearn' && part !== 'head';
-    const directButton = ['codexRules', 'codexRestore', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'].includes(control) && part === 'button';
+    const directButton = ['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'searchCodexMemory', 'inspectCodexMemory', 'reviewCodexApprovals', 'importCodexRules', 'reviewCodexMcp', 'rebuildCodexMemory', 'codexMemoryGates'].includes(control) && part === 'button';
     assert.ok(await dashboardState(directButton ? control : autoButton ? part : control + (part === 'head' ? 'Head' : 'Btn')),
       'dashboard became unavailable before the click');
     let movedPoint;
@@ -521,6 +540,59 @@ async function main() {
     });
     report.observations.push({ phase: 'dashboard-control-click', ...ready });
     await click(ready.point);
+  }
+  async function permissionToolsReady() {
+    const ids = ['claudeRules', 'restore', 'codexRules', 'codexRestore', 'codexHook', 'reviewCodexApprovals', 'reviewCodexMcp', 'importCodexRules'];
+    const inspect = (state, expanded) => {
+      const menu = state?.permissionTools;
+      assert.ok(menu?.visible, 'WITNESS the actual Permission tools disclosure is visible');
+      assert.equal(menu.text, 'Permission tools');
+      assert.equal(menu.controls, 'bodyPermissionTools');
+      assert.deepEqual(menu.buttonIds, ids, 'WITNESS Permission tools contains exactly the eight Claude and Codex controls');
+      assert.deepEqual(menu.groups, [
+        { label: 'Claude Code', visible: expanded, buttonIds: ids.slice(0, 2) },
+        { label: 'Codex', visible: expanded, buttonIds: ids.slice(2) },
+      ], 'WITNESS Permission tools separates Claude Code and Codex actions under their visible headings');
+      assert.equal(state.claudeRules.text, 'View / remove Claude wildcards…');
+      assert.ok(state.restore.text.endsWith('Restore Claude permissions from backup'));
+      assert.equal(menu.expanded, expanded, 'WITNESS Permission tools has the expected visible state');
+      assert.equal(menu.hidden, !expanded);
+      assert.equal(menu.ariaExpanded, String(expanded), 'WITNESS Permission tools announces its actual expanded state');
+      for (const id of ids) assert.equal(state[id]?.visible, expanded,
+        `WITNESS ${id} is ${expanded ? 'shown' : 'hidden'} with Permission tools`);
+      return menu;
+    };
+    const initial = await dashboardState('permissionToolsHead');
+    if (report.permissionTools) {
+      inspect(initial, true);
+      report.permissionTools.retainedAcrossActions += 1;
+      return;
+    }
+    inspect(initial, false);
+    const closedScreenshot = await dashboardScreenshot('permission-tools-closed');
+    await dashboardClick('permissionTools', 'head');
+    const opened = await waitFor('waiting for Permission tools mouse expansion', async () => {
+      const state = await dashboardState(); return state?.permissionTools?.expanded ? state : null;
+    });
+    inspect(opened, true);
+    assert.equal(opened.permissionTools.focused, true, 'WITNESS clicking the native disclosure focuses its keyboard control');
+    const openScreenshot = await dashboardScreenshot('permission-tools-open');
+    // Native button activation needs the Enter character as well as keyDown;
+    // workbench pickers elsewhere consume keyDown directly.
+    await key('Enter', 'Enter', 13, '\r');
+    const collapsed = await waitFor('waiting for Permission tools keyboard collapse', async () => {
+      const state = await dashboardState(); return state?.permissionTools && !state.permissionTools.expanded ? state : null;
+    });
+    inspect(collapsed, false);
+    assert.equal(collapsed.permissionTools.focused, true);
+    await key('Enter', 'Enter', 13, '\r');
+    const reopened = await waitFor('waiting for Permission tools keyboard expansion', async () => {
+      const state = await dashboardState(); return state?.permissionTools?.expanded ? state : null;
+    });
+    inspect(reopened, true);
+    report.permissionTools = { status: 'passed', buttonIds: ids, groups: reopened.permissionTools.groups, initialCollapsed: true,
+      mouseExpanded: true, keyboardCollapsed: true, keyboardExpanded: true, retainedAcrossActions: 0,
+      closedScreenshot, openScreenshot };
   }
   function autoLearnButtons(state) {
     return Object.fromEntries(['alScan', 'alReview', 'alUndo', 'alWhy'].map((id) => [id, state.autoLearn.buttons[id].enabled]));

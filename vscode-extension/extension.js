@@ -3871,13 +3871,15 @@ class WildcardingViewProvider {
   .heronum small { font-size: 13px; font-weight: 400; color: var(--vscode-descriptionForeground); }
   .herosub { text-align: center; font-size: 11px; color: var(--vscode-descriptionForeground);
              margin-bottom: 12px; }
-  .hero button.run, .hero button.restore { margin-bottom: 0; }
-  .hero button.restore { margin-top: 6px; }
+  .hero button.run { margin-bottom: 0; }
 
   .row { border-top: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
   .row:last-of-type { border-bottom: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
   .rowhead { display: flex; align-items: center; gap: 8px; padding: 8px 2px;
              cursor: pointer; user-select: none; }
+  button.rowhead { width: 100%; border: none; background: transparent;
+                   color: inherit; font: inherit; text-align: left; }
+  button.rowhead:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .rowhead:hover .rowname { color: var(--vscode-textLink-foreground); }
   /* An identity glyph, not a status colour. The state itself is the text on the
      right, so a collapsed row never communicates by hue alone — which the eleven
@@ -3892,6 +3894,9 @@ class WildcardingViewProvider {
   .rowstate.hot  { color: var(--vscode-charts-red, #f85149); font-weight: 600; }
   .rowbody { padding: 0 2px 10px 2.1em; }
   .rowbody[hidden] { display: none; }
+  #bodyPermissionTools:not([hidden]) { display: grid; gap: 6px; }
+  #bodyPermissionTools button.restore { margin: 0; }
+  .permission-group { margin: 4px 0 0; font-size: 11px; color: var(--vscode-descriptionForeground); }
   /* The card markup inside a row keeps its ids and its JS untouched, and simply
      stops drawing itself as a card. */
   .row .card { background: none; border: none; border-radius: 0; padding: 0; margin: 0 0 8px; }
@@ -3912,17 +3917,30 @@ class WildcardingViewProvider {
       <span id="wildcards">–</span> wildcards · <span id="specific">–</span> specific
     </div>
 
-    <button class="run" id="runNow">⟳  Wildcard Now</button>
-    <button class="restore" id="restore" title="Merge your saved backup back into the allow list">⤺  Restore prunes from backup</button>
-    <button class="restore" id="codexRules">View / remove Codex rules…</button>
-    <button class="restore" id="codexRestore">Restore Codex rules…</button>
-    <button class="restore" id="codexHook">Configure Codex after-turn learning…</button>
-    <button class="restore" id="reviewCodexApprovals">Review Codex approvals…</button>
-    <button class="restore" id="reviewCodexMcp">Review Codex MCP approvals…</button>
-    <button class="restore" id="importCodexRules">Import project Codex rules…</button>
+    <button class="run" id="runNow">⟳  Wildcard Claude permissions</button>
     <div class="muted sub" id="lastRun"></div>
     <div class="muted" id="backup"></div>
   </div>
+
+  <section class="row">
+    <button type="button" class="rowhead" id="permissionToolsToggle" data-row="permissionTools"
+            aria-controls="bodyPermissionTools" aria-expanded="false">
+      <span class="chev" aria-hidden="true">▸</span><span class="glyph" aria-hidden="true">⚙</span>
+      <span class="rowname">Permission tools</span>
+    </button>
+    <div class="rowbody" id="bodyPermissionTools" hidden>
+      <h3 class="permission-group">Claude Code</h3>
+      <button class="restore" id="claudeRules">View / remove Claude wildcards…</button>
+      <button class="restore" id="restore" title="Merge saved Claude allow and deny entries back into settings.json">⤺  Restore Claude permissions from backup</button>
+      <h3 class="permission-group">Codex</h3>
+      <button class="restore" id="codexRules">View / remove Codex rules…</button>
+      <button class="restore" id="codexRestore">Restore Codex rules…</button>
+      <button class="restore" id="codexHook">Configure Codex after-turn learning…</button>
+      <button class="restore" id="reviewCodexApprovals">Review Codex approvals…</button>
+      <button class="restore" id="reviewCodexMcp">Review Codex MCP approvals…</button>
+      <button class="restore" id="importCodexRules">Import project Codex rules…</button>
+    </div>
+  </section>
 
   <section class="row">
     <div class="rowhead" data-row="autoLearn">
@@ -4038,7 +4056,7 @@ class WildcardingViewProvider {
   <section class="row">
     <div class="rowhead" data-row="list" title="Click to collapse / expand">
       <span class="chev">▸</span><span class="glyph">✱</span>
-      <span class="rowname">Wildcards tracked</span><span class="rowstate" id="wcount"></span>
+      <span class="rowname">Claude wildcards</span><span class="rowstate" id="wcount"></span>
     </div>
     <div class="rowbody" id="bodyList" hidden><ul id="list"></ul></div>
   </section>
@@ -4065,6 +4083,7 @@ class WildcardingViewProvider {
       const isOpen = openRows.has(key);
       const body = bodyFor(key);
       if (body) body.hidden = !isOpen;
+      if (head.hasAttribute('aria-expanded')) head.setAttribute('aria-expanded', String(isOpen));
       const chev = head.querySelector('.chev');
       if (chev) chev.textContent = isOpen ? '▾' : '▸';
     }
@@ -4471,7 +4490,7 @@ class WildcardingViewProvider {
     $('wildcards').textContent = d.wildcardCount;
     $('specific').textContent = d.specificCount;
     $('wcount').textContent = d.wildcardCount + ' total';
-    $('runNow').textContent = (d.pendingWildcard > 0) ? '⟳  Wildcard Now (' + d.pendingWildcard + ')' : '⟳  Wildcard Now';
+    $('runNow').textContent = '⟳  Wildcard Claude permissions' + (d.pendingWildcard > 0 ? ' (' + d.pendingWildcard + ')' : '');
 
     const list = $('list');
     list.innerHTML = '';
@@ -4526,6 +4545,7 @@ class WildcardingViewProvider {
   $('alUndo').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnUndo' }));
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
   $('restore').addEventListener('click', () => vscode.postMessage({ type: 'restore' }));
+  $('claudeRules').addEventListener('click', () => vscode.postMessage({ type: 'showWildcards' }));
   $('codexRules').addEventListener('click', () => vscode.postMessage({ type: 'showCodexRules' }));
   $('codexRestore').addEventListener('click', () => vscode.postMessage({ type: 'restoreCodexRules' }));
   $('codexHook').addEventListener('click', () => vscode.postMessage({ type: 'codexHook' }));

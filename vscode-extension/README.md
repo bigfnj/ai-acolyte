@@ -25,9 +25,9 @@ a Claude Code hook. The optional Codex after-turn hook has its own review requir
 On every write it also saves a high-water-mark backup of the allow list **and the
 deny list** to `~/.claude/backups/allow-list.latest.json`, so a managed-settings
 refresh that resets `settings.json` can't lose your accumulated wildcards or your
-safety boundary. Recover both with **Restore prunes from backup** (dashboard
-button, title-bar `history` icon, or the `Acolyte: Restore prunes from
-backup` command).
+safety boundary. Recover both with **Restore Claude permissions from backup** under
+the dashboard's collapsed **Permission tools** section, the title-bar `history` icon,
+or the `Acolyte: Restore prunes from backup` command.
 
 deny is restored alongside allow deliberately: every other feature here ends its
 safety argument at "deny still wins", so bringing permissions back without the

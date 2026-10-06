@@ -77,6 +77,7 @@ inputs and configurations were exercised and which boundaries remain open.
 | High-water allow/deny backup and restore | implemented | retained literal rules and reviewed restoration; fresh-process checks pass |
 | Tracked-wildcard inventory and prune | implemented | literal local rule inventory, confirmed allow-rule removal and shared suppression |
 | Post-tool approval hook | `PostToolUse` hook | Stop callback learns completed turns with the editor closed; Codex hook review required |
+| PermissionRequest hook (optional) | observe by default; approves only simple shell calls your rules allow | the same, after review in `/hooks` |
 | Auto Learn over session history | implemented | shell learning implemented; actual runtime transcripts parsed |
 | Reviewed and auto-safe policy output | allow-list entries | safe apply checked; generated rules exercised in fresh sessions |
 | Shell-style guidance | `CLAUDE.md` writer | active Codex instruction file; custom home and override support |
@@ -210,6 +211,28 @@ the overflow link and **View / remove permissions** open one searchable list.
 
 Backups are taken before every write. Expand **Permission tools** and choose
 **Restore permissions**, then **Claude Code**, to recover entries a pass removed.
+
+## 8. PermissionRequest hook (both agents, optional)
+
+Both products run their own rules first and fire `PermissionRequest` only when they are about
+to ask, so a hook that approves what your rules allow changes little. Measured on the
+development box, it would have approved none of the 1,076 dialogs the transcripts show. What
+it can do is approve a call that a rule written after the session started now allows, which
+Codex does not reload until it restarts, and count every shell-command dialog per app, which
+no transcript records.
+
+```bash
+wildcard-perms --permission-hook on              # observe mode: logs, approves nothing
+wildcard-perms --permission-hook report          # per app: decisions, reasons, rule ids
+wildcard-perms --permission-hook mode approve    # opt in to approving
+wildcard-perms --permission-hook off             # removes exactly its own entries
+```
+
+In approve mode a call is approved only when every part of it matches an allow rule, no deny
+or ask rule matches, it carries no shell structure or high-risk command, and the session is in
+default or acceptEdits mode. It never adds a lasting rule. Codex skips the hook until you trust
+it in `/hooks`. The log holds tool names, decisions, reason codes and hashed rule ids, never
+command text.
 
 ---
 

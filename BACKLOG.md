@@ -35,6 +35,31 @@ entry. Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
+### PermissionRequest hook: observe first, then the approve decision
+
+Built 2026-10-06 in observe mode (`wildcard-perms --permission-hook on`); approve mode is one
+command (`--permission-hook mode approve`). The measurement, the real-Codex runtime findings
+and every decision taken are in `docs/engineering-record.md` under "PermissionRequest hook".
+Measured expectation: near zero for Claude, and for Codex the mid-session-rule case only.
+Open, each with what would close it:
+
+- **Does each app run it at all?** Claude desktop, Claude in VS Code, Codex in VS Code, Codex
+  Desktop. Closed by `--permission-hook report` showing entries per host after ordinary use.
+  Where the managed policy applies it declares that only its own hooks run for this event, so
+  the hook is expected to be dropped there; the install output says so. Codex runs it only
+  after the person trusts it in `/hooks`.
+- **How many dialogs, of which kind.** The report's verdict and reason counts are the first
+  direct count of approved dialogs this repo has had; transcripts record only declined ones.
+- **The approve decision belongs to the owner,** made from that report rather than from the
+  transcript estimate.
+- **Whether Claude Code reloads `settings.json` mid-session** is unmeasured. If it does not,
+  `would-approve` entries in default or acceptEdits mode with no structure codes are its
+  signature, and that would be the one sizeable Claude case.
+- **Known gaps, recorded rather than fixed:** the terminal-on-stdin refusal has no test,
+  since a test can only supply a pipe; Codex rules in trusted project directories are not
+  enumerated, the same standing limit as the rest of the repo; and Claude Code's PowerShell
+  parser may disagree with this splitter in ways only observe mode can show.
+
 ### Codex compatibility: feature coverage and real-app validation
 
 `docs/codex-compatibility.md` holds the feature inventory and dated evidence. The

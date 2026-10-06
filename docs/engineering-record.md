@@ -1561,3 +1561,153 @@ This is the same lesson as the release-note claim about validating the deployed 
 keeps arriving from a different direction: **a patch script that asserts `count === 1` proves
 its pattern was unique, not that the pattern was the only place the thing was said.** Uniqueness
 of a string is not coverage of a concept. Grep the artefact for the CONCEPT afterwards.
+
+---
+
+## PermissionRequest hook: measured before it was built (2026-10-06)
+
+The owner asked how much approval friction a `PermissionRequest` hook would remove in the
+Claude and Codex desktop apps, where AgentFlow cannot press a dialog. Both products evaluate
+their own rules first and run this hook only when that evaluation decided to ask, so a hook
+that approves "what my rules allow" changes an outcome only where this repo's matcher and the
+product's disagree over the same rules. The measurement came first. The hook was built
+afterwards in observe mode, because observe mode is the only instrument that can count the
+dialogs a transcript does not record.
+
+### The measurement, and what it cannot see
+
+`scripts/measure-permission-gap.js` runs every recorded call through the same `decide()` the
+hook ships, against the rules on disk on 2026-10-06: user settings, the cached managed policy
+and each session's project files. It is read-only and prints counts only;
+`test/measure-permission-gap.test.js` drives it over a synthetic home with a secret placed
+right after the root word and fails if any of it reaches the output.
+
+**Neither product records an approved dialog.** A declined one leaves `toolDenialKind:
+user-rejected` (Claude) or "command rejected by user" (Codex); an approved one looks exactly
+like a call that needed none. So "visible dialogs" below is a lower bound: calls an exact ask
+rule matched (ask prompts in every mode, auto included) plus calls the person declined. Every
+value `toolDenialKind` took was counted, six of them: `automode-blocked` 47, `permission-rule`
+45, `user-rejected` 14, `interrupted` 8, `cancelled` 3, `automode-unavailable` 2. Subagent
+transcripts, 1,587 of the 1,704 files, carry no mode of their own; they inherit the session's
+mode at the call's timestamp and are labelled as inherited.
+
+| Claude host | calls | in auto mode | visible dialogs | hook approves | declined although an allow rule matches |
+|---|---|---|---|---|---|
+| claude-vscode | 132,080 | 95.6% | 1,042 | 0 | 7, stopped by structure (5) or mode (2) |
+| claude-desktop | 5,519 | 99.2% | 32, all managed ask, see below | 0 | 0 |
+| cli | 2 | 0% | 2 | 0 | 1, stopped by structure |
+
+The approved dialogs nobody can see were estimated too: shell calls that ran, in a mode that
+prompts on a rule miss, with no allow rule. That is 710 in VS Code and 4 in desktop, an upper
+estimate because built-in read-only commands and acceptEdits' filesystem set run unprompted
+as well. The hook abstains on every one of them by construction.
+
+Codex, 71 rollouts. `codex_vscode`: 65 rollouts, 6,031 `exec` calls, 30 of which requested
+escalation or extra permissions, 1 declined by the person. Against today's rules those 30
+commands are 13 allow, 12 ask (managed prompt rules) and 5 with no rule, and the hook would
+approve 11, but each of the 11 is covered by a rule Codex itself now loads, so Codex would not
+ask. `Codex Desktop`: 2 rollouts, web search only, no escalation. `codex_exec`: 4 rollouts, none.
+
+**Plainly: on this box the hook would have approved none of the 1,076 dialogs that can be
+seen, and the only visible instances of the class it exists for, a dialog although an allow
+rule matches, were 8 calls the person declined.** Most visible friction is dialogs a managed
+`ask` rule forces: 1,024 in VS Code, and 32 in desktop if desktop applies the same cached
+policy, which nothing here verifies (it is signed into a different organisation). The hook
+evaluates ask first and never overrides one, and in VS Code the managed policy declares that
+only its own hooks run for this event.
+
+### What the real Codex runtime showed
+
+`scripts/check-permission-request-runtime.js` drives Codex 0.145.0 against a temporary
+`CODEX_HOME` with a scripted loopback responder: no model, no credentials, no network beyond
+127.0.0.1. All six cases pass.
+
+- `codex exec` cannot exercise the hook. It forces `approval_policy = never` whatever the
+  config says and rejects an escalation without asking. The check uses `codex app-server`,
+  where an approval reaches the client unless a hook decides it.
+- A configured hook is listed `untrusted` and skipped. Trust is the exact `currentHash`
+  `hooks/list` reports, written as `trusted_hash` the way `/hooks` writes it, and only into
+  the temporary home.
+- A trusted hook runs before Codex asks. Codex sends `permission_mode: "default"` under
+  `on-request`, `tool_input.command` as a plain string, and a `transcript_path` whose first
+  line names the originator, which is how the log learns the host.
+- An abstaining hook leaves the approval to the person, in observe and in approve mode.
+- **A rule written after Codex started is not reloaded.** Codex asked, the hook approved from
+  the fresh rules file, and the command ran with nobody prompted. This is the one disagreement
+  the hook resolves, and on a long-lived app-server it is real: an Auto Learn rule written
+  during a session otherwise waits for a restart.
+- A rule Codex loaded at start means no dialog and no hook call.
+
+Control: with the approve line disabled in the product, the check fails exactly at the
+mid-session case after the first four pass. Codex needs `git status` replaced by a probe
+executable for any of this, because it auto-allows known read-only commands, which the
+reviewed-rule work above had already found.
+
+**Not measured: whether Claude Code reloads `settings.json` mid-session.** If it does not, the
+same class exists there and would be its largest, since the PostToolUse wildcarder writes
+generalized rules during sessions. Observe mode shows it as `would-approve` entries in default
+or acceptEdits mode with no structure codes.
+
+### Decisions taken in this lane
+
+Each is the conservative option where the brief and the code were silent. An abstention costs
+one prompt; a wrong approval costs whatever the command does.
+
+- **No approval in auto, plan, dontAsk or bypassPermissions mode.** Auto mode evaluates deny,
+  ask and allow before its classifier, so a dialog there while an allow rule matches means the
+  product chose not to honour that rule: an interpreter grant it discards at load, an ask, or
+  one of its safety checks.
+- **Bash and PowerShell only for Claude, Bash only for Codex.** Read and Edit rules use
+  gitignore path semantics this matcher does not implement. MCP, WebFetch and apply_patch
+  abstain as `unsupported-tool`.
+- **Structure and risk bar an approval even when every segment is allowed:** write
+  redirection, substitution and script syntax, interpreters and shell wrappers, call
+  operators, quoted or path executables, environment prefixes, stripped wrappers, trailing
+  globs, and destructive, admin, credential or shell risk. The lists are `STRUCTURE_BARS` and
+  `RISK_BARS`, over the classifier in `src/auto-learn.js`.
+- **Deny and ask are read from more places than allow,** and matched case-folded and across
+  both shell tools: user, user-local, managed (the remote cache and the machine file), and the
+  project files of cwd and of every ancestor. Allow comes only from user, managed and the
+  cwd's own project files, matched exactly. An environment prefix is not stripped before
+  matching, unlike Claude Code's own matcher, so such a command never reaches allow.
+- **Any unreadable source abstains** as `rules-unreadable`, including a non-array deny or ask
+  and a Codex rules file the literal reader cannot parse.
+- **Codex:** one segment only; one plain `bash -lc` or `powershell -Command` wrapper is
+  unwrapped; the cached managed bundle's prompt and forbidden rules outrank a local allow; a
+  request whose description names the network abstains, because a managed-network approval
+  is a separate gate.
+- **The mode lives in its own file,** `~/.ai-acolyte/permission-request-mode.json`, so
+  flipping it never changes the hook definition Codex has trusted. Anything other than
+  exactly `approve` is observe.
+- **The log holds rule ids, not rules:** a tier plus an FNV-1a hash of the rule text, because
+  14% of a measured allow list was verbatim commands. It rotates once at 1 MiB.
+- **Ownership is the exact handler.** A near match, the same verb from an old checkout path,
+  is reported and left alone, and install refuses rather than writing a second copy. The hook
+  times out after 10 s, and the product then shows its normal dialog.
+- **Phase 2 was built although the approve value measured near zero,** because observe mode
+  is the only way to count approved dialogs and to learn whether each app runs a user hook on
+  this event at all.
+
+### Cost
+
+Cold, a fresh process per sample, the two arms interleaved in alternating order, n=41 per arm,
+three runs. The hook ran against copies of the real rule files; the purpose-built floor drains
+stdin and exits, which is what a hook doing nothing costs.
+
+| run | hook min / p50 | floor min / p50 | added min / p50 |
+|---|---|---|---|
+| 1 | 85.7 / 92.1 ms | 57.6 / 63.0 ms | 28.1 / 29.1 ms |
+| 2 | 88.1 / 100.2 ms | 61.3 / 69.5 ms | 26.9 / 30.7 ms |
+| 3 | 85.4 / 99.6 ms | 58.9 / 67.9 ms | 26.6 / 31.7 ms |
+
+About 27 ms at the minimum, paid only when a dialog is about to show. In-process, after node
+starts, the decision and the log take 12.6 ms at the minimum. The copies sat in a temporary
+home, so their `.json` reads paid the out-of-`~/.claude` penalty recorded above: upper bounds.
+
+### Evidence
+
+`D:/.ai-work/projects/.acolyte-worktrees/temp/permission-request-hook/evidence/`:
+`phase1-report-v2.txt` and `.json`, `codex-runtime-pass.json`,
+`codex-runtime-mutation-no-approve.json`, `timing-results.txt`, and `mutation-results.json`,
+where 26 of 26 mutations over the new guards were killed, each restore verified on bytes,
+with the control green before and after. Open items are in `BACKLOG.md`.

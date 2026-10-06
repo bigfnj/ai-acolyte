@@ -63,19 +63,26 @@ const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
   '       wildcard-perms --guidance accept|decline|reset <id>\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n';
 const CODEX_HOOK_USAGE = 'usage: wildcard-perms --codex-hook on|off|status\n';
+const PERMISSION_HOOK_USAGE =
+  'usage: wildcard-perms --permission-hook on|off|status [--product claude|codex|both]\n' +
+  '       wildcard-perms --permission-hook mode [observe|approve]\n' +
+  '       wildcard-perms --permission-hook report [--json]\n';
+const PERMISSION_REQUEST_USAGE =
+  'usage: wildcard-perms --permission-request claude|codex   (a hook entry: reads one event on stdin)\n';
 
 // Every active verb, the two retired MAX flags, and the one-way cleanup for
 // withdrawn Codex workspace rules. Keeping the retired flags in dispatch is a
 // safety boundary: an old invocation must reach a read-only or cleanup handler,
 // never fall through to hook mode and rewrite settings.json.
 const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
-  '--codex-max', '--max', '--bypass', '--codex-workspace-rules', '--codex-hook'];
+  '--codex-max', '--max', '--bypass', '--codex-workspace-rules', '--codex-hook',
+  '--permission-hook', '--permission-request'];
 const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex permissions\n\n' +
   'Run with NO arguments to act as a PostToolUse hook (reads a JSON event on stdin).\n\n' +
   LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
   'usage: wildcard-perms --seed\n' +
   'usage: wildcard-perms --bypass on|off|status\n' +
-  WORKSPACE_RULES_USAGE + CODEX_HOOK_USAGE +
+  WORKSPACE_RULES_USAGE + CODEX_HOOK_USAGE + PERMISSION_HOOK_USAGE + PERMISSION_REQUEST_USAGE +
   'usage: wildcard-perms --help | --version\n';
 
 const argv = process.argv.slice(2);
@@ -116,6 +123,10 @@ if (argv.includes('--help') || argv.includes('-h')) {
   codexWorkspaceRules(argv);
 } else if (argv.includes('--codex-hook')) {
   codexHook(argv);
+} else if (argv.includes('--permission-request')) {
+  permissionRequest(argv);
+} else if (argv.includes('--permission-hook')) {
+  permissionHook(argv);
 } else {
   // Hook mode. Claude Code sends a JSON context on stdin, and one field of it
   // matters: `cwd` names the project whose settings.local.json may have just
@@ -162,42 +173,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   // silent-drain-failure trap this whole section is written around. That is what
   // the chunked-delivery test pins.
   const HOOK_STDIN_LIMIT = 1024 * 1024;
-  let input = '';
-  let overflowed = false;
-  {
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    const kept = [];
-    let total = 0;
-    for (;;) {
-      let read;
-      try { read = fs.readSync(0, buffer, 0, buffer.length, null); }
-      catch (err) {
-        // EAGAIN is a non-blocking pipe with nothing ready yet, which the stream
-        // used to wait out for us. Yield the thread rather than spinning on it.
-        // Anything else — EBADF from a closed stdin, EOF on the platforms that
-        // raise it instead of returning 0 — ends the payload.
-        if (err.code === 'EAGAIN') {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
-          continue;
-        }
-        break;
-      }
-      if (read === 0) break;
-      if (overflowed) continue;
-      if (total + read > HOOK_STDIN_LIMIT) {
-        overflowed = true;
-        kept.length = 0;
-        total = 0;
-        continue;
-      }
-      // Copied out: `buffer` is reused by the next read.
-      kept.push(Buffer.from(buffer.subarray(0, read)));
-      total += read;
-    }
-    // Decoded once, from the joined bytes, so a multi-byte character split
-    // across two reads survives.
-    if (!overflowed) input = Buffer.concat(kept, total).toString('utf8');
-  }
+  const { text: input, overflowed } = readHookStdin(HOOK_STDIN_LIMIT);
   if (overflowed) {
     // Said out loud on every occurrence. A control that runs degraded and does
     // not report it is indistinguishable from one that is working.
@@ -208,6 +184,166 @@ if (argv.includes('--help') || argv.includes('-h')) {
     );
   }
   run(overflowed ? null : input);
+}
+
+// The bounded synchronous stdin read described above, shared by both hook
+// entries (PostToolUse here, PermissionRequest below) so the two cannot drift.
+// At most `limit` bytes are retained; the pipe is always drained to EOF.
+function readHookStdin(limit) {
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const kept = [];
+  let total = 0;
+  let overflowed = false;
+  for (;;) {
+    let read;
+    try { read = fs.readSync(0, buffer, 0, buffer.length, null); }
+    catch (err) {
+      // EAGAIN is a non-blocking pipe with nothing ready yet, which the stream
+      // used to wait out for us. Yield the thread rather than spinning on it.
+      // Anything else — EBADF from a closed stdin, EOF on the platforms that
+      // raise it instead of returning 0 — ends the payload.
+      if (err.code === 'EAGAIN') {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        continue;
+      }
+      break;
+    }
+    if (read === 0) break;
+    if (overflowed) continue;
+    if (total + read > limit) {
+      overflowed = true;
+      kept.length = 0;
+      total = 0;
+      continue;
+    }
+    // Copied out: `buffer` is reused by the next read.
+    kept.push(Buffer.from(buffer.subarray(0, read)));
+    total += read;
+  }
+  // Decoded once, from the joined bytes, so a multi-byte character split
+  // across two reads survives.
+  return { text: overflowed ? '' : Buffer.concat(kept, total).toString('utf8'), overflowed };
+}
+
+// The PermissionRequest hook entry. Prints the allow decision ONLY when the
+// rules allow the call, every gate passes and the mode file says approve;
+// otherwise prints nothing and exits 0, which leaves the product's own dialog in
+// place. Every invocation appends one metadata-only line to the log, and a
+// failure to log is said on stderr rather than swallowed.
+//
+// A terminal on stdin is refused rather than waited on: a hook is always fed
+// by a pipe, and a manual run would otherwise block for an event that is never
+// coming, which is the trap the unrecognized-flag guard above was written for.
+function permissionRequest(args) {
+  const product = args[1];
+  if (args[0] !== '--permission-request' || args.length !== 2 || !['claude', 'codex'].includes(product)) {
+    process.stderr.write(PERMISSION_REQUEST_USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  if (require('tty').isatty(0)) {
+    process.stderr.write('wildcard-perms --permission-request: stdin is a terminal; this is a hook entry.\n'
+      + PERMISSION_REQUEST_USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  const { text, overflowed } = readHookStdin(1024 * 1024);
+  const { runPermissionRequest, appendLog } = require('../src/permission-request');
+  const { output, entry } = runPermissionRequest(product, text, { oversized: overflowed });
+  try { appendLog(entry); }
+  catch (err) {
+    process.stderr.write(`wildcard-perms --permission-request: could not write the log (${err.code || err.name}); `
+      + `the decision was ${entry.decision}.\n`);
+  }
+  if (output) process.stdout.write(`${output}\n`);
+}
+
+function permissionHook(args) {
+  const cmd = String(args[args.indexOf('--permission-hook') + 1] || 'status').toLowerCase();
+  let product;
+  try { product = String(learnOption(args, '--product', 'both')).toLowerCase(); }
+  catch { product = null; }
+  if (!['claude', 'codex', 'both'].includes(product)) {
+    process.stderr.write(PERMISSION_HOOK_USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  const products = product === 'both' ? ['claude', 'codex'] : [product];
+  const hooks = require('../src/permission-request');
+
+  if (cmd === 'mode') {
+    const value = args[args.indexOf('mode') + 1];
+    if (value === undefined || value.startsWith('--')) {
+      const current = hooks.readHookMode();
+      process.stdout.write(`wildcard-perms permission hook mode: ${current.mode} (${current.source}), ${current.path}\n`);
+      return;
+    }
+    if (!['observe', 'approve'].includes(value)) {
+      process.stderr.write(PERMISSION_HOOK_USAGE);
+      process.exitCode = 2;
+      return;
+    }
+    const result = hooks.setHookMode(value);
+    process.stdout.write(`wildcard-perms permission hook mode: ${result.mode}${result.changed ? '' : ' (already)'}, ${result.path}\n`
+      + (value === 'approve'
+        ? '  approve: a call is approved only when your rules allow every part of it, no deny or ask rule\n'
+          + '  matches, it carries no shell structure, and the session is in default or acceptEdits mode.\n'
+        : '  observe: every prompt is logged with what the hook would decide; nothing is approved.\n'));
+    return;
+  }
+
+  if (cmd === 'report') {
+    const summary = hooks.summarizeLog();
+    process.stdout.write(args.includes('--json') ? `${JSON.stringify(summary, null, 2)}\n` : hooks.formatSummary(summary));
+    return;
+  }
+
+  if (!['on', 'off', 'status'].includes(cmd)) {
+    process.stderr.write(PERMISSION_HOOK_USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  const install = require('../src/permission-request-install');
+  const mode = hooks.readHookMode();
+  for (const name of products) {
+    let result;
+    try {
+      if (name === 'claude') {
+        result = cmd === 'status' ? install.inspectClaudePermissionHook()
+          : install.setClaudePermissionHook(cmd === 'on');
+      } else {
+        result = cmd === 'status' ? install.inspectCodexPermissionHook()
+          : install.setCodexPermissionHook(cmd === 'on');
+      }
+    } catch (err) {
+      const { POLICY_LOCK_CODE, POLICY_LOCK_BUSY_MESSAGE } = require('../src/policy-lock');
+      process.stderr.write(`wildcard-perms --permission-hook ${cmd} [${name}]: `
+        + `${err?.code === POLICY_LOCK_CODE ? POLICY_LOCK_BUSY_MESSAGE : err.message}\n`);
+      process.exitCode = 1;
+      continue;
+    }
+    const state = result.configured ? 'ON' : 'OFF';
+    process.stdout.write(`wildcard-perms permission hook [${name}]: ${state}`
+      + `${cmd !== 'status' && !result.changed ? ' (already)' : ''}`
+      + `${result.status !== 'configured' && result.status !== 'missing' ? ` (${result.status})` : ''}, ${result.path}\n`);
+    if (result.reason) process.stdout.write(`  ${result.reason}\n`);
+    if (result.backupPath) process.stdout.write(`  previous hooks.json saved to ${result.backupPath}\n`);
+    if (!result.configured) continue;
+    if (name === 'claude' && result.policy && result.policy.dropped) {
+      process.stdout.write('  note: a managed policy on this machine runs only its own hooks for PermissionRequest,\n'
+        + '  so a host that applies it will skip this one. The report shows which hosts actually run it.\n');
+    }
+    if (name === 'codex') {
+      process.stdout.write('  Codex skips a new or changed hook until you review and trust this exact definition:\n'
+        + '  open Codex, run /hooks, and trust the "AI Acolyte: checking saved permission rules" entry.\n');
+    }
+  }
+  if (cmd !== 'off') {
+    process.stdout.write(`  mode: ${mode.mode}${mode.mode === 'observe'
+      ? '. Logs what it would decide and approves nothing. Switch with: wildcard-perms --permission-hook mode approve'
+      : '. Approves calls your rules allow, under the gates listed by --permission-hook mode approve'}\n`
+      + '  log: wildcard-perms --permission-hook report\n');
+  }
 }
 
 // The first positional argument after a verb, with flag/value pairs skipped, so

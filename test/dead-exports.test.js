@@ -117,7 +117,7 @@ const TEST_ONLY = {
   'src/codex-stop-hook.js': ['runCodexStopHook'],
   // Production wraps this read-only primitive in the reviewed proposal API.
   'src/codex-mcp-config.js': ['inspectCodexMcpTool'],
-  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'classifyInvocation', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
+  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'classifyInvocation', 'isLearnableTool', 'toolInvocation'],
   // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
   // consumer when the managed-requirements parser was rewritten on 2026-09-24:
   // production now asks enterprisePolicyAssessment, which answers with the degraded
@@ -126,12 +126,15 @@ const TEST_ONLY = {
   'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRules', 'enterpriseRequirements'],
   'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'markersFor', 'reconcileDerived', 'renderMitigation'],
   'src/exec-resolve.js': ['quoteForCommandProcessor', 'resolveExecutable'],
-  'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
-  'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl', 'parseCodexJsonl'],
+  'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'readFixedPoint'],
+  'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'parseClaudeJsonl', 'parseCodexJsonl'],
   'src/legacy-backup-cleanup.js': ['parseBackupText'],
   'src/legacy-max-cleanup.js': ['LEGACY_ALLOW_CORE', 'legacyApproveCommandFor', 'legacyGeneratedAllow'],
   'src/local-settings.js': ['localBackupPath', 'partitionLocal', 'planPromotions', 'promotionFor', 'redundantUnder'],
-  'src/managed-policy.js': ['coversPrefix', 'hookEventAllowed', 'rulePrefix'],
+  'src/managed-policy.js': ['coversPrefix', 'rulePrefix'],
+  // The pure planners behind the PermissionRequest install and removal, exported so
+  // the merge rules can be pinned without a settings file or a lock.
+  'src/permission-request-install.js': ['claudeHookCommand', 'planClaudeHook', 'planCodexHook'],
   'src/permission-match.js': ['MATCH_CACHE_LIMIT', 'matchCacheStats'],
   // readBypassState joined on 2026-09-25 off PENDING_REMOVAL: see the note above that
   // list. test/bypass-round-trip.test.js is the only caller and is the whole reason the

@@ -286,7 +286,7 @@ where a control reports on something other than what is running.
 `drainableRoots()` (`vscode-extension/extension.js:2842`) enumerates every workspace folder,
 but `localSettingsPath` (`src/local-settings.js:42-46`) is a single non-recursive join, so the
 extension drains one file per open FOLDER and never a subdirectory. The CLI hook drains the
-Claude Code session's own cwd on every tool call (`bin/wildcard-perms:501-515`, reading
+Claude Code session's own cwd on every tool call (`bin/wildcard-perms:637-651`, reading
 `event.cwd` off the hook payload). With the editor open at a parent and sessions running in
 `projects/<name>`, a file the hook drains is invisible to the card, and the card can read
 "nothing to drain" while a subproject file is being drained under it.
@@ -502,8 +502,8 @@ modules. A rule phrased as "no caller reads this property name" is therefore sil
 
 Five false-positive classes, each large enough to sink it on its own:
 
-1. **Whole object `JSON.stringify`d to CLI stdout** (`bin/wildcard-perms:349`, `:735`,
-   `:749`). Every key of the ~30-key `scan`/`apply`/`undo` results is a user-visible output
+1. **Whole object `JSON.stringify`d to CLI stdout** (`bin/wildcard-perms:485`, `:871`,
+   `:885`). Every key of the ~30-key `scan`/`apply`/`undo` results is a user-visible output
    field with no `.prop` reader. `src/auto-learn-manager.js:2024-2028` says so in a comment.
 2. **The webview boundary.** ~20 keys are posted by `postMessage` and read only inside a
    template-literal `<script>` (`vscode-extension/extension.js:4213-4227`). A text scan sees
@@ -590,7 +590,7 @@ and is closed. Still open, each leaving an unreachable branch:
   ⚠ **Not reachable from any shipped surface**, verified 2026-09-27: there is no
   `codexRulesPath` setting in the manifest (17 keys, none of them a rules path) and no CLI
   flag. Both producers hard-code it off `os.homedir()` (`vscode-extension/extension.js:1045`,
-  `bin/wildcard-perms:324-325`). It is reachable only through the programmatic API, i.e. an
+  `bin/wildcard-perms:460-461`). It is reachable only through the programmatic API, i.e. an
   embedder or a test. That lowers it well below the other items here.
 - **The packaging gate reports but does not quarantine.** `scripts/package.mjs:56-62` runs
   `assertRetiredMaxAbsent(out)` after `vsce` has written the artefact, with no `try`/`catch`

@@ -735,7 +735,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   inert. **A future transform whose side effects are not idempotent must not use
   this writer** — now stated in the code as well.
 - **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
-  but not `settings?.permissions?.allow` at `bin/wildcard-perms:460`,** where the
+  but not `settings?.permissions?.allow` at `bin/wildcard-perms:596`,** where the
   allow array the pass runs on is extracted. Changing *which* field feeds the
   pass would not invalidate existing keys.
 - **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
@@ -988,7 +988,7 @@ Today `runWildcarding` satisfies that **by accident of structure** — its
 `readSettings()` happens to sit inside the lock, so the snapshot is nearly
 `latest`. **Moving the read out of the lock without an authoritative in-lock
 re-read and recompute reintroduces the MAX / `Bash(npm test)` deletion bug**
-documented at `bin/wildcard-perms:360-374`.
+documented at `bin/wildcard-perms:496-510`.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
@@ -1015,7 +1015,7 @@ rebuilt, deny-only edits lost, poisoning the memo on a busy-lock-deferred pass
 
 Also worth folding in eventually: activation takes **two** lock acquisitions
 back to back — `runWildcarding()` then `drainLocal()` — which is the shape
-`bin/wildcard-perms:317-335` ("ONE lock acquisition covering both jobs") was
+`bin/wildcard-perms:453-471` ("ONE lock acquisition covering both jobs") was
 deliberately fixed away from for the hook.
 
 ## `preMax` is misnamed, and the audit's read of it was wrong too

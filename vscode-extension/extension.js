@@ -2715,7 +2715,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:293-302 — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:429-438 — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.

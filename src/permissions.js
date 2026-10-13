@@ -306,7 +306,8 @@ function generalizeCommandArg(arg, tool) {
   const first = stripped.split(/\s+/)[0] || '';
   if (!first) return `${tool}(${arg})`; // nothing to key on — leave verbatim
   // PowerShell never reaches this with a non-command first token: its caller
-  // admits only `[A-Za-z][\w.-]*` names outside PS_SCRIPT_KEYWORDS. Bash had no
+  // admits only `[\w.-]` names (isPowerShellCommandName: a letter first, or a digit
+  // that does not make a number) outside PS_SCRIPT_KEYWORDS. Bash had no
   // such gate, so it gets one here, and only Bash: `select` and `set` are
   // ordinary PowerShell aliases (Select-Object, Set-Variable), not keywords.
   if (tool === 'Bash' && bashOpensScript(arg, stripped, first)) return `${tool}(${arg})`;
@@ -329,6 +330,24 @@ function generalizeCommandArg(arg, tool) {
   return `${tool}(${first} *)`;
 }
 
+// A PowerShell token that starts with a digit is a NUMBER when it is a numeric
+// literal, and the statement is then an expression that runs nothing: `42`, `1.5`,
+// `0x1F`, `0b101`, `1e3`, `10kb`, `5l`, `2d`. A range literal (`1..6`) is an
+// expression too. Any other digit-leading token in command position is a command
+// name, so `7z a x.zip` runs 7z. Until 2026-10-13 the gate below admitted only an
+// `[A-Za-z]` first character, so `PowerShell(7z a x.zip)` stayed exact while
+// `Bash(7z a x.zip)` became `Bash(7z *)`. The classifier settled the same question
+// that day (commit 3ebbf04, POWERSHELL_RANGE_LITERAL in src/auto-learn.js): only the
+// range literal is script syntax, and `7z` keeps its root. This pass refuses a little
+// more, every numeric literal and not only the range, because a wildcard on `42`
+// names no program either.
+const PS_NUMERIC_LITERAL =
+  /^(?:0x[0-9a-f]+|0b[01]+|\d+(?:\.\d*)?(?:e[+-]?\d+)?)(?:u?[ysl]|u|n|d)?(?:kb|mb|gb|tb|pb)?$/i;
+function isPowerShellCommandName(first) {
+  if (/^[A-Za-z][\w.-]*$/.test(first)) return true;
+  return /^\d[\w.-]*$/.test(first) && !first.includes('..') && !PS_NUMERIC_LITERAL.test(first);
+}
+
 // Generalize a PowerShell arg. The `& "app.exe" …` call form collapses to a
 // single "run any & invocation" wildcard; plain command/cmdlet names collapse to
 // their root; script-like constructs (variables, keywords, subexpressions) are
@@ -340,7 +359,7 @@ function generalizePowerShellArg(arg) {
   if (/^&\s/.test(t)) return `PowerShell(${arg})`;
   const first = t.split(/\s+/)[0] || '';
   const isSimpleCommand =
-    /^[A-Za-z][\w.-]*$/.test(first) && !PS_SCRIPT_KEYWORDS.has(first.toLowerCase());
+    isPowerShellCommandName(first) && !PS_SCRIPT_KEYWORDS.has(first.toLowerCase());
   return isSimpleCommand ? generalizeCommandArg(arg, 'PowerShell') : `PowerShell(${arg})`;
 }
 
@@ -768,12 +787,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :698.
+// prunePermissions, whose only caller is processAllowList at :717.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :764 and nowhere else in the
+// reached it, in any of the three: it is called at :783 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is

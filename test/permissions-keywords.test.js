@@ -138,6 +138,35 @@ test('a PowerShell entry that opens with a keyword, variable or range stays verb
   }
 });
 
+test('a digit-leading PowerShell command name generalizes; a number or range stays verbatim', () => {
+  // Until 2026-10-13 the PowerShell gate admitted only a letter first, so `7z a x.zip`
+  // stayed exact in PowerShell while `Bash(7z a x.zip)` became `Bash(7z *)`. The
+  // classifier already kept 7z's root and refused only the range literal (3ebbf04).
+  // MUTATION: restore the letter-only gate (`/^[A-Za-z][\w.-]*$/.test(first)` in
+  // generalizePowerShellArg). Every row here stays exact and this fails on the first.
+  // Confirmed 2026-10-13.
+  for (const [entry, expected] of [
+    ['PowerShell(7z a x.zip)', 'PowerShell(7z *)'],
+    ['PowerShell(7za x a.7z)', 'PowerShell(7za *)'],
+    ['PowerShell(7z.exe l x)', 'PowerShell(7z.exe *)'],
+    ['PowerShell(2to3 -w x.py)', 'PowerShell(2to3 *)'],
+  ]) assert.equal(generalizePermission(entry), expected, entry);
+  // Controls: PowerShell reads each of these as a number or a range, so the statement
+  // is an expression and names no program.
+  // MUTATION: drop `!first.includes('..')` from isPowerShellCommandName. `1..6` becomes
+  // `PowerShell(1..6 *)` and this fails. Drop the PS_NUMERIC_LITERAL test instead and
+  // `42` becomes `PowerShell(42 *)`. Both confirmed 2026-10-13.
+  for (const entry of ['PowerShell(1..6)', 'PowerShell(1..6 | ForEach-Object { $_ })', 'PowerShell(-1..5)',
+    'PowerShell(1..$n)', 'PowerShell(42)', 'PowerShell(7)', 'PowerShell(1.5)', 'PowerShell(0x1F)',
+    'PowerShell(0b101)', 'PowerShell(1e3)', 'PowerShell(10kb)', 'PowerShell(10MB)', 'PowerShell(5l)',
+    'PowerShell(2d)', 'PowerShell(1uy)']) {
+    assert.equal(generalizePermission(entry), entry, `${entry} is an expression`);
+  }
+  // Bash is untouched: it has no range operator, so there `1..6` is an attempt to run a
+  // program and was already wildcarded like any other name.
+  assert.equal(generalizePermission('Bash(7z a x.zip)'), 'Bash(7z *)');
+});
+
 test('controls: ordinary commands generalize exactly as they did before the guard', () => {
   const cases = [
     ['Bash(git status)', 'Bash(git status *)'],          // MIXED_FAMILY_ROOTS keep a subcommand

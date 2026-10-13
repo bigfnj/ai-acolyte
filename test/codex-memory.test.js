@@ -26,6 +26,52 @@ function fixture(t) {
 
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 
+// Fixture steps that a scanner can refuse for a moment, retried until it lets
+// go. A copy of `whenReleased` and `linkDirectory` in
+// test/codex-reviewed-plans.test.js, whose comment has the mechanism and the
+// measurements (Windows, Node 24.19.0, 2026-10-13): renaming a directory fails
+// EPERM while any file inside it is open, and creating a junction fails EBUSY
+// while anything has the new directory open. A copy, not a shared module:
+// test/ has no support modules, and `node --test` runs every .js under test/
+// as a test file, so one would join the suite as a phantom test of its own.
+//
+// Measured here under a stand-in scanner (a process that keeps listing the
+// fixture directories and opens each newly written file once and holds it;
+// 60 runs of this file, 6 in parallel, 6 CPU burners, private TEMP),
+// 2026-10-13. "A selected parent replaced by a link after discovery" writes
+// rollout_summaries/fixture.md and renames that directory away milliseconds
+// later, from INSIDE the lstatSync mock, so the refusal never surfaces as an
+// EPERM: the reader under test catches it, reports "path-unreadable (EPERM)"
+// for fixture.md, and the test fails on the missing linked-or-invalid-parent,
+// which reads exactly like a product regression. It failed 59 of 60 runs
+// holding 10 ms, 60 of 60 holding 100 ms, and 0 of 60 with no scanner. With
+// that rename retried, "linked native roots..." surfaced next: its two
+// junctions failed EBUSY in 3 of 60 runs at 10 ms. With every rename and
+// junction here retried, 0 of 60 at either hold, and 0 of 180 at 10 ms.
+// Only EPERM, EACCES and EBUSY on Windows are retried, for ~2.6 s at most, and
+// the original error is thrown after that. The file rename in the chunk
+// identity test is left alone: a FILE held open by such a handle still renames
+// to a new name (measured the same day: a Node read handle on the source, the
+// rename lands; the same handle on a file inside a directory, the directory's
+// rename fails EPERM), and it never failed in any of these runs.
+const HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RELEASE_WAITS_MS = [10, 20, 40, 80, 160, 320, 500, 500, 500, 500];
+function whenReleased(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try { return operation(attempt); } catch (error) {
+      if (process.platform !== 'win32' || !HELD.has(error.code) || attempt >= RELEASE_WAITS_MS.length) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RELEASE_WAITS_MS[attempt]);
+    }
+  }
+}
+function linkDirectory(target, link) {
+  whenReleased((attempt) => {
+    // A failed junction can leave the empty directory libuv made; clear only that.
+    if (attempt > 0 && fs.existsSync(link) && !fs.lstatSync(link).isSymbolicLink() && !fs.readdirSync(link).length) fs.rmdirSync(link);
+    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+  });
+}
+
 function mockError(t, method, exactPath, code) {
   const original = fs[method];
   t.mock.method(fs, method, function (file, ...args) {
@@ -173,14 +219,14 @@ test('linked native roots and selected linked subdirectories are not followed', 
   fs.mkdirSync(external);
   fs.writeFileSync(path.join(external, 'MEMORY.md'), 'EXTERNAL_PRIVATE_FIXTURE\n');
   fs.mkdirSync(box.codexHome);
-  fs.symlinkSync(external, box.memory, process.platform === 'win32' ? 'junction' : 'dir');
+  linkDirectory(external, box.memory);
   const root = readCodexMemory({ codexHome: box.codexHome });
   assert.equal(root.state, 'unreadable');
   assert.equal(root.diagnostics[0].code, 'root-unreadable');
   assert.deepEqual(root.chunks, []);
   fs.unlinkSync(box.memory);
   fs.mkdirSync(box.memory);
-  fs.symlinkSync(external, path.join(box.memory, 'rollout_summaries'), process.platform === 'win32' ? 'junction' : 'dir');
+  linkDirectory(external, path.join(box.memory, 'rollout_summaries'));
   const child = readCodexMemory({ codexHome: box.codexHome });
   assert.equal(child.state, 'unreadable');
   assert.ok(child.diagnostics.some((diagnostic) => diagnostic.code === 'linked-path' && diagnostic.relativePath === 'rollout_summaries'));
@@ -198,8 +244,8 @@ test('a selected parent replaced by a link after discovery is rejected before co
   t.mock.method(fs, 'lstatSync', function (target, ...args) {
     const stat = originalStat.call(this, target, ...args);
     if (path.resolve(String(target)) === path.join(box.memory, 'rollout_summaries', 'fixture.md') && ++selectedStats === 1) {
-      fs.renameSync(path.join(box.memory, 'rollout_summaries'), path.join(box.memory, 'original-rollouts'));
-      fs.symlinkSync(external, path.join(box.memory, 'rollout_summaries'), process.platform === 'win32' ? 'junction' : 'dir');
+      whenReleased(() => fs.renameSync(path.join(box.memory, 'rollout_summaries'), path.join(box.memory, 'original-rollouts')));
+      linkDirectory(external, path.join(box.memory, 'rollout_summaries'));
     }
     return stat;
   });

@@ -337,16 +337,102 @@ esac
 # Restoring the saved bytes always costs nothing when they are already correct and
 # fixes the case where they are not. The cold-run assertions above have already read
 # what they needed by this point.
+#
+# WHAT IS CHECKED AFTER THE RESTORE, AND WHY IT IS NOT A READ-BACK. Until 2026-10-13
+# this printf'd $FP_ORIGINAL into the file, read it straight back with $(cat), and
+# passed when the two matched. That could fail only on a write or read error, so it
+# proved almost nothing; what it argued for is delivered by the restore being
+# unconditional. The property worth a PASS is that the restored key is one the hook
+# ACCEPTS. So the hook runs once more on the same payload and the file must not move:
+# a hit returns before any write (bin/wildcard-perms `run`, the `isFixedPoint`
+# branch), and a miss rewrites the file with the key this checkout mints.
+#
+# "Did not move" is judged on the file's mtime as well as its text, because equal text
+# is not proof of a hit: a hook whose read side broke would miss on its own key and
+# rewrite the same bytes. And settings.json is hashed around the call, because a miss
+# on bytes that are not a fixed point writes settings.json and leaves the cache alone,
+# which would also look unmoved.
+#
+# A miss is INFO, not FAIL, when the key this run found came from other code (the
+# installed checkout while this runs from a worktree, or this checkout before an edit
+# to src/permissions.js or src/permission-match.js, whose mtime:size is the stamp) or
+# was minted for other settings.json bytes. The found key is then put back again:
+# this block's contract is the state the run found, and a worktree-stamped key left
+# in the live file is the damage it exists to undo.
+#
+# This extra call cannot write settings.json, or anything the earlier hook runs could
+# not. The cold run above processed the same bytes with the cache forced to miss, so
+# they are a fixed point, or were made one. A second miss therefore finds nothing
+# pending and writes only the cache key: `run` records a key "ONLY for a verified fixed
+# point" and calls the locked writer only when the pass changed the list. HOOK_EVENT
+# carries no cwd, so `hookCwd` returns null and the project-local drain never runs.
+#
+# The check is vacuous if PW_FPCACHE names a file the hook does not read, because then
+# nothing the hook does can move it. The CLI resolves its cache and its settings from
+# os.homedir() and ignores PW_FPCACHE and PW_SETTINGS, so the probe asks the cache
+# module for the hook's own path and compares, and hashes the settings file the hook
+# itself reads. Output: `same|<cache mtimeMs>|<settings sha256 prefix>`, or the
+# hook's cache path in place of `same`.
+FP_SUBJECT="the restored fixed-point key is a hit for this checkout's hook"
+FP_KEY_SHAPE='^[0-9]+:[0-9a-f]{8}:[0-9]+:[0-9a-f]{8}$'
+FP_PROBE='
+  const fs = require("fs"), os = require("os"), path = require("path"), crypto = require("crypto");
+  const hookFile = require(process.argv[1]).cachePath();
+  const key = (p) => { const r = path.resolve(p); return process.platform === "win32" ? r.toLowerCase() : r; };
+  let mtime = "absent";
+  try { mtime = String(fs.statSync(hookFile).mtimeMs); } catch {}
+  let settings = "absent";
+  try {
+    settings = crypto.createHash("sha256")
+      .update(fs.readFileSync(path.join(os.homedir(), ".claude", "settings.json"))).digest("hex").slice(0, 16);
+  } catch {}
+  process.stdout.write([key(hookFile) === key(process.argv[2]) ? "same" : hookFile, mtime, settings].join("|"));
+'
 if [ -n "$FP_ORIGINAL" ]; then
   mkdir -p "$(dirname "$FPCACHE")"
   printf '%s\n' "$FP_ORIGINAL" > "$FPCACHE"
-  RESTORED="$(cat "$FPCACHE")"
-  if [ "$RESTORED" = "$FP_ORIGINAL" ]; then
-    ok "the fixed-point cache is back to the key this run found" "$FP_ORIGINAL"
+  IFS='|' read -r FP_HOOK_FILE FP_MTIME_WAS FP_SETTINGS_WAS \
+    <<< "$(node -e "$FP_PROBE" "$REPO/src/fixed-point-cache.js" "$FPCACHE" 2>/dev/null)"
+  if [ "$FP_HOOK_FILE" != "same" ]; then
+    echo "  INFO  the hook reads ${FP_HOOK_FILE:-an unknown cache file}, not $FPCACHE, so whether the restored key is a hit cannot be observed here"
   else
-    no "the fixed-point cache is back to the key this run found" \
-       "wanted $FP_ORIGINAL, on disk $RESTORED"
+    printf '%s' "$HOOK_EVENT" | node "$CLI" >/dev/null 2>&1
+    RECHECK_RC=$?
+    FP_AFTER="$(cat "$FPCACHE" 2>/dev/null)"
+    IFS='|' read -r _ FP_MTIME_NOW FP_SETTINGS_NOW \
+      <<< "$(node -e "$FP_PROBE" "$REPO/src/fixed-point-cache.js" "$FPCACHE" 2>/dev/null)"
+    if [ "$RECHECK_RC" -ne 0 ]; then
+      no "$FP_SUBJECT" "the hook exited $RECHECK_RC on the re-run"
+      printf '%s\n' "$FP_ORIGINAL" > "$FPCACHE"
+    elif [ "$FP_SETTINGS_NOW" != "$FP_SETTINGS_WAS" ]; then
+      # Not judged either way. Something wrote settings.json after the cold run (a
+      # permission approved in a live session is the usual writer), or the pass is not
+      # idempotent at a fixed point; a second smoke run tells the two apart.
+      printf '%s\n' "$FP_ORIGINAL" > "$FPCACHE"
+      echo "  INFO  settings.json changed during the re-run, so it was not a fixed point and the restored key could not be judged"
+      echo "        either something wrote it after the cold run, or the pass is not idempotent; run smoke again to tell them apart"
+    elif [ "$FP_AFTER" = "$FP_ORIGINAL" ] && [ "$FP_MTIME_NOW" = "$FP_MTIME_WAS" ]; then
+      ok "$FP_SUBJECT" "$FP_ORIGINAL"
+    elif [ "$FP_AFTER" = "$FP_ORIGINAL" ]; then
+      no "$FP_SUBJECT" "the hook rewrote the key it was given, so it missed on a key it mints itself"
+    elif printf '%s' "$FP_AFTER" | grep -Eq "$FP_KEY_SHAPE"; then
+      IFS=: read -r _ FP_STAMP_WAS _ _ <<< "$FP_ORIGINAL"
+      IFS=: read -r _ FP_STAMP_NOW _ _ <<< "$FP_AFTER"
+      if [ "$FP_STAMP_WAS" != "$FP_STAMP_NOW" ]; then
+        FP_WHY="it was minted by other code (stamp $FP_STAMP_WAS; this checkout mints $FP_STAMP_NOW)"
+      else
+        FP_WHY="it was minted for different settings.json bytes than the ones on disk now"
+      fi
+      printf '%s\n' "$FP_ORIGINAL" > "$FPCACHE"
+      echo "  INFO  the key this run found is not a hit for this checkout's hook: $FP_WHY"
+      echo "        the hook re-earned $FP_AFTER; the found key was put back, as this block promises"
+    else
+      printf '%s\n' "$FP_ORIGINAL" > "$FPCACHE"
+      no "$FP_SUBJECT" "the hook missed and left no valid key (on disk: ${FP_AFTER:-<empty>})"
+    fi
   fi
+else
+  echo "  INFO  no fixed-point key existed when this run started, so none was restored; the hook re-earned the key on disk in the cold run above"
 fi
 
 echo ""

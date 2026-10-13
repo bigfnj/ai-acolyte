@@ -12,7 +12,7 @@ import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { artefactName, writeBuildStamp } from './build-stamp.mjs';
+import { BUILD_STAMP, artefactName, gateOrQuarantine, writeBuildStamp } from './build-stamp.mjs';
 import { assertRetiredMaxAbsent } from './assert-retired-max-absent.mjs';
 import { syncVersion } from './sync-version.mjs';
 
@@ -60,5 +60,8 @@ execSync(`npx --yes @vscode/vsce package --no-dependencies -o "${out}"`, {
   cwd: ext,
   stdio: 'inherit',
 });
-assertRetiredMaxAbsent(out);
+// 4. Gate the artefact vsce actually wrote. A rejection removes the VSIX and the stamp
+// before it propagates, or the pair would satisfy check-version-sync.mjs. See
+// gateOrQuarantine in build-stamp.mjs.
+gateOrQuarantine(out, join(root, BUILD_STAMP), () => assertRetiredMaxAbsent(out));
 console.log(`\nPackaged ${out}`);

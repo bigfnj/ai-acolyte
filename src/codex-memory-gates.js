@@ -50,6 +50,20 @@ function snapshot(file) {
   return { path: file, exists: true, hash: sha(content), content, text };
 }
 
+// The rename codes a momentary holder produces. Windows refuses to replace a
+// file while ANY handle on it is open: measured 2026-10-13 on the development
+// box (Node 24.19.0), even a Node read handle, which shares delete, makes the
+// swap fail EPERM. AGENTS.md is a file Codex, editors, Defender and the indexer
+// all open, so a strict writer with no retry turned a scanner's millisecond
+// into "Native Codex gate update failed: EPERM". With a stand-in scanner
+// holding each newly written file once (60 runs of the native-gate test file,
+// 6 in parallel), eleven of its tests failed on this rename: 41 of 60 runs
+// failed holding 10 ms, 60 of 60 holding 100 ms. With the retry below (and the
+// test's own fixture retries), 0 of 60 at either hold.
+const HELD_RENAME = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_ATTEMPTS = 10; // 20, 40, ... 180 ms between: 0.9 s at most, as atomicWrite in auto-learn-manager
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
 function strictWrite(file, bytes) {
   ordinaryParents(file, true);
   snapshot(file);
@@ -61,8 +75,23 @@ function strictWrite(file, bytes) {
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor); descriptor = undefined;
     ordinaryParents(file);
-    snapshot(file);
-    fs.renameSync(temp, file);
+    // Retrying the SAME rename is still never an in-place write: the target is
+    // either the old bytes or the new ones. What a retry must not do is outwait
+    // a WRITER -- the holder may be someone saving AGENTS.md, and a rename that
+    // lands after they close would destroy their edit. So the target is
+    // re-read before every retry and must still be the bytes seen here, or the
+    // write stops and the caller rolls back. Persistent holding fails as before.
+    const expected = snapshot(file).hash;
+    for (let attempt = 1; ; attempt++) {
+      try { fs.renameSync(temp, file); break; } catch (error) {
+        if (!HELD_RENAME.has(error.code) || attempt >= RENAME_ATTEMPTS) throw error;
+        pause(20 * attempt);
+        ordinaryParents(file);
+        if (snapshot(file).hash !== expected) {
+          throw new Error(`Native gate target changed while its rename was retried (${error.code}): ${file}`);
+        }
+      }
+    }
     renamed = true;
   } finally {
     if (descriptor !== undefined) try { fs.closeSync(descriptor); } catch { /* preserve the write error */ }

@@ -17,6 +17,37 @@ const NATIVE_BEGIN = '<!-- BEGIN permission-wildcarding: native Codex memory gat
 const NATIVE_END = '<!-- END permission-wildcarding: native Codex memory gates -->';
 const shared = '<!-- BEGIN permission-wildcarding: memory gates (managed) -->\nShared rule\n<!-- END permission-wildcarding: memory gates -->\n';
 
+// Fixture steps that a scanner can refuse for a moment, retried until it lets
+// go; the same helper as test/codex-reviewed-plans.test.js, whose comment has
+// the measurements. In short, on Windows (Node 24.19.0, 2026-10-13): renaming a
+// directory fails EPERM while any file inside it is open, and junction creation
+// fails EBUSY while anything has the new directory open. This file hit one
+// EPERM in a full run while several worktrees ran the suite at once on the
+// development box. Under the same stand-in scanner (60 runs, 6 in parallel),
+// the "linked instruction parents" test failed on its profile-directory rename
+// in 10 runs holding 10 ms and in 60 of 60 holding 100 ms. The rest of this
+// file's failures were the PRODUCT's own swap, fixed in src/codex-memory-gates.js
+// `strictWrite`. With both, 0 of 60 at either hold. Only EPERM, EACCES and
+// EBUSY on Windows are retried, for ~2.6 s at most, and the original error is
+// thrown after that.
+const HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RELEASE_WAITS_MS = [10, 20, 40, 80, 160, 320, 500, 500, 500, 500];
+function whenReleased(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try { return operation(attempt); } catch (error) {
+      if (process.platform !== 'win32' || !HELD.has(error.code) || attempt >= RELEASE_WAITS_MS.length) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RELEASE_WAITS_MS[attempt]);
+    }
+  }
+}
+function linkDirectory(target, link) {
+  whenReleased((attempt) => {
+    // A failed junction can leave the empty directory libuv made; clear only that.
+    if (attempt > 0 && fs.existsSync(link) && !fs.lstatSync(link).isSymbolicLink() && !fs.readdirSync(link).length) fs.rmdirSync(link);
+    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+  });
+}
+
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-native-gates-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -257,13 +288,84 @@ test('strict rename failure rolls back earlier target changes and never falls ba
   box.write('MEMORY.md', globalGate('- Updated.'));
   const status = api.inspectNativeCodexGates(box.options);
   const before = new Map([box.base, box.override, status.compiledPath].map(file => [file, fs.readFileSync(file)]));
+  let baseRenames = 0;
   const failing = mocked({ fs: { ...fs, renameSync(from, to) {
-    if (to === box.base) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' });
+    if (to === box.base) { baseRenames++; throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }); }
     return fs.renameSync(from, to);
   } } });
   assert.throws(() => failing.setNativeCodexGates(true, { fingerprint: status.fingerprint }, box.options), /Previous instruction bytes were preserved/);
+  assert.equal(baseRenames, 1, 'WITNESS an error no holder produces is not retried');
   for (const [file, bytes] of before) assert.deepEqual(fs.readFileSync(file), bytes);
   assert.equal(fs.readdirSync(box.codexHome).some(name => name.endsWith('.tmp')), false);
+});
+
+// A momentary holder -- Defender, the indexer, Codex itself reading AGENTS.md --
+// makes the Windows swap fail EPERM, EBUSY or EACCES and then lets go. Until
+// 2026-10-13 the strict writer failed the whole update on the first refusal
+// (41 of 60 parallel runs of this file under a stand-in scanner holding each
+// new file for 10 ms). The refusals are injected here, so this runs the same on
+// every platform. `holder` counts the renames aimed at the instruction target.
+function holder(box, refusals, code) {
+  let calls = 0;
+  const gates = mocked({ fs: { ...fs, renameSync(from, to) {
+    if (to === box.base && ++calls <= refusals) throw Object.assign(new Error(`injected ${code} holder`), { code });
+    return fs.renameSync(from, to);
+  } } });
+  return { gates, calls: () => calls };
+}
+const leftovers = box => fs.readdirSync(box.codexHome).filter(name => name.endsWith('.tmp'));
+
+test('a momentarily held instruction target is retried until the same atomic rename lands', (t) => {
+  for (const [code, refusals] of [['EPERM', 3], ['EBUSY', 1], ['EACCES', 1]]) {
+    const box = fixture(t); box.write('MEMORY.md', globalGate('- Held rule.'));
+    const flaky = holder(box, refusals, code);
+    const result = flaky.gates.setNativeCodexGates(true, { fingerprint: api.inspectNativeCodexGates(box.options).fingerprint }, box.options);
+    assert.equal(result.on, true, `WITNESS ${code} from a holder that lets go does not fail the update`);
+    // At least, not exactly: a real scanner on the box can refuse an attempt of
+    // its own on top of the injected ones (46 of 60 stressed runs did, when this
+    // said `=== refusals + 1`). The bound itself is the persistent-holder test's.
+    assert.ok(flaky.calls() > refusals, 'the same rename, repeated past every injected refusal, is what landed');
+    const text = fs.readFileSync(box.base, 'utf8');
+    assert.match(text, /Held rule/);
+    assert.equal(text.startsWith('Codex user text\n' + shared), true, 'user text and the shared block are untouched');
+    assert.deepEqual(leftovers(box), []);
+  }
+});
+
+test('a persistent holder still fails after a bounded retry, with every earlier byte restored', (t) => {
+  const box = fixture(t); box.write('MEMORY.md', globalGate('- Never lands.'));
+  const status = api.inspectNativeCodexGates(box.options);
+  const original = fs.readFileSync(box.base);
+  const stuck = holder(box, Infinity, 'EPERM');
+  assert.throws(() => stuck.gates.setNativeCodexGates(true, { fingerprint: status.fingerprint }, box.options),
+    /EPERM.*Previous instruction bytes were preserved/);
+  assert.equal(stuck.calls(), 10, 'WITNESS the retry is bounded (ten attempts, 0.9 s of waits)');
+  assert.deepEqual(fs.readFileSync(box.base), original, 'WITNESS no in-place write after the retries run out');
+  assert.equal(fs.existsSync(status.compiledPath), false, 'the compiled cache written before the target is rolled back');
+  assert.deepEqual(leftovers(box), []);
+});
+
+// The holder may be a WRITER: someone saving AGENTS.md holds it open, and a
+// rename that waited them out would land over their edit. The retry re-reads
+// the target before every attempt and stops when it changed.
+test('a retried rename never outwaits a writer: bytes changed during the wait stop the write and are kept', (t) => {
+  const box = fixture(t); box.write('MEMORY.md', globalGate('- Must not clobber.'));
+  const status = api.inspectNativeCodexGates(box.options);
+  let calls = 0;
+  const racing = mocked({ fs: { ...fs, renameSync(from, to) {
+    if (to === box.base && ++calls === 1) {
+      fs.appendFileSync(box.base, 'Saved by the owner mid-write\n');
+      throw Object.assign(new Error('injected writer hold'), { code: 'EPERM' });
+    }
+    return fs.renameSync(from, to);
+  } } });
+  assert.throws(() => racing.setNativeCodexGates(true, { fingerprint: status.fingerprint }, box.options),
+    /changed while its rename was retried \(EPERM\).*Previous instruction bytes were preserved/);
+  assert.equal(calls, 1, 'WITNESS no rename is attempted over bytes that changed');
+  const text = fs.readFileSync(box.base, 'utf8');
+  assert.match(text, /Saved by the owner mid-write/);
+  assert.equal(text.includes(NATIVE_BEGIN), false, 'WITNESS the owner\'s bytes are kept, not replaced');
+  assert.deepEqual(leftovers(box), []);
 });
 
 test('busy instruction lock linked targets and ambiguous native fences refuse changes visibly', (t) => {
@@ -348,14 +450,14 @@ test('linked instruction parents and private compiled parents are refused before
   const box = fixture(t); box.write('MEMORY.md', globalGate('- Keep paths ordinary.'));
   const before = fs.readFileSync(box.base), external = path.join(box.home, 'external-cache');
   fs.mkdirSync(external);
-  fs.symlinkSync(external, path.join(box.home, '.ai-acolyte'), process.platform === 'win32' ? 'junction' : 'dir');
+  linkDirectory(external, path.join(box.home, '.ai-acolyte'));
   const status = api.inspectNativeCodexGates(box.options);
   assert.throws(() => api.setNativeCodexGates(true, { fingerprint: status.fingerprint }, box.options), /linked or not a directory/);
   assert.deepEqual(fs.readdirSync(external), []);
   assert.deepEqual(fs.readFileSync(box.base), before);
   const moved = path.join(box.home, 'moved-profile');
-  fs.renameSync(box.codexHome, moved);
-  fs.symlinkSync(moved, box.codexHome, process.platform === 'win32' ? 'junction' : 'dir');
+  whenReleased(() => fs.renameSync(box.codexHome, moved));
+  linkDirectory(moved, box.codexHome);
   const linked = api.inspectNativeCodexGates(box.options);
   assert.equal(linked.canEnable, false);
   assert.match(linked.target.error, /linked or not a directory/);

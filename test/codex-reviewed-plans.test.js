@@ -13,6 +13,44 @@ const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const rule = (pattern, decision = 'allow') => `prefix_rule(pattern=${JSON.stringify(pattern)},decision=${JSON.stringify(decision)})`;
 const managed = (text) => `${CODEX_BEGIN_MARKER}\n${text}\n${CODEX_BEGIN_MARKER.replace('BEGIN ', 'END ')}\n`;
 
+// Fixture steps that a scanner can refuse for a moment, retried until it lets
+// go. Windows only: there, MEASURED 2026-10-13 on the development box (Node
+// 24.19.0), any open handle on a file inside a directory -- even Node's own
+// read handle, which shares delete -- makes renaming the directory fail EPERM,
+// and creating a junction fails EBUSY while anything has the new directory open
+// (libuv creates the directory, then reopens it with no sharing to write the
+// reparse point, and removes it again on failure). The fixture files here are
+// written milliseconds before the swap, which is exactly when Defender and the
+// indexer open them, and "parent link replacement..." failed once in a full run
+// while several worktrees ran the suite at once on that box, then passed three
+// isolated reruns. Reproduced with a stand-in scanner: a process that opens
+// each newly written fixture file once and holds it, run beside 6 parallel
+// copies of this file and 6 CPU burners with a private TEMP. Holding 10 ms, the
+// file failed in 39 of 60 runs (that test's rename EPERM in 38, the junction in
+// the linked-inputs test EBUSY in 2); holding 100 ms, in 60 of 60. With these
+// retries, 0 of 60 at either hold. A retry waits out a holder and nothing else:
+// any other error code, any other platform, and a holder that outlasts the
+// ~2.6 s budget still throw the original error.
+const HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RELEASE_WAITS_MS = [10, 20, 40, 80, 160, 320, 500, 500, 500, 500];
+function whenReleased(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try { return operation(attempt); } catch (error) {
+      if (process.platform !== 'win32' || !HELD.has(error.code) || attempt >= RELEASE_WAITS_MS.length) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RELEASE_WAITS_MS[attempt]);
+    }
+  }
+}
+function linkDirectory(target, link) {
+  whenReleased((attempt) => {
+    // libuv's own cleanup of a failed junction can be refused by the same
+    // holder, leaving the empty directory it made; the retry would then meet
+    // EEXIST. Only an empty, unlinked directory left by an attempt is removed.
+    if (attempt > 0 && fs.existsSync(link) && !fs.lstatSync(link).isSymbolicLink() && !fs.readdirSync(link).length) fs.rmdirSync(link);
+    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+  });
+}
+
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-reviewed-plans-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -103,11 +141,11 @@ test('unreadable computed and linked visible inputs refuse allows instead of pro
   fs.unlinkSync(bad);
   fs.mkdirSync(bad);
   assert.equal(box.planner.inventory('stored-widening').plans.length, 0, 'WITNESS non-file rules entries cannot disappear from safety inventory');
-  fs.rmdirSync(bad);
+  whenReleased(() => fs.rmdirSync(bad));
   const external = path.join(box.root, 'external-project-rules'); fs.mkdirSync(external);
   fs.writeFileSync(path.join(external, 'rule.rules'), rule(['git'], 'forbidden'));
-  const directory = path.dirname(bad); fs.rmdirSync(directory);
-  fs.symlinkSync(external, directory, process.platform === 'win32' ? 'junction' : 'dir');
+  const directory = path.dirname(bad); whenReleased(() => fs.rmdirSync(directory));
+  linkDirectory(external, directory);
   inventory = box.planner.inventory('stored-widening');
   assert.equal(inventory.plans.length, 0, 'WITNESS linked project directory is refused before policy reads');
   assert.ok(inventory.files.some((file) => file.path === directory && file.supported === false));
@@ -218,8 +256,8 @@ test('parent link replacement after inventory is stale even when linked file byt
   const inventory = box.planner.inventory('project-import');
   const prepared = box.planner.prepare({ kind: inventory.kind, id: inventory.plans[0].id });
   const originalDirectory = path.dirname(source);
-  const moved = path.join(box.root, 'moved-rules'); fs.renameSync(originalDirectory, moved);
-  fs.symlinkSync(moved, originalDirectory, process.platform === 'win32' ? 'junction' : 'dir');
+  const moved = path.join(box.root, 'moved-rules'); whenReleased(() => fs.renameSync(originalDirectory, moved));
+  linkDirectory(moved, originalDirectory);
   assert.throws(() => prepared.verify(), /changed before writing/, 'WITNESS identical bytes behind a new linked parent are refused');
   assert.equal(fs.existsSync(box.destination), false);
 });

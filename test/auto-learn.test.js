@@ -138,19 +138,31 @@ test('extracts later roots in compound commands and classifies each independentl
 });
 
 test('strips direct env assignments but keeps them out of automatic policy', () => {
+  // The family is still found past ANY assignment, so risk is judged on the command.
   const [item] = extractInvocations('Bash', 'FOO="two words" BAR=plain git status');
   assert.deepEqual(item.argv, ['git', 'status']);
   assert.deepEqual(item.environment, ['FOO', 'BAR']);
   assert.equal(item.root, 'git');
   assert.ok(item.reasons.includes('environment-prefix'));
-  // The assignment is stripped by Claude Code's matcher too, so the command it
-  // sees is the one derived here and the family classifies on its own merits.
   assert.equal(item.risk, 'read-only');
-  assert.equal(item.claudePermission, 'Bash(git status *)');
-  // "Out of automatic policy" is the part that matters, and it is enforced by
-  // the exporter rather than by refusing to name the family.
+  // Decision 2026-10-13: FOO and BAR are not on Claude Code's known-safe list (and FOO's
+  // value is quoted), so Claude Code does not strip them and `Bash(git status *)` would
+  // not match this run. The permission is withheld rather than proposed for a command
+  // nobody ran. This used to assert `Bash(git status *)` on the premise that Claude Code
+  // strips any assignment.
+  assert.equal(item.claudePermission, null);
+  assert.ok(item.reasons.includes('environment-not-stripped'));
   assert.deepEqual(renderClaudePermissions([item], {}), []);
-  assert.deepEqual(renderClaudePermissions([item], { includeReviewed: true }), ['Bash(git status *)']);
+  assert.deepEqual(renderClaudePermissions([item], { includeReviewed: true }), []);
+
+  // A known-safe variable with a plain value IS stripped by Claude Code, so the family
+  // keeps its rule, and "out of automatic policy" is still the exporter's job.
+  const [safe] = extractInvocations('Bash', 'NODE_ENV=test CI=1 git status');
+  assert.deepEqual(safe.environment, ['NODE_ENV', 'CI']);
+  assert.equal(safe.claudePermission, 'Bash(git status *)');
+  assert.ok(!safe.reasons.includes('environment-not-stripped'));
+  assert.deepEqual(renderClaudePermissions([safe], {}), []);
+  assert.deepEqual(renderClaudePermissions([safe], { includeReviewed: true }), ['Bash(git status *)']);
 
   const [preloaded] = extractInvocations('Bash', 'LD_PRELOAD=/tmp/evil.so cat README.md');
   assert.deepEqual(preloaded.environment, ['LD_PRELOAD']);
@@ -587,17 +599,76 @@ test('documented stripped wrappers resolve to the inner command', () => {
   assert.deepEqual(rootOf('timeout 30'), ['timeout']);
 });
 
-// An env prefix is stripped by the matcher, so `Bash(cat *)` covers
-// `LD_PRELOAD=x cat f` whether or not we propose it. Refusing to propose denied
-// the grant without denying the injection. It stays barred from the automatic
-// path, where minting a rule from that evidence would be wrong.
-test('an env-prefixed observation is reviewable but never automatic', () => {
+// Since 2026-10-13 the learner strips exactly what the wildcarding pass strips, through
+// the same routine (claudeWrapperPrefix in src/permissions.js). Before, it knew only
+// `timeout`, `command` and `builtin`, so the families below were the wrappers themselves,
+// and it stripped `command -v`, which Claude Code matches as itself.
+test('the learner strips the whole documented wrapper set, and nothing Claude Code keeps', () => {
+  const rootOf = (command) => extractInvocations('Bash', command, { outcome: 'success' })
+    .map((item) => item.root);
+  for (const [command, root] of [
+    ['nohup node server.js', 'node'], ['nice -n 10 rg x', 'rg'], ['nice -5 rg x', 'rg'], ['time make', 'make'],
+    ['stdbuf -oL rg x', 'rg'], ['noglob git status', 'git'], ['builtin -- cd x', 'cd'], ['command -p git log', 'git'],
+    ['xargs grep x', 'grep'], ['nohup xargs grep x', 'grep'], ['nohup timeout 5 nice -n 1 rg x', 'rg'],
+    ['timeout --signal=TERM --preserve-status 1.5m make', 'make'],
+  ]) {
+    // MUTATION: make the wrapper step `break` without calling claudeWrapperPrefix (the
+    // learner strips nothing). Every row here keeps the wrapper and this fails on the
+    // first. Confirmed 2026-10-13.
+    assert.deepEqual(rootOf(command), [root], command);
+  }
+  for (const [command, root] of [
+    // Claude Code matches these as themselves, so the learner roots on them too.
+    ['command -v rg', 'command'], ['xargs -0 grep x', 'xargs'], ['Time make', 'Time'],
+    // Shapes the allow-path stripper refuses: unknown option, separate stdbuf value,
+    // a fragment after the wrapper, an option where the command should be.
+    ['timeout --bogus 5 rg', 'timeout'], ['stdbuf -o L rg x', 'stdbuf'], ['time -p make', 'time'],
+    ['nice --adjustment=5 rg', 'nice'],
+    // Stripping stops at the first wrapper it refuses, as the matcher's does.
+    ['nohup timeout npm test', 'timeout'],
+    // Nothing after xargs is stripped: Claude Code tries `xargs <rule>` once.
+    // MUTATION: drop `if (refused) break;` in deriveBaseInvocation. The loop strips nohup
+    // on its next pass and roots `xargs nohup grep x` on grep. Confirmed 2026-10-13.
+    ['xargs nohup grep x', 'nohup'],
+  ]) {
+    assert.deepEqual(rootOf(command), [root], command);
+  }
+  // A wrapper that stays the root is a shell-risk runner, never automatic, and its rule
+  // is refused by the exporter at any depth.
+  // MUTATION: drop the new row from SHELL_WRAPPERS in src/auto-learn.js. `nohup` alone is
+  // risk `unknown` and this fails. Confirmed 2026-10-13.
+  const [bare] = extractInvocations('Bash', 'nohup', { outcome: 'success' });
+  assert.equal(bare.risk, 'shell');
+  assert.deepEqual(renderClaudePermissions([bare], { includeReviewed: true }), []);
+});
+
+// Until 2026-10-13 this said an env prefix is stripped by the matcher, so `Bash(cat *)`
+// covers `LD_PRELOAD=x cat f` and refusing to propose it denied the grant without
+// denying the injection. Claude Code strips only a known-safe list (docs, and the list
+// read out of the 2.1.296 binary; src/permissions.js CLAUDE_SAFE_ENV_VARS), and
+// LD_PRELOAD is not on it, so Claude Code prompts for this run and `Bash(cat *)` was a
+// rule for a command nobody ran. It is withheld now, at review as well; a known-safe
+// variable keeps the family's rule reviewable and still never automatic.
+test('an env-prefixed observation is never automatic, and is reviewable only past a variable Claude Code strips', () => {
   const [item] = extractInvocations('Bash', 'LD_PRELOAD=/tmp/evil.so cat README.md', {});
   assert.deepEqual(item.environment, ['LD_PRELOAD']);
   assert.ok(item.reasons.includes('environment-prefix'));
+  assert.ok(item.reasons.includes('environment-not-stripped'));
 
+  // MUTATION: drop `environmentKept` from permissionBlocked in deriveBaseInvocation
+  // (src/auto-learn.js). `Bash(cat *)` is proposed again and the review assertion fails.
+  // Confirmed 2026-10-13.
+  // MUTATION: drop the explicit-null check in candidateClaudePermission
+  // (src/policy-exporters.js). The exporter re-derives `Bash(cat *)` from the prefix and
+  // the same assertion fails. Confirmed 2026-10-13.
+  assert.equal(item.claudePermission, null);
   assert.deepEqual(renderClaudePermissions([item], {}), []);
-  assert.deepEqual(renderClaudePermissions([item], { includeReviewed: true }), ['Bash(cat *)']);
+  assert.deepEqual(renderClaudePermissions([item], { includeReviewed: true }), []);
+
+  // Control: a known-safe variable with a plain value.
+  const [safe] = extractInvocations('Bash', 'LANG=C cat README.md', {});
+  assert.deepEqual(renderClaudePermissions([safe], {}), []);
+  assert.deepEqual(renderClaudePermissions([safe], { includeReviewed: true }), ['Bash(cat *)']);
 
   // And the candidate-level gate agrees: the reason bars auto-safe outright.
   const [candidate] = aggregateObservations([{
@@ -606,4 +677,27 @@ test('an env-prefixed observation is reviewable but never automatic', () => {
   }], { threshold: 1 });
   assert.equal(candidate.autoSafe, false);
   assert.ok(candidate.reasons.includes('environment-prefix'));
+  assert.equal(candidate.claudePermission, null);
+});
+
+test('which leading assignments the learner treats as stripped follows Claude Code exactly', () => {
+  const kept = (command) => extractInvocations('Bash', command, {})[0].reasons.includes('environment-not-stripped');
+  // Stripped: a known-safe name with a plain, unquoted value, while the line opens with it.
+  for (const command of ['NODE_ENV=test npm test', 'CI=1 FORCE_COLOR=0 npm test', 'LANG=en_US.UTF-8 ls',
+    'TZ=America/New_York date', 'GIT_TERMINAL_PROMPT=0 git fetch']) {
+    assert.equal(kept(command), false, command);
+  }
+  // Kept: a name off the list, a quoted or expanding value, a quoted name, a safe one
+  // after a kept one, and an assignment after a stripped wrapper.
+  // MUTATION: drop `strippedWrappers.length ||`. `timeout 5 NODE_ENV=x make` reads as
+  // stripped and this fails. Confirmed 2026-10-13.
+  // MUTATION: drop the `token.raw.startsWith(...)` test. `"NODE_ENV"=test npm test` (a
+  // quoted name, which bash does not read as an assignment) reads as stripped and this
+  // fails. Confirmed 2026-10-13.
+  // MUTATION: drop the plain-value test (make claudeStripsAssignment check the name only).
+  // `NODE_ENV="test" npm test` reads as stripped and this fails. Confirmed 2026-10-13.
+  for (const command of ['GITHUB_TOKEN=x git push', 'PYTHONUTF8=1 python x.py', 'NODE_ENV="test" npm test',
+    'LANG=$X ls', '"NODE_ENV"=test npm test', 'FOO=1 CI=1 make', 'timeout 5 NODE_ENV=x make']) {
+    assert.equal(kept(command), true, command);
+  }
 });

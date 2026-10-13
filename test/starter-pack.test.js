@@ -82,3 +82,37 @@ test('mirroring never carries an interpreter or a bare family prefix across', ()
   assert.deepEqual(mixed.missing, ['PowerShell(ffprobe *)']);
   assert.ok(NEVER_MIRROR.has('bash'));
 });
+
+// Decided 2026-10-13, one entry at a time (patterns/starter-pack.md, "Wrapper entries").
+// Claude Code strips its fixed wrapper set before matching a Bash rule (docs, "Wrappers"),
+// and its allow matcher also tries each rule against the command as written (read out of
+// the 2.1.296 binary). So a rule naming a stripped wrapper adds nothing for a command the
+// pack already allows, and for any other command it grants whatever the wrapper runs.
+// The engineering record's "13 blanket wrapper grants" (bash, sh, python, node, npx,
+// pwsh, powershell, PowerShell's `&`, ...) are the maintainer's call and are not touched.
+test('the pack seeds no grant for a wrapper Claude Code strips, except the forms it keeps', () => {
+  const { ruleMatches } = require('../src/permission-match');
+  // MUTATION: put `Bash(timeout *)` back into patterns/starter-pack.json. This fails
+  // naming it. Confirmed 2026-10-13.
+  for (const wrapper of ['timeout', 'time', 'nice', 'nohup', 'stdbuf', 'builtin', 'noglob', 'command']) {
+    assert.ok(!pack.includes(`Bash(${wrapper} *)`), `Bash(${wrapper} *) is a grant for whatever it wraps`);
+  }
+  // Their legitimate use is served by the inner command's own rule, which the pack seeds.
+  assert.ok(pack.includes('Bash(npm *)'), 'precondition: the pack seeds npm');
+  assert.equal(ruleMatches('Bash(npm *)', 'Bash(timeout 30 npm test)'), true);
+  assert.equal(ruleMatches('Bash(npm *)', 'Bash(nohup npm start)'), true);
+  assert.equal(ruleMatches('Bash(npm *)', 'Bash(command npm test)'), true);
+  // Kept, because Claude Code matches these forms as themselves, so only such a rule covers
+  // them. MUTATION: restore `Bash(command *)` in place of `Bash(command -v *)`. Both
+  // assertions on it fail. Confirmed 2026-10-13.
+  assert.ok(pack.includes('Bash(command -v *)'), 'the lookup form is not stripped');
+  assert.equal(ruleMatches('Bash(command -v *)', 'Bash(command -v rg)'), true);
+  assert.equal(ruleMatches('Bash(command -v *)', 'Bash(command rm -rf x)'), false, 'and runs nothing');
+  assert.ok(pack.includes('Bash(xargs *)'), 'a flagged xargs is matched as xargs');
+  assert.equal(ruleMatches('Bash(grep *)', 'Bash(xargs -0 grep x)'), false,
+    'precondition: no inner rule covers a flagged xargs, which is why Bash(xargs *) stays');
+  // Control: the maintainer-decided blanket grants are untouched.
+  for (const kept of ['Bash(bash *)', 'Bash(python *)', 'Bash(node *)', 'PowerShell(& *)']) {
+    assert.ok(pack.includes(kept), `${kept} stays on the maintainer's call`);
+  }
+});

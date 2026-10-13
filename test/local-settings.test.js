@@ -75,7 +75,7 @@ test('only a portable command family is promotable', () => {
     'PowerShell(Get-LocalUser -Name x)': 'PowerShell(Get-LocalUser *)',
     'Bash(python *)': 'Bash(python *)',                 // already generalized
     'Bash(rg:*)': 'Bash(rg:*)',                         // colon form Claude Code also writes
-    'Bash(PYTHONUTF8=1 python -c x)': 'Bash(python *)', // env prefixes are stripped
+    'Bash(NODE_ENV=test npm test)': 'Bash(npm test *)',  // a known-safe env prefix is stripped
   };
   for (const [entry, expected] of Object.entries(promotable)) {
     assert.equal(promotionFor(entry), expected, entry);
@@ -89,6 +89,10 @@ test('only a portable command family is promotable', () => {
     'Bash(/usr/local/bin/tool run)',                        // absolute path
     'Bash(C:/Users/me/.venv/Scripts/python.exe -c x)',      // windows path
     'Bash(for f in *.txt)',                                 // shell keyword, not a command
+    // Until 2026-10-13 this was promoted as `Bash(python *)`. PYTHONUTF8 is not on Claude
+    // Code's known-safe list, so the rule keeps the assignment (`Bash(PYTHONUTF8=1 python
+    // *)`), which names this machine's environment rather than a portable family.
+    'Bash(PYTHONUTF8=1 python -c x)',
     'mcp__github__create_issue',                            // opaque by construction
     'WebFetch(domain:example.com)',                         // network family, review-only
     'Read(/etc/hosts)', 'Edit', 'Write', 'WebSearch',       // file/tool families
@@ -96,6 +100,34 @@ test('only a portable command family is promotable', () => {
   ];
   for (const entry of local) assert.equal(promotionFor(entry), null, entry);
   assert.equal(promotionFor(undefined), null);
+});
+
+test('a digit-leading command name is promotable; a number or a range is not', () => {
+  // Until 2026-10-13 PROMOTABLE required a letter first, so the `7z` family the
+  // generalizer mints in both shells (2b8e6b2 for PowerShell) never left a project's
+  // local file. The line is 2b8e6b2's: a command name yes, a numeric literal or range no.
+  // MUTATION: restore `([A-Za-z][\w.-]*)` as PROMOTABLE's root. Every row here is null
+  // and this fails on the first. Confirmed 2026-10-13.
+  for (const [entry, expected] of [
+    ['Bash(7z a x.zip)', 'Bash(7z *)'],
+    ['PowerShell(7z a x.zip)', 'PowerShell(7z *)'],
+    ['PowerShell(7za x a.7z)', 'PowerShell(7za *)'],
+    ['PowerShell(7z.exe l x)', 'PowerShell(7z.exe *)'],
+    ['Bash(2to3 -w x.py)', 'Bash(2to3 *)'],
+    ['Bash(7z:*)', 'Bash(7z:*)'],
+    ['Bash(7z *)', 'Bash(7z *)'],
+  ]) assert.equal(promotionFor(entry), expected, entry);
+  // Already-wildcarded numbers and ranges reach PROMOTABLE without the generalizer's own
+  // gate (an argument ending in `*` is passed through), so the refusal has to be here.
+  // MUTATION: drop the `isPowerShellCommandName(root)` test from promotionFor. Each of
+  // these is promoted and this fails on the first. Confirmed 2026-10-13.
+  for (const entry of ['PowerShell(1..6 *)', 'Bash(42 *)', 'PowerShell(10kb *)', 'Bash(1.5 *)',
+    'PowerShell(0x1F *)', 'Bash(1..6 *)', 'PowerShell(42)']) {
+    assert.equal(promotionFor(entry), null, `${entry} names no program`);
+  }
+  // Controls: letter-first roots are unchanged.
+  assert.equal(promotionFor('Bash(rg x)'), 'Bash(rg *)');
+  assert.equal(promotionFor('PowerShell(Get-ChildItem x)'), 'PowerShell(Get-ChildItem *)');
 });
 
 test('a promotion user scope already grants is not proposed twice', () => {

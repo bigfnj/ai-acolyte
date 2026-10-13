@@ -248,7 +248,11 @@ or path-rooted executable (a first token holding `/` or `\`, or opening with `~`
 letter) is left verbatim. A Bash entry first loses the wrappers Claude Code
 itself strips before matching (`timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`,
 `noglob`, and `xargs` without flags), so `timeout 5 rg x` keys on `rg`; `command -v` keeps its
-flag. Everything else collapses to `Tool(<root> *)`,
+flag. A leading environment assignment goes too, but only when Claude Code strips it: one of its
+39 known-safe variables (`NODE_ENV`, `CI`, `LANG`, ...) with a plain value. Any other assignment
+stays in the rule as written, `GITHUB_TOKEN=x git push origin` becoming
+`Bash(GITHUB_TOKEN=x git push *)`, because Claude Code will not match `Bash(git push *)` past it
+(docs/claude-code-permissions.md, section 3). Everything else collapses to `Tool(<root> *)`,
 destructive roots included, except the 16 roots in `MIXED_FAMILY_ROOTS`, which keep one
 subcommand, and PowerShell's `&` call form, which stays exact because a root-wide call-operator
 wildcard is arbitrary execution. The safety boundary is `permissions.deny`, which always wins and
@@ -256,7 +260,10 @@ is evaluated per sub-command.
 
 Coverage is one function, `isCoveredBy`, which is `!sameRule && ruleMatches`, built on
 `src/permission-match.js`, the only implementation of Claude Code's matching rules and shared with
-the dashboard so the two cannot drift. Both sweeps are narrowed by an index that deliberately does
+the dashboard so the two cannot drift. It models the same wrapper and known-safe environment strip
+Claude Code's allow matcher applies, as a subset, so `Bash(rg *)` covers `Bash(timeout 5 rg x)` and
+`Bash(xargs rg x)`; the generalizer and the learner share that one routine. Both sweeps are narrowed
+by an index that deliberately does
 not reimplement matching: it narrows the candidate set while `isCoveredBy` still decides every
 answer, so a false positive costs one regex while only a false negative could change a result.
 That asymmetry is why `test/cover-index.test.js` can assert cover-sets identical to the scan's.

@@ -133,6 +133,10 @@ test('the matcher cache is bounded, and stays correct across an eviction', () =>
   const stats = matchCacheStats();
   assert.ok(stats.compiled <= limit, `compiled cache ${stats.compiled} exceeds ${limit}`);
   assert.ok(stats.normalized <= limit, `normalized cache ${stats.normalized} exceeds ${limit}`);
+  // The allow-candidate memo (2026-10-13) is keyed on the permission string the same way.
+  // MUTATION: give claudeAllowCandidates an unbounded Map.set instead of `cached`. This
+  // fails. Confirmed 2026-10-13.
+  assert.ok(stats.candidates > 0 && stats.candidates <= limit, `candidate cache ${stats.candidates} exceeds ${limit}`);
 
   assert.equal(ruleMatches('Bash(git status *)', 'Bash(git status --short)'), true);
   assert.equal(ruleMatches('Bash(git stash *)', 'Bash(git status --short)'), false);
@@ -171,4 +175,87 @@ test('the matcher cache bound is the documented value, and the report cannot dri
     'witness:match-cache-limit -- the bound must stay an order of magnitude above the '
     + 'largest real allow list measured for this project (316 entries), or eviction stops '
     + 'being a bug signal and becomes the normal case');
+});
+
+// Claude Code's allow-path strip, modelled since 2026-10-13. Before, this matcher compared a
+// rule with the permission's own text only, so `Bash(rg *)` did not cover `Bash(timeout 5
+// rg x)`, which Claude Code strips to `rg x` before it consults that rule (docs,
+// "Wrappers"; the routine read out of Claude Code 2.1.296's binary). That only ever
+// under-reported coverage. Every row is synthetic.
+test('a Bash rule covers what Claude Code strips its way to: wrappers and known-safe assignments', () => {
+  for (const [rule, permission] of [
+    ['Bash(rg *)', 'Bash(timeout 5 rg x)'],
+    ['Bash(rg *)', 'Bash(nohup timeout 5 nice -n 1 rg x)'],
+    ['Bash(rg:*)', 'Bash(time rg x)'],
+    ['Bash(git status *)', 'Bash(command -p git status --short)'],
+    ['Bash(rg *)', 'Bash(stdbuf -oL rg x)'],
+    ['Bash(npm test *)', 'Bash(NODE_ENV=test npm test)'],
+    ['Bash(npm test *)', 'Bash(CI=1 timeout 30 npm test)'],
+    ['Bash(rg *)', 'Bash(timeout 5 rg *)'],          // a wildcard entry, pruned as covered
+    ['Bash(./x.sh)', 'Bash(nohup ./x.sh)'],          // an exact rule matches the stripped text
+    ['Bash(timeout *)', 'Bash(nohup timeout npm test)'], // the strip stops at timeout, as the CLI's does
+  ]) {
+    // MUTATION: make claudeAllowCandidatesUncached return `[target]` only (no stripped
+    // form). The first row is false and this fails. Confirmed 2026-10-13.
+    assert.equal(ruleMatches(rule, permission), true, `${rule} must cover ${permission}`);
+  }
+});
+
+test('a Bash rule ending in a star also matches with xargs in front of it, and only then', () => {
+  // "Bare `xargs` is also stripped, so `Bash(grep *)` matches `xargs grep pattern`.
+  // Stripping applies only when `xargs` has no flags." The CLI does it from the rule side:
+  // it tries `xargs <rule>`, once, against the text its strip leaves.
+  // MUTATION: make matchesThroughXargs return false. The first row is false and this
+  // fails. Confirmed 2026-10-13.
+  assert.equal(ruleMatches('Bash(grep *)', 'Bash(xargs grep x)'), true);
+  assert.equal(ruleMatches('Bash(grep *)', 'Bash(nohup xargs grep x)'), true);
+  assert.equal(ruleMatches('Bash(git add *)', 'Bash(xargs git add)'), true);
+  assert.equal(ruleMatches('Bash(grep *)', 'Bash(xargs -n1 grep x)'), false, 'a flagged xargs is matched as xargs');
+  assert.equal(ruleMatches('Bash(grep *)', 'Bash(xargs nohup grep x)'), false, 'nothing after xargs is stripped');
+  // An exact rule gets no xargs variant, and the command keeps its xargs.
+  // MUTATION: drop the `\*\s*$` test in matchesThroughXargs. `Bash(grep x)` covers
+  // `Bash(xargs grep x)` and this fails. Confirmed 2026-10-13.
+  assert.equal(ruleMatches('Bash(grep x)', 'Bash(xargs grep x)'), false);
+  // MUTATION: pass `{ xargs: true }` from claudeAllowStrip (strip xargs from the
+  // command instead). This row fails; the one above does not, because a line that
+  // OPENS with xargs takes the first-word fast path. Confirmed 2026-10-13.
+  assert.equal(ruleMatches('Bash(grep x)', 'Bash(nohup xargs grep x)'), false);
+});
+
+test('what Claude Code does not strip is not stripped here: a subset, never a superset', () => {
+  // The costly error is claiming a cover Claude Code does not honour, which lets
+  // processAllowList prune a rule still needed. Each of these prompts in Claude Code.
+  for (const [rule, permission] of [
+    ['Bash(git push *)', 'Bash(GITHUB_TOKEN=x git push origin)'], // not a known-safe variable
+    ['Bash(npm test *)', 'Bash(NODE_ENV="test" npm test)'],       // not a plain value
+    ['Bash(make *)', 'Bash(timeout 5 NODE_ENV=x make)'],          // no assignment after a wrapper
+    ['Bash(rg *)', 'Bash(stdbuf -o L rg x)'],                     // a separate stdbuf value
+    ['Bash(rg *)', 'Bash(time -p rg x)'],                         // an incomplete fragment
+    ['Bash(rg *)', 'Bash(Time rg x)'],                            // names are exact
+    ['Bash(x *)', 'Bash(command -v x)'],                          // the lookup form is kept
+    ['Bash(rg *)', 'Bash(timeout --bogus 5 rg x)'],
+    ['Bash(rg *)', 'Bash(env FOO=1 rg x)'],                       // env is not on the list
+    ['PowerShell(rg *)', 'PowerShell(timeout 5 rg x)'],           // Bash only
+  ]) {
+    // MUTATION: make claudeStripsAssignment test the name only. The quoted NODE_ENV row
+    // is covered and this fails. Confirmed 2026-10-13.
+    // MUTATION: strip PowerShell too (drop the `parsed[1] !== 'Bash'` test in
+    // claudeAllowCandidatesUncached). The last row is covered and this fails. Confirmed
+    // 2026-10-13.
+    assert.equal(ruleMatches(rule, permission), false, `${rule} must not cover ${permission}`);
+  }
+});
+
+test('processAllowList prunes what a broader rule covers through the strip, and nothing else', () => {
+  // Measured 2026-10-13 against the development box's 581-entry allow list: 0 entries
+  // change, before and after this model. These synthetic lists show what it does decide.
+  assert.deepEqual(processAllowList(['Bash(./x.sh)', 'Bash(nohup ./x.sh)']), ['Bash(./x.sh)']);
+  assert.deepEqual(processAllowList(['Bash(rg *)', 'Bash(timeout 5 rg *)']), ['Bash(rg *)']);
+  assert.deepEqual(processAllowList(['Bash(grep *)', 'Bash(xargs grep *)']), ['Bash(grep *)']);
+  // Controls: a kept assignment, a flagged xargs, and identity are not covers.
+  assert.deepEqual(processAllowList(['Bash(git push *)', 'Bash(GITHUB_TOKEN=x git push *)']),
+    ['Bash(git push *)', 'Bash(GITHUB_TOKEN=x git push *)']);
+  assert.deepEqual(processAllowList(['Bash(grep *)', 'Bash(xargs -0 grep *)']),
+    ['Bash(grep *)', 'Bash(xargs -0 grep *)']);
+  assert.equal(isCoveredBy('Bash(rg *)', 'Bash(rg *)'), false);
 });

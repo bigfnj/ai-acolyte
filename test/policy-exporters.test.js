@@ -160,9 +160,12 @@ test('reviewed Codex export refuses every learner runner as a bare prefix, in ev
 
 test('the refusal reaches a bare prefix the learner itself builds', () => {
   const { classifyInvocation } = require('../src/auto-learn');
+  // `xargs rm` was the xargs row until 2026-10-13, when the learner began stripping a
+  // bare, flagless `xargs` the way Claude Code's matcher does (it keys on `rm` now). A
+  // flagged xargs is matched as xargs, so `xargs -0 rm` is the row that hands over the root.
   for (const [root, command] of [
     ['node', 'node build.js'], ['npx', 'npx tsc --noEmit'], ['uvx', 'uvx ruff check .'],
-    ['xargs', 'xargs rm'], ['parallel', 'parallel gzip ::: a b'], ['env', 'env FOO=1 make'],
+    ['xargs', 'xargs -0 rm'], ['parallel', 'parallel gzip ::: a b'], ['env', 'env FOO=1 make'],
   ]) {
     const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
     assert.deepEqual(learned.prefix, [root], `precondition: ${command} hands over the bare root`);
@@ -214,6 +217,13 @@ test('a reviewed interpreter prefix carrying an inline-code flag is refused like
     // MUTATION: delete the INLINE_CODE_FLAGS check in wrapperIsBroad
     // (src/policy-exporters.js). The first row, ["python","-c"], renders and this fails.
     // Confirmed 2026-10-13. Deleting one interpreter's entry (perl) fails its rows alone.
+    //
+    // Superseded the same day: the interpreter rule below (INTERPRETER_GRAMMAR) refuses
+    // every row of this table on its own as well, because a code flag is not an option
+    // that table lists, so deleting the INLINE_CODE_FLAGS check now survives this loop.
+    // What still needs it is a code flag AFTER the pinned program, which the grammar
+    // reads as the program's own argument; the test after next holds that row
+    // (`["python", "x.py", "-c"]`) and is what the deletion fails now.
     assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs whatever code it is handed`);
   }
   // Controls: the same interpreters, narrowed to something that is not program text.
@@ -221,6 +231,118 @@ test('a reviewed interpreter prefix carrying an inline-code flag is refused like
     ['python', '-m', 'pytest'], ['node', 'build.js'], ['deno', 'run', 'x.ts'], ['bun', 'run', 'x'],
     ['ruby', 'x.rb'], ['perl', 'x.pl'], ['php', 'x.php'], ['npx', 'tsc'], ['uvx', 'ruff']]) {
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a narrower prefix and still renders`);
+  }
+});
+
+// An interpreter or shell prefix is narrow only once it pins the program: a script path,
+// a module NAME (`-m pytest`, `php -f x.php`), or exactly one inert informational form.
+// MEASURED 2026-10-13 against a309f54 with a 132-prefix probe: every row of BROAD
+// below rendered there (bar `["fish", "-C", "x"]`, already refused), 70 in all, and
+// none of the controls changed. Each admits the next token, which can be the code flag:
+// `python -u -c ...`, `bash -x -c ...`, `node -r x -e ...`, `python -m <any module>`.
+const INTERPRETER_BROAD = [
+  // the measured four, and options that end the prefix
+  ['python', '-u'], ['bash', '-x'], ['node', '-r'], ['python', '-m'],
+  ['python', '-W'], ['python', '-O'], ['python', '-B'], ['python3', '-I'], ['py', '-3.12'],
+  ['node', '--require'], ['node', '--inspect'], ['ruby', '-w'], ['perl', '-w'], ['php', '-n'], ['php', '-f'],
+  ['bash', '-e'], ['bash', '-l'], ['bash', '--login'], ['zsh', '-f'], ['fish', '-i'],
+  // a value option's value is not the program
+  ['python', '-W', 'ignore'], ['python', '-X', 'utf8'], ['python', '-u', '-W', 'ignore'],
+  ['node', '-r', 'ts-node/register'], ['node', '--import', 'x'], ['node', '--title', 'x'],
+  ['ruby', '-I', 'lib'], ['ruby', '-r', 'json'], ['perl', '-I', 'lib'], ['perl', '-Mstrict'], ['php', '-d', 'x=1'],
+  ['bash', '-o', 'pipefail'], ['bash', '-euo', 'pipefail'], ['bash', '--rcfile', 'x'],
+  // an option the table does not know, stdin, code or a server in an option
+  ['node', '--bogus', 'x.js'], ['python', '-'], ['bash', '-'], ['python', '--', '-'], ['sh', '-s'],
+  ['bash', '-ec'], ['bash', '-xc'], ['php', '-a'], ['php', '-S', 'localhost:8000'], ['fish', '-c', 'x'],
+  ['fish', '--init-command=x'],
+  ['node', '--import=data:text/javascript,1', 'x.js'], ['node', '--import', 'data:x', 'x.js'],
+  // `-h` is set -h and `-V` is not the version, in a POSIX shell
+  ['bash', '-h'], ['bash', '-V'], ['dash', '-E'],
+  // a subcommand that still needs its target, or runs code itself
+  ['deno', 'run'], ['deno', 'run', '-A'], ['deno', 'serve'], ['deno', 'repl'], ['deno', '--unstable', 'run', 'x.ts'],
+  ['bun', 'run'], ['bun', 'x'], ['bun', 'exec', 'x'], ['bun', 'create'], ['bun', '--watch', 'x.ts'],
+];
+
+test('an interpreter or shell prefix is broad until it pins the program it runs', () => {
+  for (const prefix of INTERPRETER_BROAD) {
+    // MUTATION: delete the INTERPRETER_GRAMMAR dispatch in wrapperIsBroad (the generic
+    // rule then decides). `["python", "-W", "ignore"]` renders. Confirmed 2026-10-13.
+    // MUTATION: let an unknown option `continue` in interpreterIsBroad.
+    // `["node", "--bogus", "x.js"]` renders. Confirmed 2026-10-13.
+    // MUTATION: read a value option as a flag (drop the `k += 1` that skips its value).
+    // `["python", "-W", "ignore"]` reads `ignore` as the script. Confirmed 2026-10-13.
+    // MUTATION: give the POSIX shells DEFAULT_INFO instead of SHELL_INFO. `["bash", "-h"]`
+    // renders. Confirmed 2026-10-13.
+    // MUTATION: make a subcommand that needs a target pin on its own (drop the target
+    // check). `["deno", "run"]` renders. Confirmed 2026-10-13.
+    // MUTATION: drop `broadValue` from the node grammar. `["node", "--import", "data:x",
+    // "x.js"]` renders. Confirmed 2026-10-13.
+    // MUTATION: drop `|| rest[k] === '-'` after the walk. `["python", "--", "-"]` (the
+    // program is stdin) renders. Confirmed 2026-10-13. A `-`, `bash -c`/`-s`, `php
+    // -a`/`-S` or fish `-c` before the program needs no line of its own: none is in any
+    // table, so each is an unknown option.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} has not pinned a program`);
+  }
+  // An inline-code flag after the pinned program is still refused, by INLINE_CODE_FLAGS
+  // alone: the grammar reads it as the script's own argument (30f92a4 refused it on
+  // purpose as the safe failure, and that stands).
+  // MUTATION: delete the INLINE_CODE_FLAGS check. This row renders. Confirmed 2026-10-13.
+  assert.equal(codexRuleCount(['python', 'x.py', '-c']), 0);
+});
+
+test('an interpreter or shell prefix that pins its program, or only asks for help or a version, renders', () => {
+  for (const prefix of [
+    // the 30f92a4 controls, unchanged
+    ['python', '--version'], ['node', '--version'], ['python', 'script.py'], ['python', '-m', 'pytest'],
+    ['node', 'build.js'], ['deno', 'run', 'x.ts'], ['bun', 'run', 'x'], ['ruby', 'x.rb'], ['perl', 'x.pl'],
+    ['php', 'x.php'], ['bash', 'script.sh'], ['pwsh', '-File', 'x.ps1'],
+    // informational forms, exactly
+    ['python', '-V'], ['python', '-h'], ['python', '--help'], ['node', '-v'], ['node', '-h'],
+    ['bash', '--version'], ['bash', '--help'],
+    // options first, then the program
+    ['python', '-u', 'x.py'], ['python', '-W', 'ignore', 'x.py'], ['python', '-mpytest'], ['python3', '-I', '-m', 'pip'],
+    ['py', '-3.12', '-m', 'pip'], ['node', '--inspect', 'x.js'], ['node', '-r', 'ts-node/register', 'x.ts'],
+    ['node', '--require=dotenv/config', 'x.js'], ['ruby', '-w', 'x.rb'], ['ruby', '-I', 'lib', 'x.rb'],
+    ['perl', '-w', 'x.pl'], ['perl', '-Mstrict', 'x.pl'], ['php', '-n', 'x.php'], ['php', '-f', 'x.php'],
+    ['php', '-d', 'x=1', 'x.php'], ['bash', '-e', 'x.sh'], ['bash', '-euo', 'pipefail', 'x.sh'], ['bash', '-x', 'x.sh'],
+    ['bash', '--', 'x.sh'], ['fish', 'x.fish'], ['zsh', 'x.zsh'],
+    // once pinned, the rest are the program's own arguments
+    ['python', '-m', 'pytest', '-x'], ['python', 'x.py', '-u'], ['bash', 'x.sh', '-c'],
+    // subcommands that pin, and a target after one that needs it
+    ['deno', 'test'], ['deno', 'fmt'], ['deno', 'x.ts'], ['bun', 'test'], ['bun', 'install'], ['bun', 'x', 'tsc'],
+    ['bun', 'x.ts'],
+  ]) {
+    // MUTATION: drop the `pin` handling (`-m MODULE`). `["python", "-m", "pytest"]` is an
+    // unknown option and refused. Confirmed 2026-10-13.
+    // MUTATION: drop the exact-info early return. `["python", "--version"]` is refused.
+    // Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} pins its program and still renders`);
+  }
+});
+
+test('parallel is broad at any depth, because it runs its command line through a shell', () => {
+  // GNU parallel composes each job and hands it to a shell, so naming the command does
+  // not narrow it the way it narrows xargs (`["xargs", "rm"]` still renders, 30f92a4).
+  // MUTATION: drop 'parallel' from ALWAYS_BROAD_WRAPPERS. `["parallel", "gzip"]` renders.
+  // Confirmed 2026-10-13.
+  for (const prefix of [['parallel', 'gzip'], ['parallel', '-j4', 'gzip'], ['parallel', '--version'],
+    ['parallel.exe', 'gzip']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  assert.equal(codexRuleCount(['xargs', 'rm']), 1, 'control: xargs execs without a shell');
+});
+
+test('any other runner prefix that ends in an option is broad unless it only asks for a version', () => {
+  // `npx -y` admits `npx -y <any package>`, `npm --silent` admits `npm --silent exec ...`.
+  // MUTATION: delete the ends-in-an-option rule at the bottom of wrapperIsBroad.
+  // `["npx", "-y"]` renders. Confirmed 2026-10-13.
+  for (const prefix of [['npx', '-y'], ['npx', '--yes'], ['npm', '--silent'], ['uvx', '--from'], ['make', '-k'],
+    ['java', '-cp'], ['java', '-version'], ['just', '--justfile']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  for (const prefix of [['npx', 'tsc'], ['uvx', 'ruff'], ['npx', '--version'], ['npm', 'test'], ['npm', 'run', 'build'],
+    ['make', 'test'], ['java', '-jar', 'x.jar'], ['just', 'build']]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} still renders`);
   }
 });
 
@@ -257,6 +379,115 @@ test('env and xargs are as narrow as the command they name, and broad when they 
     ['xargs', '-I{}', 'rm', '{}']]) {
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
   }
+});
+
+// Process and exec wrappers: each runs whatever command follows its own options.
+// MEASURED 2026-10-13 against the previous exporter (fa9db35), with a 117-prefix probe of
+// synthetic prefixes: every bare root below, and every option-only tail further down,
+// rendered as a valid reviewed prefix_rule; 80 of the 117 rendered then and are refused
+// now, and none went the other way. Kept as a LITERAL so a root dropped from the
+// exporter's own row fails here by name.
+const EXEC_WRAPPER_ROOTS = [
+  'busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice', 'ltrace',
+  'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser', 'script',
+  'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time', 'timeout',
+  'unshare', 'valgrind', 'watch',
+];
+
+test('every process and exec wrapper is refused as a bare reviewed prefix, in both spellings', () => {
+  for (const root of EXEC_WRAPPER_ROOTS) {
+    for (const spelling of [root, `${root}.exe`]) {
+      // MUTATION: delete the `...[...].flatMap(...)` row from OWN_SHELL_WRAPPERS
+      // (src/policy-exporters.js). `["busybox"]` renders a one-token rule and this fails;
+      // so do all 31 roots. Confirmed 2026-10-13.
+      assert.equal(codexRuleCount([spelling]), 0, `${JSON.stringify([spelling])} runs whatever follows it`);
+    }
+  }
+});
+
+test('an exec wrapper prefix that stops before naming a command is broad', () => {
+  // The option-only tails: each ends inside the wrapper's own syntax, so the next token
+  // can be any program at all.
+  for (const prefix of [
+    ['timeout', '5'], ['timeout', '-k', '2', '10s'], ['timeout', '--signal=KILL', '5'], ['timeout', '-k'],
+    ['nice', '-n', '10'], ['nice', '-5'], ['stdbuf', '-oL'], ['stdbuf', '-o', 'L'], ['time', '-p'],
+    ['setsid', '-f'], ['ionice', '-c', '3'], ['flock', 'lock'], ['flock', '-n', 'lock'],
+    ['nsenter', '-t', '1', '-m'], ['strace', '-f', '-e', 'trace=open'], ['ltrace', '-c'],
+    ['chroot', '/srv/x'], ['unshare', '-r'], ['taskset', '0x1'], ['chrt', '-f', '10'],
+    ['valgrind', '--tool=memcheck'], ['exec', '-a', 'x'], ['command', '-p'], ['nohup', '--'],
+  ]) {
+    // MUTATION: drop `+ (grammar.operands || 0)` in execWrapperInner. `["timeout", "5"]`
+    // reads `5` as the command and renders. Confirmed 2026-10-13.
+    // MUTATION: delete the EXEC_WRAPPER_GRAMMAR branch in wrapperIsBroad. Every row here
+    // falls to "two tokens, so narrower". Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names no command`);
+  }
+});
+
+test('an exec wrapper is exactly as narrow as the command it names', () => {
+  // Broad: the command it names is itself broad, an option the grammar does not know,
+  // or flock's `-c`, which comes after the lock file and takes a shell command line.
+  for (const prefix of [
+    ['timeout', '5', 'sh'], ['nohup', 'bash', '-c'], ['busybox', 'sh'], ['builtin', 'eval'],
+    ['exec', 'sh'], ['command', 'sh'], ['nice', 'python', '-c'], ['setsid', 'env', 'FOO=1'],
+    ['strace', '-f', 'xargs', 'sh'], ['noglob', 'xargs', '-0'], ['nohup', 'timeout', '5'],
+    ['timeout', '--bogus', '5', 'rm'], ['nice', '--bogus', 'rm'], ['ionice', '-z', 'rm'],
+    ['flock', 'lock', '-c'], ['flock', 'lock', '--command'], ['flock', '--command=x', 'lock'],
+  ]) {
+    // MUTATION: drop `|| wrapperIsBroad(inner)` from the new branch. `["timeout", "5",
+    // "sh"]` renders. Confirmed 2026-10-13.
+    // MUTATION: make an unknown option `continue` instead of returning null.
+    // `["timeout", "--bogus", "5", "rm"]` renders. Confirmed 2026-10-13.
+    // MUTATION: drop the leading-dash refusal at the end of execWrapperInner.
+    // `["flock", "lock", "-c"]` renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} is as broad as what it runs`);
+  }
+  // Controls: a concrete command after the wrapper's options renders, the same decision
+  // 30f92a4 made for xargs (it execs without a shell, so it is no broader than the
+  // command), and `command -v` is a lookup that runs nothing.
+  for (const prefix of [
+    ['timeout', '5', 'rg'], ['timeout', '-k', '2', '10s', 'make', 'test'], ['timeout', '--', '5', 'rg'],
+    ['nice', '-n', '10', 'rg'], ['nohup', 'rg'], ['stdbuf', '-oL', 'grep'], ['time', '-p', 'rg'],
+    ['setsid', 'rg'], ['ionice', '-c', '3', 'rg'], ['flock', '/tmp/l', 'rg'], ['busybox', 'ls'],
+    ['nsenter', '-t', '1', '-m', 'ls'], ['strace', '-f', 'ls'], ['ltrace', '-c', 'ls'],
+    ['chroot', '/srv/x', 'ls'], ['unshare', '-r', 'ls'], ['taskset', '0x1', 'ls'],
+    ['chrt', '-f', '10', 'ls'], ['valgrind', '--tool=memcheck', 'ls'], ['builtin', 'cd'],
+    ['noglob', 'ls'], ['nocorrect', 'ls'], ['command', 'rg'], ['exec', 'rg'],
+    ['command', '-v'], ['command', '-v', 'rg'],
+  ]) {
+    // MUTATION: delete the `grammar.lookup` line in execWrapperInner. `-v` is then an
+    // unknown option, `["command", "-v"]` is refused and this fails. Confirmed
+    // 2026-10-13. (Dropping only the `inner === LOOKUP` return in wrapperIsBroad is an
+    // equivalent mutant: a Symbol has no length and no root, so it falls through to
+    // narrow anyway. The explicit return is kept so that reads as intended.)
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
+  }
+});
+
+test('identity-changing and shell-text wrappers are broad at any depth', () => {
+  // A named command does not narrow these: watch and eval hand their arguments to a
+  // shell, script and firejail can, sudo-like wrappers change who the command runs as,
+  // and gdb and systemd-run carry options this module cannot bound.
+  for (const prefix of [
+    ['watch', 'ls'], ['sudo', 'rm'], ['sudo', '-u', 'root', 'ls'], ['sudo.exe', 'ls'], ['doas', 'ls'],
+    ['pkexec', 'ls'], ['su', '-c'], ['runuser', '-u', 'x', 'ls'], ['runas', '/user:x', 'cmd'],
+    ['eval', 'x'], ['script', '-q'], ['firejail', 'ls'], ['systemd-run', 'ls'], ['gdb', '--args', 'x'],
+  ]) {
+    // MUTATION: delete the ALWAYS_BROAD_WRAPPERS check in wrapperIsBroad. `["watch",
+    // "ls"]` renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+});
+
+test('the Claude side refuses the same wrappers at any depth, by membership', () => {
+  // claudePermissionIsSafe refuses a wrapper root at any depth (64b4eaa), so the new
+  // roots are refused there too. The learner strips the wrappers Claude Code strips, so
+  // a rule like these only reaches the exporter from a shape Claude Code does not strip.
+  for (const permission of ['Bash(timeout *)', 'Bash(nohup rg *)', 'Bash(sudo ls *)', 'Bash(watch *)',
+    'Bash(nice -n *)', 'PowerShell(sudo *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
 });
 
 test('every reviewed cmd prefix is broad: the code switch may follow other switches', () => {

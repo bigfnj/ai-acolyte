@@ -94,6 +94,8 @@ const SHELL_WRAPPERS = new Set([
   'perl', 'php', 'pnpm', 'powershell', 'powershell.exe', 'pwsh', 'py', 'python',
   'python3', 'ruby', 'rundll32', 'sh', 'source', 'uvx', 'wsl', 'xargs', 'yarn',
   'zsh',
+  // Claude Code's stripped process wrappers, 2026-10-13 (see the claudeWrapperPrefix import below).
+  'builtin', 'nice', 'nocorrect', 'noglob', 'nohup', 'stdbuf', 'timeout',
 ]);
 const WRITE_ROOTS = new Set([
   'add-content', 'chmod', 'chown', 'copy-item', 'cp', 'dd', 'install', 'ln',
@@ -533,23 +535,28 @@ function permissionFor(shell, prefix, blocked) {
   return `${tool}(${prefix.join(' ')} *)`;
 }
 
-// `timeout [OPTION] DURATION COMMAND` is stripped by Claude Code's matcher, so
-// the family is the inner command. Returns the index of that command, or null
-// when the shape is not the documented one, in which case nothing is stripped
-// rather than guessed.
-const TIMEOUT_VALUE_OPTIONS = new Set(['-s', '-k', '--signal', '--kill-after']);
-const TIMEOUT_DURATION = /^[0-9]+(?:\.[0-9]+)?[smhd]?$/;
-function skipTimeoutPreamble(details, start) {
-  let index = start;
-  while (details[index] && details[index].value.startsWith('-')) {
-    const option = details[index].value;
-    index += 1;
-    if (TIMEOUT_VALUE_OPTIONS.has(option) && details[index]) index += 1;
-  }
-  if (!details[index] || !TIMEOUT_DURATION.test(details[index].value)) return null;
-  index += 1;
-  return details[index] ? index : null;
-}
+// Claude Code's known-safe environment list and its wrapper stripping live in
+// src/permissions.js, the file the fixed-point cache stamps, and are imported from there:
+// one copy each, and the import runs in the direction that cannot let a learner edit
+// change the hook's output. Required here, beside their one consumer, rather than at the
+// top, so that the line references other files make into this module's opening tables
+// do not move.
+//
+// The wrapper routine replaced this module's own subset on 2026-10-13. That subset
+// stripped `timeout` (accepting any option, `timeout --bogus 5 x` included), `command`
+// (`command -v` included, which Claude Code does not strip) and `builtin`, compared names
+// case-folded and by basename (`/usr/bin/timeout`, `Command`), and left `time`, `nice`,
+// `nohup`, `stdbuf`, `noglob` and bare `xargs` in place, so their families were the
+// wrappers themselves: `Bash(nohup *)`, `Bash(nice *)` and so on. A test in
+// test/permissions-wrappers.test.js holds the two callers to the same answers.
+//
+// A wrapper still becomes the root when Claude Code would not strip it either (`nohup`
+// alone, `nice --adjustment=5 make`, `stdbuf -o L x`), and then its family is a grant
+// for whatever it runs. Those seven names joined SHELL_WRAPPERS above the same day, so
+// such a family is `shell` risk, never automatic, and refused at any depth by the
+// exporter, which unions this table into its own. `time` needs no entry (it is a reserved
+// word here), and `command` and `xargs` were already in the table.
+const { claudeStripsAssignment, claudeWrapperPrefix } = require('./permissions');
 
 function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   const shell = normalizeShell(metadata && metadata.shell, tool);
@@ -558,27 +565,40 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   let index = 0;
   const environment = [];
   const strippedWrappers = [];
-  // Claude Code strips a leading env assignment, `command`, `builtin` and a
-  // `timeout` preamble before matching, so a rule for the inner command covers
-  // the wrapped invocation. Learning the wrapper instead would propose
-  // `Bash(timeout *)`, which grants every command it can run.
+  // Set when an assignment is one Claude Code does NOT strip before an allow rule is
+  // consulted: a variable outside its known-safe list, a value that is not plain, or
+  // any assignment after one of those or after a stripped wrapper (its routine strips
+  // assignments only while the line opens with one). Corrected 2026-10-13: this loop
+  // used to treat every leading `VAR=value` as stripped, so `LD_PRELOAD=x cat f` proposed
+  // `Bash(cat *)`, a rule Claude Code never matches against that command (docs, and the
+  // list itself, in src/permissions.js above CLAUDE_SAFE_ENV_VARS). The assignment is
+  // still stepped over to find the command, so risk is judged on what runs; only the
+  // Claude permission is withheld, because the one rule that matches such a run keeps
+  // the assignment verbatim, and the learner never writes a value into a rule.
+  let environmentKept = false;
+  // Claude Code strips a leading env assignment and its fixed set of wrappers before
+  // matching (claudeWrapperPrefix), so a rule for the inner command covers the wrapped
+  // invocation. Learning the wrapper instead would propose `Bash(timeout *)`, which
+  // grants every command it can run. A wrapper in a shape Claude Code does not strip is
+  // where stripping stops, and it becomes the root, as it is for the matcher.
   if (shell === 'bash') {
     for (let guard = 0; guard < 8; guard += 1) {
       const token = details[index];
       if (!token) break;
       if (isEnvironmentAssignment(token.value)) {
-        environment.push(token.value.split('=', 1)[0]); index += 1; continue;
+        const name = token.value.split('=', 1)[0];
+        const rawValue = token.raw.slice(token.raw.indexOf('=') + 1);
+        // Sticky: once one is kept, the line no longer opens with an assignment Claude
+        // Code strips, so any after it is kept too, and that needs no test of its own.
+        if (strippedWrappers.length || !token.raw.startsWith(`${name}=`) || !claudeStripsAssignment(name, rawValue)) {
+          environmentKept = true;
+        }
+        environment.push(name); index += 1; continue;
       }
-      const name = normalizeRoot(token.value);
-      if (name === 'command' || name === 'builtin') {
-        strippedWrappers.push(name); index += 1; continue;
-      }
-      if (name === 'timeout') {
-        const inner = skipTimeoutPreamble(details, index + 1);
-        if (inner === null) break;
-        strippedWrappers.push('timeout'); index = inner; continue;
-      }
-      break;
+      const { length, refused } = claudeWrapperPrefix(details.slice(index).map((item) => item.raw));
+      if (length === 0) break;
+      strippedWrappers.push(token.raw); index += length;
+      if (refused) break;
     }
   }
   let callOperator = false;
@@ -603,6 +623,7 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   const prefix = prefixFor(root, argv.slice(1));
   const reasons = [];
   if (environment.length) reasons.push('environment-prefix');
+  if (environmentKept) reasons.push('environment-not-stripped');
   if (strippedWrappers.length) reasons.push('stripped-wrapper');
   if (totalSegments > 1) reasons.push('compound-command');
   if (callOperator) reasons.push('powershell-call-operator');
@@ -615,14 +636,22 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   if (unknownFamily) reasons.push('family-subcommand-unknown');
   if (hasWriteRedirection(command, shell)) reasons.push('write-redirection');
   if (containsScriptSyntax(command, shell)) reasons.push('script-syntax');
-  // An env assignment is deliberately absent. Claude Code strips a leading
-  // `VAR=value` before matching, so `Bash(cat *)` already covers
-  // `LD_PRELOAD=x cat f`: refusing to propose the rule denies the grant without
-  // denying the injection. The reason is kept, and it still bars auto-safe
-  // (isAutoSafeCandidate and AUTO_UNSAFE_REASONS both list it), so evidence
-  // carrying an injection vector can only ever reach policy through a review.
+  // An assignment Claude Code strips (a known-safe variable, a plain value, at the
+  // head of the line) is deliberately absent: `Bash(npm test *)` covers `NODE_ENV=test
+  // npm test`, so refusing to propose it would deny the grant without denying anything.
+  // The `environment-prefix` reason is kept for every assignment, and it still bars
+  // auto-safe (isAutoSafeCandidate and AUTO_UNSAFE_REASONS both list it), so evidence
+  // carrying one can only ever reach policy through a review.
+  //
+  // An assignment Claude Code KEEPS blocks the permission (2026-10-13). This used to say
+  // that `Bash(cat *)` already covers `LD_PRELOAD=x cat f`; it does not, because
+  // LD_PRELOAD is not on the known-safe list, so Claude Code prompts for that run. A
+  // rule proposed from it would be one for a command nobody ran, the line
+  // aggregateObservations does not cross. A family whose evidence mixes such runs with
+  // plain ones therefore gets no Claude rule, the same as when one spelling is a path
+  // executable; its Codex prefix is unaffected.
   const permissionBlocked = pathExecutable || dynamicExecutable || callOperator || reserved ||
-    unknownFamily || Boolean(executable && executable.quoted);
+    unknownFamily || environmentKept || Boolean(executable && executable.quoted);
 
   return {
     ...(metadata && typeof metadata === 'object' ? metadata : {}),

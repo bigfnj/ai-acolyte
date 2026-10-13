@@ -23,6 +23,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const { codexHistoryStoreState } = require('../src/history-adapters');
 const { createAutoLearnManager } = require('../src/auto-learn-manager');
@@ -34,7 +35,11 @@ const { createAutoLearnManager } = require('../src/auto-learn-manager');
 // pass.
 let sqlite = null;
 try { sqlite = require('node:sqlite'); } catch { sqlite = null; }
-const exactTier = Boolean(sqlite && typeof sqlite.DatabaseSync === 'function');
+// `Database` from Node 26.11.0 (where `DatabaseSync` became a documented alias,
+// DEP0210), `DatabaseSync` before it: the same class either way, so the exact
+// tier keeps running if the alias is ever removed.
+const SqliteDatabase = sqlite && (typeof sqlite.Database === 'function' ? sqlite.Database : sqlite.DatabaseSync);
+const exactTier = typeof SqliteDatabase === 'function';
 if (!exactTier) {
   process.stderr.write(
     '\n[codex-history-store] SKIPPING the exact tier: node:sqlite is unavailable on ' +
@@ -89,7 +94,7 @@ function archivedRollout(home, threadId) {
 function threadStore(home, threadIds, { name = 'thread_history_1.sqlite', offsets = {} } = {}) {
   const file = path.join(home, '.codex', name);
   fs.rmSync(file, { force: true });
-  const db = new sqlite.DatabaseSync(file);
+  const db = new SqliteDatabase(file);
   db.exec(`CREATE TABLE thread_history_projection_state (
     thread_id TEXT PRIMARY KEY,
     next_rollout_byte_offset INTEGER NOT NULL,
@@ -114,7 +119,7 @@ function threadStore(home, threadIds, { name = 'thread_history_1.sqlite', offset
 function stateStore(home, rows, { migrations = [], name = 'state_5.sqlite' } = {}) {
   const file = path.join(home, '.codex', name);
   fs.rmSync(file, { force: true });
-  const db = new sqlite.DatabaseSync(file);
+  const db = new SqliteDatabase(file);
   db.exec(`CREATE TABLE threads (
     id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL,
     created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
@@ -694,6 +699,129 @@ test('unavailable survives the state file instead of decaying to skipped', (t) =
   assert.equal(reloaded.codexHistoryInspected, 'unavailable',
     'witness:sqlite-unavailable -- the persisted state was not in the reader whitelist, so a '
     + 'reload turned it back into a value the badge cannot distinguish');
+});
+
+// ── which constructor, and which warning ──────────────────────────────────────
+//
+// Node 26.11.0 renamed `DatabaseSync` to `Database` and kept the old name as a
+// documentation-only deprecated alias (DEP0210). Measured 2026-10-13: 26.11.1
+// exports both names for one class, 22.23.3 / 24.19.0 / 24.21.0 only
+// `DatabaseSync`, and no build warned about either. The fakes below are the
+// shapes the rename can take from here -- the 26.11 shape, the alias removed,
+// a runtime deprecation done Node's way (a getter, or a `deprecate()` wrapper
+// that shares its target's prototype), and a `Database` that is some other
+// class -- each handed to the reader as the `node:sqlite` module. The real
+// class does the reading, so `exact` means the read genuinely ran.
+function withSqliteModule(fake, fn) {
+  const original = NodeModule._load;
+  NodeModule._load = function fakeLoad(request, ...rest) {
+    if (request === 'node:sqlite' || request === 'sqlite') return typeof fake === 'function' ? fake() : fake;
+    return original.call(this, request, ...rest);
+  };
+  try { return fn(); } finally { NodeModule._load = original; }
+}
+
+function exactStore(t, label) {
+  const home = codexHome(t, label);
+  for (const id of THREADS) rollout(home, id);
+  threadStore(home, THREADS);
+  return home;
+}
+
+test('the reader prefers Database and never reads or constructs a deprecated alias', { skip: !exactTier }, (t) => {
+  const home = exactStore(t, 'ctor-alias');
+  let aliasReads = 0;
+  const getter = { Database: SqliteDatabase, get DatabaseSync() { aliasReads += 1; return SqliteDatabase; } };
+  assert.equal(withSqliteModule(getter, () => codexHistoryStoreState({ home })).inspected, 'exact');
+  assert.equal(aliasReads, 0,
+    'witness:dep0210 -- the alias getter ran, and a getter is where a runtime deprecation warns');
+
+  let wrapped = 0;
+  function DatabaseSync(...args) {
+    wrapped += 1;
+    return Reflect.construct(SqliteDatabase, args, new.target || SqliteDatabase);
+  }
+  DatabaseSync.prototype = SqliteDatabase.prototype;
+  assert.equal(withSqliteModule({ Database: SqliteDatabase, DatabaseSync }, () => codexHistoryStoreState({ home })).inspected,
+    'exact');
+  assert.equal(wrapped, 0,
+    'witness:dep0210 -- a deprecation wrapper over Database was constructed instead of Database');
+});
+
+test('every shape the rename can take still reads exactly, and an unrelated Database is not used', { skip: !exactTier }, (t) => {
+  const home = exactStore(t, 'ctor-shapes');
+  for (const [label, fake] of [
+    ['22.x to 26.10: DatabaseSync only', { DatabaseSync: SqliteDatabase }],
+    ['26.11: two names, one class', { Database: SqliteDatabase, DatabaseSync: SqliteDatabase }],
+    ['after the alias is removed', { Database: SqliteDatabase }],
+  ]) {
+    assert.equal(withSqliteModule(fake, () => codexHistoryStoreState({ home })).inspected, 'exact', label);
+  }
+  let unrelated = 0;
+  class Database { constructor() { unrelated += 1; throw new Error('not the synchronous class'); } }
+  const state = withSqliteModule({ Database, DatabaseSync: SqliteDatabase }, () => codexHistoryStoreState({ home }));
+  assert.equal(state.inspected, 'exact', 'a different Database falls back to DatabaseSync');
+  assert.equal(unrelated, 0, 'witness:dep0210 -- a Database that is not the DatabaseSync class was constructed');
+  // Control: with neither name the runtime cannot host the probe, which is
+  // `unavailable`, not a degraded read.
+  const neither = withSqliteModule({}, () => codexHistoryStoreState({ home }));
+  assert.equal(neither.inspected, 'unavailable');
+  assert.match(neither.notes.join('\n'), /neither Database nor DatabaseSync/);
+});
+
+// What Node 22.13+ does inside lib/sqlite.js on the first require (measured on
+// 22.23.3): the public `process.emitWarning`, with the type as the second
+// argument. A recorder stands in for the real function, so the test proves
+// what reaches it without printing anything.
+test('requiring node:sqlite silences its experimental warning, and only that, only then', (t) => {
+  const home = codexHome(t, 'quiet-require');
+  rollout(home, THREADS[0]);
+  fs.writeFileSync(path.join(home, '.codex', 'thread_history_1.sqlite'), 'unopened');
+  const reached = [];
+  const original = process.emitWarning;
+  const recorder = function recorder(warning, type) {
+    reached.push(`${typeof warning === 'string' ? type : warning.name}: ${warning.message || warning}`);
+  };
+  const sqliteWarning = 'SQLite is an experimental feature and might change at any time';
+  let during;
+  let after;
+  process.emitWarning = recorder;
+  try {
+    withSqliteModule(() => {
+      process.emitWarning(sqliteWarning, 'ExperimentalWarning');
+      process.emitWarning(Object.assign(new Error(sqliteWarning), { name: 'ExperimentalWarning' }));
+      process.emitWarning(sqliteWarning, 'Warning');
+      process.emitWarning('Fetch is an experimental feature', 'ExperimentalWarning');
+      return {};
+    }, () => codexHistoryStoreState({ home }));
+    during = process.emitWarning;
+    withSqliteModule(() => { throw Object.assign(new Error('masked'), { code: 'MODULE_NOT_FOUND' }); },
+      () => codexHistoryStoreState({ home }));
+  } finally {
+    after = process.emitWarning;
+    process.emitWarning = original;
+  }
+  assert.deepEqual(reached, [`Warning: ${sqliteWarning}`, 'ExperimentalWarning: Fetch is an experimental feature'],
+    'witness:sqlite-warning -- exactly the SQLite ExperimentalWarning is dropped, in either call form');
+  assert.equal(during, recorder, 'emitWarning is put back after the require');
+  assert.equal(after, recorder, 'and put back when the require throws');
+});
+
+// The same property against the real runtime, in a fresh process so the
+// warning has not already been spent. On 22.x the control prints it and the
+// reader must not; on 24.19+ neither does, and the diagnostic says so rather
+// than letting a vacuous pass read as coverage.
+test('a fresh process reading the store prints no SQLite experimental warning', { skip: !exactTier }, (t) => {
+  const home = exactStore(t, 'fresh-process');
+  const adapters = path.resolve(__dirname, '..', 'src', 'history-adapters.js');
+  const run = (code) => spawnSync(process.execPath, ['-e', code, adapters, home],
+    { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const control = run("require('node:sqlite')");
+  const reader = run('const state = require(process.argv[1]).codexHistoryStoreState({ home: process.argv[2] });'
+    + " if (state.inspected !== 'exact') { console.error('inspected ' + state.inspected); process.exit(1); }");
+  assert.equal(reader.status, 0, reader.stderr);
+  assert.doesNotMatch(reader.stderr, /ExperimentalWarning/, 'witness:sqlite-warning -- the reader printed it');
+  t.diagnostic(`a bare require prints the warning on ${process.version}: ${/ExperimentalWarning: SQLite/.test(control.stderr)}`);
 });
 
 // ── the manager: the archive is a history root by default ─────────────────────

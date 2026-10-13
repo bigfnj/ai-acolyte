@@ -2001,18 +2001,85 @@ function mergeRolloutIndex(first, second) {
 // `PRAGMA busy_timeout`. The constructor reads its options by name and ignores a
 // key it does not know (also measured on 24.19.0), so an older host simply runs
 // without one.
+//
+// THE CONSTRUCTOR'S NAME. Node 26.11.0 renamed the class to `Database` and kept
+// `DatabaseSync` as an alias under DEP0210, a DOCUMENTATION-ONLY deprecation
+// (the deprecations page's history table, read 2026-10-13). Measured the same
+// day with `Object.keys(require('node:sqlite'))` and a construct-and-query
+// probe, run plain and with --pending-deprecation:
+//   22.23.3   DatabaseSync only
+//   24.19.0   DatabaseSync only
+//   24.21.0   DatabaseSync only (VS Code 1.141.1's Electron 43.7.7)
+//   26.11.1   Database and DatabaseSync, one class (`===`), synchronous:
+//             `prepare().get()` returns a row, not a Promise, and `timeout`
+//             reads back from `PRAGMA busy_timeout`.
+// None of them warned about the alias, with or without the flag. So nothing
+// warns today, and `Database` is preferred anyway: a documentation-only
+// deprecation is the stage before a runtime one.
+//
+// `Database` is taken only when it is provably the class `DatabaseSync` names.
+// That means the alias is absent (removed after its deprecation), identical,
+// a deprecation wrapper over it (Node's `deprecate()` gives the wrapper the
+// target's own `prototype`), or a getter. A getter is how Node runtime-
+// deprecates a property, and calling it would emit the very warning this
+// avoids, so the alias is inspected through its descriptor and never read. A
+// `Database` that is some other class, such as an asynchronous API, falls
+// back to `DatabaseSync`.
+function sqliteDatabaseClass(sqlite) {
+  if (!sqlite) return null;
+  const alias = Object.getOwnPropertyDescriptor(sqlite, 'DatabaseSync');
+  const named = sqlite.Database;
+  if (typeof named === 'function' && (!alias || typeof alias.get === 'function'
+    || alias.value === named || (typeof alias.value === 'function' && alias.value.prototype === named.prototype))) {
+    return named;
+  }
+  return typeof sqlite.DatabaseSync === 'function' ? sqlite.DatabaseSync : null;
+}
+
+// THE EXPERIMENTAL WARNING. On a Node where `node:sqlite` loads without a flag
+// but is still experimental, the first require prints
+//   (node:PID) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+// plus a "--trace-warnings" hint to stderr. Measured 2026-10-13 on 22.23.3,
+// the newest 22.x and what CI's `node: 22` leg installs: `wildcard-perms
+// --learn scan` printed both lines on the user's terminal over a clean scan
+// (exit 0), because the history-store check is what first loads the module.
+// 24.19.0, 24.21.0 and 26.11.1 print nothing (the docs mark the module a
+// release candidate from 24.15.0 and 25.7.0). It never reaches a Codex user
+// through the Stop hook, since Codex reads a hook's stderr only on exit 2.
+//
+// Silenced narrowly: only that warning (type and message both checked), and
+// only for the duration of this one synchronous require. Node emits it from
+// lib/sqlite.js through the public `process.emitWarning` (the same probe saw
+// it arrive there), and records the feature as warned either way, so it is
+// not re-emitted later. Every other warning passes through untouched, and the
+// original function is put back even when the require throws.
+const SQLITE_EXPERIMENTAL = /^SQLite is an experimental feature\b/;
+function requireSqliteQuietly() {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function quietSqliteWarning(warning, ...rest) {
+    const type = typeof rest[0] === 'string' ? rest[0] : rest[0]?.type;
+    const name = typeof warning === 'string' ? type : (warning?.name || type);
+    const message = typeof warning === 'string' ? warning : warning?.message;
+    if (name === 'ExperimentalWarning' && SQLITE_EXPERIMENTAL.test(String(message))) return undefined;
+    return emitWarning.call(this, warning, ...rest);
+  };
+  try { return require('node:sqlite'); }
+  finally { process.emitWarning = emitWarning; }
+}
+
 function withReadOnlyDatabase(file, read) {
   let sqlite;
-  try { sqlite = require('node:sqlite'); }
+  try { sqlite = requireSqliteQuietly(); }
   catch {
     return { ok: false, unavailable: true, reason: 'node:sqlite is unavailable on this Node runtime' };
   }
-  if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
-    return { ok: false, unavailable: true, reason: 'node:sqlite exposes no DatabaseSync' };
+  const Database = sqliteDatabaseClass(sqlite);
+  if (!Database) {
+    return { ok: false, unavailable: true, reason: 'node:sqlite exposes neither Database nor DatabaseSync' };
   }
   let db = null;
   try {
-    db = new sqlite.DatabaseSync(file, { readOnly: true, timeout: 250 });
+    db = new Database(file, { readOnly: true, timeout: 250 });
     const tables = new Set(db.prepare(
       "select name from sqlite_master where type='table'",
     ).all().map((row) => String(row.name)));

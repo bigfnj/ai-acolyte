@@ -16,11 +16,13 @@
 // can make a fresh app-server emit both shapes. This records what the rollout
 // contains and what the named subject's parser concludes, cell by cell.
 //
-// What it asserts is the safety property, not the current coverage: a cell is
-// credited with its true terminal outcome or left `unknown`, and never with the
-// opposite one. A parser that later joins `wait` results back to their cell
-// keeps passing; one that credits a failed continued cell with success fails.
-// The observed per-cell verdicts are printed and recorded either way.
+// What it asserted first was the safety property alone: a cell is credited with
+// its true terminal outcome or left `unknown`, never the opposite one. Since
+// the parser joins a `wait` result back to the cell it names (2026-10-13), it
+// asserts the exact outcome instead: completed and continued cells carry their
+// own, a cell continued across a wait that yields again included, and a
+// terminated cell carries none. A parser without the join fails here, on every
+// continued cell. The observed per-cell verdicts are printed and recorded.
 //
 // `--write-fixture` writes a sanitized copy of the one-session sequence rollout
 // (every cell shape in real order and real cell-ID allocation) for
@@ -60,19 +62,34 @@ const evidence = { boundary: 'Isolated real Codex app-server with code_mode enab
 // first and is finished by `wait` (`continued`). Exit 7 is a deliberate
 // nonzero; the shell may report it as another nonzero code, which is why the
 // expectation is a status rather than a number.
+//
+// Two more shapes, added 2026-10-13 with the parser's wait join. `rewaited`:
+// the command outlasts the first wait's window, so a wait itself yields again
+// ("If the cell is still running, `wait` may yield again with the same
+// `cell_id`", 0.161.0's own tool description) and a later wait completes it.
+// 12 s against 5 s waits leaves at least one repeated yield even if Codex
+// clamps the wait to 10 s as it clamps exec_command's yield on Windows.
+// `terminated`: the first wait passes `terminate: true` ("stops the running
+// cell"), so the cell has no outcome at all and must never be credited; its
+// command would have exited 0, which is what a reader that credited the
+// termination result as a completion would wrongly claim.
 const COMPLETE_SUCCESS = { exitCode: 0, delayMs: 10, cellYieldMs: 25000, expected: 'success', continued: false };
 const COMPLETE_FAILED = { exitCode: 7, delayMs: 10, cellYieldMs: 25000, expected: 'failed', continued: false };
 const CONTINUED_SUCCESS = { exitCode: 0, delayMs: 4000, cellYieldMs: 500, expected: 'success', continued: true };
 const CONTINUED_FAILED = { exitCode: 7, delayMs: 4000, cellYieldMs: 500, expected: 'failed', continued: true };
+const REWAITED_SUCCESS = { exitCode: 0, delayMs: 12000, cellYieldMs: 500, waitYieldMs: 5000, expected: 'success', continued: true, rewaited: true };
+const TERMINATED = { exitCode: 0, delayMs: 20000, cellYieldMs: 500, expected: 'unknown', continued: true, terminate: true };
 const CASES = [
   ['complete-success', [COMPLETE_SUCCESS]],
   ['complete-failed', [COMPLETE_FAILED]],
   ['continued-success', [CONTINUED_SUCCESS]],
   ['continued-failed', [CONTINUED_FAILED]],
-  // One session, all four shapes in sequence: real ordering and real cell-ID
+  ['rewaited-success', [REWAITED_SUCCESS]],
+  ['terminated', [TERMINATED]],
+  // One session, every shape in sequence: real ordering and real cell-ID
   // allocation for the sanitized fixture, and the parser's view of a session
-  // that mixes them.
-  ['sequence', [COMPLETE_SUCCESS, COMPLETE_FAILED, CONTINUED_SUCCESS, CONTINUED_FAILED]],
+  // that mixes them. The first four are the original fixture's, in its order.
+  ['sequence', [COMPLETE_SUCCESS, COMPLETE_FAILED, CONTINUED_SUCCESS, CONTINUED_FAILED, REWAITED_SUCCESS, TERMINATED]],
 ];
 
 function sse(res, item, id) {
@@ -110,7 +127,8 @@ async function run(name, cells) {
   });
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome };
   for (const key of SECRET_ENV) delete env[key];
-  const observed = { name, cells: plan.map(({ callId, expected, continued }) => ({ callId, expected, continued })),
+  const observed = { name, cells: plan.map(({ callId, expected, continued, rewaited, terminate }) =>
+      ({ callId, expected, continued, rewaited: !!rewaited, terminate: !!terminate })),
     requests: 0, approvals: [], calls: [], waits: [], events: [] };
   evidence.cases.push(observed);
   let child, lines, timer, stopping = false, count = 0, finishedResolve, finishedReject, next = 0;
@@ -130,7 +148,7 @@ async function run(name, cells) {
         const body = JSON.parse(raw);
         observed.requests += 1;
         observed.canaryFreeRequests = observed.requests;
-        assert.ok(observed.requests <= 1 + plan.length * 3, 'unexpected extra provider requests');
+        assert.ok(observed.requests <= 1 + plan.length * 6, 'unexpected extra provider requests');
         const outputs = body.input.filter((item) => ['function_call_output', 'custom_tool_call_output'].includes(item.type));
         const latest = outputs[outputs.length - 1];
         if (observed.requests === 1) {
@@ -141,8 +159,13 @@ async function run(name, cells) {
         const running = latest && /Script running with cell ID\s+([A-Za-z0-9_-]+)/i.exec(outputText(latest.output));
         let item;
         if (running) {
-          observed.waits.push({ after: latest.call_id, cellId: running[1] });
-          item = { type: 'function_call', name: 'wait', call_id: `call_wait_${observed.requests}`, arguments: JSON.stringify({ cell_id: running[1], yield_time_ms: 10000 }) };
+          // The running cell is the last one issued: the next exec is only sent
+          // once this one's output stops saying it is running.
+          const cell = plan[next - 1];
+          const terminate = !!cell.terminate && !observed.waits.some((wait) => wait.cell === cell.callId && wait.terminate);
+          observed.waits.push({ after: latest.call_id, afterType: latest.type, cellId: running[1], cell: cell.callId, terminate });
+          item = { type: 'function_call', name: 'wait', call_id: `call_wait_${observed.requests}`, arguments: JSON.stringify(terminate
+            ? { cell_id: running[1], terminate: true } : { cell_id: running[1], yield_time_ms: cell.waitYieldMs ?? 10000 }) };
         } else if (next < plan.length) {
           const cell = plan[next++];
           item = { type: 'custom_tool_call', name: 'exec', call_id: cell.callId, input: cell.source };
@@ -289,13 +312,20 @@ function sanitizedFixture(rolloutPath, workspace) {
     const observed = evidence.cases[evidence.cases.length - 1];
     try {
       assert.equal(observed.approvals.length, cells.length, `${name}: one individually accepted nested command per cell`);
-      assert.equal(observed.waits.length, cells.filter((cell) => cell.continued).length,
-        `${name}: WITNESS every continued cell actually yielded and was resumed by wait`);
       for (const cell of observed.cells) {
+        const waits = observed.waits.filter((wait) => wait.cell === cell.callId);
+        assert.equal(waits.length > 0, cell.continued, `${name}/${cell.callId}: WITNESS a continued cell, and only one, yielded and was resumed by wait`);
+        if (cell.rewaited) assert.ok(waits.some((wait) => wait.afterType === 'function_call_output'),
+          `${name}/${cell.callId}: WITNESS a wait itself yielded again`);
+        assert.equal(waits.filter((wait) => wait.terminate).length, cell.terminate ? 1 : 0,
+          `${name}/${cell.callId}: WITNESS a terminated cell, and only one, was stopped by wait`);
         assert.equal(cell.observations, 1, `${name}/${cell.callId}: WITNESS exactly one observation per cell`);
-        if (!cell.continued) assert.equal(cell.status, cell.expected, `${name}/${cell.callId}: a completed cell carries its own outcome`);
-        else assert.ok([cell.expected, 'unknown'].includes(cell.status),
-          `${name}/${cell.callId}: a continued cell is credited with its true outcome or withheld, never the opposite (got ${cell.status})`);
+        // Exact since 2026-10-13: the parser joins a wait's result back to the
+        // cell it names, so a continued cell carries its true outcome, and a
+        // terminated one has none. Against a parser without the join, every
+        // continued cell reads `unknown` and this fails.
+        assert.equal(cell.status, cell.expected, `${name}/${cell.callId}: ${!cell.continued ? 'a completed cell carries its own outcome'
+          : cell.terminate ? 'a terminated cell is never credited' : 'a continued cell carries the outcome its wait reported'}`);
       }
       observed.passed = true;
     } catch (error) { failures.push(error.message); }
@@ -311,7 +341,8 @@ function sanitizedFixture(rolloutPath, workspace) {
   fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ status: evidence.status, evidence: path.join(root, 'evidence.json'), codexVersion: evidence.codexVersion,
     cases: evidence.cases.map(({ name, approvals, waits, cells }) => ({ name, approvals: approvals.length, waits: waits.length,
-      cells: cells.map(({ callId, continued, expected, status }) => `${callId}:${continued ? 'continued' : 'complete'}:${expected}->${status}`) })),
+      cells: cells.map(({ callId, continued, rewaited, terminate, expected, status }) =>
+        `${callId}:${!continued ? 'complete' : terminate ? 'terminated' : rewaited ? 'rewaited' : 'continued'}:${expected}->${status}`) })),
     failures }, null, 1));
   if (failures.length) process.exitCode = 1;
 })().catch((error) => { console.error(JSON.stringify({ evidence: path.join(root, 'evidence.json'), error: error.message })); process.exitCode = 1; });

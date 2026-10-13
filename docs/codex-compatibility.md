@@ -856,6 +856,48 @@ item accepted from any record type, the type matched case-insensitively) were ea
 Not changed and not run: `scripts/vscode-acceptance/mcp.js` still asserts the 0.145.0
 `mcp_tool_call_end` record and will fail on 0.161.0 until it accepts both shapes.
 
+**Code-mode cells continued by `wait` are joined to their outcome.** This replaces the
+bounded limit the section above records, and amends the matrix row "Shell history scan
+and outcome learning" and the "History coverage is still bounded" paragraph under Still
+not proven: code-mode cell continuations are no longer outside the proof on 0.161.0. The
+harness gained two shapes. A cell whose command outlasts its waits yields AGAIN from a
+`wait` with the same header ("Script running with cell ID 5"; 12 s against 5 s waits gave
+two repeated yields and a completing third wait, so the wait is not clamped the way
+`exec_command`'s yield is), and `wait` with `terminate: true` returns "Script terminated".
+`codeModeJoin` in `src/history-adapters.js` opens a cell on its yield, keyed by session
+and cell ID, and binds each `wait` result to the single open cell with that key: a
+repeated yield keeps it open, a terminal result closes it and the cell's own output plus
+every bound result are applied as one result through the same group rule a directly
+completed cell meets, and a terminate (the argument, read wide, or a "Script terminated"
+result) closes it with nothing applied. Two open cells with one key, a wait whose own
+definitions disagree, a wait for an ID never yielded and a repeated yield naming another
+cell are all withheld. Only the header line counts, so a cell's stdout cannot open, close
+or credit anything, and a yield is applied as pending, which also closes a gap that
+predates the join: a yielded cell whose stdout said "Script completed" used to be
+credited with success. A bound result whose cell is outside an append slice is reported
+through `_codexUnmatchedWaits`, so the scanner's bounded reconcile widen reaches it and
+the cell comes back under its full-read identity and verdict. One exception is recorded
+in the code: a conflicting open cell older than the slice's start is invisible to the
+slice, which then binds where a full read withholds; it needs two runtimes allocating
+IDs in one session, and the slice's verdict is still never the opposite one.
+
+The sanitized fixture now holds six cells (the first four byte-identical to wave c1's;
+three runs wrote byte-identical files). Harness on 0.161.0: against the parser before the
+join it fails exactly the four continued cells (`acolyte-code-mode-FGjN3U`: continued
+success, continued failure, re-waited success and the sequence's cell 3 read `unknown`);
+with the join it passes 7 sessions, verdicts complete success, complete failure,
+continued success, continued failure, re-waited success, terminated withheld, and the
+same six in one session (`acolyte-code-mode-gdcdgw`, `-q7K3zz`). The harness now asserts
+those exact verdicts rather than "true or withheld". Mutation: fifteen parser mutants
+were each killed by `test/codex-code-mode-history.test.js` (join disabled; binding by
+recency instead of ID; the first of two open cells bound; terminate credited; a
+"Script terminated" result treated as a completion; terminate read only as `true`; a
+repeated yield treated as terminal; a repeated yield naming another cell accepted; a
+yield not pending; a yield line matched anywhere in the output; IDs not scoped by
+session; disagreeing wait definitions accepted; join results not handed to the scanner;
+a wait for an unseen cell not reported; a bound result with no call in the slice not
+reported).
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,
@@ -941,7 +983,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1408#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1579#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

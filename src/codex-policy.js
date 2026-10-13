@@ -446,9 +446,11 @@ function codexRulesArguments(files) {
 // consumed from outside this module, including by tests. Unexported rather than
 // deleted: every one of them is called internally, and MANAGED_POLICY_BLIND_SPOTS
 // reaches the user through enterprisePolicyAssessment's verdict rather than directly.
-// test/dead-exports.test.js is what caught them, on the merge.
+// test/dead-exports.test.js is what caught them, on the merge. CODEX_BUNDLE_CACHE
+// followed on 2026-10-13 off that census's PENDING_REMOVAL list: its one use is the
+// default argument of readEnterpriseBundle, which is how the profile-routing test
+// reaches it.
 module.exports = {
-  CODEX_BUNDLE_CACHE,
   readEnterpriseBundle,
   enterpriseRequirements,
   allowedApprovalPolicies,

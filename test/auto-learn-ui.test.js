@@ -216,6 +216,17 @@ test('Claude permission analysis reports deny then ask then allow precedence', (
   );
 });
 
+test('the Claude permission verdict carries only what its callers read', () => {
+  // A `precedence` array rode along until 2026-10-13 that no caller read:
+  // extension.js destructures `decision`, claudeDecisionExplanation reads
+  // `decision` and `matches`, and the review-list filter reads `decision`. The
+  // order it restated is the ternary that computes `decision`, so a second copy
+  // could only ever drift from the one that decides.
+  const verdict = claudePermissionDecision({ permissions: { allow: ['Bash(git *)'] } }, 'Bash(git status)');
+  assert.deepEqual(Object.keys(verdict).sort(), ['decision', 'matches']);
+  assert.deepEqual(verdict.matches, { deny: [], ask: [], allow: ['Bash(git *)'] });
+});
+
 // The review list drops candidates an existing allow rule already covers. That
 // suppression reuses the same precedence check, so pin the shapes it depends on:
 // a candidate permission is a *wildcard* string, and coverage means an existing

@@ -1051,4 +1051,7 @@ module.exports = {
   // test is what keeps the copies from falling behind.
   BASH_RESERVED,
   POWERSHELL_RESERVED,
+  // Consumed by src/policy-exporters.js, which unions it into its own refusal table.
+  // Only ever to refuse more: see the comment above SHELL_WRAPPERS there.
+  SHELL_WRAPPERS,
 };

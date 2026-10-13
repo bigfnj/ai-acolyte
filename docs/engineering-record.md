@@ -1192,7 +1192,7 @@ Unrebased whole-object writers still outstanding:
 | `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
 | `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1933-1935`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
 | `change.before.content` at `src/auto-learn-manager.js:1877` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1873`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2013` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2853` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:266` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:205` read → `:266` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`

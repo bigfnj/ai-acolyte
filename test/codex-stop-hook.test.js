@@ -9,6 +9,28 @@ const { spawnSync } = require('node:child_process');
 const { runCodexStopHook } = require('../src/codex-stop-hook');
 const { createAutoLearnManager } = require('../src/auto-learn-manager');
 const { scanHistoryFiles } = require('../src/history-adapters');
+const { createPolicyLock, POLICY_LOCK_CODE } = require('../src/policy-lock');
+
+// Codex 0.161.0 parses Stop output with `deny_unknown_fields`; these are the
+// only keys it accepts (codex-rs/hooks/src/events/stop.rs, read 2026-10-13).
+// Any other key fails the run as invalid JSON output, so every output this
+// hook prints must be a subset -- in practice `{}` or `{ systemMessage }`.
+const CODEX_STOP_KEYS = new Set(['continue', 'stopReason', 'suppressOutput', 'systemMessage', 'decision', 'reason']);
+function assertWarning(output, label) {
+  assert.ok(output && typeof output === 'object' && !Array.isArray(output), label);
+  for (const key of Object.keys(output)) assert.ok(CODEX_STOP_KEYS.has(key), `${label}: ${key} would fail the Codex run`);
+  assert.deepEqual(Object.keys(output), ['systemMessage'], label);
+  assert.equal(typeof output.systemMessage, 'string');
+  return output.systemMessage;
+}
+// No path reaches the Codex UI: not a drive, not a separator, not the fixture's
+// temp folder, not the account name a profile path carries.
+function assertPathFree(message, box) {
+  assert.doesNotMatch(message, /[A-Za-z]:[\\/]|[\\/]/, 'no path separator reaches the Codex UI');
+  for (const part of [path.basename(box.root), 'rollout-stop', os.userInfo().username]) {
+    assert.equal(message.toLowerCase().includes(part.toLowerCase()), false, `the message names no ${part}`);
+  }
+}
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-stop-hook-'));
@@ -88,10 +110,20 @@ test('Stop adapter validates event and directory before constructing a manager a
       'WITNESS only a valid Stop event with an absolute directory can scan');
   }
   assert.equal(calls, 0);
-  assert.throws(() => runCodexStopHook(box.input, { createManager: () => ({ scan() { throw new Error('locked fixture'); } }) }), /locked fixture/);
+  assert.throws(() => runCodexStopHook(box.input, { createManager: () => ({ scan() { throw new Error('locked fixture'); } }) }), /locked fixture/,
+    'WITNESS an exception nothing anticipated still escapes, so the CLI can exit 1 for a broken hook');
+  const busy = runCodexStopHook(box.input, { createManager: () => ({ scan() {
+    throw Object.assign(new Error('Auto Learn is mid-scan'), { code: POLICY_LOCK_CODE });
+  } }) });
+  assert.equal(busy.ok, false, 'a held lock is not a scan');
+  assert.match(assertWarning(busy.output, 'held lock'), /^AI Acolyte: Codex learning could not read history this turn: another AI Acolyte scan was running\. Nothing was lost/,
+    'WITNESS the expected busy condition is a warning, not an escaping exception');
   const incomplete = runCodexStopHook(box.input, { createManager: () => ({ scan: () => ({ errors: 1, partial: 0 }) }) });
   assert.equal(incomplete.ok, false, 'WITNESS incomplete history is not reported as a successful hook');
   assert.match(incomplete.error, /incomplete/);
+  assert.equal(assertWarning(incomplete.output, 'counts only'),
+    'AI Acolyte: Codex learning could not read 1 history file or folder.',
+    'a manager that never called the scanner still yields a reason, from its counts');
   let received;
   runCodexStopHook(box.input, { createManager: (settings) => { received = settings; return { scan: () => ({}) }; } });
   assert.equal(Object.hasOwn(received, 'home'), false);
@@ -114,10 +146,92 @@ test('Stop treats a budget deferral as progress and still fails on lost evidence
   const lost = run({ errors: 0, partial: 1, unreadable: 1 });
   assert.equal(lost.ok, false, 'WITNESS a stepped-over stretch is evidence no later scan can read');
   assert.match(lost.error, /1 unreadable/);
-  assert.equal(run({ errors: 2, partial: 1, unreadable: 0 }).ok, false, 'a read error still fails beside a deferral');
+  assert.match(assertWarning(lost.output, 'unreadable'), /could not read 1 stretch of transcript with no line break inside 256 MiB, skipped for good\.$/);
+  const errored = run({ errors: 2, partial: 1, unreadable: 0 });
+  assert.equal(errored.ok, false, 'a read error still fails beside a deferral');
+  assert.match(assertWarning(errored.output, 'errors'), /could not read 2 history files or folders\.$/);
   const blind = run({ errors: 0, partial: 0, blindScan: true });
   assert.equal(blind.ok, false);
   assert.match(blind.error, /nothing could be listed/);
+  assert.match(assertWarning(blind.output, 'blind'), /could not read any Codex history: no transcript could be listed, so this scan learned nothing/);
+});
+
+// Until 2026-10-13 each case below exited 1, and Codex 0.161.0 reads stderr
+// only for exit 2, so the reason never reached the Codex user: the run showed
+// "hook exited with code 1" and nothing else. Now each one completes with a
+// systemMessage naming what could not be read. The scanner seam is the real
+// scanner plus one injected entry, so the manager's own counting decides
+// that the scan lost evidence; nothing here hands the hook a verdict.
+function injecting(extra) {
+  return (request) => {
+    const result = scanHistoryFiles(request);
+    return { ...result, files: [...result.files, ...extra(request)] };
+  };
+}
+
+// Node's own messages carry the full path ("EACCES: permission denied, open
+// 'C:\\...'"), which is exactly what must not reach the Codex UI.
+const rolloutOf = (box) => path.join(box.codexHome, 'sessions', 'rollout-stop.jsonl');
+const LOST = [
+  ['a transcript read error', (box) => ({ path: rolloutOf(box), source: 'codex', mode: 'error', size: 10, bytesRead: 0,
+    error: `EACCES: permission denied, open '${rolloutOf(box)}'` }), /could not read 1 transcript \(EACCES\); the next scan retries them\.$/],
+  ['a folder that could not be listed', (box) => ({ path: path.join(box.codexHome, 'archived_sessions'), source: 'codex', mode: 'error',
+    scope: 'root', error: `EPERM: operation not permitted, scandir '${path.join(box.codexHome, 'archived_sessions')}'` }),
+  /could not read 1 history folder \(archived_sessions: EPERM\)\.$/],
+  ['a stepped-over stretch', (box) => ({ path: rolloutOf(box), source: 'codex', mode: 'unreadable', size: 300 * 1048576,
+    consumedEnd: 300 * 1048576 }), /could not read 1 stretch of transcript with no line break inside 256 MiB, skipped for good\.$/],
+];
+
+test('Stop names what it could not read, as a warning with no path in it', (t) => {
+  for (const [label, entry, reason] of LOST) {
+    const box = fixture(t);
+    const result = runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome,
+      historyScanner: injecting(() => [entry(box)]) });
+    assert.equal(result.ok, false, `${label}: the scan lost evidence`);
+    const message = assertWarning(result.output, label);
+    assert.match(message, /^AI Acolyte: Codex learning could not read /);
+    assert.match(message, reason, `WITNESS ${label} reaches the Codex user with its reason`);
+    assertPathFree(message, box);
+  }
+  const box = fixture(t);
+  // Real, nothing injected: a profile whose history folder disappeared after
+  // cursors were saved is a blind scan with zero errors (ENOENT is not one).
+  assert.deepEqual(runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome }).output, {}, 'control: the first scan is clean');
+  fs.rmSync(path.join(box.codexHome, 'sessions'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  const blind = runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome });
+  assert.equal(blind.scan.blindScan, true);
+  assert.equal(blind.scan.errors, 0);
+  const message = assertWarning(blind.output, 'blind scan');
+  assert.match(message, /^AI Acolyte: Codex learning could not read any Codex history: no transcript could be listed, so this scan learned nothing and kept its saved positions\.$/);
+  assertPathFree(message, box);
+});
+
+test('Stop says both when it lost evidence and this turn\'s own rollout was deferred', (t) => {
+  const box = fixture(t);
+  const scanner = injecting(() => [{ path: path.join(box.codexHome, 'sessions', '2026'), source: 'codex', mode: 'error',
+    scope: 'root', error: 'EBUSY: resource busy or locked' }]);
+  const result = runCodexStopHook({ ...box.input, transcript_path: rolloutOf(box) }, { home: box.home, codexHome: box.codexHome,
+    historyScanner: (request) => scanner({ ...request, ingestBytes: 200 }) });
+  assert.equal(result.ok, false);
+  assert.ok(result.deferred, 'control: this turn\'s rollout was deferred too');
+  const message = assertWarning(result.output, 'loss and deferral');
+  assert.match(message, /^AI Acolyte: Codex learning could not read 1 history folder \(2026: EBUSY\)\. This session's transcript is larger than one scan reads, .* MB left\)\. The next scan continues where this one stopped\.$/,
+    'WITNESS one systemMessage carries both, loss first');
+  assert.doesNotMatch(message, /nothing failed/, 'a run that lost evidence never says nothing failed');
+  assertPathFree(message, box);
+});
+
+test('Stop hook holds the Auto Learn lock contention as a warning, and a real lock still blocks the scan', (t) => {
+  const box = fixture(t);
+  const manager = createAutoLearnManager({ home: box.home, codexHome: box.codexHome, workspaceRoot: box.workspace });
+  const result = createPolicyLock({ lockPath: manager.paths.lock }).locked(() =>
+    runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome }));
+  assert.equal(result.ok, false);
+  assert.equal(result.scan, null, 'WITNESS nothing was scanned while another scan held the lock');
+  assert.match(assertWarning(result.output, 'busy'), /another AI Acolyte scan was running\. Nothing was lost; the next scan learns this turn\.$/);
+  assert.equal(manager.listCandidates().length, 0, 'control: the held lock really kept the scan out');
+  assert.equal(runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome }).scan.newObservations, 2,
+    'WITNESS nothing was lost: the next Stop learns the turn the busy one skipped');
 });
 
 // Codex's own payload names the turn's rollout (`transcript_path`), so whether
@@ -217,4 +331,53 @@ test('standalone Stop callback prints its own deferral as a systemMessage and ex
   const drained = spawnSync(process.execPath, [executable], options);
   assert.equal(drained.status, 0, drained.stderr);
   assert.deepEqual(JSON.parse(drained.stdout), {});
+});
+
+// The exit table at the top of src/codex-stop-hook.js, as Codex sees it: an
+// exit code and stdout. A scan that lost evidence, and a held lock, complete
+// with exit 0 and the reason as a systemMessage; until 2026-10-13 both exited
+// 1 and the reason went to stderr, which Codex 0.161.0 reads only for exit 2.
+// A defect escaping the hook still exits 1, so a broken hook stays a "Failed"
+// run rather than one more warning.
+const EXECUTABLE = path.resolve(__dirname, '..', 'src', 'codex-stop-hook.js');
+const cliOptions = (box, input = box.input) => ({ cwd: box.workspace, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  env: { ...process.env, HOME: box.home, USERPROFILE: box.home, CODEX_HOME: box.codexHome }, input: JSON.stringify(input) });
+function scannerPreload(box, name, body) {
+  const file = path.join(box.root, name);
+  fs.writeFileSync(file, `const adapters = require(${JSON.stringify(path.resolve(__dirname, '..', 'src', 'history-adapters.js'))});\n` +
+    `const real = adapters.scanHistoryFiles;\n${body}\n`);
+  return file;
+}
+
+test('standalone Stop callback exits 0 with the reason when it could not read something', (t) => {
+  const box = fixture(t);
+  const options = cliOptions(box);
+  const preload = scannerPreload(box, 'eacces.js', 'adapters.scanHistoryFiles = (options) => { const result = real(options);\n' +
+    '  const file = result.files[0].path;\n' +
+    '  return { ...result, files: [...result.files, { path: file, source: "codex", mode: "error", error: `EACCES: permission denied, open \'${file}\'` }] }; };');
+  const lost = spawnSync(process.execPath, ['--require', preload, EXECUTABLE], options);
+  assert.equal(lost.status, 0, 'WITNESS a scan that lost evidence is a completed run with a reason, not "hook exited with code 1": ' + lost.stderr);
+  assert.equal(lost.stderr, '');
+  const message = assertWarning(JSON.parse(lost.stdout), 'CLI lost evidence');
+  assert.match(message, /^AI Acolyte: Codex learning could not read 1 transcript \(EACCES\); the next scan retries them\.$/);
+  assertPathFree(message, box);
+  // This process holds the Auto Learn lock while the hook runs.
+  const manager = createAutoLearnManager({ home: box.home, codexHome: box.codexHome, workspaceRoot: box.workspace });
+  const busy = createPolicyLock({ lockPath: manager.paths.lock }).locked(() => spawnSync(process.execPath, [EXECUTABLE], options));
+  assert.equal(busy.status, 0, 'WITNESS another scan holding the lock is a warning, not a failed hook: ' + busy.stderr);
+  assert.match(assertWarning(JSON.parse(busy.stdout), 'CLI busy'), /another AI Acolyte scan was running\. Nothing was lost/);
+  // Real, nothing injected: cursors are saved, then the history folder goes.
+  fs.rmSync(path.join(box.codexHome, 'sessions'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  const blind = spawnSync(process.execPath, [EXECUTABLE], options);
+  assert.equal(blind.status, 0, blind.stderr);
+  assert.match(assertWarning(JSON.parse(blind.stdout), 'CLI blind scan'), /could not read any Codex history: no transcript could be listed/);
+});
+
+test('standalone Stop callback still exits 1 when the hook itself breaks', (t) => {
+  const box = fixture(t);
+  const preload = scannerPreload(box, 'defect.js', 'adapters.scanHistoryFiles = () => { throw new TypeError("injected scanner defect"); };');
+  const broken = spawnSync(process.execPath, ['--require', preload, EXECUTABLE], cliOptions(box));
+  assert.equal(broken.status, 1, 'WITNESS an exception nothing anticipated stays distinguishable as a failed run');
+  assert.match(broken.stderr, /^AI Acolyte Codex Stop hook: injected scanner defect$/m);
+  assert.equal(broken.stdout, '', 'no output object for Codex to parse on a failed run');
 });

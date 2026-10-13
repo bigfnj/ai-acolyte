@@ -23,8 +23,31 @@
 // fails the run as "invalid stop hook JSON output". So `systemMessage` is the
 // only channel for saying something without failing, and nothing else is
 // ever added to the output.
+//
+// WHICH EXIT EACH OUTCOME GETS (2026-10-13). Until then a scan that lost
+// evidence exited 1, and by the table above its reason went to stderr, which
+// Codex never reads for exit 1: every such failure reached the Codex user as
+// "hook exited with code 1" and nothing else. Now:
+//   exit 0, `{}`              clean scan, or another file still catching up.
+//   exit 0, systemMessage     this turn's own rollout was deferred; OR the scan
+//                             could not read something (read errors, a stretch
+//                             stepped over, nothing listable, the learning lock
+//                             held by another scan). The warning says what, with
+//                             no path in it, so the reason finally reaches the
+//                             person it is about.
+//   exit 1                    the hook itself is broken: input that is not a
+//                             Codex Stop payload (malformed, over 1 MiB, wrong
+//                             event, cwd not an existing absolute directory), or
+//                             an exception nothing here anticipated. Kept
+//                             non-zero on purpose. A visible "Failed" is the
+//                             one signal that separates "the hook ran and found
+//                             a problem in the history" from "the hook cannot
+//                             run", and a person debugging the second case runs
+//                             the script by hand and reads stderr.
+//   exit 2                    never.
 const fs = require('node:fs');
 const path = require('node:path');
+const { POLICY_LOCK_CODE } = require('./policy-lock');
 
 // The payload's path and the walker's are two spellings until proven one. Codex
 // writes both `\\?\C:\...` and plain forms of a rollout path into its own state
@@ -64,6 +87,48 @@ function megabytes(bytes) {
   return mb < 0.1 ? '<0.1' : mb < 10 ? mb.toFixed(1) : String(Math.round(mb));
 }
 
+// The error code of a Node system error, read from the front of its message
+// ("EACCES: permission denied, open 'C:\\...'"). The code is the useful part of
+// the reason, and the rest of the message carries the full path, which must not
+// reach the Codex UI. Anything without a code is just "error".
+function errorCode(entry) {
+  const match = /^([A-Z][A-Z0-9_]{2,}):/.exec(String(entry?.error || ''));
+  return match ? match[1] : 'error';
+}
+const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+const codes = (entries) => [...new Set(entries.map(errorCode))].sort().join(', ');
+
+// What a scan that lost evidence tells the Codex user. Built from the scanner's
+// per-file list when the hook has it, and from the manager's counts when it
+// does not (a manager supplied by a caller may never call the scanner). Folder
+// names are basenames only (`sessions`, `archived_sessions`, a date folder):
+// directory names at most, never a path, because a path carries the user name.
+function lostEvidenceMessage(scan, files) {
+  const fileErrors = files.filter((item) => item && item.mode === 'error' && item.scope !== 'root');
+  const rootErrors = files.filter((item) => item && item.mode === 'error' && item.scope === 'root');
+  const unreadable = Number(scan.unreadable) || 0;
+  const parts = [];
+  if (scan.blindScan === true) {
+    parts.push('any Codex history: no transcript could be listed' +
+      (rootErrors.length ? ` (${codes(rootErrors)})` : '') + ', so this scan learned nothing and kept its saved positions');
+  } else {
+    if (fileErrors.length) parts.push(`${plural(fileErrors.length, 'transcript', 'transcripts')} (${codes(fileErrors)}); ` +
+      'the next scan retries them');
+    if (rootErrors.length) {
+      const names = [...new Set(rootErrors.map((item) => path.basename(String(item.path || '')) || 'history'))].sort();
+      parts.push(`${plural(rootErrors.length, 'history folder', 'history folders')} (${names.join(', ')}: ${codes(rootErrors)})`);
+    }
+    if (!fileErrors.length && !rootErrors.length && Number(scan.errors) > 0) {
+      parts.push(plural(Number(scan.errors), 'history file or folder', 'history files or folders'));
+    }
+  }
+  if (unreadable > 0) {
+    parts.push(`${plural(unreadable, 'stretch', 'stretches')} of transcript with no line break inside 256 MiB, ` +
+      'skipped for good');
+  }
+  return `AI Acolyte: Codex learning could not read ${parts.join('; ')}.`;
+}
+
 function runCodexStopHook(input, options = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || input.hook_event_name !== 'Stop') {
     throw new Error('Expected a Codex Stop hook event');
@@ -92,7 +157,20 @@ function runCodexStopHook(input, options = {}) {
     files = Array.isArray(result?.files) ? result.files : [];
     return result;
   };
-  const scan = createManager(settings).scan();
+  const manager = createManager(settings);
+  let scan;
+  try { scan = manager.scan(); } catch (error) {
+    // The one exception that is an expected condition rather than a broken hook:
+    // the shared Auto Learn lock is held, by the editor's own worker or by a
+    // Stop in another Codex window finishing at the same moment. The lock is
+    // taken before anything is read (policy-lock `locked`), so no cursor moved
+    // and the next scan learns this turn. Exiting 1 for it would put a "Failed"
+    // over a scan that lost nothing, the defect 0d266fd removed for deferrals.
+    if (error?.code !== POLICY_LOCK_CODE) throw error;
+    return { ok: false, error: 'Codex history scan skipped: the Auto Learn lock is held by another scan',
+      scan: null, deferred: null, output: { systemMessage: 'AI Acolyte: Codex learning could not read history ' +
+        'this turn: another AI Acolyte scan was running. Nothing was lost; the next scan learns this turn.' } };
+  }
   // WHAT FAILS THE HOOK, AND WHAT DOES NOT.
   //
   // `partial` used to be here, and it is the one count that is not a failure.
@@ -114,22 +192,30 @@ function runCodexStopHook(input, options = {}) {
   //                not on every Stop.
   //   blindScan    nothing at all could be enumerated, so the cursor map was
   //                kept rather than trusted.
-  const unreadable = Number(scan.unreadable) || 0;
-  if (scan.errors > 0 || unreadable > 0 || scan.blindScan === true) {
-    return { ok: false, error: `Codex history scan incomplete (${scan.errors || 0} errors, ` +
-      `${unreadable} unreadable stretches${scan.blindScan === true ? ', nothing could be listed' : ''})`, scan };
-  }
+  // "Fails" means `ok: false` and a warning, not a non-zero exit: see WHICH
+  // EXIT EACH OUTCOME GETS at the top of this file. `ok` describes the scan;
+  // the exit code describes whether the hook could run at all.
+  //
   // A deferral of the CURRENT turn's own rollout is the one worth telling the
   // user about: the commands this turn just ran are in the unread tail, so they
   // are not learned yet. Said as a warning on a completed run, never a failure.
   // Any other file's deferral is silent catch-up, as it is in the extension.
   const deferred = currentTranscriptDeferral(input.transcript_path, files);
-  const output = deferred ? {
-    systemMessage: 'AI Acolyte: this session\'s transcript is larger than one scan reads, so the commands ' +
+  const deferral = deferred
+    ? 'session\'s transcript is larger than one scan reads, so the commands ' +
       `from this turn are not learned yet (${megabytes(deferred.remainingBytes)} MB left). ` +
-      'The next scan continues where this one stopped; nothing failed.',
-  } : {};
-  return { ok: true, scan, deferred, output };
+      'The next scan continues where this one stopped'
+    : null;
+  const unreadable = Number(scan.unreadable) || 0;
+  if (scan.errors > 0 || unreadable > 0 || scan.blindScan === true) {
+    // One systemMessage only, so a turn that lost evidence AND had its own
+    // rollout deferred says both, loss first. "nothing failed" would then be
+    // false, so the deferral half ends without it.
+    return { ok: false, error: `Codex history scan incomplete (${scan.errors || 0} errors, ` +
+      `${unreadable} unreadable stretches${scan.blindScan === true ? ', nothing could be listed' : ''})`, scan, deferred,
+    output: { systemMessage: lostEvidenceMessage(scan, files) + (deferral ? ` This ${deferral}.` : '') } };
+  }
+  return { ok: true, scan, deferred, output: deferral ? { systemMessage: `AI Acolyte: this ${deferral}; nothing failed.` } : {} };
 }
 
 // Importing this module never reads stdin, scans history or writes policy.
@@ -154,9 +240,14 @@ if (require.main === module) {
     if (rejected) return;
     try {
       const result = runCodexStopHook(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      if (!result.ok) throw new Error(result.error);
-      // No blocking, continuation request or model context: `{}`, or a
-      // `systemMessage` warning when this turn's own rollout was deferred.
+      // `ok: false` is NOT rethrown. It used to be, which turned every scan
+      // that lost evidence into exit 1 and so into a reason Codex never shows;
+      // the run's own warning is printed instead and the hook exits 0. A result
+      // with no output object is the one thing that cannot happen, and it is
+      // treated as the broken hook it would be.
+      if (!result || typeof result.output !== 'object' || result.output === null) throw new Error(result?.error || 'no hook output');
+      // No blocking, continuation request or model context: `{}`, or one
+      // `systemMessage` warning (deferral of this turn, or what could not be read).
       process.stdout.write(JSON.stringify(result.output) + '\n');
     } catch (error) { fail(error); }
   });

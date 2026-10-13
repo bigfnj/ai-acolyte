@@ -132,6 +132,34 @@ function writeStore(dir, indexBody) {
   fs.writeFileSync(path.join(dir, 'MEMORY.md'), indexBody, 'utf8');
 }
 
+// The store move, retried while a scanner holds a file inside the store. A copy
+// of `whenReleased` in test/codex-reviewed-plans.test.js, whose comment has the
+// mechanism and the measurements: on Windows (Node 24.19.0, 2026-10-13)
+// renaming a DIRECTORY fails EPERM while any file inside it is open, even
+// through a handle that shares delete, and Defender and the indexer open a file
+// milliseconds after it is written. Both tests that move a store write
+// MEMORY.md into it and rename the directory a few milliseconds later. Under a
+// stand-in scanner (a process that opens each newly written fixture file once
+// and holds it; 60 runs of this file, 6 in parallel, 6 CPU burners, private
+// TEMP), 2026-10-13: 60 of 60 runs failed holding 10 ms and 60 of 60 holding
+// 100 ms, every failure that rename's EPERM (233 of them across both tests),
+// and 0 of 60 with no scanner. With the retry, 0 of 60 at either hold, and 0
+// of 180 at 10 ms. A copy, not a shared module: test/ has no support modules,
+// and `node --test` runs every .js under test/ as a test file, so one would
+// join the suite as a phantom test of its own. Only EPERM, EACCES and EBUSY on
+// Windows are retried, for ~2.6 s at most, and the original error is thrown
+// after that.
+const HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RELEASE_WAITS_MS = [10, 20, 40, 80, 160, 320, 500, 500, 500, 500];
+function whenReleased(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try { return operation(attempt); } catch (error) {
+      if (process.platform !== 'win32' || !HELD.has(error.code) || attempt >= RELEASE_WAITS_MS.length) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RELEASE_WAITS_MS[attempt]);
+    }
+  }
+}
+
 test('the watcher set follows the store when it moves to a new project slug', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-move-'));
   const oldDir = path.join(tempHome, '.claude', 'projects', 'd---old', 'memory');
@@ -151,7 +179,7 @@ test('the watcher set follows the store when it moves to a new project slug', ()
     // The move: the whole store relocates to a different slug, exactly as a renamed
     // working root does. Nothing about the old directory survives.
     fs.mkdirSync(path.dirname(newDir), { recursive: true });
-    fs.renameSync(oldDir, newDir);
+    whenReleased(() => fs.renameSync(oldDir, newDir));
     fs.rmSync(path.join(tempHome, '.claude', 'projects', 'd---old'), { recursive: true, force: true });
 
     lint.refresh();
@@ -301,7 +329,7 @@ test('a periodic reconcile is registered, so a move with no live watcher still r
     assert.equal(h.intervals[0].ms, 5 * 60 * 1000);
 
     fs.mkdirSync(path.dirname(newDir), { recursive: true });
-    fs.renameSync(oldDir, newDir);
+    whenReleased(() => fs.renameSync(oldDir, newDir));
     fs.rmSync(path.join(tempHome, '.claude', 'projects', 'd---old'), { recursive: true, force: true });
     fs.writeFileSync(path.join(newDir, 'MEMORY.md'), '# Memory Index\n\n- [x](x.md) — short\n', 'utf8');
 
@@ -975,7 +1003,7 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
 // this repo, from the pinned-`memory.dir` bug, and is why
-// `memoryStoreDirs` (extension.js:2515-2516) overrides `dir` before calling this.
+// `memoryStoreDirs` (extension.js:2562-2563) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

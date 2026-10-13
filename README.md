@@ -94,7 +94,7 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2219`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2379`).
 It lists local rules and confirms removal of a selected literal allow declaration
 ("Remove this Codex allow rule?", `vscode-extension/extension.js:3681`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
@@ -341,7 +341,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2499`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2546`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine

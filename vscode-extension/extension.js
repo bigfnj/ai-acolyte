@@ -752,6 +752,21 @@ function abortLiveTransfers() {
   liveTransfers.clear();
 }
 
+// The rename codes a momentary holder produces, and how long the publish step
+// waits one out. On Windows a rename is refused while anything holds a handle
+// in its way, and Defender and the indexer open a file milliseconds after it is
+// written; a 32MB file closed a moment ago is exactly what they open. Measured
+// 2026-10-13 on the development box (Node 24.19.0): a holder with the .tmp open
+// and not sharing delete makes this rename fail EBUSY, and the same rename
+// lands once it lets go (held 400 ms: 16 refusals at 20 ms spacing, then it
+// landed); an open handle on an existing destination makes it fail EPERM
+// (597b4f7). Every other writer here already retried its rename
+// (writeFileAtomicSync, atomicWrite, strictWrite). This one failed the whole
+// download on the first refusal and threw the 32MB away with it.
+// Ten attempts, 20, 40, ... 180 ms apart: 0.9 s at most, the budget those use.
+const MODEL_RENAME_HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const MODEL_RENAME_ATTEMPTS = 10;
+
 // Downloads to `<dest>.tmp` and renames on success so a cancelled/failed run never
 // leaves a half-written bge-small.onnx that would falsely read as "model present".
 function downloadRecallModel() {
@@ -819,6 +834,53 @@ function downloadRecallModel() {
         out.close(() => { try { fs.unlinkSync(tmp); } catch { /* already gone */ } resolve(false); });
       };
 
+      // The publish step: the one rename that makes the model real, retried
+      // while a holder refuses it (MODEL_RENAME_HELD has why and the numbers).
+      // On TIMERS, not Atomics.wait: this runs on the extension-host thread, and
+      // a synchronous wait there freezes every extension in the window, which is
+      // why writeFileAtomicSync's own comment counts its wait as a cost. Still
+      // never an in-place write: the destination is absent or a whole file, and
+      // when the attempts run out it fails exactly as a single refusal did, the
+      // .tmp unlinked by `fail`. No re-read of the destination between attempts,
+      // which strictWrite needs because its target is someone's AGENTS.md: this
+      // one is the extension's own copy of a public asset in its own model
+      // home, and this rename is its only writer.
+      //
+      // What a wait must not outlast is the download itself. So every attempt
+      // first re-checks what can have ended it meanwhile: another channel
+      // already settled it (its cleanup is unlinking the .tmp, and a rename now
+      // would publish a file whose failure was already reported), the host was
+      // torn down, or, on a retry, the user pressed Cancel. A Cancel does not
+      // reach `fail` by itself at this point: the request has finished, and
+      // destroying a finished request emits nothing, so the handle's sticky
+      // `cancelled` flag is read instead.
+      const publish = (attempt) => {
+        if (settled) return;
+        // A reload that landed during the transfer must not be finished off
+        // by its own completion. This is the last moment before the file
+        // becomes real, and renaming it here would publish a model into
+        // ~/.claude on behalf of a host that no longer exists.
+        if (deactivated) { fail(new Error('extension deactivated')); return; }
+        if (attempt > 1 && transfer?.cancelled) { fail(new Error('cancelled')); return; }
+        // try/catch, because this runs inside out.close()'s callback or a timer
+        // — long after the Promise executor returned. A throw here is not a
+        // rejection, it is an UNCAUGHT exception, and the promise it was
+        // supposed to settle stays pending, so the progress notification
+        // spins for the life of the window. EXDEV (tmp and dest on
+        // different volumes, which RECALL_MODEL_DIR can arrange) and EPERM
+        // from an antivirus scanner both reach it.
+        try { fs.renameSync(tmp, dest); }
+        catch (renameError) {
+          if (MODEL_RENAME_HELD.has(renameError.code) && attempt < MODEL_RENAME_ATTEMPTS) {
+            setTimeout(publish, 20 * attempt, attempt + 1);
+            return;
+          }
+          fail(renameError); return;
+        }
+        if (!claim()) return;
+        resolve(true);
+      };
+
       token.onCancellationRequested(() => transfer?.destroy(new Error('cancelled')));
 
       transfer = httpsGetFollow(RECALL_MODEL_URL, (res, err) => {
@@ -837,22 +899,7 @@ function downloadRecallModel() {
         out.on('finish', () => {
           out.close(() => {
             if (received < RECALL_MODEL_MIN_BYTES) { fail(new Error(`only received ${received} bytes — expected a ~32MB file`)); return; }
-            // A reload that landed during the transfer must not be finished off
-            // by its own completion. This is the last moment before the file
-            // becomes real, and renaming it here would publish a model into
-            // ~/.claude on behalf of a host that no longer exists.
-            if (deactivated) { fail(new Error('extension deactivated')); return; }
-            // try/catch, because this runs inside out.close()'s callback — long
-            // after the Promise executor returned. A throw here is not a
-            // rejection, it is an UNCAUGHT exception, and the promise it was
-            // supposed to settle stays pending, so the progress notification
-            // spins for the life of the window. EXDEV (tmp and dest on
-            // different volumes, which RECALL_MODEL_DIR can arrange) and EPERM
-            // from an antivirus scanner both reach it.
-            try { fs.renameSync(tmp, dest); }
-            catch (renameError) { fail(renameError); return; }
-            if (!claim()) return;
-            resolve(true);
+            publish(1);
           });
         });
         out.on('error', fail);

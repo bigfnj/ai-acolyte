@@ -631,7 +631,17 @@ let tmpUnlinkCount = 0;
 // callback, long after the Promise executor returned, so an unwrapped throw
 // there is an uncaught exception AND a promise that never settles. EXDEV and an
 // antivirus EPERM both reach it on a real box.
+//
+// Or a FUNCTION, called with the 1-based count of renames aimed at the model so
+// far, that returns the error for that attempt or nothing to let it through.
+// That is how a holder that refuses N times and then lets go is injected, and
+// the moment of a refusal is the one place a test can act "during the wait"
+// without racing the retry's timer. Added 2026-10-13 with the publish retry.
 let renameFailure = null;
+
+// How many renames the extension aimed at bge-small.onnx, reset when a fresh .tmp
+// stream opens. The retry's bound, and "this error is not retried", are counts.
+let modelRenames = 0;
 
 function fsHidingRecallModel(realFs) {
   let tmpStreamClosed = false;
@@ -643,6 +653,7 @@ function fsHidingRecallModel(realFs) {
         tmpStreamClosed = false;
         tmpUnlinkObserved = null;
         tmpUnlinkCount = 0;
+        modelRenames = 0;
         const realClose = stream.close.bind(stream);
         // Always pass a callback, even when the caller gave none, so the flag flips on the
         // same tick node would have called the caller's own callback on.
@@ -651,7 +662,9 @@ function fsHidingRecallModel(realFs) {
       return stream;
     },
     renameSync(from, to) {
-      if (renameFailure) throw renameFailure;
+      if (path.basename(String(to)) === 'bge-small.onnx') modelRenames += 1;
+      const failure = typeof renameFailure === 'function' ? renameFailure(modelRenames) : renameFailure;
+      if (failure) throw failure;
       return realFs.renameSync(from, to);
     },
     unlinkSync(target) {
@@ -1948,11 +1961,183 @@ test('a rename that throws fails the download instead of hanging the notificatio
         `a failed rename left the progress notification spinning forever — got "${outcome}"`);
       assert.ok(app.errors.some((m) => m.includes('EXDEV')),
         `the rename failure was never reported: ${JSON.stringify(app.errors)}`);
+      assert.equal(modelRenames, 1, 'WITNESS an error no holder produces is not retried');
       const models = path.join(home, '.claude', 'wildcarding', 'models');
       assert.deepEqual(fs.readdirSync(models).filter((f) => f.endsWith('.tmp')), [],
         'a failed publish left its partial file behind, which reads as "model present"');
     } finally {
       await app.dispose();
+    }
+  });
+
+// ── the publish rename against a momentary holder ─────────────────────────────
+//
+// On Windows a rename is refused while anything holds a handle in its way, and
+// Defender and the indexer open a file milliseconds after it is written. Until
+// 2026-10-13 the publish step made ONE attempt, so a scanner's moment on the
+// just-closed .tmp failed the whole 32MB download (measured on the development
+// box: a holder without delete sharing makes this exact rename fail EBUSY, and
+// the same rename lands once it lets go). It now retries the same rename on
+// EPERM, EACCES and EBUSY, ten attempts 20..180 ms apart, on timers. The
+// refusals are injected, so these run the same on every platform.
+
+// A download driven up to the publish step: redirected, past the 5MB floor, and
+// one body.finish() away from the rename. `carrier` is the request that carried
+// the body, for the tests that need it to behave like a finished request.
+async function downloadAtPublish(t) {
+  const started = await startModelDownload(t);
+  started.app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+  const body = liveBodyResponse();
+  const carrier = started.app.httpsRequests[1];
+  carrier.respond(body);
+  body.deliver(6 * 1024 * 1024);
+  started.app.errors.length = 0;
+  const models = path.join(started.home, '.claude', 'wildcarding', 'models');
+  return {
+    ...started, body, carrier,
+    dest: path.join(models, 'bge-small.onnx'),
+    leftovers: () => fs.readdirSync(models).filter((f) => f.endsWith('.tmp')),
+    // Bounded well past the 0.9 s of waits, so "still pending" means hung.
+    settled: (ms = 5000) => Promise.race([
+      started.rebuild.then(() => 'settled'),
+      tick(ms).then(() => `still pending after ${ms}ms`),
+    ]),
+  };
+}
+const holderError = (code) => Object.assign(new Error(`${code}: injected holder, rename`), { code });
+
+for (const [code, refusals] of [['EPERM', 3], ['EBUSY', 1], ['EACCES', 1]]) {
+  test(`a model rename refused ${refusals}x with ${code} by a holder that lets go lands on a retry`,
+    TEST_TIMEOUT, async (t) => {
+      // Whether the event loop turned between the first two attempts: an
+      // Atomics.wait between them would pass every other assertion here while
+      // freezing the extension-host thread for the whole wait.
+      let turned = null, turnedBetween = null;
+      renameFailure = (attempt) => {
+        if (attempt === 2) turnedBetween = turned;
+        if (attempt === 1) { turned = false; setImmediate(() => { turned = true; }); }
+        return attempt <= refusals ? holderError(code) : null;
+      };
+      t.after(() => { renameFailure = null; });
+      const box = await downloadAtPublish(t);
+      try {
+        box.body.finish();
+        assert.equal(await box.settled(), 'settled', 'the retried publish never settled');
+        assert.ok(modelRenames > refusals,
+          'WITNESS the same rename, repeated past every injected refusal, is what landed');
+        assert.equal(turnedBetween, true, 'WITNESS the wait yields the extension-host thread instead of blocking it');
+        assert.equal(fs.existsSync(box.dest), true, `WITNESS ${code} from a holder that lets go does not fail the download`);
+        assert.deepEqual(box.leftovers(), [], 'the .tmp was renamed into place, not copied');
+        assert.deepEqual(box.app.errors.filter((m) => m.includes('download failed')), [],
+          `a refusal that cleared was still reported as a failure: ${JSON.stringify(box.app.errors)}`);
+        // The download resolved TRUE, and this is how that shows here: the harness
+        // hides every bge-small.onnx outside the toolbox dir, so rebuildRecall's
+        // post-download probe cannot see the file that just landed and says so.
+        // A download that resolved false returns before reaching that probe.
+        assert.ok(box.app.errors.some((m) => m.includes('reported success')),
+          `the download did not resolve as a success: ${JSON.stringify(box.app.errors)}`);
+      } finally {
+        await box.app.dispose();
+      }
+    });
+}
+
+test('a holder that never lets go fails the download after a bounded retry, with the .tmp removed',
+  TEST_TIMEOUT, async (t) => {
+    renameFailure = () => holderError('EPERM');
+    t.after(() => { renameFailure = null; });
+    const box = await downloadAtPublish(t);
+    try {
+      box.body.finish();
+      assert.equal(await box.settled(), 'settled', 'a persistent holder left the notification spinning');
+      assert.equal(modelRenames, 10, 'WITNESS the retry is bounded (ten attempts, 0.9 s of waits)');
+      assert.ok(box.app.errors.some((m) => m.includes('download failed') && m.includes('EPERM')),
+        `the persistent refusal was not reported: ${JSON.stringify(box.app.errors)}`);
+      assert.equal(fs.existsSync(box.dest), false, 'WITNESS no model is published when the rename never lands');
+      assert.deepEqual(box.leftovers(), [], 'the failed download left its .tmp behind');
+      assert.equal(tmpUnlinkCount, 1, 'the cleanup ran once, as for any other failure');
+    } finally {
+      await box.app.dispose();
+    }
+  });
+
+// The wait is new state, and three things can end a download during it. None of
+// them may be outwaited: a retry that landed afterwards would publish a model
+// the user cancelled, into a host that is gone, or after its failure was shown.
+test('a Cancel pressed while the publish is being refused stops the retry instead of publishing',
+  TEST_TIMEOUT, async (t) => {
+    const box = await downloadAtPublish(t);
+    // The body has arrived, so this request is finished, and destroying a
+    // finished request emits nothing: Cancel cannot reach `fail` through it.
+    box.carrier.destroy = () => { box.carrier.destroyed = true; };
+    renameFailure = (attempt) => {
+      if (attempt > 1) return null; // the holder lets go: a second attempt WOULD land
+      box.cancel();
+      return holderError('EBUSY');
+    };
+    t.after(() => { renameFailure = null; });
+    try {
+      box.body.finish();
+      assert.equal(await box.settled(), 'settled');
+      assert.equal(box.carrier.destroyed, true, 'precondition: Cancel reached the handle');
+      assert.equal(fs.existsSync(box.dest), false, 'WITNESS a retry outwaited the Cancel and published the model');
+      assert.equal(modelRenames, 1, 'no rename is attempted after Cancel');
+      assert.ok(box.app.errors.some((m) => m.includes('cancelled')),
+        `the cancellation was not reported: ${JSON.stringify(box.app.errors)}`);
+      assert.deepEqual(box.leftovers(), [], 'the cancelled download left its .tmp behind');
+    } finally {
+      await box.app.dispose();
+    }
+  });
+
+test('a teardown while the publish is being refused publishes nothing and says nothing',
+  TEST_TIMEOUT, async (t) => {
+    const box = await downloadAtPublish(t);
+    box.carrier.destroy = () => { box.carrier.destroyed = true; };
+    let teardown = null;
+    renameFailure = (attempt) => {
+      if (attempt > 1) return null;
+      teardown = box.app.extension.deactivate();
+      return holderError('EPERM');
+    };
+    t.after(() => { renameFailure = null; });
+    try {
+      box.body.finish();
+      assert.equal(await box.settled(), 'settled', 'a teardown during the wait left the download pending');
+      await teardown;
+      assert.equal(fs.existsSync(box.dest), false,
+        'WITNESS a retry outwaited the teardown and published a model into ~/.claude for a host that is gone');
+      assert.equal(modelRenames, 1, 'no rename is attempted after teardown');
+      assert.deepEqual(box.app.errors.filter((m) => m.includes('download failed')), [],
+        'a torn-down host raised an error toast');
+      assert.deepEqual(box.leftovers(), [], 'the abandoned download left its .tmp behind');
+    } finally {
+      await box.app.dispose();
+    }
+  });
+
+test('a download another channel failed during the wait is not retried into place',
+  TEST_TIMEOUT, async (t) => {
+    const box = await downloadAtPublish(t);
+    renameFailure = (attempt) => {
+      if (attempt > 1) return null;
+      // Any of `fail`'s other channels; the response stream is the simplest to fire.
+      box.body.emit('error', new Error('socket hang up'));
+      return holderError('EBUSY');
+    };
+    t.after(() => { renameFailure = null; });
+    try {
+      box.body.finish();
+      assert.equal(await box.settled(), 'settled');
+      // Let the retry's timer come due: the failure settled the download first.
+      await tick(100);
+      assert.equal(modelRenames, 1, 'WITNESS a rename was attempted after the download had already failed');
+      assert.equal(fs.existsSync(box.dest), false);
+      assert.equal(box.app.errors.filter((m) => m.includes('download failed')).length, 1,
+        `one failure, one toast: ${JSON.stringify(box.app.errors)}`);
+      assert.deepEqual(box.leftovers(), []);
+    } finally {
+      await box.app.dispose();
     }
   });
 

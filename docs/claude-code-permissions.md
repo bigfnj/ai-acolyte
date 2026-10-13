@@ -118,24 +118,36 @@ and zsh's `noglob`." Not stripped: the query form `command -v` and zsh's
 `xargs -n1 grep x` is matched as an `xargs` command. The list "is built in and is
 not configurable" **[docs: permissions]**.
 
-`deriveBaseInvocation` strips a subset of these (`timeout`, `command`, `builtin`,
-and an env prefix), so the family learned from `timeout 30 git status` is
-`git status` rather than `timeout`. Learning the wrapper would have proposed
-`Bash(timeout *)`, a grant for every command `timeout` can run. An unrecognised
-shape is left alone: `timeout npm test` with no duration, or a duration with no
-command, strips nothing.
+The learner (`deriveBaseInvocation` in `src/auto-learn.js`), the wildcarding pass
+(`generalizeCommandArg` in `src/permissions.js`) and the matcher
+(`src/permission-match.js`) share one routine for this since 2026-10-13
+(`claudeWrapperPrefix`), so the family learned from `timeout 30 git status` is `git
+status`, an approved `timeout 5 rg x` becomes `Bash(rg *)`, and `Bash(rg *)` covers
+`Bash(timeout 5 rg x)`. Before that date the learner stripped only `timeout`, `command`
+(including `command -v`) and `builtin`, and the pass keyed on the wrapper. Learning or
+writing the wrapper proposes `Bash(timeout *)`, a grant for every command `timeout` can
+run.
 
-The wildcarding pass (`generalizeCommandArg` in `src/permissions.js`) strips the
-whole documented list since 2026-10-13, so an approved `timeout 5 rg x` becomes
-`Bash(rg *)`, not `Bash(timeout *)`. Before that date it keyed on the wrapper,
-which names text Claude Code removes before it consults any rule. The shapes it
-accepts are the ones the wrapper routine in the shipped CLI accepts, read out of
-Claude Code 2.1.296's binary: a `timeout` duration after its documented options,
-`nice -n N` or `nice -N`, `stdbuf` with at least one mode, `command` with `-p`
-only. Any other shape is one that routine reports it "can't be checked before it
-runs", and the entry stays verbatim. `command -v` keeps its flag
-(`Bash(command -v *)`). `env` is not on the list and is not stripped
-**[docs; measured against the binary]**.
+The shapes the routine accepts are the ones Claude Code 2.1.296's binary strips on the
+allow path **[measured against the binary]**. The binary has two wrapper routines: a
+safety walker over the parsed argv (the one that reports a shape "can't be checked
+before it runs") and a text stripper the allow matcher runs before it compares a rule.
+The second decides matching, so it is the one modelled, as a subset: a `timeout`
+duration after its documented options, `nice -n N` or `nice -N`, `stdbuf` with fused
+modes only (`-oL`, `-o0`; the walker also takes `-o L`, the stripper does not),
+`command` with `-p` only. Any other shape stays verbatim. `command -v` keeps its flag
+(`Bash(command -v *)`). `env` is not on the list and is not stripped. The stripper does
+not touch `xargs` at all: the matcher tries each rule ending in `*` a second time with
+`xargs ` in front of it, so xargs counts only as the innermost layer (`nohup xargs grep
+x` matches `Bash(grep *)`, `xargs nohup grep x` does not).
+
+The same stripper is tried in addition to, not instead of, the command as written
+**[measured against the binary]**. So a rule naming a wrapper is not dead weight: it
+matches the text as written, and `Bash(timeout *)` approves `timeout 5 <anything>`. That
+is why `patterns/starter-pack.json` no longer seeds `Bash(timeout *)` or `Bash(nohup *)`
+and narrows `Bash(command *)` to `Bash(command -v *)`, and keeps `Bash(xargs *)`, the only
+rule that covers a flagged `xargs` (2026-10-13; the reasoning per entry is in
+`patterns/starter-pack.md`, "Wrapper entries").
 
 ### Environment assignments: only a known-safe list is stripped
 

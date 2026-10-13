@@ -88,7 +88,7 @@ for everything.
 | `Bash(sort *)` | Sort lines |
 | `Bash(tee *)` | Pipe + write to file |
 | `Bash(printf *)` | Formatted output |
-| `Bash(command *)` | Run command bypassing shell functions |
+| `Bash(command -v *)` | Look up whether a command exists (see "Wrapper entries" below) |
 | `Bash(exit *)` | Exit a shell / script |
 | `Bash(printenv *)` | Print environment variables |
 | `Bash(ip route *)` | Routing table inspection |
@@ -361,6 +361,30 @@ should opt into on your own machine rather than inherit from a seed:
 - **`sudo *`** — rare on Windows; approve per machine
 - **Project-specific binaries & env var prefixes** (`WE="..."`, `WP_DIR=...`, personal
   scripts) — repopulate per project
+- **`timeout *`, `nohup *` and a bare `command *`** — removed 2026-10-13; see "Wrapper
+  entries" below
+
+### Wrapper entries
+
+Claude Code strips `timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`,
+`noglob` and a flagless `xargs` before it matches a Bash rule, so `Bash(npm *)` already
+covers `timeout 30 npm test` and `nohup npm start` (docs, "Wrappers"). Its allow matcher
+also tries every rule against the command as written (read out of the 2.1.296 binary,
+2026-10-13). Put together, a rule that names a wrapper adds nothing for a command the
+pack already allows, and for every other command it is a grant for whatever runs under
+the wrapper: `Bash(timeout *)` approves `timeout 5 python -c '...'`, which `Bash(python
+*)` would be needed for otherwise, and which auto mode refuses to pre-approve through that
+rule. The four wrapper entries the seed carried were decided one at a time:
+
+| Entry | Decision | Why |
+|---|---|---|
+| `Bash(timeout *)` | removed | Every legitimate use is covered by the inner command's own rule; the rest is a blanket grant. |
+| `Bash(nohup *)` | removed | The same. |
+| `Bash(command *)` | narrowed to `Bash(command -v *)` | Plain `command X` is stripped and matched as `X`. The lookup form `command -v` is NOT stripped, so it is the one use only this entry served, and it runs nothing. |
+| `Bash(xargs *)` | kept | Only a flagless `xargs` is stripped, so `xargs -0 grep x` is matched as an `xargs` command and nothing else in the pack covers it. It is a runner grant of the same class as `Bash(bash *)` and `Bash(python *)`, which stay on the maintainer's call (docs/engineering-record.md, "The 13 blanket wrapper grants"), and auto mode already discards it. |
+
+A list seeded before this change keeps whatever it already holds; nothing removes an
+entry from your `settings.json`.
 
 > **⚠ A few everyday destructive roots ARE in the seed** — `Bash(rm *)`,
 > `PowerShell(Remove-Item *)`, and `PowerShell(Stop-Process *)` (plus the `rm` PowerShell
@@ -391,9 +415,10 @@ whether they do anything. Measured against 2.1.238 and 2.1.245, so this tracks t
 rather than the version.
 
 Two things follow. Sibling spellings are not interchangeable: `Bash(powershell *)`,
-`Bash(cmd.exe *)`, `Bash(pwsh *)`, `Bash(wsl *)`, `Bash(scp *)`, `Bash(timeout *)` and
-`Bash(nohup *)` all survive auto mode while their `PowerShell(...)` counterparts do not, and
-`Bash(scp *)` survives where `Bash(ssh *)` does not. And narrowing the argument does not
+`Bash(cmd.exe *)`, `Bash(pwsh *)`, `Bash(wsl *)` and `Bash(scp *)` all survive auto mode while
+their `PowerShell(...)` counterparts do not, and `Bash(scp *)` survives where `Bash(ssh *)`
+does not. (`Bash(timeout *)` and `Bash(nohup *)` survived too, measured the same way; that is
+part of why they left the seed on 2026-10-13, see "Wrapper entries".) And narrowing the argument does not
 help: a managed `Bash(python -m pytest:*)` is refused for the same reason. If you need those
 families to be pre-approved, run in `default` mode; if you want the classifier deciding, run
 auto and expect these to be ignored.

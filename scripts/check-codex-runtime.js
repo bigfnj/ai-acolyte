@@ -182,6 +182,77 @@ function rolloutFor(codexHome, threadId) {
   return found[0];
 }
 
+// EACH TEMP WORKSPACE IS ITS OWN PROJECT ROOT, AND A CANARY PROVES IT (2026-10-13).
+//
+// Codex finds project instructions by walking up from the session cwd to the
+// nearest directory holding a project-root marker (`.git` by default) and then
+// loading every AGENTS.md from that directory down to the cwd. These harnesses
+// put their workspaces under os.tmpdir(), which on Windows is inside the user's
+// home, and on the development box that home has a `.git` directory (holding
+// only a credentials file; git itself does not accept it as a repository) and
+// its own AGENTS.md. Codex 0.161.0 counted that `.git`, so every fresh harness
+// session carried the developer's home AGENTS.md as project instructions: read
+// only, sent only to the loopback responder, kept only in temp evidence
+// (acolyte-codex-mcp-runtime-ddsfLK), but an isolation gap, and one that made
+// harness inputs depend on whose machine ran them.
+//
+// MEASURED 2026-10-13 on codex-cli 0.161.0, Windows, through runtimeCase in an
+// isolated temp tree (acolyte-root-probe-SIgiRe): the AGENTS.md walk counts a
+// `.git` by EXISTENCE. An empty `.git` directory in the workspace stopped it
+// there (canary absent, home AGENTS.md absent); with none in the workspace, an
+// empty `.git` one level up became the root and its canary AGENTS.md was
+// loaded, and the home file still was not, because the walk stops at the
+// nearest marker. The same empty directory is NOT a repository anywhere else
+// that matters, which is why it is used rather than `project_root_markers`:
+//   - Codex's project config layers and trust ignored a `.git` that is not a
+//     repository (scripts/check-codex-project-rules-runtime.js, recorded in
+//     src/codex-policy.js), so no layer or trust result moves;
+//   - the product's own repositoryMarker (src/codex-policy.js) requires HEAD,
+//     and any `project_root_markers` line in config.toml would instead switch
+//     its candidate scan to EVERY ancestor `.codex` folder, the user's real
+//     ~/.codex included, and start a config/read app-server a real user's
+//     profile would not -- the harness would stop modelling a typical config;
+//   - git rejects it too ("not a git repository"), as it rejects the home one.
+// A `.git` that already exists (the hook harness's real `git init`, a worktree's
+// `.git` file) is a marker as it is and is left alone.
+//
+// THE CANARY. An AGENTS.md naming FOREIGN_INSTRUCTION_CANARY goes in the
+// workspace's parent, inside the temp tree, beside an empty `.git` of its own.
+// The loaded chain is contiguous from the root down to the cwd, so if the root
+// is anywhere above the workspace -- this box's home, a parent repository on
+// another box -- the chain passes the parent and the canary is in the request.
+// The parent's own `.git` makes that detection independent of the machine:
+// remove the workspace marker and the walk stops one level up and loads the
+// canary even where the home has no marker at all. Every harness that drives a
+// session asserts the canary is absent from every request its loopback receives.
+const FOREIGN_INSTRUCTION_CANARY = 'acolyte-harness-foreign-agents-md-canary';
+const FOREIGN_INSTRUCTION_TEXT = `# Harness isolation canary: Codex must never load this file\n${FOREIGN_INSTRUCTION_CANARY}\n`;
+
+function isolateWorkspaceInstructions(workspace) {
+  const resolved = path.resolve(workspace);
+  const parent = path.dirname(resolved);
+  // Plant only strictly inside the temp tree and never in the temp root itself,
+  // where an AGENTS.md and a `.git` would reach every other process's sessions.
+  const temp = fs.realpathSync.native(os.tmpdir());
+  const relative = path.relative(temp, fs.realpathSync.native(parent));
+  assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative),
+    `instruction isolation plants only below the temp root, not in ${parent}`);
+  for (const directory of [resolved, parent]) {
+    if (!fs.existsSync(path.join(directory, '.git'))) fs.mkdirSync(path.join(directory, '.git'));
+  }
+  const canary = path.join(parent, 'AGENTS.md');
+  if (fs.existsSync(canary)) {
+    assert.equal(fs.readFileSync(canary, 'utf8'), FOREIGN_INSTRUCTION_TEXT, `${canary} is not the isolation canary`);
+  } else fs.writeFileSync(canary, FOREIGN_INSTRUCTION_TEXT, { flag: 'wx' });
+  return FOREIGN_INSTRUCTION_CANARY;
+}
+
+// `text` is a raw request body as the loopback received it.
+function assertNoForeignInstructions(text, label) {
+  assert.equal(String(text).includes(FOREIGN_INSTRUCTION_CANARY), false,
+    `${label}: Codex loaded an AGENTS.md from above the workspace (the isolation canary is in the request)`);
+}
+
 function removeOwnedState(root, state) {
   const resolvedRoot = path.resolve(root);
   const resolvedState = path.resolve(state);
@@ -288,8 +359,11 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
         assert.equal(req.url, '/v1/responses', `${name}: unexpected provider request path`);
         assert.equal(req.headers.authorization, undefined, `${name}: fixture provider must receive no authorization header`);
         assert.equal(req.headers['api-key'], undefined, `${name}: fixture provider must receive no API key header`);
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const raw = Buffer.concat(chunks).toString('utf8');
+        assertNoForeignInstructions(raw, name);
+        const body = JSON.parse(raw);
         observed.providerRequests += 1;
+        observed.canaryFreeRequests = observed.providerRequests;
         assert.ok(observed.providerRequests <= 2, `${name}: runtime requested an unexpected extra model response`);
         if (observed.providerRequests === 1) {
           firstInstructions = strings([body.instructions, body.input]).join('\n').replace(/\r\n/g, '\n');
@@ -320,6 +394,7 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
     });
   });
   try {
+    isolateWorkspaceInstructions(workspace);
     await new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
@@ -600,6 +675,7 @@ async function main() {
 }
 
 module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined,
-  runtimeShellTool, runtimeShellArguments, PROVENANCE_ROOTS, localRequireClosure };
+  runtimeShellTool, runtimeShellArguments, PROVENANCE_ROOTS, localRequireClosure,
+  isolateWorkspaceInstructions, assertNoForeignInstructions };
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });

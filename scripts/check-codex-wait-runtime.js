@@ -18,13 +18,15 @@ assert.equal(process.argv[2], '--extension-dir');
 const subject = path.resolve(process.argv[3]);
 const { commandLaunch } = require(path.join(subject, 'src/exec-resolve'));
 const { parseCodexJsonl } = require(path.join(subject, 'src/history-adapters'));
-const { rolloutFor } = require('./check-codex-runtime');
+const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-wait-completion-'));
 const evidence = { boundary: 'Isolated real Codex app-server; scripted loopback provider, no inference or credentials; fixture-only rollouts.', root, cases: [] };
 const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 async function run(name, exitCode) {
   const dir = path.join(root, name), home = path.join(dir, 'home'), codexHome = path.join(home, '.codex'), workspace = path.join(dir, 'workspace');
   for (const target of [codexHome, workspace]) fs.mkdirSync(target, { recursive: true });
+  // Workspace is its own project root, canary one level up (check-codex-runtime.js, 2026-10-13).
+  isolateWorkspaceInstructions(workspace);
   const script = path.join(workspace, 'delay.cjs');
   // 12 s, not the original 3.5 s (2026-10-13). Codex 0.161.0 on Windows clamps
   // exec_command's yield_time_ms to at least 10000 ms ("Effective range on
@@ -50,8 +52,11 @@ async function run(name, exitCode) {
       try {
         assert.equal(req.headers.authorization, undefined);
         assert.equal(req.headers['api-key'], undefined);
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const raw = Buffer.concat(chunks).toString('utf8');
+        assertNoForeignInstructions(raw, name);
+        const body = JSON.parse(raw);
         observed.requests += 1;
+        observed.canaryFreeRequests = observed.requests;
         assert.ok(observed.requests <= 6, 'at most five actual polls');
         const outputs = body.input.filter((item) => item.type === 'function_call_output');
         const latest = outputs[outputs.length - 1];

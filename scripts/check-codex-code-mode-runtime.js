@@ -51,7 +51,7 @@ assert.ok(option('--extension-dir'), '--extension-dir must name the subject');
 const subject = path.resolve(option('--extension-dir'));
 const { commandLaunch } = require(path.join(subject, 'src/exec-resolve'));
 const { parseCodexJsonl } = require(path.join(subject, 'src/history-adapters'));
-const { rolloutFor } = require('./check-codex-runtime');
+const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-code-mode-'));
 const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidence = { boundary: 'Isolated real Codex app-server with code_mode enabled only in a temporary CODEX_HOME; scripted loopback provider, no inference or credentials; fixture-only rollouts.', root, cases: [] };
@@ -95,6 +95,8 @@ function outputText(output) {
 async function run(name, cells) {
   const dir = path.join(root, name), home = path.join(dir, 'home'), codexHome = path.join(home, '.codex'), workspace = path.join(dir, 'workspace');
   for (const target of [codexHome, workspace]) fs.mkdirSync(target, { recursive: true });
+  // Workspace is its own project root, canary one level up (check-codex-runtime.js, 2026-10-13).
+  isolateWorkspaceInstructions(workspace);
   const plan = cells.map((cell, index) => {
     const script = path.join(workspace, `cell-${index + 1}.cjs`);
     fs.writeFileSync(script, `setTimeout(() => { console.log('${WITNESS}'); process.exit(${cell.exitCode}); }, ${cell.delayMs});\n`);
@@ -123,8 +125,11 @@ async function run(name, cells) {
       try {
         assert.equal(req.headers.authorization, undefined, 'fixture provider must receive no authorization header');
         assert.equal(req.headers['api-key'], undefined, 'fixture provider must receive no API key header');
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const raw = Buffer.concat(chunks).toString('utf8');
+        assertNoForeignInstructions(raw, name);
+        const body = JSON.parse(raw);
         observed.requests += 1;
+        observed.canaryFreeRequests = observed.requests;
         assert.ok(observed.requests <= 1 + plan.length * 3, 'unexpected extra provider requests');
         const outputs = body.input.filter((item) => ['function_call_output', 'custom_tool_call_output'].includes(item.type));
         const latest = outputs[outputs.length - 1];

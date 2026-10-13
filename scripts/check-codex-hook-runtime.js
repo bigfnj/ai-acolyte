@@ -13,7 +13,8 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
-const { createRuntimeContext, runtimeCase, assertAllowed, rolloutFor, runtimeShellTool } = require('./check-codex-runtime');
+const { createRuntimeContext, runtimeCase, assertAllowed, rolloutFor, runtimeShellTool, isolateWorkspaceInstructions,
+  assertNoForeignInstructions } = require('./check-codex-runtime');
 
 const BOUNDARY = 'Real Codex exec with the staged setCodexHook configuration and staged Stop callback; no editor, synthetic history, provider inference, credentials or persisted hook-trust changes. Scripted loopback responder requests inspected read-only git commands in an isolated empty repository.';
 const ENV_KEYS = ['HOME', 'USERPROFILE', 'CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
@@ -75,6 +76,9 @@ async function main() {
     report.codexVersion = sync(codex, ['--version']).stdout.trim();
     report.gitVersion = sync('git', ['--version']).stdout.trim();
     sync('git', ['init', '--quiet', workspace]);
+    // The real repository is already the workspace's root marker; this plants the
+    // canary one level up (check-codex-runtime.js, 2026-10-13).
+    isolateWorkspaceInstructions(workspace);
     fs.writeFileSync(path.join(workspace, 'hook-runtime-witness.txt'), 'Harmless runtime fixture\n');
     const user = 'acolyte-stop-hook-user-witness';
     const shadowed = 'acolyte-stop-hook-shadowed-base';
@@ -120,7 +124,8 @@ async function main() {
           try {
             assert.equal(req.method, 'POST'); assert.equal(req.url, '/v1/responses');
             assert.equal(req.headers.authorization, undefined); assert.equal(req.headers['api-key'], undefined);
-            const body = JSON.parse(Buffer.concat(chunks)); evidence.requests++;
+            const raw = Buffer.concat(chunks).toString('utf8'); assertNoForeignInstructions(raw, name);
+            const body = JSON.parse(raw); evidence.requests++; evidence.canaryFreeRequests = evidence.requests;
             assert.ok(evidence.requests <= (tool ? 2 : 1), 'no hook-triggered tool or model loop');
             // Catalog-selected, as in check-codex-runtime.js: 0.161.0 offers only
             // exec_command where 0.145.0 offered shell_command (2026-10-13).

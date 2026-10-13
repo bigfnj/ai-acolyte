@@ -12,7 +12,7 @@ const http = require('node:http');
 const readline = require('node:readline');
 const { spawn, spawnSync } = require('node:child_process');
 const { commandLaunch } = require('../src/exec-resolve');
-const { rolloutFor } = require('./check-codex-runtime');
+const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
 function fixtureServer() {
   const fs = require('node:fs'), readline = require('node:readline');
   const log = process.argv[2];
@@ -89,7 +89,11 @@ async function mcpRuntimeCase(context, name, options = {}) {
   const server=http.createServer((req,res)=>{
     const chunks=[];req.on('data',x=>chunks.push(x));req.on('end',()=>{try{
       assert.equal(req.headers.authorization,undefined);assert.equal(req.headers['api-key'],undefined);
-      const body=JSON.parse(Buffer.concat(chunks));observed.providerRequests++;
+      // Opt-in, because scripts/vscode-acceptance/mcp.js reuses this case with a
+      // workspace this module does not own; main() below always asks (2026-10-13).
+      const raw=Buffer.concat(chunks).toString('utf8');
+      if(options.foreignInstructionCheck){assertNoForeignInstructions(raw,name);observed.canaryFreeRequests=observed.providerRequests+1;}
+      const body=JSON.parse(raw);observed.providerRequests++;
       assert.ok(observed.providerRequests<=2,'at most two scripted provider requests');
       observed.providerInputs.push(body.input);
       let item;
@@ -186,11 +190,14 @@ async function main() {
     const context=createMcpRuntimeContext({home,codexHome:path.join(home,'.codex'),workspace:path.join(directory,'workspace'),
       fixtureServerPath:path.join(root,'fixture-server.cjs'),logPath:path.join(directory,'mcp.jsonl')});
     writeMcpFixture(context,overrides);
-    const observed=await mcpRuntimeCase(context,name,{tool,approvalDecision:approval});
+    // Workspace is its own project root, canary one level up (check-codex-runtime.js, 2026-10-13).
+    isolateWorkspaceInstructions(context.workspace);
+    const observed=await mcpRuntimeCase(context,name,{tool,approvalDecision:approval,foreignInstructionCheck:true});
     results.push({name,tool,error:observed.error,approvals:observed.serverRequests.length,executed:observed.mcpCalls.filter(x=>x.method==='tools/call').length,
       items:observed.events.filter(x=>x.method==='item/completed').map(x=>x.params.item),evidence:observed.evidencePath});
     console.log(JSON.stringify(results.at(-1)));
     assert.equal(observed.error,undefined,name+' actual runtime completed');
+    assert.equal(observed.canaryFreeRequests,observed.providerRequests,name+' every provider request was checked for foreign instructions');
     assert.equal(observed.serverRequests.length,prompts,name+' exact approval count');
     for (const request of observed.serverRequests) {
       assert.equal(request.method,'mcpServer/elicitation/request');

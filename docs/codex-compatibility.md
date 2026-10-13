@@ -773,6 +773,61 @@ Superseded by this section: the "Declared window: none yet" row above, the "One 
 one recorded contract-tested version" paragraph under Still not proven, and the CI
 paragraph below.
 
+## Codex 0.161.0 follow-up, October 13, 2026: harness isolation and history-parser gaps
+
+Added after the section above; it amends that section where it says so and replaces none
+of it. Same machine, `codex-cli` 0.161.0, Windows, isolated temp homes, scripted loopback
+responder, no credentials.
+
+**The harness workspaces are their own project roots now, and a canary proves it.** The
+section above records that 0.161.0 loaded the developer's home `AGENTS.md` into every
+fresh harness session. One correction to it: the home directory is not a git repository.
+Its `.git` is a directory holding only a credentials file, which git itself rejects, and
+Codex counted it anyway, because the `AGENTS.md` walk tests a `.git` by existence. Measured
+through `runtimeCase` in a temp tree (`acolyte-root-probe-SIgiRe`): an empty `.git` in the
+workspace stopped the walk there; without one, an empty `.git` one level up became the
+root, its `AGENTS.md` was loaded, and the home file was not. The same empty directory
+counts for nothing else: project layers and trust ignore a `.git` that is not a repository
+(the project-rules record above), the product's own repository check requires `HEAD`, and
+git rejects it. So `isolateWorkspaceInstructions` in `scripts/check-codex-runtime.js`
+gives each workspace an empty `.git` (an existing one, such as the hook harness's real
+repository or a worktree's `.git` file, is left alone) and puts a canary `AGENTS.md`
+beside an empty `.git` of its own in the workspace's parent, refusing to plant outside the
+temp tree or in its root. Every harness that drives a session asserts the canary is absent
+from every request its loopback receives. The chain Codex loads is contiguous from the
+root down to the cwd, so a root anywhere above the workspace puts the canary in the
+request, and the parent's own `.git` makes that true on a machine whose home has no marker
+at all. `project_root_markers` was not used: any mention of it in `config.toml` widens
+`src/codex-policy.js`'s candidate scan to every ancestor `.codex` folder, the real
+`~/.codex` included, which a harness modelling a typical profile should not do.
+`scripts/vscode-acceptance/mcp.js` reuses the MCP case with the VS Code driver's own
+workspace, so the check is opt-in in that shared case; the acceptance suite does not ask
+for it and was not run here.
+
+Mutation: with the workspace marker removed, the code-mode harness failed 5/5 sessions
+(`acolyte-code-mode-AcCa5r`, canary in every rollout, home file in none) and the runtime
+harness failed its first case (`acolyte-codex-runtime-MVboeg`). Restored byte-identical.
+
+| Harness | Result after the change | Evidence |
+|---|---|---|
+| `check-codex-runtime.js` | 4/4 default, 4/4 custom-override | `acolyte-codex-runtime-hS8yLU`, `-bhN2Wr` |
+| `check-codex-hook-runtime.js` | 5/5 CLI turns + 1/1 fresh process, both layouts | `acolyte-codex-hook-runtime-JxzZr0`, `-CI297T` |
+| `check-codex-wait-runtime.js` | success and nonzero, each through a real `write_stdin` | `acolyte-wait-completion-jqr9A8` |
+| `check-codex-memory-runtime.js` | 3/3 both layouts | `acolyte-codex-memory-runtime-T1TKbK`, `-iKXz5m` |
+| `check-codex-native-gates-runtime.js` | 3/3 both layouts | `acolyte-native-gates-runtime-MviJNi`, `-ZIu96J` |
+| `check-codex-prune-runtime.js` | 9/9 both layouts | `acolyte-codex-prune-runtime-w7xpvh`, `-ycylZZ` |
+| `check-codex-restore-runtime.js` | 10/10 both layouts | `acolyte-codex-restore-runtime-Gdo5l2`, `-FZDeeF` |
+| `check-codex-shared-runtime.js` | 3/3 groups, 14/14 processes, both layouts | `acolyte-codex-shared-runtime-Il4ksY`, `-HCBH4Q` |
+| `check-codex-wrapper-runtime.js` | 13/13 agree + 2 observations | `acolyte-codex-wrapper-runtime-e06QTL` |
+| `check-codex-project-rules-runtime.js` | 11 sessions pass, so the empty `.git` moved no rule or trust result | `acolyte-codex-project-rules-zhhviB` |
+| `check-codex-code-mode-runtime.js` | passes | `acolyte-code-mode-fPP7Qf` |
+| `check-codex-mcp-runtime.js` | every Codex fact and the canary pass; the parser check still fails 5/5 (fixed below) | `acolyte-codex-mcp-runtime-LLYYvB` |
+
+None of those evidence trees contains the home file's content; `acolyte-codex-mcp-runtime-ddsfLK`
+from the section above does. One limit stays: the project-rules harness's plain-folder
+cases still get their project LAYER root from whether the home is a real repository,
+which no empty marker can change without changing what those cases measure.
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,

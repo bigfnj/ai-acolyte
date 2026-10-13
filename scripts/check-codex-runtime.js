@@ -81,6 +81,34 @@ function hash(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+// WHICH SHELL TOOL THE RUNTIME OFFERS IS VERSION-DEPENDENT, so ask the catalog.
+//
+// Codex 0.145.0 (September 27-28) exposed `shell_command` to this unknown
+// fixture model, and every check here was written against it. Codex 0.161.0
+// (measured 2026-10-13, Windows) exposes only the unified `exec_command` /
+// `write_stdin` pair: default, `unified_exec = false` and `code_mode` catalogs
+// all omit `shell_command`. The old hard assertion therefore failed every
+// runtime case on 0.161.0 before Codex was asked anything, which is harness
+// drift, not a product result. Prefer `shell_command` when it is offered, so
+// older binaries keep exercising the exact shape their evidence names, and fall
+// back to `exec_command` otherwise. The two spell the command differently
+// (`command` vs `cmd`); the product parser accepts both (src/history-adapters.js
+// CODEX_FUNCTION_SHELL_NAMES).
+function runtimeShellTool(tools) {
+  const names = new Set((Array.isArray(tools) ? tools : []).map((tool) => tool?.name));
+  if (names.has('shell_command')) return 'shell_command';
+  if (names.has('exec_command')) return 'exec_command';
+  return null;
+}
+
+// `shell` names the shell binary for exec_command (its own optional parameter);
+// omitted, Codex uses the user's default shell. shell_command has no such field.
+function runtimeShellArguments(tool, command, workdir, justification, shell) {
+  const common = { workdir, sandbox_permissions: 'require_escalated', justification };
+  if (tool === 'shell_command') return { command, ...common };
+  return shell ? { cmd: command, shell, ...common } : { cmd: command, ...common };
+}
+
 function rolloutFor(codexHome, threadId) {
   const pending = [path.join(codexHome, 'sessions')];
   const found = [];
@@ -119,7 +147,13 @@ async function stopChild(child, closed) {
   // Wait for close, not merely exit: inherited stdout/stderr handles can still
   // be held by the npm shim's Codex child after the shim exits.
   if (await finishesWithin(closed, 5000)) return;
-  if (child.pid && child.exitCode === null && child.signalCode === null) {
+  if (child.pid && child.exitCode === null && child.signalCode === null && process.platform !== 'win32') {
+    // POSIX has no batch shim between us and Codex, so the spawned process is
+    // the app-server (or its node launcher). Only the wrapper matrix runs this
+    // module off Windows (2026-10-13); main() below still targets Windows.
+    child.kill('SIGTERM');
+    assert.ok(await finishesWithin(closed, 5000), `spawned Codex process ${child.pid} did not close after SIGTERM`);
+  } else if (child.pid && child.exitCode === null && child.signalCode === null) {
     // commandLaunch may return an npm batch shim. Terminate only this spawned
     // process tree, or killing cmd.exe alone can leave its app-server running.
     const killed = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'],
@@ -139,7 +173,12 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
   const approvalDecision = context.approvalDecision ?? 'decline';
   const instructionWitnesses = { user: USER_WITNESS, gate: GATE_WITNESS, shadowed: SHADOWED_WITNESS,
     ...context.instructionWitnesses };
-  assert.match(commandName, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'fixture command must be a bare executable name');
+  // `commandLine` sends one exact shell spelling instead of `<bare name> <arg>`.
+  // Only the wrapper matrix (check-codex-wrapper-runtime.js, 2026-10-13) uses it,
+  // because its whole subject is spellings that do not start with a bare name.
+  const commandLine = context.commandLine ?? `${commandName} ${argument}`;
+  if (context.commandLine === undefined) assert.match(commandName, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'fixture command must be a bare executable name');
+  else assert.ok(typeof commandLine === 'string' && commandLine.trim().length > 0, 'an explicit command line must be nonempty');
   assert.ok(['accept', 'decline'].includes(approvalDecision), 'fixture approvals may only accept one call or decline; never amend policy');
   assert.ok(typeof shellWitness === 'string' && shellWitness.length > 0, 'execution witness must be nonempty');
   assert.equal(typeof instructionsExpected, 'boolean', 'managed instruction expectation must be explicit');
@@ -197,12 +236,13 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
         assert.ok(observed.providerRequests <= 2, `${name}: runtime requested an unexpected extra model response`);
         if (observed.providerRequests === 1) {
           firstInstructions = strings([body.instructions, body.input]).join('\n').replace(/\r\n/g, '\n');
-          assert.ok(body.tools?.some((tool) => tool.name === 'shell_command'), `${name}: runtime did not expose shell_command`);
+          observed.shellTool = runtimeShellTool(body.tools);
+          assert.ok(observed.shellTool, `${name}: runtime exposed neither shell_command nor exec_command`);
         }
         const item = observed.providerRequests === 1
-          ? { id: 'fc_runtime_fixture', type: 'function_call', name: 'shell_command', call_id: 'call_runtime_fixture',
-            arguments: JSON.stringify({ command: `${commandName} ${argument}`, workdir: workspace,
-              sandbox_permissions: 'require_escalated', justification: 'Run the isolated harmless Acolyte runtime fixture.' }) }
+          ? { id: 'fc_runtime_fixture', type: 'function_call', name: observed.shellTool, call_id: 'call_runtime_fixture',
+            arguments: JSON.stringify(runtimeShellArguments(observed.shellTool, commandLine, workspace,
+              'Run the isolated harmless Acolyte runtime fixture.', context.shellBinary)) }
           : { id: 'msg_runtime_fixture', type: 'message', role: 'assistant', status: 'completed',
             content: [{ type: 'output_text', text: 'Isolated runtime fixture complete.', annotations: [] }] };
         const responseId = `response_fixture_${observed.providerRequests}`;
@@ -273,7 +313,8 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
         if (message.method === 'item/completed' && message.params?.item?.type === 'commandExecution') {
           const item = message.params.item;
           const next = { id: item.id, status: item.status, exitCode: item.exitCode ?? null,
-            witness: String(item.aggregatedOutput || '').includes(shellWitness) };
+            witness: String(item.aggregatedOutput || '').includes(shellWitness),
+            command: typeof item.command === 'string' ? item.command.slice(0, 400) : null };
           // Codex 0.145 emits a declined completion twice for the same item,
           // first without an exit code and then with -1. Count execution items,
           // retaining any witness, rather than mistaking that update for a rerun.
@@ -493,6 +534,7 @@ async function main() {
   }
 }
 
-module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined };
+module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined,
+  runtimeShellTool, runtimeShellArguments };
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });

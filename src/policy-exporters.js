@@ -8,10 +8,29 @@ const GENERATED_FORMAT_VERSION = 1;
 const CODEX_BEGIN_MARKER = '# BEGIN permission-wildcarding generated rules';
 const CODEX_END_MARKER = '# END permission-wildcarding generated rules';
 
+// `duckdb`, `hyperfine`, `just` and `make` (each with its `.exe` spelling, because
+// canonicalRoot keeps the suffix) added 2026-10-13, alongside the same four in the
+// learner's own SHELL_WRAPPERS in src/auto-learn.js. That table only raises risk; it
+// cannot stop this exporter. MEASURED that day: a reviewed candidate the learner builds
+// from `just build`, `make all`, `hyperfine 'sleep 1'` or `duckdb -c "SELECT 1"` carries
+// the bare prefix `[root]`, is not `complex`, and rendered as a valid `prefix_rule` with
+// that one-token pattern under `includeReviewed`: nothing here refused it, and the
+// validator below bans only bare python, curl, git and PowerShell. A one-token pattern
+// for any of the four is arbitrary execution, by recipe, by benchmarked command or by
+// `.shell`. Membership here makes `wrapperIsBroad` refuse the bare prefix while still
+// allowing a reviewed, narrower one (`["just", "build"]`), which is exactly how `sh` and
+// `bash` are already treated. On the Claude side the bare `Bash(<root> *)` was already
+// refused (it is on neither root list); membership also refuses a reviewed multi-token
+// form such as `Bash(just --version *)`, as for every wrapper here. This is NOT the
+// full list of runners the learner knows
+// (`node`, `npx`, `uvx`, `xargs` and others are absent here); that gap is older than
+// these four and is recorded rather than widened in passing.
 const SHELL_WRAPPERS = new Set([
   'bash', 'bash.exe', 'cmd', 'cmd.exe', 'command.com', 'dash', 'dash.exe',
-  'fish', 'fish.exe', 'ksh', 'ksh.exe', 'powershell', 'powershell.exe',
-  'pwsh', 'pwsh.exe', 'sh', 'sh.exe', 'wsl', 'wsl.exe', 'zsh', 'zsh.exe',
+  'duckdb', 'duckdb.exe', 'fish', 'fish.exe', 'hyperfine', 'hyperfine.exe',
+  'just', 'just.exe', 'ksh', 'ksh.exe', 'make', 'make.exe', 'powershell',
+  'powershell.exe', 'pwsh', 'pwsh.exe', 'sh', 'sh.exe', 'wsl', 'wsl.exe',
+  'zsh', 'zsh.exe',
 ]);
 
 const DESTRUCTIVE_OR_ADMIN_ROOTS = new Set([

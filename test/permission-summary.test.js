@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { readCodexPermissionSummary } = require('../src/permission-summary');
+const { readCodexPermissionSummary, deadShellApprovals } = require('../src/permission-summary');
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-permission-summary-'));
@@ -133,4 +133,79 @@ test('non-regular rules and invalid UTF-8 stay explicit unknown inputs', (t) => 
   assert.equal(summary.issues.length, 2);
   assert.match(summary.issues.find((entry) => entry.path === directory).reason, /non-regular/);
   assert.match(summary.issues.find((entry) => entry.path === invalid).reason, /UTF-8/);
+});
+
+// One-off shell approvals (2026-10-13). Every entry below is synthetic: each is the
+// SHAPE a real allow list was measured to hold, never a real entry. Each test drives one
+// reason, so dropping that reason from DEAD_APPROVAL_REASONS fails the test named for it.
+const dead = (list) => deadShellApprovals(list);
+for (const [reason, entry, alsoCounted] of [
+  // A chain is compound on every segment. No other dead reason fires for this one, so
+  // dropping the reason makes the entry live again.
+  ['compound-command', 'Bash(git add src && git commit -m wip)', []],
+  // `for` without a body has no `;` and no `$(`, so the keyword is the only reason.
+  ['reserved-keyword', 'Bash(for f in a b)', []],
+  // A command substitution is script syntax and nothing else.
+  ['script-syntax', 'Bash(echo $(date))', []],
+  // A variable opener has no root, so it is always BOTH of these; the per-reason count is
+  // what dropping either one changes.
+  ['dynamic-executable', 'PowerShell($stamp = Get-Date)', ['missing-command-root']],
+  // A range literal (2026-10-13, src/auto-learn.js containsScriptSyntax) has no root
+  // either, and is script syntax.
+  ['missing-command-root', 'PowerShell(1..6)', ['script-syntax']],
+]) {
+  test(`a saved approval flagged ${reason} is counted as a one-off`, () => {
+    // MUTATION: drop '${reason}' from DEAD_APPROVAL_REASONS in src/permission-summary.js.
+    // Its per-reason count disappears, and where it is the only reason the entry stops
+    // counting at all. Confirmed 2026-10-13, one reason at a time.
+    const result = dead([entry, 'Bash(git status)']);
+    assert.equal(result.byReason[reason], 1, `${entry}: ${JSON.stringify(result.byReason)}`);
+    assert.deepEqual(Object.keys(result.byReason).sort(), [reason, ...alsoCounted].sort());
+    assert.deepEqual(result.entries, [entry]);
+    assert.equal(result.count, 1);
+    assert.equal(result.total, 2, 'both exact shell entries were examined');
+  });
+}
+
+test('ordinary exact approvals, including path and call-operator executables, are not one-offs', () => {
+  // The control, and the reason `shell-structure` is NOT in the set (see the comment on
+  // DEAD_APPROVAL_REASONS). A path or quoted executable raises `shell-structure` on its
+  // own, yet it is an ordinary command that matches again when re-run; counting it
+  // would invite deleting an approval that works.
+  // MUTATION: add 'shell-structure' to DEAD_APPROVAL_REASONS. The two executable forms
+  // below are then counted. Confirmed 2026-10-13.
+  const result = dead([
+    'Bash(git status)', 'Bash(npm test)', 'Bash(./scripts/build.sh --release)',
+    'PowerShell(& "C:\\Tools\\probe.exe" --version)', 'PowerShell(Get-ChildItem -Force)',
+  ]);
+  assert.deepEqual(result, { count: 0, total: 5, byReason: {}, entries: [] });
+});
+
+test('patterns and non-shell entries are not judged', () => {
+  // An entry with any `*` is a pattern that may match more than its own text, so it is
+  // skipped (neither counted nor examined) even when its text is a one-off shape. Tools
+  // that are not shell commands, and non-strings, are ignored the same way.
+  // MUTATION: drop the `entry.includes('*')` skip. The loop below is examined, flagged
+  // compound and reserved, and counted. Confirmed 2026-10-13.
+  const result = dead([
+    'Bash(for f in *.txt; do wc -l $f; done)', 'Bash(git status *)', 'PowerShell(Get-Item *)',
+    'Read(~/notes/**)', 'WebSearch', 'mcp__fixture__tool', 42, null,
+  ]);
+  assert.deepEqual(result, { count: 0, total: 0, byReason: {}, entries: [] });
+  assert.deepEqual(dead('not a list'), { count: 0, total: 0, byReason: {}, entries: [] });
+});
+
+test('the result is memoized on the list contents', () => {
+  const list = ['PowerShell($stamp = Get-Date)', 'Bash(git status)'];
+  const first = dead(list);
+  // MUTATION: delete the memo early-return in deadShellApprovals. Every call builds a
+  // fresh object and this identity check fails. Confirmed 2026-10-13.
+  assert.equal(dead(list.slice()), first, 'an equal list is the same answer, not a recomputation');
+  // And it is keyed on CONTENT, not identity or length: one changed entry is a new answer.
+  // MUTATION: key the memo on list.length; this fails. Confirmed 2026-10-13.
+  const changed = dead(['PowerShell(1..6)', 'Bash(git status)']);
+  assert.notEqual(changed, first);
+  assert.deepEqual(changed.entries, ['PowerShell(1..6)']);
+  // The memo hands one object to every caller, so it must not be writable by them.
+  assert.ok(Object.isFrozen(first) && Object.isFrozen(first.entries) && Object.isFrozen(first.byReason));
 });

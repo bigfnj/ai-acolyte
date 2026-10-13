@@ -1178,6 +1178,70 @@ test('a Codex-only saved list is populated while Claude has no permissions', asy
   }
 });
 
+// One-off shell approvals (2026-10-13): saved exact entries that open with something
+// that is not a command, or chain several, counted by deadShellApprovals off the SAME
+// allow list the push already read. Synthetic entries only, and every one is a shape
+// the wildcarding pass leaves alone, so activation does not rewrite the list under test.
+test('the saved-permissions card names one-off shell approvals and links to them, and goes quiet at zero', async (t) => {
+  const env = setup(t);
+  const oneOffs = ['PowerShell($stamp = Get-Date)', 'PowerShell(1..6 | ForEach-Object { $_ })'];
+  env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(./scripts/build.sh --release)', ...oneOffs], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual(env.read().permissions.allow.slice(2), oneOffs, 'precondition: the list was not rewritten');
+    // MUTATION: drop `deadApprovals,` from the _push payload. The field is absent and
+    // this fails; the panel then renders nothing. Confirmed 2026-10-13.
+    assert.deepEqual(data.deadApprovals, {
+      count: 2, total: 3,
+      byReason: { 'compound-command': 1, 'dynamic-executable': 1, 'missing-command-root': 2, 'script-syntax': 1 },
+    }, 'the star rule is not examined; the path executable is examined and not counted');
+
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    const line = panel.dom.byId.get('deadApprovals');
+    // MUTATION: drop the renderDeadApprovals(d) call from render(). The line stays
+    // hidden and empty while the badge still counts, which is the disagreement the
+    // shared helper exists to prevent. Confirmed 2026-10-13.
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent,
+      '2 saved shell approvals are one-off scripts that will prompt again on any variation — review');
+    assert.match(line.title, /Nothing is removed automatically/);
+    // MUTATION: drop the one-off suffix from the wcount badge. Confirmed 2026-10-13.
+    assert.equal(panel.dom.byId.get('wcount').textContent, '4 total · 2 one-off');
+    assert.equal(panel.dom.byId.get('wcount').className, 'rowstate', 'a note, not a warn tone');
+
+    panel.posted.length = 0;
+    line.click();
+    // MUTATION: post viewPermissions without the selection. The picker then opens the
+    // full mixed list instead of these entries. Confirmed 2026-10-13.
+    assert.deepEqual(panel.posted, [{ type: 'viewPermissions', selection: { filter: 'dead' } }]);
+    ui.on.message(panel.posted[0]);
+    assert.deepEqual(app.executedArgs.at(-1), {
+      id: 'permission-wildcarding.viewPermissions', args: [{ filter: 'dead' }],
+    }, 'the route carries the filter to the shared picker unchanged');
+
+    // Zero is silence: no line, no badge suffix, and a click does nothing.
+    env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(./scripts/build.sh --release)'], deny: [] } });
+    app.provider.refresh();
+    await settle();
+    const quiet = ui.posted.at(-1);
+    assert.deepEqual(quiet.deadApprovals, { count: 0, total: 1, byReason: {} });
+    panel.deliver(quiet);
+    assert.equal(line.hidden, true);
+    assert.equal(line.textContent, '');
+    assert.equal(panel.dom.byId.get('wcount').textContent, '2 total');
+    panel.posted.length = 0;
+    line.click();
+    assert.deepEqual(panel.posted, [], 'a hidden line has nothing to open');
+  } finally {
+    await app.dispose();
+  }
+});
+
 // The memory report is the most expensive thing one push does: measured 6.99 ms
 // and 25 fs syscalls (12 readFileSync + 11 existsSync + 2 readdirSync) against a
 // live corpus. _push called it TWICE — once for the Memory card, once for a

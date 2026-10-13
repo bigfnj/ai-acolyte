@@ -136,8 +136,12 @@ function harness(tempHome, opts = {}) {
       },
     },
     workspace: {
-      isTrusted: true,
-      workspaceFolders: [{ uri: { fsPath: path.join(tempHome, 'workspace') } }],
+      // `opts.isTrusted` and `opts.workspaceFolders` override the one trusted folder
+      // every other test runs in. Both were hard-coded, so the Project-local card was
+      // only ever rendered for a single trusted folder, which is the one shape whose
+      // subtitle named its file and whose counts the drain could act on.
+      isTrusted: opts.isTrusted ?? true,
+      workspaceFolders: opts.workspaceFolders ?? [{ uri: { fsPath: path.join(tempHome, 'workspace') } }],
       createFileSystemWatcher(pattern) {
         return { pattern, onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} };
       },
@@ -2254,6 +2258,173 @@ test('partial Codex instruction installation is reported consistently in cards a
           'WITNESS partial gates badge must have warning tone');
       }
     }
+  } finally {
+    await app.dispose();
+  }
+});
+
+// ── the Project-local card ──────────────────────────────────────────────────────
+// BACKLOG "The Project-local card reports on a path it did not watch", fixed
+// 2026-10-13. localCardData carried its own copy of the folder filter, without the
+// trust gate drainableRoots applies, so an untrusted window showed dry-run numbers
+// the drain refused to act on. With two or more folders the payload held only the
+// bare LOCAL_RELATIVE constant, so the subtitle named no file. Neither showed here,
+// because the harness pinned the one shape where both are invisible: a single
+// trusted folder. Nothing in the suite rendered the card at all.
+
+// Every outcome against a user scope holding Bash(rg *): dotnet build promotes as
+// a family (and its local entry is then pruned under it), rg needle is already
+// covered so it is pruned, and the script blob is kept, since only the project
+// that approved it can justify it. So promote 1, prune 2, kept 1.
+const LOCAL_MIX = ['Bash(dotnet build src/App.csproj)', 'Bash(rg needle)', 'PowerShell($x = 1; ls)'];
+
+function seedLocal(root, allow = LOCAL_MIX) {
+  const file = path.join(root, '.claude', 'settings.local.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ permissions: { allow } }, null, 2) + '\n');
+  return file;
+}
+
+// The display form the extension builds under this harness, whose os.homedir()
+// is the temp home.
+function tilde(tempHome, file) { return file.replace(tempHome, '~'); }
+
+async function localCard(app) {
+  const ui = fakeView();
+  app.provider.resolveWebviewView(ui.view);
+  await settle();
+  const data = ui.posted.at(-1);
+  return { local: data.local, rendered: renderDashboard(app.provider, data) };
+}
+
+test('with two folders open the Project-local card names both files, not the bare file name', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: [] } });
+  const files = ['alpha', 'bravo'].map((name) => seedLocal(path.join(env.tempHome, name)));
+  // Auto-drain off, so activation leaves both files for the dry run to count.
+  const app = harness(env.tempHome, {
+    workspaceFolders: files.map((file) => ({ uri: { fsPath: path.dirname(path.dirname(file)) } })),
+    settings: { 'localDrain.enabled': false },
+  });
+  try {
+    const { local, rendered } = await localCard(app);
+    const shown = files.map((file) => tilde(env.tempHome, file));
+    assert.deepEqual(local.files, shown, 'one home-relative path per folder inspected');
+    assert.equal(local.folders, 2);
+    assert.equal(local.promote, 2, 'precondition: both folders were dry-run, trusted');
+
+    const sub = rendered.node('locsub');
+    assert.equal(sub.textContent, '2 folders · auto-drain off');
+    for (const file of shown) {
+      assert.ok(sub.title.includes(file), 'the subtitle tooltip names ' + file);
+    }
+    assert.equal(sub.title.split(' · ').slice(0, 2).join(' · '), shown.join(' · '),
+      'the paths are joined on one line, in folder order');
+    assert.match(sub.title, /CLI hook/,
+      'the tooltip says the hook drains session folders this card cannot list');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('an untrusted window names its Project-local file but shows no dry-run counts, and the drain stays refused', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: [] } });
+  const file = seedLocal(path.join(env.tempHome, 'workspace'));
+  const before = fs.readFileSync(file, 'utf8');
+  // Auto-drain left ON, so activation's own drain pass is the first refusal tested.
+  const app = harness(env.tempHome, { isTrusted: false });
+  try {
+    const { local, rendered } = await localCard(app);
+    assert.equal(local.trusted, false);
+    assert.deepEqual(local.files, [tilde(env.tempHome, file)], 'the file left alone is still named');
+    assert.deepEqual([local.promote, local.prune, local.kept], [null, null, null],
+      'no dry run over a workspace the drain will not touch, so no numbers');
+
+    for (const id of ['locpromote', 'locprune', 'lockept']) {
+      assert.equal(rendered.node(id).textContent, '–', id + ' shows the placeholder dash, not a count');
+    }
+    assert.equal(rendered.node('loctext').textContent, 'Project-local approvals: not counted',
+      'the headline neither counts nor claims "drained"');
+    assert.equal(rendered.node('locsub').textContent,
+      'workspace not trusted — read-only · ' + tilde(env.tempHome, file));
+    assert.equal(rendered.node('stLocal').textContent, 'workspace not trusted');
+    assert.equal(rendered.node('drainLocal').disabled, true);
+    assert.equal(rendered.node('drainLocal').textContent, '⤴  Drain into user scope',
+      'an uncounted file is not "Nothing to drain"');
+
+    // The gate on the drain itself is unchanged: activation drained nothing, and
+    // the command, reachable from the palette with the button disabled, refuses.
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'activation left the untrusted file alone');
+    await app.commands.get('permission-wildcarding.drainLocal')();
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'a manual drain left it alone too');
+    assert.deepEqual(env.read().permissions.allow, ['Bash(rg *)'], 'nothing reached user scope');
+    assert.ok(app.statuses.some((message) => message.includes('workspace is not trusted — local drain skipped')),
+      'the refusal is said, not silent');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The control for the test above: the same file in a trusted window is counted,
+// the single-folder subtitle is the path itself, and the drain does what the
+// counts said it would.
+test('a trusted window shows the Project-local dry-run counts, and the drain acts on them', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: [] } });
+  const file = seedLocal(path.join(env.tempHome, 'workspace'));
+  const app = harness(env.tempHome, { settings: { 'localDrain.enabled': false } });
+  try {
+    const { local, rendered } = await localCard(app);
+    assert.equal(local.trusted, true);
+    assert.deepEqual([local.promote, local.prune, local.kept], [1, 2, 1]);
+    for (const [id, n] of [['locpromote', '1'], ['locprune', '2'], ['lockept', '1']]) {
+      assert.equal(String(rendered.node(id).textContent), n, id + ' shows its count');
+    }
+    assert.equal(rendered.node('loctext').textContent, 'Project-local approvals: 3 to drain');
+    assert.equal(rendered.node('locsub').textContent, tilde(env.tempHome, file) + ' · auto-drain off',
+      'one folder keeps the path itself as the subtitle');
+    assert.equal(rendered.node('drainLocal').disabled, false);
+    assert.equal(rendered.node('drainLocal').textContent, '⤴  Drain 3 into user scope');
+
+    await app.commands.get('permission-wildcarding.drainLocal')();
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow, ['PowerShell($x = 1; ls)']);
+    assert.ok(env.read().permissions.allow.includes('Bash(dotnet build *)'));
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The card and the drain take their folders from one function, localRoots. Two
+// copies of the filter is how the card came to show numbers for an untrusted
+// workspace, and only a folder one copy keeps and the other drops can tell a
+// second copy from the first. A non-file folder whose fsPath happens to exist on
+// this disk is that folder: the shared filter drops it, the old copy did not.
+test('the Project-local card and the drain read one folder filter, so a folder the drain skips is not listed', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const realFile = seedLocal(path.join(env.tempHome, 'alpha'), ['Bash(dotnet build src/App.csproj)']);
+  const virtualFile = seedLocal(path.join(env.tempHome, 'virtual'), ['Bash(dotnet build src/App.csproj)']);
+  const virtualBefore = fs.readFileSync(virtualFile, 'utf8');
+  const app = harness(env.tempHome, {
+    workspaceFolders: [
+      { uri: { scheme: 'file', fsPath: path.join(env.tempHome, 'alpha') } },
+      { uri: { scheme: 'vscode-vfs', fsPath: path.join(env.tempHome, 'virtual') } },
+    ],
+    settings: { 'localDrain.enabled': false },
+  });
+  try {
+    assert.ok(fs.existsSync(virtualFile),
+      'precondition: the skipped folder HAS a file, so only the filter can be what drops it');
+    const { local } = await localCard(app);
+    assert.deepEqual(local.files, [tilde(env.tempHome, realFile)], 'the card lists the file-scheme folder only');
+    assert.equal(local.promote, 1, 'and counts only it');
+
+    await app.commands.get('permission-wildcarding.drainLocal')();
+    assert.deepEqual(JSON.parse(fs.readFileSync(realFile, 'utf8')).permissions.allow, [],
+      'the folder the card listed is the folder the drain drained');
+    assert.equal(fs.readFileSync(virtualFile, 'utf8'), virtualBefore,
+      'and the folder the card left out is the folder the drain left alone');
   } finally {
     await app.dispose();
   }

@@ -932,6 +932,31 @@ the shared assertion; the suite not asking for the canary check, not requiring e
 request checked, or not isolating its workspace), and the suite as it stood before this
 change fails the source test.
 
+**A call is grouped with its result inside its own session.** `parseCodexJsonl` joined
+each call to its result through maps keyed by the call id alone, while everything else it
+joins (observation identity, unified-exec process ids, code-mode cell IDs, MCP identity)
+was already scoped by session. So two sessions in one rollout file that reused a call id
+shared one group: the second session's real successes were withheld, and either session's
+failure was applied to the other's call of the same id (a direct `exec_command` success
+read `failed` because the other session's call failed). Real call ids are unique and a
+rollout Codex writes holds one session, so this is defence in depth, but the five real MCP
+rollouts concatenated in the MCP fixture all use one call id. The key is now (the session
+in effect at the record, call id), the scope identity already uses, so no observation id
+moves: `test/codex-session-call-groups.test.js` pins ten ids taken from the parser before
+the change (the six real code-mode cells, a direct and a `write_stdin`-finished
+`exec_command`, a call with no call id, and a call after a fork head, which keeps the
+parent file's own id), and they pass before and after. It also shows each of two sessions
+sharing every call id reads exactly as it reads alone, in either order and with a
+failure in one, and that an append slice of a forked rollout reaches the full-read id,
+session and verdict: through the overlap, through the bounded widen, and from the head
+seed alone when the slice starts at the call. The code-mode session-scope test now runs
+with shared call ids as well as renamed ones. Against the parser before the change, the
+three shared-id tests fail and the identity and append tests pass. Mutation: eight
+mutants were each killed (groups keyed by call id alone, by cwd, or by the slice seed
+instead of the in-order session; the wait join looking its cell up outside its session;
+a previous result merged across sessions; identity gaining the command or losing the
+session; the append seed applying only the first head `session_meta`).
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,
@@ -1017,7 +1042,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1579#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1599#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

@@ -1144,6 +1144,21 @@ function codexMcpObservation(record, location, state, file) {
 
 function parseCodexJsonl(text, options = {}) {
   const observations = [];
+  // A CALL JOINS ITS RESULT INSIDE ITS OWN SESSION (2026-10-13). `callGroups`
+  // and `results` were keyed by the call id alone while everything else joined
+  // here is scoped by session -- observation identity (identityParts,
+  // createObservation), unified-exec process ids (applyCodexProcessResults),
+  // code-mode cell IDs (codeModeJoin), MCP identity -- so two sessions in one
+  // file reusing a call id shared ONE group: two observations withhold success
+  // (applyCodexGroupResult), and either session's failure was applied to both.
+  // Real call ids are unique and a real rollout holds one session (a fork head
+  // names two, and every record after it is the second's, see codexHeadSeed),
+  // but the five real MCP rollouts concatenated in
+  // test/fixtures/codex-mcp-item-completed-sanitized.jsonl all use one call id.
+  // The key is (the session in effect at the record, call id), the same scope
+  // identityParts already use, so no observation id moves, and an append slice,
+  // seeded with the same in-order session after the head, keys a call and its
+  // result the way a full read does (test/codex-session-call-groups.test.js).
   const callGroups = new Map();
   const results = new Map();
   const mcpCalls = new Map();
@@ -1153,6 +1168,7 @@ function parseCodexJsonl(text, options = {}) {
   const processOutputs = [];
   const cellJoin = codeModeJoin();
   const state = { session: stringValue(options.session), cwd: stringValue(options.cwd) };
+  const callKey = (callId) => JSON.stringify([state.session || '', callId]);
   const file = stringValue(options.file) || stringValue(options.path);
 
   parseJsonlRecords(text, options, (record, location) => {
@@ -1213,7 +1229,7 @@ function parseCodexJsonl(text, options = {}) {
           file, callOffset: location.offset, callEnd: location.end,
         });
         if (!observation) continue;
-        const groupKey = outerCallId || observation.callId;
+        const groupKey = callKey(outerCallId || observation.callId);
         if (!callGroups.has(groupKey)) callGroups.set(groupKey, []);
         const group = callGroups.get(groupKey);
         if (name === 'exec_command' || name === 'functions.exec_command') {
@@ -1237,7 +1253,7 @@ function parseCodexJsonl(text, options = {}) {
         const calls = extractNestedShellCalls(input);
         const commands = calls.map((call) => call.command);
         const outerCallId = stringValue(firstDefined(item.call_id, item.callId, item.id));
-        const groupKey = outerCallId || `codex-group-${stableHash(file, state.session, location.offset, input)}`;
+        const groupKey = callKey(outerCallId || `codex-group-${stableHash(file, state.session, location.offset, input)}`);
         if (!callGroups.has(groupKey)) callGroups.set(groupKey, []);
         const group = callGroups.get(groupKey);
         group._customExec = true;
@@ -1276,7 +1292,8 @@ function parseCodexJsonl(text, options = {}) {
           nestedStatuses: item.type === 'custom_tool_call_output'
             ? nestedShellStatuses(item.output) : [],
         };
-        const previous = results.get(outerCallId);
+        const resultKey = callKey(outerCallId);
+        const previous = results.get(resultKey);
         if (previous) {
           result.status = mergeStatus(previous.status, result.status);
           result.nestedStatuses = [
@@ -1284,8 +1301,8 @@ function parseCodexJsonl(text, options = {}) {
             ...result.nestedStatuses,
           ];
         }
-        results.set(outerCallId, result);
-        applyCodexGroupResult(callGroups.get(outerCallId), result);
+        results.set(resultKey, result);
+        applyCodexGroupResult(callGroups.get(resultKey), result);
         if (yieldId !== null) cellJoin.yielded(state.session || '', yieldId, outerCallId);
         if (item.type === 'function_call_output') {
           const bound = cellJoin.waitOutput(state.session || '', outerCallId, {
@@ -1298,15 +1315,18 @@ function parseCodexJsonl(text, options = {}) {
             // nested status a directly completed cell would need.
             let status = 'unknown';
             const nestedStatuses = [];
-            for (const part of [results.get(bound.cell.callId), ...bound.cell.outputs]) {
+            // The wait and the cell it names share a session (codeModeJoin keys
+            // both by it), so the cell's call key is the current one.
+            const cellKey = callKey(bound.cell.callId);
+            for (const part of [results.get(cellKey), ...bound.cell.outputs]) {
               if (!part) continue;
               status = mergeStatus(status, part.status);
               nestedStatuses.push(...(Array.isArray(part.nestedStatuses) ? part.nestedStatuses : []));
             }
             const joined = { status, nestedStatuses, pending: bound.terminal.pending,
               offset: bound.terminal.offset, end: bound.terminal.end };
-            results.set(bound.cell.callId, joined);
-            const group = callGroups.get(bound.cell.callId);
+            results.set(cellKey, joined);
+            const group = callGroups.get(cellKey);
             if (group) applyCodexGroupResult(group, joined);
             // The cell's call is outside this slice: ask for the bounded widen.
             else cellJoin.unresolved.push({ callId: outerCallId, resultEnd: location.end });

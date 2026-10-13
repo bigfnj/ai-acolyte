@@ -815,8 +815,12 @@ function applyBypass(settings, on) {
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is
 // exported for test/bypass-round-trip.test.js, which is what makes that mutation
 // fail now.
+//
+// isPowerShellCommandName is exported (2026-10-13) for src/local-settings.js, whose
+// promotion test asks the same "a command name, not a number or a range" question of a
+// digit-leading root.
 module.exports = {
-  generalizePermission, BASH_SCRIPT_KEYWORDS,
+  generalizePermission, BASH_SCRIPT_KEYWORDS, isPowerShellCommandName,
   isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   currentMode, isBypassOn, applyBypass, readBypassState,

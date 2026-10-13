@@ -30,7 +30,7 @@ const path = require('path');
 
 const {
   generalizePermission, createCoverIndex, writeFileAtomicSync,
-  BASH_SCRIPT_KEYWORDS,
+  BASH_SCRIPT_KEYWORDS, isPowerShellCommandName,
 } = require('./permissions');
 const { legacyClaudeMaxStatus } = require('./legacy-max-cleanup');
 // The same glob matcher the policy guard uses to decide whether managed policy
@@ -54,7 +54,7 @@ function localSettingsPath(workspaceRoot) {
 // non-shell family: `Read`/`Edit`/`Write` would mean inferring a directory rule
 // from observed paths, and an MCP tool is opaque by construction. Those are
 // review-only in `tool-learn.js` and they stay local here for the same reason.
-const PROMOTABLE = /^(Bash|PowerShell)\(([A-Za-z][\w.-]*)(?:[ :]([A-Za-z0-9][\w.-]*))?[ :]\*\)$/;
+const PROMOTABLE = /^(Bash|PowerShell)\(([A-Za-z0-9][\w.-]*)(?:[ :]([A-Za-z0-9][\w.-]*))?[ :]\*\)$/; // digit-led: see the end
 
 // The user-scope permission a local entry would become, or null if it is not
 // portable. Generalizing first is what turns `Bash(git status)` into
@@ -64,7 +64,7 @@ function promotionFor(entry) {
   const match = PROMOTABLE.exec(generalizePermission(entry));
   if (!match) return null;
   const [permission, tool, root] = match;
-  if (tool === 'Bash' && BASH_SCRIPT_KEYWORDS.has(root.toLowerCase())) return null;
+  if ((tool === 'Bash' && BASH_SCRIPT_KEYWORDS.has(root.toLowerCase())) || !isPowerShellCommandName(root)) return null;
   return permission;
 }
 
@@ -288,6 +288,21 @@ function drainLocalSettings({
 // promotionFor applies, and promotionFor is exported and tested directly;
 // grantedBy is the coverage test redundantUnder, partitionLocal and
 // drainLocalSettings all route through, and all three are exported and tested.
+//
+// PROMOTABLE's root may start with a digit since 2026-10-13 (this note sits down here
+// so that the line references other files make into this one do not move). Until then
+// it required a letter first, so a local `Bash(7z a x.zip)`, which the generalizer turns
+// into `Bash(7z *)` (and, since 2b8e6b2 the same day, `PowerShell(7z a x.zip)` into
+// `PowerShell(7z *)`), was never promoted, and every project kept re-earning its own copy
+// of the same command family. The line drawn is 2b8e6b2's, through the same function
+// (isPowerShellCommandName in src/permissions.js, named for the shell where the
+// generalizer applies it; the number-or-range question is the same for a Bash root): a
+// digit-leading command NAME (`7z`, `7za`, `7z.exe`, `2to3`) is portable, while a
+// numeric literal or a range (`42`, `1.5`, `0x1F`, `10kb`, `1..6`) names no program in
+// either shell, so a wildcard keyed on one stays local. promotionFor applies that test
+// itself because an entry already in wildcard form passes through generalizePermission
+// unchanged, without meeting the generalizer's own gate: an older pass could have
+// written `PowerShell(1..6 *)`.
 module.exports = {
   LOCAL_RELATIVE,
   localSettingsPath, localBackupPath, promotionFor, redundantUnder,

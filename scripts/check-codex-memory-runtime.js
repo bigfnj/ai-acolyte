@@ -12,6 +12,7 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 const readline = require('node:readline');
 const { spawn, spawnSync } = require('node:child_process');
+const { isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
 
 const TIMEOUT_MS = 45000;
 const BOUNDARY = 'Actual fresh Codex app-server processes, synthetic native-memory files and named extension adapter. Scripted loopback responder, no model inference or credentials. Memory generation disabled. No VS Code UI or model obedience claim; fixture enablement is not a live-profile setting.';
@@ -103,7 +104,10 @@ async function runtimeCase(context, name, enabled, useMemories) {
         assert.equal(req.headers['api-key'], undefined, 'fixture must not use API keys');
         observed.requests += 1;
         assert.equal(observed.requests, 1, 'memory generation or additional inference request is forbidden');
-        const body = JSON.parse(Buffer.concat(buffers).toString('utf8'));
+        const raw = Buffer.concat(buffers).toString('utf8');
+        assertNoForeignInstructions(raw, name);
+        observed.canaryFreeRequests = observed.requests;
+        const body = JSON.parse(raw);
         requestText = strings([body.instructions, body.input]).join('\n');
         const item = { id: 'memory_fixture_message', type: 'message', role: 'assistant', status: 'completed',
           content: [{ type: 'output_text', text: 'Memory loading fixture complete.', annotations: [] }] };
@@ -217,6 +221,8 @@ async function main() {
   const workspace = path.join(owned, 'workspace');
   const memoryRoot = path.join(codexHome, 'memories');
   for (const dir of [home, workspace, memoryRoot]) fs.mkdirSync(dir, { recursive: true });
+  // Workspace is its own project root, canary one level up (check-codex-runtime.js, 2026-10-13).
+  isolateWorkspaceInstructions(workspace);
   const reportPath = path.join(reportRoot, 'evidence.json');
   const report = { status: 'running', boundary: BOUNDARY, extension, subjectHashes, harnessSha256: hashFile(__filename),
     codexLayout: custom ? 'custom-override' : 'default', mutation: args['--mutation'] || null,

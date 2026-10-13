@@ -773,6 +773,131 @@ Superseded by this section: the "Declared window: none yet" row above, the "One 
 one recorded contract-tested version" paragraph under Still not proven, and the CI
 paragraph below.
 
+## Codex 0.161.0 follow-up, October 13, 2026: harness isolation and history-parser gaps
+
+Added after the section above; it amends that section where it says so and replaces none
+of it. Same machine, `codex-cli` 0.161.0, Windows, isolated temp homes, scripted loopback
+responder, no credentials.
+
+**The harness workspaces are their own project roots now, and a canary proves it.** The
+section above records that 0.161.0 loaded the developer's home `AGENTS.md` into every
+fresh harness session. One correction to it: the home directory is not a git repository.
+Its `.git` is a directory holding only a credentials file, which git itself rejects, and
+Codex counted it anyway, because the `AGENTS.md` walk tests a `.git` by existence. Measured
+through `runtimeCase` in a temp tree (`acolyte-root-probe-SIgiRe`): an empty `.git` in the
+workspace stopped the walk there; without one, an empty `.git` one level up became the
+root, its `AGENTS.md` was loaded, and the home file was not. The same empty directory
+counts for nothing else: project layers and trust ignore a `.git` that is not a repository
+(the project-rules record above), the product's own repository check requires `HEAD`, and
+git rejects it. So `isolateWorkspaceInstructions` in `scripts/check-codex-runtime.js`
+gives each workspace an empty `.git` (an existing one, such as the hook harness's real
+repository or a worktree's `.git` file, is left alone) and puts a canary `AGENTS.md`
+beside an empty `.git` of its own in the workspace's parent, refusing to plant outside the
+temp tree or in its root. Every harness that drives a session asserts the canary is absent
+from every request its loopback receives. The chain Codex loads is contiguous from the
+root down to the cwd, so a root anywhere above the workspace puts the canary in the
+request, and the parent's own `.git` makes that true on a machine whose home has no marker
+at all. `project_root_markers` was not used: any mention of it in `config.toml` widens
+`src/codex-policy.js`'s candidate scan to every ancestor `.codex` folder, the real
+`~/.codex` included, which a harness modelling a typical profile should not do.
+`scripts/vscode-acceptance/mcp.js` reuses the MCP case with the VS Code driver's own
+workspace, so the check is opt-in in that shared case; the acceptance suite does not ask
+for it and was not run here.
+
+Mutation: with the workspace marker removed, the code-mode harness failed 5/5 sessions
+(`acolyte-code-mode-AcCa5r`, canary in every rollout, home file in none) and the runtime
+harness failed its first case (`acolyte-codex-runtime-MVboeg`). Restored byte-identical.
+
+| Harness | Result after the change | Evidence |
+|---|---|---|
+| `check-codex-runtime.js` | 4/4 default, 4/4 custom-override | `acolyte-codex-runtime-hS8yLU`, `-bhN2Wr` |
+| `check-codex-hook-runtime.js` | 5/5 CLI turns + 1/1 fresh process, both layouts | `acolyte-codex-hook-runtime-JxzZr0`, `-CI297T` |
+| `check-codex-wait-runtime.js` | success and nonzero, each through a real `write_stdin` | `acolyte-wait-completion-jqr9A8` |
+| `check-codex-memory-runtime.js` | 3/3 both layouts | `acolyte-codex-memory-runtime-T1TKbK`, `-iKXz5m` |
+| `check-codex-native-gates-runtime.js` | 3/3 both layouts | `acolyte-native-gates-runtime-MviJNi`, `-ZIu96J` |
+| `check-codex-prune-runtime.js` | 9/9 both layouts | `acolyte-codex-prune-runtime-w7xpvh`, `-ycylZZ` |
+| `check-codex-restore-runtime.js` | 10/10 both layouts | `acolyte-codex-restore-runtime-Gdo5l2`, `-FZDeeF` |
+| `check-codex-shared-runtime.js` | 3/3 groups, 14/14 processes, both layouts | `acolyte-codex-shared-runtime-Il4ksY`, `-HCBH4Q` |
+| `check-codex-wrapper-runtime.js` | 13/13 agree + 2 observations | `acolyte-codex-wrapper-runtime-e06QTL` |
+| `check-codex-project-rules-runtime.js` | 11 sessions pass, so the empty `.git` moved no rule or trust result | `acolyte-codex-project-rules-zhhviB` |
+| `check-codex-code-mode-runtime.js` | passes | `acolyte-code-mode-fPP7Qf` |
+| `check-codex-mcp-runtime.js` | every Codex fact and the canary pass; the parser check still fails 5/5 on this subject (fixed below) | `acolyte-codex-mcp-runtime-LLYYvB` |
+
+None of those evidence trees contains the home file's content; `acolyte-codex-mcp-runtime-ddsfLK`
+from the section above does. One limit stays: the project-rules harness's plain-folder
+cases still get their project LAYER root from whether the home is a real repository,
+which no empty marker can change without changing what those cases measure.
+
+**MCP outcomes on 0.161.0 reach the history parser.** This closes the product defect the
+section above reports. `codexMcpObservation` in `src/history-adapters.js` now also reads
+`event_msg/item_completed` with an `McpToolCall` item, and maps it onto the old record's
+meaning: `completed` with `isError: false` is success, `isError: true` is failed whatever
+the status, and a declined call (`failed` with `error`, the old `Err`) is failed. An
+`error` beside a `result` is failed, as `Err` beside `Ok` was; anything else (no `isError`,
+a non-boolean one, no result, a status still in progress) is withheld as unknown. Only a
+direct `event_msg` record counts. The item's `id` is the call id (it equals the namespaced
+`function_call`'s `call_id` on all five rollouts), so both shapes hash to the same
+observation id and a rollout carrying both counts the call once; 0.161.0 wrote none of the
+old records, so that merge is tested on a derived file. The sanitized fixture
+`test/fixtures/codex-mcp-item-completed-sanitized.jsonl` is the five case rollouts,
+written by the harness's new `--write-fixture`; two consecutive runs wrote byte-identical
+files. `test/codex-mcp-item-completed.test.js` pins the five real verdicts, the status
+mapping, the spoof refusals, the cross-shape identity against a pre-change pinned id, the
+append-then-full-read identity and a sanitization gate; `test/codex-mcp-history.test.js`
+(the 0.145.0 shape) is unchanged and passes.
+
+The MCP harness against this checkout now passes, parser included: 5/5 cases, verdicts
+failed, success, failed, failed, success (`acolyte-codex-mcp-runtime-NkOEE2`, `-cKyzNs`,
+`-nPg2mE`). Against the pre-change parser it fails 5/5, as recorded above
+(`acolyte-codex-mcp-runtime-LLYYvB`). Mutation: eight parser mutants (the new shape unread,
+a separate identity for it, a decline read as unknown, `completed` as success without
+`isError`, `isError: true` ignored under `completed`, `error` beside `result` ignored, the
+item accepted from any record type, the type matched case-insensitively) were each killed.
+Not changed and not run: `scripts/vscode-acceptance/mcp.js` still asserts the 0.145.0
+`mcp_tool_call_end` record and will fail on 0.161.0 until it accepts both shapes.
+
+**Code-mode cells continued by `wait` are joined to their outcome.** This replaces the
+bounded limit the section above records, and amends the matrix row "Shell history scan
+and outcome learning" and the "History coverage is still bounded" paragraph under Still
+not proven: code-mode cell continuations are no longer outside the proof on 0.161.0. The
+harness gained two shapes. A cell whose command outlasts its waits yields AGAIN from a
+`wait` with the same header ("Script running with cell ID 5"; 12 s against 5 s waits gave
+two repeated yields and a completing third wait, so the wait is not clamped the way
+`exec_command`'s yield is), and `wait` with `terminate: true` returns "Script terminated".
+`codeModeJoin` in `src/history-adapters.js` opens a cell on its yield, keyed by session
+and cell ID, and binds each `wait` result to the single open cell with that key: a
+repeated yield keeps it open, a terminal result closes it and the cell's own output plus
+every bound result are applied as one result through the same group rule a directly
+completed cell meets, and a terminate (the argument, read wide, or a "Script terminated"
+result) closes it with nothing applied. Two open cells with one key, a wait whose own
+definitions disagree, a wait for an ID never yielded and a repeated yield naming another
+cell are all withheld. Only the header line counts, so a cell's stdout cannot open, close
+or credit anything, and a yield is applied as pending, which also closes a gap that
+predates the join: a yielded cell whose stdout said "Script completed" used to be
+credited with success. A bound result whose cell is outside an append slice is reported
+through `_codexUnmatchedWaits`, so the scanner's bounded reconcile widen reaches it and
+the cell comes back under its full-read identity and verdict. One exception is recorded
+in the code: a conflicting open cell older than the slice's start is invisible to the
+slice, which then binds where a full read withholds; it needs two runtimes allocating
+IDs in one session, and the slice's verdict is still never the opposite one.
+
+The sanitized fixture now holds six cells (the first four byte-identical to wave c1's;
+three runs wrote byte-identical files). Harness on 0.161.0: against the parser before the
+join it fails exactly the four continued cells (`acolyte-code-mode-FGjN3U`: continued
+success, continued failure, re-waited success and the sequence's cell 3 read `unknown`);
+with the join it passes 7 sessions, verdicts complete success, complete failure,
+continued success, continued failure, re-waited success, terminated withheld, and the
+same six in one session (`acolyte-code-mode-gdcdgw`, `-q7K3zz`). The harness now asserts
+those exact verdicts rather than "true or withheld". Mutation: fifteen parser mutants
+were each killed by `test/codex-code-mode-history.test.js` (join disabled; binding by
+recency instead of ID; the first of two open cells bound; terminate credited; a
+"Script terminated" result treated as a completion; terminate read only as `true`; a
+repeated yield treated as terminal; a repeated yield naming another cell accepted; a
+yield not pending; a yield line matched anywhere in the output; IDs not scoped by
+session; disagreeing wait definitions accepted; join results not handed to the scanner;
+a wait for an unseen cell not reported; a bound result with no call in the slice not
+reported).
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,
@@ -858,7 +983,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1352`).
+(`codexHeadSeed`, `src/history-adapters.js:1579#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

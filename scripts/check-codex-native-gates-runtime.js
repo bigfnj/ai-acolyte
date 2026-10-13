@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 const readline = require('node:readline');
 const { spawn, spawnSync } = require('node:child_process');
+const { isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
 
 const TIMEOUT_MS = 45000;
 const BEGIN = '<!-- BEGIN permission-wildcarding: native Codex memory gates (managed) -->';
@@ -99,7 +100,10 @@ async function runtimeCase(context, name, expected) {
         assert.equal(req.headers['api-key'], undefined, 'fixture must not use API keys');
         observed.requests++;
         assert.equal(observed.requests, 1, 'additional provider requests are forbidden');
-        const body = JSON.parse(Buffer.concat(buffers).toString('utf8'));
+        const raw = Buffer.concat(buffers).toString('utf8');
+        assertNoForeignInstructions(raw, name);
+        observed.canaryFreeRequests = observed.requests;
+        const body = JSON.parse(raw);
         requestText = strings([body.instructions, body.input]).join('\n');
         const item = { id: 'native_gates_fixture_message', type: 'message', role: 'assistant', status: 'completed',
           content: [{ type: 'output_text', text: 'Native gate loading fixture complete.', annotations: [] }] };
@@ -194,6 +198,8 @@ async function main() {
   const codexHome = custom ? path.join(owned, 'custom-codex') : path.join(home, '.codex');
   const workspace = path.join(owned, 'workspace'), memoryRoot = path.join(codexHome, 'memories');
   for (const directory of [home, workspace, memoryRoot, path.join(home, '.claude')]) fs.mkdirSync(directory, { recursive: true });
+  // Workspace is its own project root, canary one level up (check-codex-runtime.js, 2026-10-13).
+  isolateWorkspaceInstructions(workspace);
   const reportPath = path.join(reportRoot, 'evidence.json');
   const report = { status: 'running', boundary: BOUNDARY, extension, subjectHashes, harnessSha256: hashFile(__filename),
     codexLayout: custom ? 'custom-override' : 'default', mutation: args['--mutation'] || null,

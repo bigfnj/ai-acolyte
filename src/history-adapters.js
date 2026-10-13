@@ -577,8 +577,9 @@ const NESTED_COMMAND_KEYS = new Set(['command', 'cmd']);
 // `write_stdin` completion, including successful and nonzero exits. The runtime
 // probe is scripts/check-codex-wait-runtime.js; direct `shell_command` has its
 // own earlier runtime coverage. Both argument spellings remain supported.
-// This does not imply support for arbitrary custom tool wrappers or continued
-// functions.exec/functions.wait cells, whose outcomes need separate evidence.
+// This does not imply support for arbitrary custom tool wrappers. Continued
+// code-mode `exec` cells, finished by `wait`, got their own evidence on 0.161.0
+// and are joined by codeModeJoin (2026-10-13).
 const CODEX_FUNCTION_SHELL_NAMES = new Set([
   'shell_command', 'functions.shell_command', 'exec_command', 'functions.exec_command',
 ]);
@@ -819,7 +820,7 @@ function codexProcessResult(value) {
   return Number.isSafeInteger(exit) ? { status: exit === 0 ? 'success' : 'failed' } : null;
 }
 
-function applyCodexProcessResults(directCalls, waitCalls, outputs, observations) {
+function applyCodexProcessResults(directCalls, waitCalls, outputs, observations, extraUnresolved = []) {
   const key = (scope, id) => JSON.stringify([scope, id]);
   const byCall = new Map();
   for (const output of outputs) {
@@ -886,9 +887,141 @@ function applyCodexProcessResults(directCalls, waitCalls, outputs, observations)
   }
   // A wait can be in the overlap while its originating exec is outside it.
   // This transient parse metadata asks the existing bounded reconciliation to
-  // reach that origin without persisting process IDs, commands or paths.
-  Object.defineProperty(observations, '_codexUnmatchedWaits', { value: unresolved });
+  // reach that origin without persisting process IDs, commands or paths. Code-
+  // mode `wait` results whose cell the slice did not contain join the same list
+  // (codeModeJoin below, 2026-10-13).
+  Object.defineProperty(observations, '_codexUnmatchedWaits', { value: [...unresolved, ...extraUnresolved] });
 }
+
+// ── Code-mode cells continued by `wait` ──────────────────────────────────────
+//
+// MEASURED 2026-10-13 on codex-cli 0.161.0, Windows, `code_mode` enabled only in
+// an isolated home (scripts/check-codex-code-mode-runtime.js; the sanitized
+// sequence session is test/fixtures/codex-code-mode-rollout-sanitized.jsonl).
+// An `exec` cell that finishes inside its own window returns "Script completed"
+// plus the nested exec_command JSON as its own custom_tool_call_output, and the
+// group logic above credits it. A cell that does not returns
+//   "Script running with cell ID N\nWall time ...\nOutput:\n"
+// and its outcome arrives later as the FUNCTION_CALL_OUTPUT of a `wait` call --
+// keyed by the wait's own call id, linked to the cell only by N in the yield
+// text and in the wait's `cell_id` argument. IDs are allocated per session in
+// order, completed cells included (1..6 in the fixture), so N names a cell only
+// within one session. A wait may itself yield again with the same text while the
+// cell runs on (three waits for cell 5), and `terminate: true` stops the cell,
+// whose result is then "Script terminated" (cell 6). Until this join the parser
+// left every continued cell `unknown`: safe, and no evidence at all.
+//
+// THE JOIN. A cell opens on its yield and is keyed by (session, N). A wait's
+// result binds to the single open, unambiguous cell with that key:
+//   - a result that yields again keeps the cell open and decides nothing;
+//   - a terminal result closes it, and the cell's own output plus every result
+//     bound to it are applied as ONE result through applyCodexGroupResult, the
+//     rule a directly completed cell already meets (one nested shell call, a
+//     success-attributable script, one success status, nothing pending);
+//   - `terminate` -- the argument, or a "Script terminated" result -- closes the
+//     cell and applies nothing: a stopped cell has no outcome, and its command
+//     neither succeeded nor failed by itself;
+//   - two open cells with one key (a fork's copied history, a resume that
+//     restarts allocation, a hand-edited file) make every wait for that key
+//     ambiguous, and it is withheld; so is a wait whose own definitions disagree,
+//     one for a key with no open cell, and a repeated yield naming another cell.
+// Only a result's HEADER counts -- the first line of its first text, which Codex
+// writes before any `Output:` block -- because the block below it is the cell's
+// stdout, and a script printing "Script running with cell ID 3" must not open,
+// close or re-bind anything. For the same reason a yield is applied as PENDING:
+// stdout that happens to say "Script completed" cannot credit a cell that, by
+// its own header, has not finished.
+//
+// APPEND SLICES. A bound result in the appended bytes whose cell is not in the
+// slice is reported through `_codexUnmatchedWaits`, so scanHistoryFiles widens
+// back by its bounded reconcile window and re-parses, and the cell observation
+// comes back under the same id (session is seeded; the id never depends on the
+// wait) with its result end past the cursor, which selects it. The join itself
+// is ordinary in-order state, so a slice that contains the cell's yield reaches
+// the verdict a full read reaches -- with one bounded exception: a conflicting
+// open cell for the same key that lies before the slice's start (the overlap,
+// or the widened start) is invisible to it, so the slice binds where a full read
+// withholds. That needs two code-mode runtimes writing one session under one ID
+// sequence and a yield left open further back than the slice reaches; the
+// slice's verdict is then still the outcome reported for the cell its wait
+// names, never the opposite, and both reads use the same id. A full read is
+// itself capped at the ingest budget, so this is the limit of every bounded
+// read, not one this join adds.
+const CODE_MODE_YIELD_RE = /^Script running with cell ID ([A-Za-z0-9_-]{1,64})$/;
+const CODE_MODE_TERMINATED_RE = /^Script terminated\b/;
+
+function codeModeHeader(output) {
+  const text = typeof output === 'string' ? output
+    : (Array.isArray(output) && isObject(output[0]) && typeof output[0].text === 'string' ? output[0].text : null);
+  return text === null ? null : text.replace(/\r\n/g, '\n').split('\n', 1)[0].trim();
+}
+
+function codeModeYieldId(output) {
+  const match = CODE_MODE_YIELD_RE.exec(codeModeHeader(output) || '');
+  return match ? match[1] : null;
+}
+
+// `terminate` is read wide: any value other than absent or false stops the
+// cell as far as this reader is concerned, because the cost of a wrong guess
+// runs one way only -- crediting a stopped cell -- and never-crediting is free.
+function codeModeWaitArguments(item) {
+  const args = jsonObject(item.arguments) || jsonObject(item.input);
+  if (!args) return null;
+  const cellId = typeof args.cell_id === 'string' ? args.cell_id
+    : (Number.isSafeInteger(args.cell_id) && args.cell_id >= 0 ? String(args.cell_id) : null);
+  if (cellId === null || !/^[A-Za-z0-9_-]{1,64}$/.test(cellId)) return null;
+  return { cellId, terminate: args.terminate !== undefined && args.terminate !== false };
+}
+
+function codeModeJoin() {
+  const cells = new Map();
+  const waits = new Map();
+  const unresolved = [];
+  const key = (scope, id) => JSON.stringify([scope, id]);
+  return {
+    unresolved,
+    yielded(scope, cellId, callId) {
+      const cellKey = key(scope, cellId);
+      if (!cells.has(cellKey)) cells.set(cellKey, []);
+      const entries = cells.get(cellKey);
+      if (entries.some((entry) => entry.callId === callId)) return;
+      const open = entries.filter((entry) => entry.open);
+      const entry = { callId, open: true, ambiguous: open.length > 0, outputs: [] };
+      for (const other of open) other.ambiguous = true;
+      entries.push(entry);
+    },
+    waitCall(scope, callId, args) {
+      const waitKey = key(scope, callId);
+      if (!waits.has(waitKey)) waits.set(waitKey, []);
+      waits.get(waitKey).push(args);
+    },
+    // Returns the result to apply to the cell's group, or null. A call id that
+    // is not a wait in this scope is not this join's business.
+    waitOutput(scope, callId, record, header, location) {
+      const definitions = waits.get(key(scope, callId));
+      if (!definitions) return null;
+      const signatures = new Set(definitions.map((args) => JSON.stringify([args.cellId, args.terminate])));
+      if (signatures.size !== 1) return null;
+      const [{ cellId, terminate }] = definitions;
+      const entries = cells.get(key(scope, cellId)) || [];
+      const open = entries.filter((entry) => entry.open);
+      if (!entries.length) { unresolved.push({ callId, resultEnd: location.end }); return null; }
+      if (open.length !== 1 || open[0].ambiguous) return null;
+      const [cell] = open;
+      if (terminate || CODE_MODE_TERMINATED_RE.test(header || '')) { cell.open = false; return null; }
+      const again = CODE_MODE_YIELD_RE.exec(header || '');
+      if (again) {
+        if (again[1] !== cellId) cell.ambiguous = true;
+        else cell.outputs.push(record);
+        return null;
+      }
+      cell.open = false;
+      cell.outputs.push(record);
+      return { cell, terminal: record };
+    },
+  };
+}
+
 
 function applyCodexGroupResult(group, result) {
   if (!Array.isArray(group) || group.length === 0 || !result) return;
@@ -935,17 +1068,70 @@ function codexMcpStatus(result) {
   return result.Ok.isError === false ? 'success' : 'unknown';
 }
 
-function codexMcpObservation(record, location, state, file) {
+// THE 0.161.0 SHAPE OF THE SAME OUTCOME. MEASURED 2026-10-13 on codex-cli
+// 0.161.0 (Windows) by scripts/check-codex-mcp-runtime.js, five fresh isolated
+// sessions: the rollout carries NO `mcp_tool_call_end` at all. Each outcome is an
+// `event_msg/item_completed` whose `item` is
+//   {type: "McpToolCall", id, server, tool, arguments, status, result: {content, isError}}
+// for a call that ran, and {status: "failed", error: {message}} with no `result`
+// for one the user declined ("user rejected MCP tool call"). The parser read
+// only the older record, so it saw 0 of 5 real outcomes and reviewed-MCP Auto
+// Learn learned nothing from 0.161.0 history -- silently, because a rollout
+// with no recognised MCP record looks exactly like a session that called none.
+//
+// Outcomes map onto the old shape's meaning, record by record:
+//   completed + isError false -> success   (old: Ok, isError false)
+//   failed    + isError true  -> failed    (old: Ok, isError true)
+//   failed    + error         -> failed    (old: Err; a declined call was Err)
+// Anything else is withheld as unknown, for the reason codexMcpStatus gives: no
+// textual fallback. An `error` beside a `result` is failed, as Ok beside Err is.
+// `failed` is the conservative direction: it blocks auto-safe, never grants.
+function codexMcpItemStatus(item) {
+  if (item.error !== undefined && item.error !== null) return 'failed';
+  if (item.status === 'failed') return 'failed';
+  if (isObject(item.result) && item.result.isError === true) return 'failed';
+  if (item.status !== 'completed' || !isObject(item.result)) return 'unknown';
+  return item.result.isError === false ? 'success' : 'unknown';
+}
+
+// One completion, in either shape, as {callId, server, tool, status}. Only a
+// DIRECT event_msg record confers MCP identity: an item nested anywhere else
+// (a response_item, a message's content) is ignored, as the old shape always was.
+//
+// ONE CALL, ONE IDENTITY, WHICHEVER SHAPE NAMED IT. The new item's `id` is the
+// call id: on all five measured rollouts it equals the `call_id` of the
+// namespaced function_call and of its function_call_output, which is what the
+// old record's `call_id` was. So both shapes hash to the same observation id,
+// and a rollout that carried both would merge them through `mcpCalls` in
+// parseCodexJsonl (one observation, failure wins, a conflicting server or tool
+// withholds) instead of counting the call twice. No measured rollout carries
+// both -- 0.161.0 wrote none of the old records -- so the merge is defence,
+// tested on a derived file rather than on a real one.
+function codexMcpCompletion(record) {
   const payload = record.payload;
-  if (record.type !== 'event_msg' || !isObject(payload) || payload.type !== 'mcp_tool_call_end') return null;
-  const invocation = payload.invocation;
-  if (!isObject(invocation) || !codexMcpName(invocation.server) || !codexMcpName(invocation.tool) ||
-      typeof payload.call_id !== 'string' || !payload.call_id || payload.call_id.length > 512) return null;
+  if (record.type !== 'event_msg' || !isObject(payload)) return null;
+  if (payload.type === 'mcp_tool_call_end') {
+    const invocation = payload.invocation;
+    if (!isObject(invocation)) return null;
+    return { callId: payload.call_id, server: invocation.server, tool: invocation.tool,
+      status: codexMcpStatus(payload.result) };
+  }
+  if (payload.type === 'item_completed' && isObject(payload.item) && payload.item.type === 'McpToolCall') {
+    const item = payload.item;
+    return { callId: item.id, server: item.server, tool: item.tool, status: codexMcpItemStatus(item) };
+  }
+  return null;
+}
+
+function codexMcpObservation(record, location, state, file) {
+  const completion = codexMcpCompletion(record);
+  if (!completion || !codexMcpName(completion.server) || !codexMcpName(completion.tool) ||
+      typeof completion.callId !== 'string' || !completion.callId || completion.callId.length > 512) return null;
   const observation = {
-    id: `codex:${stableHash('codex-mcp', state.session || file || '<text>', payload.call_id)}`,
+    id: `codex:${stableHash('codex-mcp', state.session || file || '<text>', completion.callId)}`,
     source: 'codex', kind: 'codex-mcp', tool: 'CodexMCP', command: 'call',
-    mcpServer: invocation.server, mcpTool: invocation.tool,
-    status: codexMcpStatus(payload.result), callId: payload.call_id,
+    mcpServer: completion.server, mcpTool: completion.tool,
+    status: completion.status, callId: completion.callId,
   };
   if (record.timestamp !== undefined) observation.timestamp = record.timestamp;
   if (state.cwd !== undefined) observation.cwd = state.cwd;
@@ -965,6 +1151,7 @@ function parseCodexJsonl(text, options = {}) {
   const directProcessCalls = [];
   const processWaitCalls = [];
   const processOutputs = [];
+  const cellJoin = codeModeJoin();
   const state = { session: stringValue(options.session), cwd: stringValue(options.cwd) };
   const file = stringValue(options.file) || stringValue(options.path);
 
@@ -1001,6 +1188,14 @@ function parseCodexJsonl(text, options = {}) {
             scope: state.session || '', callId, sessionId,
             interactive: args.chars !== undefined && args.chars !== '',
           });
+          continue;
+        }
+        // Code mode's continuation of a yielded cell (codeModeJoin). Not a shell
+        // call: it creates no observation, it only names the cell it resumes.
+        if (name === 'wait' || name === 'functions.wait') {
+          const args = codeModeWaitArguments(item);
+          const callId = stringValue(firstDefined(item.call_id, item.callId, item.id));
+          if (args && callId) cellJoin.waitCall(state.session || '', callId, args);
           continue;
         }
         if (!CODEX_FUNCTION_SHELL_NAMES.has(name)) continue;
@@ -1072,9 +1267,12 @@ function parseCodexJsonl(text, options = {}) {
           scope: state.session || '', callId: outerCallId, process: processResult,
           offset: location.offset, end: location.end,
         });
+        // A cell's own "Script running with cell ID N" is a yield: pending, so
+        // nothing its stdout says can credit it, and the cell opens for a wait.
+        const yieldId = item.type === 'custom_tool_call_output' ? codeModeYieldId(item.output) : null;
         const result = {
           status: processResult?.pending ? 'unknown' : classifyCodexOutput(item), offset: location.offset, end: location.end,
-          pending: pendingShellResult(item.output),
+          pending: yieldId !== null || pendingShellResult(item.output),
           nestedStatuses: item.type === 'custom_tool_call_output'
             ? nestedShellStatuses(item.output) : [],
         };
@@ -1088,10 +1286,36 @@ function parseCodexJsonl(text, options = {}) {
         }
         results.set(outerCallId, result);
         applyCodexGroupResult(callGroups.get(outerCallId), result);
+        if (yieldId !== null) cellJoin.yielded(state.session || '', yieldId, outerCallId);
+        if (item.type === 'function_call_output') {
+          const bound = cellJoin.waitOutput(state.session || '', outerCallId, {
+            status: classifyCodexOutput(item), nestedStatuses: nestedShellStatuses(item.output),
+            pending: pendingShellResult(item.output), offset: location.offset, end: location.end,
+          }, codeModeHeader(item.output), location);
+          if (bound) {
+            // The cell's own output and every result bound to it, as one result:
+            // failure from any of them wins, and success needs exactly the one
+            // nested status a directly completed cell would need.
+            let status = 'unknown';
+            const nestedStatuses = [];
+            for (const part of [results.get(bound.cell.callId), ...bound.cell.outputs]) {
+              if (!part) continue;
+              status = mergeStatus(status, part.status);
+              nestedStatuses.push(...(Array.isArray(part.nestedStatuses) ? part.nestedStatuses : []));
+            }
+            const joined = { status, nestedStatuses, pending: bound.terminal.pending,
+              offset: bound.terminal.offset, end: bound.terminal.end };
+            results.set(bound.cell.callId, joined);
+            const group = callGroups.get(bound.cell.callId);
+            if (group) applyCodexGroupResult(group, joined);
+            // The cell's call is outside this slice: ask for the bounded widen.
+            else cellJoin.unresolved.push({ callId: outerCallId, resultEnd: location.end });
+          }
+        }
       }
     }
   });
-  applyCodexProcessResults(directProcessCalls, processWaitCalls, processOutputs, observations);
+  applyCodexProcessResults(directProcessCalls, processWaitCalls, processOutputs, observations, cellJoin.unresolved);
   return observations;
 }
 

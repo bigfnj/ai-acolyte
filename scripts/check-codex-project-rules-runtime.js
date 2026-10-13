@@ -30,6 +30,7 @@ const readline = require('node:readline');
 const { spawn, spawnSync } = require('node:child_process');
 const { commandLaunch } = require('../src/exec-resolve');
 const { codexRuleFileSet } = require('../src/codex-policy');
+const { isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
 
 const COMMAND = 'acolyte-project-rules-probe.cmd';
 const WITNESS = 'acolyte-project-rules-witness';
@@ -51,7 +52,7 @@ function git(cwd, ...args) {
 }
 
 // One session: config/read for the layers, then one turn that runs the probe.
-async function session(codex, { home, codexHome, cwd, configLines }) {
+async function session(codex, { home, codexHome, cwd, configLines, label }) {
   const observed = { approvals: 0, items: [], providerRequests: 0 };
   let child, closed, reader, timer, nextId = 0, stopping = false;
   const pending = new Map();
@@ -65,8 +66,11 @@ async function session(codex, { home, codexHome, cwd, configLines }) {
     req.on('end', () => {
       try {
         assert.equal(req.headers.authorization, undefined, 'the loopback model must receive no credentials');
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const raw = Buffer.concat(chunks).toString('utf8');
+        assertNoForeignInstructions(raw, label);
+        const body = JSON.parse(raw);
         observed.providerRequests += 1;
+        observed.canaryFreeRequests = observed.providerRequests;
         assert.ok(observed.providerRequests <= 2, 'one tool call and one final answer');
         let item;
         if (observed.providerRequests === 1) {
@@ -225,6 +229,13 @@ async function main() {
     } else fs.mkdirSync(project);
     if (spec.repository) git(project, 'init', '-q');
     if (spec.marker) fs.writeFileSync(path.join(project, spec.marker), '');
+    // The PROJECT, not the cwd, is the instruction root here: two cases put the
+    // cwd below it on purpose. A repository's or worktree's own `.git` and the
+    // custom marker already stop the walk at the project; the plain-folder cases
+    // get an empty `.git`, which Codex counts for AGENTS.md but not for project
+    // layers or trust (src/codex-policy.js), so no case's rule result moves. The
+    // canary sits one level up, beside Main (check-codex-runtime.js, 2026-10-13).
+    isolateWorkspaceInstructions(project);
     fs.mkdirSync(cwd, { recursive: true });
     const rules = path.join(project, '.codex', 'rules');
     fs.mkdirSync(rules, { recursive: true });
@@ -234,7 +245,7 @@ async function main() {
     const context = { dir, project, cwd };
     const result = { name: spec.name, expectedLoaded: spec.loaded };
     try {
-      const observed = await session(codex, { home, codexHome, cwd,
+      const observed = await session(codex, { home, codexHome, cwd, label: spec.name,
         configLines: { top: spec.top, tables: spec.trust ? spec.trust(context) : [] } });
       const item = observed.items[0];
       result.tool = observed.tool;

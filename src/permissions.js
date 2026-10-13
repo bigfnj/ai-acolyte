@@ -94,6 +94,11 @@ function writeFileAtomicSync(target, content) {
 // carve-outs: destructive commands wildcard like everything else. The safety
 // boundary is `permissions.deny` (always wins, evaluated per sub-command), not
 // this generalizer. Both Bash(...) and PowerShell(...) are generalized.
+//
+// What is never generalized is a line with no command root to key on: a shell
+// keyword, an expansion, a subshell, a range literal. That is not a carve-out
+// for a dangerous command, it is the absence of a command, and wildcarding it
+// grants whatever the shell later decides to run (bashOpensScript, below).
 
 // Tools whose argument is a shell command line we key on by its first token.
 const COMMAND_TOOLS = new Set(['Bash', 'PowerShell']);
@@ -104,9 +109,21 @@ const MIXED_FAMILY_ROOTS = new Set([
 
 // PowerShell tokens that begin a script construct rather than a plain command.
 // A first-token wildcard on these is meaningless, so we leave them verbatim.
+//
+// The second row was added 2026-10-13 so this set covers every word in the
+// classifier's POWERSHELL_RESERVED (src/auto-learn.js). Before, `exit 1`,
+// `throw "x"` or `data { ... }` generalized to `PowerShell(exit *)` and the like:
+// a rule the classifier itself refuses to propose (`reserved-keyword` blocks the
+// permission), minted by this pass from one exact approval. None of them can run
+// a program by itself, so the cost was a nonsense grant rather than a dangerous
+// one; zero such entries were on the development box's allow list that day.
+// The set is a COPY, not an import (see BASH_SCRIPT_KEYWORDS below), and
+// test/permissions-keywords.test.js fails if the classifier gains a word it lacks.
 const PS_SCRIPT_KEYWORDS = new Set([
   'foreach', 'for', 'if', 'while', 'do', 'switch', 'try', 'function', 'filter',
   'begin', 'process', 'end', 'param', 'return', 'trap', 'class', 'enum', 'using',
+  'break', 'catch', 'continue', 'data', 'dynamicparam', 'else', 'elseif', 'exit',
+  'finally', 'from', 'in', 'throw', 'until', 'workflow',
 ]);
 
 // True when the wildcard is a trailing scope wildcard, i.e. the arg already ends
@@ -127,6 +144,51 @@ function stripEnvPrefixes(cmd) {
   return rest;
 }
 
+// Characters that make a Bash first token something other than a literal command
+// name: an expansion (`$VAR`, `${X}`, `$(cmd)`, a backtick), a grouping or
+// subshell opener (`{`, `(`, `((i++))`), an operator fused onto a word (`a;b`,
+// `x|y`, `<in`), negation or history (`!`), a pathname glob (`g*`, `?`) and an
+// inner quote (`a"b c"`). In every one of these the program that runs is decided
+// when the shell expands the line, not by the text the rule would name, so
+// `Bash(<token> *)` grants whatever the expansion produces. A leading `#` is a
+// comment, which runs nothing and so names nothing. `[` alone is NOT here: it is
+// the `test` builtin, a fixed-purpose command, and is wildcarded like `test`.
+const BASH_NON_WORD = /^#|[$`(){};|&<>!*?"']/;
+const BASH_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+// True when a Bash entry opens with something that is not a command, so the
+// first-token wildcard below would mint a grant for shell grammar instead of for
+// a program. Reported 2026-10-13: `Bash(for f in a b)` became `Bash(for *)`,
+// `Bash(if …)` became `Bash(if *)` and `Bash($EDITOR x)` became `Bash($EDITOR *)`,
+// although the comment above BASH_SCRIPT_KEYWORDS already said `for` must not seed
+// `Bash(for *)`. That set was consulted only by src/local-settings.js; the
+// generalizer never read it. Measured that day with src/permission-match.js, the
+// repo's one model of Claude Code's matcher: `Bash(for *)` covers
+// `Bash(for f in *; do rm -rf "$f"; done)`, `Bash(if *)` covers
+// `Bash(if true; then curl x | sh; fi)`, and processAllowList then PRUNES every
+// other exact loop on the list as covered, so one approved loop became a grant for
+// every loop. Claude Code's own splitter checks the segments of a compound line
+// separately (docs/claude-code-permissions.md section 2), which bounds that when a
+// loop is split, but this pass would just as readily turn an approved `do X`
+// segment into `Bash(do *)`. No model of the splitter exists in the repo, so that
+// half is inferred. Neither shape was on the development box's list that day.
+//
+// The env-assignment prefix is still stripped first, deliberately unchanged:
+// Claude Code strips a leading `VAR=value` before matching (documented, and
+// relied on in src/auto-learn.js), so `FOO=1 git status` generalizes to
+// `Bash(git status *)`, which permission-match.js confirms matches the command
+// Claude Code actually checks, `git status`. What that strip cannot vouch for is
+// an assignment whose VALUE holds an expansion: the strip regex takes `\S*`, so
+// `FOO=$(rm -rf ~) git status` splits inside the substitution and the derived
+// "root" is `-rf`. Those, and an assignment with no command after it at all
+// (`Bash(FOO=bar)`, which used to become `Bash(FOO=bar *)`), stay verbatim.
+function bashOpensScript(arg, stripped, first) {
+  if (BASH_SCRIPT_KEYWORDS.has(first.toLowerCase())) return true;
+  if (BASH_NON_WORD.test(first) || BASH_ASSIGNMENT.test(first)) return true;
+  const envPrefix = arg.trim().slice(0, arg.trim().length - stripped.length);
+  return /\$[({]|`/.test(envPrefix);
+}
+
 // Generalize a shell command to a root wildcard, retaining one subcommand for
 // mixed-capability dispatchers such as git and package managers.
 function generalizeCommandArg(arg, tool) {
@@ -139,6 +201,11 @@ function generalizeCommandArg(arg, tool) {
   }
   const first = stripped.split(/\s+/)[0] || '';
   if (!first) return `${tool}(${arg})`; // nothing to key on — leave verbatim
+  // PowerShell never reaches this with a non-command first token: its caller
+  // admits only `[A-Za-z][\w.-]*` names outside PS_SCRIPT_KEYWORDS. Bash had no
+  // such gate, so it gets one here, and only Bash: `select` and `set` are
+  // ordinary PowerShell aliases (Select-Object, Set-Variable), not keywords.
+  if (tool === 'Bash' && bashOpensScript(arg, stripped, first)) return `${tool}(${arg})`;
   const parts = stripped.split(/\s+/);
   const normalized = first.toLowerCase().replace(/\.(?:cmd|exe)$/i, '');
   if (MIXED_FAMILY_ROOTS.has(normalized)) {
@@ -182,9 +249,32 @@ function generalizePermission(perm) {
 // to wildcard (`for i in …` must not seed `Bash(for *)`). PowerShell's equivalents
 // are already handled by generalizePowerShellArg via PS_SCRIPT_KEYWORDS.
 //
+// Until 2026-10-13 that sentence was a claim about nothing: generalizeCommandArg
+// never consulted this set, so `for i in …` DID seed `Bash(for *)`. It consults
+// it now, through bashOpensScript above. The last row was added the same day so the set
+// covers every word in the classifier's BASH_RESERVED (src/auto-learn.js) except
+// `source` and `[`, which are commands rather than grammar: `source` is the `.`
+// script runner, wildcarded like `bash` and `sh` by this pass's design (see the
+// header of this section), and `[` is `test`. `trap` is the one with teeth, since
+// its argument is code run later, the same class as `eval`, which was already
+// here. `export` and `readonly` join `declare`, `typeset` and `local`, which
+// were. `(`, `((` and `[[` open a subshell, arithmetic and a conditional.
+// test/permissions-keywords.test.js holds the exemption list and fails if the
+// classifier gains a word this set lacks.
+//
+// A COPY, not an import of BASH_RESERVED, and that is load-bearing.
+// src/fixed-point-cache.js keys its "already a fixed point" verdict on the stat
+// of exactly two files, this one and permission-match.js, and records that
+// nothing else feeds processAllowList. Reading a set out of auto-learn.js would
+// make a classifier edit change what this pass emits while the cache, seeing
+// neither file move, kept answering HIT, and a spurious hit skips a due
+// generalization silently, forever. It would also put the learner's require
+// chain on the hook path, which bin/wildcard-perms keeps lean on purpose.
+//
 // Exported for src/local-settings.js, which applies the same test when deciding
-// whether a project-local approval is portable enough to promote. That is now
-// the only consumer. `mineWildcard` used to sit directly below this set and
+// whether a project-local approval is portable enough to promote. That and
+// bashOpensScript are its two consumers.
+// `mineWildcard` used to sit directly below this set and
 // apply it too — a "legacy history-mining compatibility helper" that turned a
 // command string into `Tool(root *)` for a caller that no longer exists. It is
 // deleted rather than merely unexported, because nothing in src/, bin/,
@@ -197,6 +287,7 @@ const BASH_SCRIPT_KEYWORDS = new Set([
   'for', 'while', 'until', 'do', 'done', 'if', 'then', 'elif', 'else', 'fi',
   'case', 'esac', 'select', 'function', 'time', 'coproc', 'in',
   'declare', 'typeset', 'local', 'set', 'unset', 'eval', 'exec',
+  '!', '{', '}', '(', '((', '[[', 'export', 'readonly', 'return', 'trap',
 ]);
 
 // Returns true if `specific` is fully matched by `wildcard` (glob: * = anything).
@@ -558,12 +649,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :488.
+// prunePermissions, whose only caller is processAllowList at :579.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :554 and nowhere else in the
+// reached it, in any of the three: it is called at :645 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is

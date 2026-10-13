@@ -112,6 +112,14 @@ for (const [root, command] of [
       // src/policy-exporters.js. wrapperIsBroad never runs, the reviewed branch returns
       // the prefix, and a one-token prefix_rule is emitted. Confirmed 2026-10-13 for each
       // root and each spelling, one at a time.
+      //
+      // That was true of the table as it stood that morning. The same day the exporter
+      // began unioning in the learner's SHELL_WRAPPERS, and all four roots are in both,
+      // so dropping one from OWN_SHELL_WRAPPERS alone now survives (measured for `just`:
+      // every test in this file stays green). The redundancy is the point of the union.
+      // What kills it now
+      // is dropping the root from BOTH tables (measured for `just`: this test fails), or
+      // dropping the union itself, which the tests further down pin.
       assert.equal((rendered.match(/prefix_rule\(/g) || []).length, 0,
         `${JSON.stringify(item.prefix)} must not become a reviewed Codex rule:\n${rendered}`);
     }
@@ -122,6 +130,94 @@ for (const [root, command] of [
     assert.ok(compact(narrow).includes('pattern = ' + JSON.stringify([root, 'build'])), narrow);
   });
 }
+
+// The 27 learner SHELL_WRAPPERS roots this exporter's own table lacked until 2026-10-13.
+// MEASURED that day against the previous exporter: every one of them, bare, rendered a
+// valid one-token reviewed prefix_rule (99 leaks counting the .exe and .cmd spellings).
+// Kept as a LITERAL on purpose. The exporter now derives these from the learner's table,
+// so the drift test below cannot notice the learner dropping one; this list can.
+const NEWLY_REFUSED_RUNNERS = [
+  '.', 'bun', 'command', 'deno', 'env', 'eval', 'exec', 'iex', 'invoke-expression',
+  'java', 'mshta', 'node', 'npm', 'npx', 'parallel', 'perl', 'php', 'pnpm', 'py',
+  'python', 'python3', 'ruby', 'rundll32', 'source', 'uvx', 'xargs', 'yarn',
+];
+const spellingsOf = (root) => (/^[a-z0-9][a-z0-9_+-]*$/.test(root)
+  ? [root, `${root}.exe`, `${root}.cmd`] : [root]);
+const codexRuleCount = (prefix) =>
+  (renderCodexRules([{ prefix }], { includeReviewed: true }).match(/prefix_rule\(/g) || []).length;
+
+test('reviewed Codex export refuses every learner runner as a bare prefix, in every spelling', () => {
+  for (const root of NEWLY_REFUSED_RUNNERS) {
+    for (const spelling of spellingsOf(root)) {
+      // MUTATION: build SHELL_WRAPPERS from OWN_SHELL_WRAPPERS alone (drop the learner
+      // union in src/policy-exporters.js). The first root, `.`, renders a one-token rule
+      // and this fails; so do all 27. Confirmed 2026-10-13.
+      assert.equal(codexRuleCount([spelling]), 0,
+        `${JSON.stringify([spelling])} is an arbitrary-execution runner and must not become a bare rule`);
+    }
+  }
+});
+
+test('the refusal reaches a bare prefix the learner itself builds', () => {
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const [root, command] of [
+    ['node', 'node build.js'], ['npx', 'npx tsc --noEmit'], ['uvx', 'uvx ruff check .'],
+    ['xargs', 'xargs rm'], ['parallel', 'parallel gzip ::: a b'], ['env', 'env FOO=1 make'],
+  ]) {
+    const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
+    assert.deepEqual(learned.prefix, [root], `precondition: ${command} hands over the bare root`);
+    const rendered = renderCodexRules([learned], { includeReviewed: true });
+    assert.equal((rendered.match(/prefix_rule\(/g) || []).length, 0, `${command}:\n${rendered}`);
+  }
+});
+
+test('a narrower reviewed runner prefix still renders, and the exporter keeps its own extras', () => {
+  // Control: refusal is of the BARE runner only, the rule wrapperIsBroad already applied
+  // to `just` and `make`. MUTATION: make wrapperIsBroad return true for every wrapper;
+  // these fail.
+  for (const prefix of [['node', '--version'], ['npx', 'tsc'], ['uvx', 'ruff'], ['xargs', '-0']]) {
+    const rendered = renderCodexRules([{ prefix }], { includeReviewed: true });
+    assert.ok(compact(rendered).includes('pattern = ' + JSON.stringify(prefix)), rendered);
+    assert.equal(validateCodexRulesText(rendered).valid, true, rendered);
+  }
+  // `command.com` is in the exporter's own list and nowhere in the learner's. The union
+  // must not have replaced the own list. MUTATION: build SHELL_WRAPPERS from the learner
+  // spellings alone; this fails.
+  assert.equal(codexRuleCount(['command.com']), 0);
+  // The existing shell-specific rules are untouched: `bash -c` is still broad, and
+  // `bash script.sh` still narrow.
+  assert.equal(codexRuleCount(['bash', '-c']), 0);
+  assert.equal(codexRuleCount(['bash', 'script.sh']), 1);
+});
+
+test('exporter refusal covers every learner shell wrapper, so the tables cannot drift', () => {
+  const { SHELL_WRAPPERS: learner } = require('../src/auto-learn');
+  assert.ok(learner.size >= 43, 'precondition: the learner table is the one measured on 2026-10-13');
+  const leaked = [];
+  for (const root of learner) {
+    for (const spelling of spellingsOf(root)) if (codexRuleCount([spelling]) !== 0) leaked.push(spelling);
+  }
+  // MUTATION: drop the learner union; 99 spellings leak and this fails listing them.
+  assert.deepEqual(leaked, [],
+    'a root in src/auto-learn.js SHELL_WRAPPERS renders as a bare reviewed Codex rule');
+  for (const root of NEWLY_REFUSED_RUNNERS) {
+    assert.ok(learner.has(root), `${root} left the learner table; decide whether the exporter `
+      + 'should still refuse it and, if so, add it to OWN_SHELL_WRAPPERS');
+  }
+});
+
+test('on the Claude side a learner runner is refused at any depth, as every wrapper already was', () => {
+  // A deliberate consequence of one shared table, pinned so it reads as a decision.
+  // Before 2026-10-13 each of these rendered under review.
+  for (const permission of ['Bash(node --version *)', 'Bash(command -v *)', 'Bash(xargs -0 *)',
+    'PowerShell(node --version *)', 'Bash(python --version *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [],
+      `${permission} names a runner and must stay refused under review`);
+  }
+  // Control: a non-runner multi-token rule still renders under review.
+  assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }),
+    ['Bash(git diff *)']);
+});
 
 test('Codex validator rejects malformed and dangerously broad generated rules', () => {
   assert.equal(validateCodexRulesText('prefix_rule(').valid, false);

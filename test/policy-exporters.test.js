@@ -175,7 +175,10 @@ test('a narrower reviewed runner prefix still renders, and the exporter keeps it
   // Control: refusal is of the BARE runner only, the rule wrapperIsBroad already applied
   // to `just` and `make`. MUTATION: make wrapperIsBroad return true for every wrapper;
   // these fail.
-  for (const prefix of [['node', '--version'], ['npx', 'tsc'], ['uvx', 'ruff'], ['xargs', '-0']]) {
+  // `['xargs', '-0']` was in this list until 2026-10-13. It names no command, so it
+  // admits `xargs -0 <anything>`, and it is refused now (the code-flag tests below); the
+  // narrower form that names one is the control instead.
+  for (const prefix of [['node', '--version'], ['npx', 'tsc'], ['uvx', 'ruff'], ['xargs', '-0', 'grep']]) {
     const rendered = renderCodexRules([{ prefix }], { includeReviewed: true });
     assert.ok(compact(rendered).includes('pattern = ' + JSON.stringify(prefix)), rendered);
     assert.equal(validateCodexRulesText(rendered).valid, true, rendered);
@@ -188,6 +191,93 @@ test('a narrower reviewed runner prefix still renders, and the exporter keeps it
   // `bash script.sh` still narrow.
   assert.equal(codexRuleCount(['bash', '-c']), 0);
   assert.equal(codexRuleCount(['bash', 'script.sh']), 1);
+});
+
+// A reviewed prefix that hands an interpreter its program as text is arbitrary execution,
+// exactly as `bash -c` is. MEASURED 2026-10-13 before the check existed: every prefix in
+// this table rendered as a valid reviewed prefix_rule, because a two-token prefix of a
+// non-shell runner was always treated as "narrower". Synthetic prefixes throughout.
+const INLINE_CODE = [
+  ['python', '-c'], ['python3', '-c'], ['py', '-c'], ['python.exe', '-c'], ['python', '-Ic'],
+  ['python', '-W', 'ignore', '-c'],          // behind a value option: anywhere counts
+  ['node', '-e'], ['node', '--eval'], ['node', '-p'], ['node', '--print'], ['node', '-pe'],
+  ['node', '--eval=1'], ['node.exe', '-e'],
+  ['deno', 'eval'], ['bun', '-e'], ['bun', '--eval'],
+  ['ruby', '-e'], ['ruby', '-ne'], ['ruby', '-E'], // -E is an encoding; refused on purpose
+  ['perl', '-e'], ['perl', '-E'], ['perl', '-lane'],
+  ['php', '-r'], ['php', '-R'],
+  ['npx', '-c'], ['npx', '--call'],
+];
+
+test('a reviewed interpreter prefix carrying an inline-code flag is refused like bash -c', () => {
+  for (const prefix of INLINE_CODE) {
+    // MUTATION: delete the INLINE_CODE_FLAGS check in wrapperIsBroad
+    // (src/policy-exporters.js). The first row, ["python","-c"], renders and this fails.
+    // Confirmed 2026-10-13. Deleting one interpreter's entry (perl) fails its rows alone.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs whatever code it is handed`);
+  }
+  // Controls: the same interpreters, narrowed to something that is not program text.
+  for (const prefix of [['python', '--version'], ['node', '--version'], ['python', 'script.py'],
+    ['python', '-m', 'pytest'], ['node', 'build.js'], ['deno', 'run', 'x.ts'], ['bun', 'run', 'x'],
+    ['ruby', 'x.rb'], ['perl', 'x.pl'], ['php', 'x.php'], ['npx', 'tsc'], ['uvx', 'ruff']]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a narrower prefix and still renders`);
+  }
+});
+
+test('PowerShell code switches were already broad in every abbreviation, and stay so', () => {
+  // PowerShell accepts any unambiguous prefix of a parameter, case-insensitively, so
+  // `-co`, `-Com` and `-e` are `-Command` and `-EncodedCommand`. The existing branch
+  // treats every second token other than -File/-f as broad, which covers all of them.
+  // These are pins, not a change: each was already refused on 2026-10-13.
+  for (const prefix of [['pwsh', '-c'], ['pwsh', '-Command'], ['pwsh', '-co'], ['pwsh', '-Com'],
+    ['pwsh', '-EncodedCommand'], ['pwsh', '-enc'], ['pwsh', '-e'], ['pwsh', '-ec'], ['pwsh', '/c'],
+    ['pwsh', '--command'], ['powershell.exe', '-C'], ['powershell', '-NoProfile', '-Command']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  assert.equal(codexRuleCount(['pwsh', '-File', 'x.ps1']), 1, 'control: a named script is narrow');
+});
+
+test('env and xargs are as narrow as the command they name, and broad when they name none', () => {
+  // Decision (2026-10-13): xargs execs its command directly, with no shell, so
+  // `["xargs", "rm"]` is `["rm"]` with arguments read from stdin. A reviewer may approve
+  // `["rm"]`, so this is no broader; `["xargs", "sh"]` is exactly as broad as `["sh"]`.
+  // env is the same, plus `-S`, which takes a whole command line in one argument.
+  // MUTATION: delete the env/xargs branch in wrapperIsBroad. ["env","FOO=1"] renders
+  // (it is "two tokens, so narrower") and this fails. Confirmed 2026-10-13.
+  for (const prefix of [['env', 'FOO=1'], ['env', '-i'], ['env', 'FOO=1', 'make'],
+    ['env', '-S', 'sh -c x'], ['env', '--bogus', 'rm'], ['env', 'python', '-c'],
+    ['xargs', '-0'], ['xargs', 'sh'], ['xargs', '-n1', 'sh'], ['xargs', '-I', '{}', 'sh', '-c'],
+    ['xargs', 'python', '-c'], ['xargs', '--bogus', 'rm']]) {
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names no command, or a broad one`);
+  }
+  // MUTATION: drop `|| wrapperIsBroad(inner)` from that branch. ["xargs","sh"] and
+  // ["env","FOO=1","make"] render and the loop above fails. Confirmed 2026-10-13.
+  for (const prefix of [['env', 'FOO=1', 'make', 'test'], ['env', 'FOO=1', 'rm'], ['env', '-u', 'PATH', 'rm'],
+    ['env', 'python', 'x.py'], ['xargs', 'rm'], ['xargs', '-0', 'grep'], ['xargs', 'sh', 'x.sh'],
+    ['xargs', '-I{}', 'rm', '{}']]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
+  }
+});
+
+test('every reviewed cmd prefix is broad: the code switch may follow other switches', () => {
+  // cmd.exe takes its command from the first /c or /k after any other switches (/r is
+  // an old alias of /c). Checking the second token alone let these three render.
+  // MUTATION: restore `return second === '/c' || second === '/k'` for cmd; the second
+  // row renders and this fails. Confirmed 2026-10-13.
+  for (const prefix of [['cmd', '/c'], ['cmd', '/d', '/c'], ['cmd', '/q'], ['cmd.exe', '/r'], ['command.com', '/k']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+});
+
+test('the Claude side already refuses interpreter code-flag rules, by wrapper membership', () => {
+  // Consistent with the Codex half, and stricter: claudePermissionIsSafe refuses a
+  // runner root at any depth (pinned as a decision in 64b4eaa), so there is no
+  // narrower-prefix rule there for a code flag to slip past.
+  for (const permission of ['Bash(python -c *)', 'Bash(node -e *)', 'Bash(env FOO=1 *)',
+    'Bash(xargs sh *)', 'PowerShell(pwsh -c *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
 });
 
 test('exporter refusal covers every learner shell wrapper, so the tables cannot drift', () => {

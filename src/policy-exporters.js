@@ -262,12 +262,98 @@ function candidateContainsSecret(candidate, prefix) {
   );
 }
 
+// Flags that hand an interpreter its program as text. A reviewed prefix holding one is
+// arbitrary execution exactly as `bash -c` is (refused below since before 2026-10-13):
+// `["python", "-c"]` admits `python -c "<anything>"`. Until 2026-10-13 only the shells
+// had this check, so `["python", "-c"]`, `["node", "-e"]`, `["env", "FOO=1"]` and
+// `["xargs", "-0"]` each rendered as a valid reviewed prefix_rule (measured that day:
+// wrapperIsBroad returned false for all four, because a two-token prefix of a
+// non-shell runner was always "narrower").
+//
+// A flag ANYWHERE after the root counts, not only in the second position or the last.
+// `bash -c` is refused at position two whatever follows, and finding where an
+// interpreter's options end needs its value-option table (`python -W ignore -c` hides
+// `-c` behind a value), which this module does not keep. So a reviewed prefix that
+// merely carries the same text as a script argument (`["python", "x.py", "-c"]`) is
+// refused too: the safe failure, and the reviewer can still narrow differently.
+// Short-option clusters are matched where the interpreter accepts them (`python -Ic`,
+// `perl -ne`, `ruby -pe`, `node -pe`). Ruby's `-E` is an encoding, not code; it is
+// refused anyway, deliberately, because it costs nothing. `npx -c`/`--call` runs a shell
+// command string, the same class, so it is here too. PowerShell and the POSIX shells
+// keep their own branches below.
+const INLINE_CODE_FLAGS = new Map(Object.entries({
+  python: (token) => /^-[bBdEhiIOPqRsSuvVx]*c/.test(token),
+  node: (token) => ['-e', '--eval', '-p', '--print', '-pe', '-ep'].includes(token)
+    || /^--(?:eval|print)=/.test(token),
+  bun: (token) => ['-e', '--eval', '-p', '--print'].includes(token) || /^--(?:eval|print)=/.test(token),
+  deno: (token) => token === 'eval' || token === '--eval' || token.startsWith('--eval='),
+  ruby: (token) => /^-(?!-)[A-Za-z0-9]*[eE]/.test(token),
+  perl: (token) => /^-(?!-)[A-Za-z0-9]*[eE]/.test(token),
+  php: (token) => /^-[rRBE]/.test(token) || /^--(?:run|process-(?:code|begin|end))(?:=|$)/.test(token),
+  npx: (token) => token === '-c' || token === '--call' || token.startsWith('--call='),
+}));
+INLINE_CODE_FLAGS.set('python3', INLINE_CODE_FLAGS.get('python'));
+INLINE_CODE_FLAGS.set('py', INLINE_CODE_FLAGS.get('python'));
+
+// `env` and `xargs` run whatever command follows their own options, so a prefix is
+// only as narrow as the command it names. Returns that inner prefix (possibly empty),
+// or null when an option is not one these tables know, which is treated as broad.
+// `env -S` / `--split-string` takes a whole command line in one argument, so it is
+// deliberately absent and lands on null.
+const ENV_FLAGS = new Set(['-i', '-0', '-v', '-', '--ignore-environment', '--null', '--debug']);
+const ENV_VALUE_OPTIONS = new Set(['-u', '--unset', '-C', '--chdir']);
+const XARGS_FLAGS = new Set(['-0', '--null', '-r', '--no-run-if-empty', '-t', '--verbose', '-p',
+  '--interactive', '-x', '--exit', '-o', '--open-tty', '--show-limits', '-e', '-i', '-l',
+  '--eof', '--replace', '--max-lines']);
+const XARGS_VALUE_OPTIONS = new Set(['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '-n',
+  '--max-args', '-P', '--max-procs', '-s', '--max-chars', '--process-slot-var', '-J', '-R', '-S']);
+function innerCommandPrefix(base, prefix) {
+  let k = 1;
+  for (; k < prefix.length; k += 1) {
+    const token = String(prefix[k]);
+    if (token === '--') { k += 1; break; }
+    if (base === 'env') {
+      if (token.includes('=') && !token.startsWith('-')) continue;           // NAME=VALUE
+      if (ENV_FLAGS.has(token) || /^--(?:unset|chdir)=/.test(token) || /^-[uC]./.test(token)) continue;
+      if (ENV_VALUE_OPTIONS.has(token)) { k += 1; continue; }
+    } else {
+      if (!token.startsWith('-')) break;
+      if (XARGS_FLAGS.has(token) || /^-[0rtpx]+$/.test(token) || /^--[a-z-]+=/.test(token)) continue;
+      if (/^-[adEILnPsJRSeil]./.test(token)) continue;                       // a fused value: -n1, -I{}
+      if (XARGS_VALUE_OPTIONS.has(token)) { k += 1; continue; }
+    }
+    if (token.startsWith('-')) return null;
+    break;
+  }
+  // env still reads NAME=VALUE pairs after `--`.
+  while (base === 'env' && k < prefix.length && String(prefix[k]).includes('=')) k += 1;
+  return prefix.slice(k);
+}
+
 function wrapperIsBroad(prefix) {
   const root = canonicalRoot(prefix?.[0]);
   if (!SHELL_WRAPPERS.has(root)) return false;
   if (prefix.length === 1) return true;
+  const base = root.replace(/\.(?:exe|cmd)$/, '');
+  if (INLINE_CODE_FLAGS.has(base) && prefix.slice(1).some((token) => INLINE_CODE_FLAGS.get(base)(String(token)))) {
+    return true;
+  }
+  // xargs execs the named command directly, with no shell, so `["xargs", "rm"]` is no
+  // broader than `["rm"]` with arguments read from stdin, which a reviewer may already
+  // approve; `["xargs", "sh"]` is as broad as `["sh"]`. Hence the recursion. A prefix that
+  // ends before naming a command (`["xargs", "-0"]`, `["env", "FOO=1"]`) runs anything.
+  if (base === 'env' || base === 'xargs') {
+    const inner = innerCommandPrefix(base, prefix);
+    return inner === null || inner.length === 0 || wrapperIsBroad(inner);
+  }
   const second = String(prefix[1]).toLowerCase();
-  if (['cmd', 'cmd.exe', 'command.com'].includes(root)) return second === '/c' || second === '/k';
+  // cmd.exe takes its command from the first `/c` or `/k` (`/r` is an old alias of `/c`)
+  // after any number of other switches, and the switch may be fused to the command
+  // (`/cdir`). Checking only the second token missed `["cmd", "/d", "/c"]` and `["cmd",
+  // "/q"]`, which admits `cmd /q /c <anything>`. The only narrow cmd prefix would be one
+  // that already holds a fixed command after `/c`, and that was refused before too, so
+  // every cmd prefix is broad (2026-10-13).
+  if (['cmd', 'command.com'].includes(base)) return true;
   if (['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(root)) {
     if (['-c', '-command', '-encodedcommand', '-enc'].includes(second)) return true;
     return !['-file', '-f'].includes(second) || prefix.length < 3;

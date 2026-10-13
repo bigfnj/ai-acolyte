@@ -216,6 +216,40 @@ test('prunedObservations survives a reload instead of being dropped by the reade
     'the reader has to keep the field the writer writes');
 });
 
+// `partial` is the per-scan ingest budget deferring the rest of a big file to the
+// next scan, and nothing else: catch-up, not an error. MEASURED 2026-10-13 the
+// largest archived rollout on the development box is 170 MB against a 64 MiB
+// budget, so the archive root makes it three scans of `partial` -- and the
+// panel used to call that "scan degraded". How much is LEFT is what a reader
+// needs, and `unreadable` (a stretch with no record boundary, skipped rather
+// than deferred) was reported per file and counted nowhere.
+test('deferred bytes and unreadable stretches are counted, returned and survive a reload', (t) => {
+  const home = tempHome(t);
+  const learn = manager(home, scanner({ files: [
+    { source: 'codex', mode: 'partial', path: path.join(home, 'big.jsonl'), size: 1000, consumedEnd: 400 },
+    { source: 'codex', mode: 'unreadable', path: path.join(home, 'odd.jsonl'), size: 900, consumedEnd: 900,
+      unreadableFrom: 0, unreadableBytes: 900 },
+    { source: 'claude', mode: 'full', path: path.join(home, 'ok.jsonl'), size: 50 },
+  ] }));
+  const result = learn.scan();
+  assert.equal(result.partial, 1);
+  assert.equal(result.deferredBytes, 600,
+    'witness:deferred-bytes -- size minus consumedEnd over the deferred files');
+  assert.equal(result.unreadable, 1, 'witness:unreadable -- the skipped stretch was counted nowhere');
+  assert.equal(result.errors, 0, 'neither a deferral nor a skipped stretch is a read error');
+
+  const reloaded = manager(home, scanner()).status().lastScanStats;
+  assert.equal(reloaded.partial, 1);
+  assert.equal(reloaded.deferredBytes, 600, 'the reader has to keep the field the writer writes');
+  assert.equal(reloaded.unreadable, 1);
+
+  // The control: a scan with nothing deferred reports nothing left, so the
+  // number above is the files and not a constant.
+  const clean = manager(home, scanner({ files: [{ source: 'claude', mode: 'full', path: path.join(home, 'ok.jsonl'), size: 50 }] })).scan();
+  assert.equal(clean.deferredBytes, 0);
+  assert.equal(clean.unreadable, 0);
+});
+
 // ── the cursor cap ────────────────────────────────────────────────────────────
 
 test('cursors are capped even on the blind path, oldest transcript evicted first', (t) => {

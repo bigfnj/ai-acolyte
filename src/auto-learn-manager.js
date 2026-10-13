@@ -750,11 +750,17 @@ function scanStats(value) {
   const count = (name) => Math.max(0, Number(value[name]) || 0);
   return {
     files: count('files'), observations: count('observations'), errors: count('errors'),
-    // Files the scan deliberately stopped short on, and results whose call it
-    // could not reach. Both are normal in small numbers and both are evidence
-    // of a problem when they persist, which is why they are counted rather
-    // than inferred from the absence of something else.
-    partial: count('partial'), unmatchedResults: count('unmatchedResults'),
+    // `partial` is a file the per-file per-scan ingest budget DEFERRED: the
+    // read stopped at the cap on a record boundary, the cursor records exactly
+    // what was consumed, and the next scan continues from there. It is catch-up,
+    // never an error, and `deferredBytes` is how much of it is left.
+    // `unreadable` is the different thing: a stretch with no record boundary at
+    // all that had to be stepped over, so its bytes were skipped, not deferred.
+    // It used to be reported per file and counted nowhere. `unmatchedResults`
+    // is results whose call the scan could not reach -- normal in small numbers,
+    // evidence of a problem when it persists, so counted rather than inferred.
+    partial: count('partial'), deferredBytes: count('deferredBytes'), unreadable: count('unreadable'),
+    unmatchedResults: count('unmatchedResults'),
     prunedObservations: count('prunedObservations'),
     // Dedupe entries the cap could not evict because their families are still
     // below the success threshold, so the map is over its limit. Normal at
@@ -784,16 +790,24 @@ function scanStats(value) {
     // answer as `false`.
     codexHistoryStale: value.codexHistoryStale === true,
     // `unavailable` is a FOURTH state and not a spelling of `partial`: the probe
-    // needs `node:sqlite`, no shipping VS Code has it, and a check that cannot
-    // run on the runtime the product ships on is inapplicable rather than
-    // degraded. Omitting it here is what would quietly turn it back into
-    // `skipped` on the first reload and lose the distinction again.
+    // needs `node:sqlite`, and a check the runtime cannot host is inapplicable
+    // rather than degraded. VS Code 1.141.1 (Node 24.21.0) loads it; hosts
+    // within the ^1.80 engine floor may not, so the `unavailable` tier stays
+    // (measured 2026-10-13). Omitting it here is what would quietly turn it back
+    // into `skipped` on the first reload and lose the distinction again.
     codexHistoryInspected: ['exact', 'unavailable', 'partial', 'skipped'].includes(value.codexHistoryInspected)
       ? value.codexHistoryInspected : 'skipped',
     codexHistoryReasons: Array.isArray(value.codexHistoryReasons)
       ? value.codexHistoryReasons.slice(0, 8).map((entry) => clean(entry, 400)).filter(Boolean) : [],
     codexHistoryNotes: Array.isArray(value.codexHistoryNotes)
       ? value.codexHistoryNotes.slice(0, 8).map((entry) => clean(entry, 400)).filter(Boolean) : [],
+    // What the stale verdict is MADE of, so the panel can say "4 Codex threads
+    // with no transcript" instead of one fixed sentence that was wrong about
+    // why. Null when the check did not run, which is not the same as zeros.
+    codexHistoryFindings: object(value.codexHistoryFindings) ? Object.fromEntries(
+      ['orphans', 'relocated', 'projectionAhead', 'emptyRollouts'].map((name) =>
+        [name, Math.max(0, Math.floor(Number(value.codexHistoryFindings[name]) || 0))]),
+    ) : null,
   };
 }
 function persistentState(state) {
@@ -1343,14 +1357,17 @@ function createAutoLearnManager(options = {}) {
   const claudeRoots = configuredRoots(home,
     options.claudeRoots ?? options.claudeHistoryPath ?? aliases.claudeHistory,
     [path.join(home, '.claude', 'projects')]);
+  // BOTH folders Codex writes transcripts to: archiving a thread MOVES its rollout
+  // from `sessions/YYYY/MM/DD/` to a flat `archived_sessions/` (measured 2026-10-13),
+  // and a default of `sessions/` alone dropped its calls from the corpus on the spot.
   const codexRoots = configuredRoots(home,
     options.codexRoots ?? options.codexHistoryPath ?? aliases.codexHistory,
-    [path.join(codexHome, 'sessions')]);
+    [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')]);
   const historyScanner = typeof options.historyScanner === 'function' ? options.historyScanner : scanHistoryFiles;
   // Injectable for the fixtures that have to make the two stores disagree, and
-  // resolved per codex root rather than once from `home`, because a test points
-  // the root somewhere else and a detector that ignored that would be checking
-  // the developer's real `~/.codex` while the fixture sat unread.
+  // resolved from the configured roots rather than once from `home`, because a
+  // test points the roots somewhere else and a detector that ignored that would
+  // be checking the developer's real `~/.codex` while the fixture sat unread.
   const historyStoreProbe = typeof options.codexHistoryStore === 'function'
     ? options.codexHistoryStore : codexHistoryStoreState;
   // Worst LAST. `unavailable` sits between `exact` and `partial` on purpose: it
@@ -1363,15 +1380,29 @@ function createAutoLearnManager(options = {}) {
   // are closed over from the enclosing manager, so the object was built and
   // silently discarded on every scan -- and had the parameter ever been added,
   // the two would have disagreed about which roots to probe.
+  //
+  // ONE PROBE PER CODEX HOME, NOT PER ROOT. The roots are grouped by the folder
+  // that holds them, and each group is probed once with all of its roots. Per
+  // root was right while there was one root per home; with `sessions/` and
+  // `archived_sessions/` side by side, a probe of either alone reads the other's
+  // threads as orphans, and the corpus is stale by construction.
   function codexHistoryStore() {
-    const roots = codexRoots.length ? codexRoots : [path.join(codexHome, 'sessions')];
+    const roots = codexRoots.length ? codexRoots
+      : [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')];
+    const groups = new Map();
+    for (const root of roots) {
+      const key = normalizedPath(path.dirname(root));
+      if (!groups.has(key)) groups.set(key, { codexHome: path.dirname(root), dirs: [] });
+      groups.get(key).dirs.push(root);
+    }
     let stale = false;
     let inspected = 'exact';
     const reasons = [];
     const notes = [];
-    for (const root of roots) {
+    const findings = { orphans: 0, relocated: 0, projectionAhead: 0, emptyRollouts: 0 };
+    for (const group of groups.values()) {
       const state = historyStoreProbe({
-        home, sessionsDir: root, codexHome: path.dirname(root),
+        home, codexHome: group.codexHome, sessionsDirs: group.dirs, sessionsDir: group.dirs[0],
       }) || {};
       if (state.stale) stale = true;
       // Worst wins. One root inspected exactly does not redeem another that
@@ -1381,8 +1412,13 @@ function createAutoLearnManager(options = {}) {
       if ((RANK[state.inspected] ?? 2) > RANK[inspected]) inspected = state.inspected || 'skipped';
       for (const reason of state.reasons || []) if (!reasons.includes(reason)) reasons.push(reason);
       for (const note of state.notes || []) if (!notes.includes(note)) notes.push(note);
+      // Summed. A probe that reports no findings -- one injected before they
+      // existed -- contributes zero, and its `stale` and reasons above still
+      // carry its verdict, so the panel falls back to the generic phrase.
+      const found = object(state.findings) ? state.findings : {};
+      for (const name of Object.keys(findings)) findings[name] += Math.max(0, Number(found[name]) || 0);
     }
-    return { stale, inspected, reasons, notes };
+    return { stale, inspected, reasons, notes, findings };
   }
   const codexValidator = typeof options.codexValidator === 'function' ? options.codexValidator
     : typeof options.validateCodexRules === 'function' ? options.validateCodexRules : defaultCodexValidator;
@@ -2566,12 +2602,30 @@ function createAutoLearnManager(options = {}) {
         // A missing directory is not proof that the old history was rebuilt.
         // Failed or skipped bytes must be retried, not blessed on an unchanged
         // next tick after their cursor already advanced past them.
+        const enumerated = new Set();
         for (const entry of codexFiles) if (entry.path && entry.scope !== 'root') {
           const id = `path-sha256:${hash(Buffer.from(normalizedPath(entry.path), 'utf8')).slice(0, 24)}`;
+          enumerated.add(id);
           if (incomplete.includes(entry)) {
             pendingFiles.add(id);
             if (entry.mode !== 'partial') delete state.cursors[id];
           } else pendingFiles.delete(id);
+        }
+        // A pending id that a CLEAN walk no longer enumerates is dropped. These
+        // ids are path hashes, and archiving MOVES a rollout to a new path, so a
+        // transcript archived mid-rebuild left its old id in this set forever:
+        // nothing could ever read that path again, `pendingFiles.size > 0` held
+        // the rebuild open for good, and auto-safe apply stayed blocked with no
+        // remedy. The moved file is enumerated under its new id and read from
+        // byte 0, so its evidence IS rebuilt. A deleted one is equivalent to a
+        // transcript deleted before the rebuild began: what remains is all
+        // freshly rebuilt, which is the property the pending flag protects.
+        //
+        // ONLY on a clean walk. A Codex root or subtree that could not be listed
+        // (`scope: 'root'`) may still hold the file, and "not enumerated" from a
+        // walk that could not look is not "gone".
+        if (!codexFiles.some((entry) => entry.scope === 'root')) {
+          for (const id of [...pendingFiles]) if (!enumerated.has(id)) pendingFiles.delete(id);
         }
         state.codexEvidencePendingFiles = [...pendingFiles].sort();
         state.codexEvidenceRebuildPending = codexFiles.length === 0 || incomplete.length > 0 || pendingFiles.size > 0;
@@ -2593,14 +2647,30 @@ function createAutoLearnManager(options = {}) {
       // Never allowed to fail a scan. The whole point is to add a signal to an
       // otherwise healthy-looking result; taking the result down with it would
       // be a worse outcome than the blindness it reports.
-      let codexHistory = { stale: false, inspected: 'skipped', reasons: [], notes: [] };
+      let codexHistory = { stale: false, inspected: 'skipped', reasons: [], notes: [], findings: null };
       try { codexHistory = codexHistoryStore(); }
       catch (error) {
+        // `findings: null`, not zeros: a check that threw found nothing because
+        // it did not look, and a zero would say it looked.
         codexHistory = {
           stale: false, inspected: 'partial', reasons: [],
           notes: [`The Codex history-store check threw (${clean(error?.message || error, 200)}), so staleness is unknown.`],
+          findings: null,
         };
       }
+      // `partial` is a file the per-scan ingest budget deferred, and NOTHING
+      // else (`scanHistoryFiles` sets it where the read stops at the cap and
+      // the cursor lands on a newline; the next scan continues from there).
+      // These two say how much is left and what was genuinely lost, which a
+      // count of deferred files cannot: a 170 MB archived rollout is three
+      // scans of catch-up, not an error. `unreadable` was reported per file
+      // and counted nowhere.
+      const scanned = Array.isArray(result.files) ? result.files : [];
+      const deferredBytes = scanned.filter((item) => item.mode === 'partial').reduce((total, item) => {
+        const left = Number(item.size) - Number(item.consumedEnd);
+        return total + (Number.isFinite(left) && left > 0 ? left : 0);
+      }, 0);
+      const unreadable = scanned.filter((item) => item.mode === 'unreadable').length;
       state.lastScanAt = now();
       state.lastScanStats = {
         files: Array.isArray(result.files) ? result.files.length : Object.keys(state.cursors).length,
@@ -2608,6 +2678,8 @@ function createAutoLearnManager(options = {}) {
         errors: Array.isArray(result.files) ? result.files.filter((item) => item.mode === 'error').length : 0,
         partial: Array.isArray(result.files)
           ? result.files.filter((item) => item.mode === 'partial').length : 0,
+        deferredBytes,
+        unreadable,
         unmatchedResults: Array.isArray(result.files)
           ? result.files.reduce((total, item) => total + (Number(item.unmatchedResults) || 0), 0) : 0,
         prunedObservations,
@@ -2627,6 +2699,7 @@ function createAutoLearnManager(options = {}) {
         codexHistoryInspected: codexHistory.inspected,
         codexHistoryReasons: codexHistory.reasons,
         codexHistoryNotes: codexHistory.notes,
+        codexHistoryFindings: codexHistory.findings ?? null,
       };
       save(state);
       const application = state.mode === 'auto-safe' && !rebuildingCodex && !state.codexEvidenceRebuildPending
@@ -2639,6 +2712,8 @@ function createAutoLearnManager(options = {}) {
         // dashboard and anything else that only ever sees this object.
         errors: state.lastScanStats.errors,
         partial: state.lastScanStats.partial,
+        deferredBytes: state.lastScanStats.deferredBytes,
+        unreadable: state.lastScanStats.unreadable,
         unmatchedResults: state.lastScanStats.unmatchedResults,
         prunedObservations, retainedObservations,
         prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidatesTotal, prunedGrants,
@@ -2648,6 +2723,7 @@ function createAutoLearnManager(options = {}) {
         codexHistoryInspected: state.lastScanStats.codexHistoryInspected,
         codexHistoryReasons: state.lastScanStats.codexHistoryReasons,
         codexHistoryNotes: state.lastScanStats.codexHistoryNotes,
+        codexHistoryFindings: state.lastScanStats.codexHistoryFindings,
         candidates: Object.keys(state.candidates).length, application, apply: application,
       };
     });

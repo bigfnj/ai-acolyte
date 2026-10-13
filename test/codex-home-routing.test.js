@@ -57,7 +57,11 @@ test('the active profile supplies the managed cache and manager default history 
     console.log(JSON.stringify({ bundle: readEnterpriseBundle(), paths: createAutoLearnManager().paths }));
   `], box);
   assert.equal(result.bundle.fixture, 'active custom profile');
-  assert.deepEqual(result.paths.codexHistory, [path.join(box.codexHome, 'sessions')]);
+  // Both folders Codex writes transcripts to: archiving moves a rollout into
+  // `archived_sessions/` (measured 2026-10-13), and both follow the active profile.
+  assert.deepEqual(result.paths.codexHistory, [
+    path.join(box.codexHome, 'sessions'), path.join(box.codexHome, 'archived_sessions'),
+  ]);
   assert.equal(result.paths.codexRules, path.join(box.codexHome, 'rules', 'permission-wildcarding.rules'));
   assert.equal(fs.existsSync(path.join(box.home, '.codex')), false);
 });

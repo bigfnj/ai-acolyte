@@ -91,7 +91,7 @@ matrix and dated evidence are in
 
 Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2219`).
 It lists local rules and confirms removal of a selected literal allow declaration
-(`vscode-extension/extension.js:3517`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:3681`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 

@@ -243,20 +243,49 @@ test('an incomplete Codex rebuild stays pending across reloads and never reappli
   assert.equal(f.read().candidates['powershell:git status'].counts.success, 2, 'retries do not subtract retained Claude counts twice');
 });
 
-test('an unfinished transcript cannot disappear behind another completed file', (t) => {
+// WAS "an unfinished transcript cannot disappear behind another completed file",
+// which held the rebuild open for ANY pending id a scan did not enumerate. The
+// ids are path hashes and archiving MOVES a rollout to a new path (measured
+// 2026-10-13), so a transcript archived mid-rebuild left an id nothing could
+// ever read again: the rebuild stayed pending for good and auto-safe apply was
+// blocked with no remedy. The moved file is enumerated under its new id and read
+// from byte 0, so its evidence is rebuilt there. The half of the old witness
+// that still holds is the control: a walk that could not list a root has not
+// shown that anything is gone.
+test('a pending transcript a clean walk no longer finds stops holding the rebuild open', (t) => {
   const f = fixture(t);
   createAutoLearnManager({ ...f.options, historyScanner: () => ({ ...f.current,
     files: f.current.files.map((entry) => ({ ...entry, mode: 'partial' })),
   }) }).scan();
-  fs.unlinkSync(f.transcript);
-  const result = createAutoLearnManager({ ...f.options, historyScanner: () => ({
-    observations: [], cursors: {}, files: [{ source: 'codex', mode: 'full', path: path.join(path.dirname(f.transcript), 'other.jsonl') }],
+  assert.equal(createAutoLearnManager(f.options).status().codexEvidence.remainingFiles, 1,
+    'precondition: the capped read left the transcript pending');
+  const archive = path.join(f.home, '.codex', 'archived_sessions');
+  fs.mkdirSync(archive, { recursive: true });
+  const moved = path.join(archive, path.basename(f.transcript));
+  fs.renameSync(f.transcript, moved);
+  const movedEntry = { source: 'codex', mode: 'full', path: moved };
+
+  // The control first, while the id is still pending: one Codex root could not
+  // be listed, so "not enumerated" is not evidence of anything.
+  const blocked = createAutoLearnManager({ ...f.options, historyScanner: () => ({
+    observations: [], cursors: {}, files: [movedEntry,
+      { source: 'codex', mode: 'error', scope: 'root', path: path.dirname(f.transcript), error: 'fixture unreadable' }],
   }) }).scan();
-  assert.equal(result.codexEvidence.pending, true, 'WITNESS a missing unfinished file cannot establish a complete rebuild');
-  assert.equal(result.codexEvidence.remainingFiles, 1);
-  assert.deepEqual(result.codexEvidence.reasons, ['unfinished-transcripts']);
-  assert.equal(createAutoLearnManager(f.options).status().codexEvidence.remainingFiles, 1);
+  assert.equal(blocked.codexEvidence.pending, true, 'WITNESS a walk that could not look cannot establish a complete rebuild');
+  assert.equal(blocked.codexEvidence.remainingFiles, 1,
+    'witness:pending-leak -- a pending id was dropped by a walk that failed on a root');
+  assert.deepEqual(blocked.codexEvidence.reasons, ['unfinished-transcripts']);
+
+  const clean = createAutoLearnManager({ ...f.options, historyScanner: () => ({
+    observations: [], cursors: {}, files: [movedEntry],
+  }) }).scan();
+  assert.equal(clean.codexEvidence.pending, false,
+    'witness:pending-leak -- a path no walk can ever enumerate again held the rebuild open');
+  assert.equal(clean.codexEvidence.remainingFiles, 0);
+  assert.equal(createAutoLearnManager(f.options).status().codexEvidence.pending, false);
+  assert.equal(f.read().codexEvidenceRebuildPending, false);
   assert.equal(f.read().candidates['powershell:git status'].counts.success, 2);
+  // The clearing scan began as a rebuild, so it does not apply anything itself.
   assert.deepEqual(f.read().lastApplication, f.legacy.lastApplication);
 });
 

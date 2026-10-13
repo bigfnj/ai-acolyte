@@ -282,6 +282,47 @@ case "${SCAN_ERRORS:-unreadable:empty}" in
     no "the last Auto Learn scan recorded no errors" "$SCAN_ERRORS file(s) failed to read" ;;
 esac
 
+# The LIVE Codex history store, compared the way every scan compares it. The state
+# file above only says what the last scan saw; this asks the store now, against the
+# real ~/.codex (or CODEX_HOME), so a divergence the panel shows as "scan degraded"
+# fails the gate here too, with its reasons, instead of passing every other check.
+#
+# The case that motivated it, reproduced 2026-10-13: four archived Codex threads
+# read as orphans because only sessions/ was walked, and the dashboard said "Codex
+# history store has moved" on every scan, over a store that had moved nothing.
+#
+# The module paths go in as ARGUMENTS, not inside the script text: under Git Bash
+# $REPO is a POSIX path that Windows node cannot resolve, and MSYS rewrites argv
+# but not the body of -e. resolveCodexHome() asks node for the home, so HOME's
+# POSIX spelling never matters either.
+CODEX_HISTORY=$(node -e '
+  const fs = require("fs");
+  const adapters = require(process.argv[1]);
+  const { resolveCodexHome } = require(process.argv[2]);
+  const codexHome = resolveCodexHome();
+  if (!fs.existsSync(codexHome)) { process.stdout.write("absent"); process.exit(0); }
+  try {
+    const state = adapters.codexHistoryStoreState({ codexHome });
+    const summary = state.inspected + "; " + state.rolloutFiles + " rollout file(s), "
+      + state.archivedFiles + " archived, " + state.storeThreads + " known thread(s)";
+    if (state.stale) process.stdout.write("stale:" + summary + " | " + state.reasons.join(" | "));
+    else if (state.inspected === "partial") process.stdout.write("partial:" + summary + " | " + state.notes.join(" | "));
+    else process.stdout.write("ok:" + summary);
+  } catch (error) { process.stdout.write("error:" + ((error && error.message) || error)); }
+' "$REPO/src/history-adapters.js" "$REPO/src/codex-paths.js" 2>/dev/null)
+case "${CODEX_HISTORY:-error:no output}" in
+  absent)
+    echo "  INFO  no Codex home on this box, so there is no Codex history store to compare" ;;
+  ok:*)
+    ok "the live Codex history store agrees with the rollout folders" "${CODEX_HISTORY#ok:}" ;;
+  stale:*)
+    no "the live Codex history store agrees with the rollout folders" "${CODEX_HISTORY#stale:}" ;;
+  partial:*)
+    no "the live Codex history-store comparison ran without degrading" "${CODEX_HISTORY#partial:}" ;;
+  *)
+    no "the live Codex history-store comparison ran" "${CODEX_HISTORY#error:}" ;;
+esac
+
 # Leave the machine as we found it — UNCONDITIONALLY.
 #
 # This used to restore only when the cold run had failed to write a key, on the

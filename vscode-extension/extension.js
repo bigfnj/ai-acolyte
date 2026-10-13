@@ -1106,9 +1106,14 @@ function autoLearnManagerOptions(cfg = autoLearnConfig()) {
     threshold: cfg.threshold, successThreshold: cfg.threshold,
     codexRulesPath: cfg.codexRulesPath, codexExecutable: cfg.codexExecutable,
     workspaceRoot: cfg.workspaceRoot,
+    // No `codexHistory` here, on purpose. It pinned the Codex root to
+    // `sessions/` alone and overrode the manager's default, which also reads
+    // `archived_sessions/`: archiving a thread MOVES its rollout there (measured
+    // 2026-10-13), so the pin dropped every archived thread's calls from the
+    // corpus. Both folders hang off CODEX_HOME_DIR, which the manager already
+    // gets as `codexHome` above and which is in the cache key below.
     paths: {
       claudeHistory: PROJECTS_DIR,
-      codexHistory: CODEX_SESSIONS_DIR,
       claudeSettings: SETTINGS,
       codexRules: cfg.codexRulesPath,
     },
@@ -1289,10 +1294,24 @@ function autoLearnScanHealth(stats) {
     // `codexHistoryInspected: 'partial'` is the other half: the comparison could
     // not be made, which is not an answer of `false`. `'unavailable'` is a
     // different statement again — the probe needs `node:sqlite` and the host
-    // does not have it — and it is passed through UNCHANGED rather than folded
-    // into 'partial', because scanTrouble treats only the latter as trouble.
+    // cannot load it. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within the
+    // ^1.80 engine floor may not, so the `unavailable` tier stays (measured
+    // 2026-10-13). It is passed through UNCHANGED rather than folded into
+    // 'partial', because scanTrouble treats only the latter as trouble.
     codexHistoryStale: stats.codexHistoryStale === true,
     codexHistoryInspected: stats.codexHistoryInspected || 'skipped',
+    // What `stale` is made of, so the card can say WHICH divergence it saw. The
+    // fixed sentence it replaced ("history store has moved") was wrong about the
+    // one case anyone actually hit: four archived threads, nothing moved.
+    codexHistoryFindings: stats.codexHistoryFindings && typeof stats.codexHistoryFindings === 'object'
+      ? stats.codexHistoryFindings : null,
+    // Three, because it is a hover title and not a report; the output channel
+    // gets every one.
+    codexHistoryReasons: (Array.isArray(stats.codexHistoryReasons) ? stats.codexHistoryReasons : []).slice(0, 3),
+    // Budget deferral is catch-up and is drawn as such, beside the count of what
+    // is left. A skipped unreadable stretch is the lost-bytes case, and trouble.
+    deferredBytes: count(stats.deferredBytes),
+    unreadable: count(stats.unreadable),
   };
 }
 
@@ -1358,6 +1377,7 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     const result = await runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold });
     autoLearnFailureCount = 0;
     autoLearnNextRetryAt = 0;
+    logScanTrouble(result);
     const manager = getAutoLearnManager();
     const status = managerStatus(manager);
     const counts = countAutoLearnCandidates(
@@ -1991,6 +2011,9 @@ function registerAutoLearnWatchers(context) {
   for (const [base, pattern] of [
     [path.join(os.homedir(), '.claude'), 'projects/**/*.jsonl'],
     [CODEX_HOME_DIR, 'sessions/**/*.jsonl'],
+    // Flat, no date folders: archiving moves a rollout here (2026-10-13), and
+    // the scan reads it, so a move is a change worth a scan.
+    [CODEX_HOME_DIR, 'archived_sessions/*.jsonl'],
   ]) {
     try {
       const watcher = vscode.workspace.createFileSystemWatcher(
@@ -2088,6 +2111,53 @@ function registerLocalWatchers(context) {
   // drain: the one above is registered before attach() and is the one under test.
 }
 
+// The panel has room for a phrase and a three-reason hover title. The full
+// reasons -- which say which folders were compared and why the verdict is what
+// it is -- had nowhere to go, so a user looking at "scan degraded" could not find
+// out what to do about it. One line per reason, to the shared channel.
+//
+// Only when the set CHANGES. A scan runs every few minutes and on every
+// transcript write, and a persisting condition would otherwise append the same
+// lines for as long as the window is open. The manager writes reasons with
+// directory names only, so nothing here is a path it did not already persist.
+//
+// Never allowed to throw into the scan: the channel API is absent from some test
+// hosts, and a logging failure must not turn a scan that returned into one the
+// card reports as failed.
+let lastScanTroubleLog = '';
+function logScanTrouble(result) {
+  try {
+    if (!result || typeof result !== 'object') return;
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const lines = [];
+    if (result.blindScan) lines.push('nothing was enumerated, so the cursor map was preserved');
+    for (const reason of Array.isArray(result.codexHistoryReasons) ? result.codexHistoryReasons : []) {
+      lines.push(`Codex history: ${reason}`);
+    }
+    if (result.codexHistoryInspected === 'partial') lines.push('the Codex history-store check ran degraded');
+    if (result.errors) lines.push(`${plural(result.errors, 'file', 'files')} could not be read`);
+    if (result.unreadable) {
+      lines.push(`${plural(result.unreadable, 'file', 'files')} had an unreadable stretch that was skipped`);
+    }
+    if (result.retainedObservations) {
+      lines.push(`${plural(result.retainedObservations, 'observation hash', 'observation hashes')} held over the cap`);
+    }
+    if (result.unmatchedResults) {
+      lines.push(`${plural(result.unmatchedResults, 'result', 'results')} could not be matched to a call`);
+    }
+    const signature = lines.join('\n');
+    if (signature === lastScanTroubleLog) return;
+    lastScanTroubleLog = signature;
+    if (!lines.length) return;
+    const channel = sharedChannel();
+    if (!channel) return;
+    const stamp = new Date().toISOString();
+    for (const line of lines) channel.appendLine(`[${stamp}] Auto Learn scan: ${line}`);
+  } catch (error) {
+    console.error('ai-acolyte: could not log Auto Learn scan trouble —', error);
+  }
+}
+
 // Created on first use and disposed with the extension. Lazy rather than built
 // in activate, because the mocked-vscode activation test does not stub every
 // window API and a channel nobody opened costs nothing.
@@ -2122,6 +2192,8 @@ function activate(context) {
   // released here or the second activation is muted for its whole lifetime.
   deactivated = false;
   activationGeneration += 1;
+  // A re-activate logs to a fresh channel, so current trouble is not "seen" yet.
+  lastScanTroubleLog = '';
   // The busy latch, released unconditionally here. deactivate() only clears it
   // when it is still the current generation — correctly, because a successor's
   // in-flight scan must not have its latch cleared by a predecessor's
@@ -4347,18 +4419,58 @@ class WildcardingViewProvider {
     // card reading perfectly healthy.
     const health = $('alScanHealth');
     const s = a.scan;
-    if (!s) { health.textContent = ''; health.className = 'memissues'; return; }
+    if (!s) { health.textContent = ''; health.className = 'memissues'; health.title = ''; return; }
     const trouble = scanTrouble(s);
+    // The persisted Codex reasons, on hover. The line itself has room for a
+    // phrase; the reason says which folders were compared and why. Empty when
+    // there are none, so a cleared condition does not leave a stale tooltip.
+    health.title = (s.codexHistoryReasons || []).join(' · ');
     if (trouble.length) {
       health.className = 'memissues';
       health.style.color = 'var(--vscode-charts-yellow, #d29922)';
-      health.textContent = '⚠ last scan: ' + trouble.join(' · ');
+      health.textContent = '⚠ last scan: ' + trouble.join(' · ') + catchUp(s);
     } else {
       health.className = 'memissues muted';
       health.style.color = '';
       health.textContent = '✓ last scan read ' + s.files + ' file' + (s.files === 1 ? '' : 's')
-        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '');
+        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '') + catchUp(s);
     }
+  }
+
+  // A file the per-scan ingest budget deferred is CATCH-UP: the cursor stopped
+  // on a record boundary and the next scan continues from it. It used to be a
+  // trouble entry, "N partly read", which put "scan degraded" on the row for
+  // every scan it took a big transcript to catch up -- three, for the 170 MB
+  // archived rollout measured 2026-10-13 -- over a scan that lost nothing. So
+  // it is said beside the verdict, in both branches, and never as the verdict.
+  function catchUp(s) {
+    if (!s.partial) return '';
+    let left = '';
+    if (s.deferredBytes) {
+      const mb = s.deferredBytes / 1048576;
+      left = ' (' + (mb < 0.1 ? '<0.1' : mb < 10 ? mb.toFixed(1) : String(Math.round(mb))) + ' MB left)';
+    }
+    return ' · catching up on ' + s.partial + ' large transcript' + (s.partial === 1 ? '' : 's') + left;
+  }
+
+  // What the stale verdict is made of, from the counts the probe persisted.
+  // The fixed sentence it replaced, "Codex history store has moved", was wrong
+  // about the one case anyone hit: four archived threads, nothing moved. The
+  // fallback is for a state file written before the counts existed, and it is
+  // the phrase the old sentence ended with, so a stale verdict is never silent.
+  function codexStalePhrase(s) {
+    const f = s.codexHistoryFindings || {};
+    const count = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+    const parts = [];
+    if (f.orphans) parts.push(count(f.orphans, 'Codex thread', 'Codex threads') + ' with no transcript');
+    if (f.relocated) {
+      parts.push(count(f.relocated, 'Codex transcript', 'Codex transcripts') + ' outside the scanned folders');
+    }
+    if (f.projectionAhead) {
+      parts.push('Codex store ahead of ' + count(f.projectionAhead, 'transcript', 'transcripts'));
+    }
+    if (f.emptyRollouts) parts.push('Codex rollout folders empty beside a populated store');
+    return parts.length ? parts.join(' · ') : 'Codex rollout directory is stale';
   }
 
   // Shared by the card body and the collapsed row badge, so the two can never
@@ -4372,20 +4484,27 @@ class WildcardingViewProvider {
     if (s.blindScan) trouble.push('nothing enumerated — cursor map preserved');
     // Second, for the same reason: a scan of a directory Codex has stopped
     // writing to looks healthy on every other number here.
-    if (s.codexHistoryStale) trouble.push('Codex history store has moved — rollout directory is stale');
+    if (s.codexHistoryStale) trouble.push(codexStalePhrase(s));
     // 'partial' ONLY, and 'unavailable' deliberately absent. That state means the
     // probe cannot run on this runtime at all: readThreadStoreIds needs
-    // node:sqlite, which no shipping VS Code carries, so this branch used to fire
-    // on every real extension host on every scan, for ever. A check that is
-    // inapplicable is not a degraded check, and reporting it as one cost the user
-    // the actionable count in the row badge above. The half that is real,
-    // codexHistoryStale, is computed from the session index and the migration
-    // directory without sqlite and still fires on the line above.
+    // node:sqlite, and on a host that cannot load it this branch used to fire on
+    // every scan, for ever. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within
+    // the ^1.80 engine floor may not, so the unavailable tier stays (measured
+    // 2026-10-13). A check that is inapplicable is not a degraded check, and
+    // reporting it as one cost the user the actionable count in the row badge
+    // above. The half that is real, codexHistoryStale, is computed from the
+    // session index against the rollout folders without sqlite and still fires
+    // on the line above.
     //
     // No backtick in this comment on purpose, same as the one further down: this
     // function lives inside the webview template literal.
     else if (s.codexHistoryInspected === 'partial') trouble.push('Codex history-store check ran degraded');
     if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
+    // Bytes that had no record boundary at all and were STEPPED OVER, so they
+    // are lost to the evidence rather than deferred. Unlike partial, this is.
+    if (s.unreadable) {
+      trouble.push(s.unreadable + ' file' + (s.unreadable === 1 ? '' : 's') + ' with an unreadable stretch skipped');
+    }
     // "The evidence cap is over its limit and cannot get back under it." Distinct
     // from the pruned count, which is what came OUT: this is what would not go. No
     // backtick in this comment on purpose - it lives inside the webview template
@@ -4394,7 +4513,8 @@ class WildcardingViewProvider {
       trouble.push(s.retainedObservations + ' observation hash'
         + (s.retainedObservations === 1 ? '' : 'es') + ' held over the cap');
     }
-    if (s.partial) trouble.push(s.partial + ' partly read');
+    // No partial entry: a budget deferral is catch-up and is drawn beside the
+    // verdict by catchUp above, never as trouble.
     if (s.unmatchedResults) {
       trouble.push(s.unmatchedResults + ' unmatched result' + (s.unmatchedResults === 1 ? '' : 's'));
     }

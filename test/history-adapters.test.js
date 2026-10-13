@@ -1572,3 +1572,75 @@ test('a directory reached through a symlinked ancestor is still visited once',
       `one transcript reached by two paths must be observed once, not ${seen.length} times; `
       + 'a visited key built from the walked spelling never matches the realpath one');
   });
+
+// ── forks and archives ────────────────────────────────────────────────────────
+//
+// MEASURED 2026-10-13 on the development box: a FORKED Codex rollout opens with
+// TWO `session_meta` records -- the fork's own (`forked_from_id` = the parent)
+// and then the parent's -- and archiving a thread moves its rollout from
+// `sessions/YYYY/MM/DD/` into a flat `archived_sessions/`. Each is harmless
+// alone. Together they double-counted: the in-order parse ends the head on the
+// PARENT, a first-line-only seed filed an append slice under the FORK, and the
+// move forces a full re-read (a new path has no cursor), so a call first seen in
+// an append slice came back under a second identity.
+
+test('a forked rollout files an append slice under the session a full read uses', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wildcard-history-fork-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'rollout-fork.jsonl');
+  fs.writeFileSync(file, jsonl(
+    { type: 'session_meta', payload: { id: 'fork-thread', forked_from_id: 'parent-thread', cwd: root } },
+    { type: 'session_meta', payload: { id: 'parent-thread', cwd: root } },
+  ) + codexCall('first-call', 'git status --short'));
+
+  const initial = scanHistoryFiles({ roots: { codex: root }, platform: 'win32', overlapBytes: 48 });
+  assert.equal(initial.observations[0].session, 'parent-thread',
+    'precondition: the in-order parse applies both head records, so the parent is the session');
+
+  fs.appendFileSync(file, codexCall('second-call', 'rg TODO src'));
+  const appended = scanHistoryFiles({
+    roots: { codex: root }, cursors: JSON.parse(JSON.stringify(initial.cursors)),
+    platform: 'win32', overlapBytes: 48,
+  });
+  assert.equal(appended.files[0].mode, 'append');
+  assert.deepEqual(appended.observations.map(({ command }) => command), ['rg TODO src'],
+    'precondition: the slice starts past the head, so only the seed can supply the session');
+
+  const fromFull = scanHistoryFiles({ roots: { codex: root }, platform: 'win32' })
+    .observations.find((item) => item.callId === 'second-call');
+  assert.equal(appended.observations[0].session, fromFull.session,
+    `witness:fork-seed -- the seed said ${appended.observations[0].session}, a full read says ${fromFull.session}`);
+  assert.equal(appended.observations[0].id, fromFull.id,
+    'append and full must agree on the identity, or archiving the fork counts this call twice');
+});
+
+test('a rollout moved into archived_sessions is read whole under its new path with the same identities', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wildcard-history-archive-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const sessions = path.join(home, '.codex', 'sessions');
+  const archive = path.join(home, '.codex', 'archived_sessions');
+  const day = path.join(sessions, '2026', '09', '24');
+  fs.mkdirSync(day, { recursive: true });
+  fs.mkdirSync(archive, { recursive: true });
+  const name = 'rollout-2026-09-24T10-00-00-0192aaaa-1111-7000-8000-00000000aa01.jsonl';
+  const live = path.join(day, name);
+  fs.writeFileSync(live, jsonl({ type: 'session_meta', payload: { id: 'moved-thread', cwd: home } })
+    + codexCall('moved-a', 'git status') + codexCall('moved-b', 'git log --oneline'));
+
+  const roots = [sessions, archive];
+  const first = scanHistoryFiles({ codexRoots: roots, platform: 'win32' });
+  assert.equal(first.observations.length, 2);
+
+  fs.renameSync(live, path.join(archive, name));
+  const second = scanHistoryFiles({
+    codexRoots: roots, cursors: JSON.parse(JSON.stringify(first.cursors)), platform: 'win32',
+  });
+  // A new path has no cursor, so the file is read from byte 0. That is only safe
+  // because a real call id makes the identity independent of the path.
+  assert.deepEqual(second.files.map((entry) => entry.mode), ['full']);
+  assert.deepEqual(second.observations.map(({ id }) => id).sort(), first.observations.map(({ id }) => id).sort(),
+    'the moved transcript produced different identities, so the manager would count it again');
+  assert.equal(second.cursors[cursorKeyForFile(live)], undefined, 'the old path keeps no cursor');
+  assert.ok(second.cursors[cursorKeyForFile(path.join(archive, name))]);
+  assert.equal(Object.keys(second.cursors).length, 1);
+});

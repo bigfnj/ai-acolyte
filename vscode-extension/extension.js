@@ -40,7 +40,7 @@ const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi
 const { CodexMemoryLint } = require('./codexMemoryLint');
 const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
 const { createPermissionActions } = require('./permissionActions');
-const { readCodexPermissionSummary, deadShellApprovals } = require('./src/permission-summary');
+const { readCodexPermissionSummary, deadShellApprovals, overBroadShellGrants } = require('./src/permission-summary');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, readCompiled, compiledPath } = require('./src/agent-gates');
@@ -3664,21 +3664,45 @@ async function showCodexRestorePicker() {
   }
 }
 
+// The Saved permissions card's two read-only diagnostic lines each open the shared
+// picker filtered to their own entries: `{ filter: 'dead' }` (one-off shell approvals)
+// and `{ filter: 'over-broad' }` (wildcards keyed on shell grammar, added 2026-10-13).
+// One table, so the two views cannot drift in how they read the list, skip Codex or
+// confirm a removal; only the entry set and the wording differ.
+const SAVED_PERMISSION_FILTERS = Object.freeze({
+  dead: Object.freeze({
+    entries: (allow) => deadShellApprovals(allow).entries,
+    description: 'Claude · allow · one-off script',
+    title: 'Saved permissions · one-off shell approvals',
+    placeHolder: 'Exact approvals that cover at most their own text; choose one to inspect or remove',
+    empty: 'AI Acolyte: no one-off shell approvals are saved now.',
+  }),
+  'over-broad': Object.freeze({
+    entries: (allow) => overBroadShellGrants(allow).entries,
+    description: 'Claude · allow · over-broad grant',
+    title: 'Saved permissions · over-broad wildcard grants',
+    placeHolder: 'Wildcards keyed on shell grammar, which match more than the command they came from; choose one to inspect or remove',
+    empty: 'AI Acolyte: no over-broad wildcard grants are saved now.',
+  }),
+});
+
 async function showSavedPermissionPicker(selection) {
   try {
     const settings = readSettingsState();
     const allow = Array.isArray(settings.settings?.permissions?.allow)
       ? settings.settings.permissions.allow.filter((entry) => typeof entry === 'string') : [];
-    // `{ filter: 'dead' }` comes from the dashboard's one-off-approvals line (2026-10-13).
     // The set is recomputed from THIS read, not carried from the push that drew the line:
     // the list can change while the panel is open, and a row offered for removal must be
-    // one that is on disk now. deadShellApprovals is memoized on the list, so an unchanged
-    // list costs nothing here. Codex is skipped for this view: the diagnostic is about
-    // Claude's verbatim shell approvals and has nothing to say about prefix rules.
+    // one that is on disk now. Both diagnostics are memoized on the list, so an unchanged
+    // list costs nothing here. Codex is skipped for a filtered view: both diagnostics are
+    // about Claude's saved shell entries and have nothing to say about prefix rules.
     // Removal is the ordinary per-entry confirmation below; nothing is removed in bulk.
-    const dead = selection?.filter === 'dead' ? new Set(deadShellApprovals(allow).entries) : null;
-    const items = allow.filter((permission) => !dead || dead.has(permission)).sort().map((permission) => ({
-      label: permission, description: dead ? 'Claude · allow · one-off script' : 'Claude · allow', agent: 'claude',
+    // An own-property lookup, so a `filter` of `toString` or `__proto__` is no view.
+    const view = Object.prototype.hasOwnProperty.call(SAVED_PERMISSION_FILTERS, selection?.filter)
+      ? SAVED_PERMISSION_FILTERS[selection.filter] : null;
+    const only = view ? new Set(view.entries(allow)) : null;
+    const items = allow.filter((permission) => !only || only.has(permission)).sort().map((permission) => ({
+      label: permission, description: view ? view.description : 'Claude · allow', agent: 'claude',
     }));
     const permissions = settings.settings?.permissions;
     const claudeComplete = settings.state !== SETTINGS_UNREADABLE
@@ -3690,7 +3714,7 @@ async function showSavedPermissionPicker(selection) {
       detail: 'Claude settings.json could not be fully read as permission lists. Known entries are shown; check the file and reload this list.', unavailable: true,
     });
     let inventory;
-    if (!dead) try {
+    if (!view) try {
       inventory = await runAutoLearnWorker('codexInventory');
       if (inventory.pendingApproval) items.push({
         label: 'Codex change needs attention', description: 'Codex · read-only',
@@ -3705,8 +3729,8 @@ async function showSavedPermissionPicker(selection) {
     if (deactivated) return;
     // The list was cleared (or edited) after the dashboard drew its line. An empty
     // QuickPick reads as "the filter failed", so say what is true instead.
-    if (dead && !items.length) {
-      vscode.window.showInformationMessage('AI Acolyte: no one-off shell approvals are saved now.');
+    if (view && !items.length) {
+      vscode.window.showInformationMessage(view.empty);
       return;
     }
     // A sidebar row is a read-only hint. Re-read the inventory before reviewing
@@ -3714,9 +3738,8 @@ async function showSavedPermissionPicker(selection) {
     let pick = selection?.agent === 'codex' && items.find((item) => item.rule
       && item.rule.path === selection.path && item.rule.start === selection.start
       && JSON.stringify(item.rule.pattern) === JSON.stringify(selection.pattern));
-    if (!pick) pick = await vscode.window.showQuickPick(items, dead ? {
-      title: 'Saved permissions · one-off shell approvals',
-      placeHolder: 'Exact approvals that cover at most their own text; choose one to inspect or remove',
+    if (!pick) pick = await vscode.window.showQuickPick(items, view ? {
+      title: view.title, placeHolder: view.placeHolder,
       matchOnDescription: true, matchOnDetail: true,
     } : {
       title: 'Saved permissions · Claude + Codex',
@@ -3969,6 +3992,14 @@ class WildcardingViewProvider {
       const dead = deadShellApprovals(allow);
       deadApprovals = { count: dead.count, total: dead.total, byReason: dead.byReason };
     } catch { /* keep the empty shape: the line simply does not render */ }
+    // Its sibling (2026-10-13): saved WILDCARD grants keyed on shell grammar rather than
+    // a command, which match more than intended. Same single read, same memo, same
+    // failure rule; each diagnostic fails alone.
+    let overBroadGrants = { count: 0, total: 0, byReason: {} };
+    try {
+      const broad = overBroadShellGrants(allow);
+      overBroadGrants = { count: broad.count, total: broad.total, byReason: broad.byReason };
+    } catch { /* keep the empty shape: the line simply does not render */ }
     const wildcards = allow.filter((p) => p.includes('*')).sort();
     // What Wildcard Now would actually change. The "specific" tally is not that
     // number: an entry with no `*` is often one the pass can never generalize
@@ -4025,6 +4056,7 @@ class WildcardingViewProvider {
         ...codexPermissions.allowRules.map((rule) => ({ agent: 'codex', label: JSON.stringify(rule.pattern), ...rule })),
       ],
       deadApprovals,
+      overBroadGrants,
       wildcardCount: wildcards.length,
       specificCount: allow.length - wildcards.length,
       pendingWildcard,
@@ -4363,6 +4395,7 @@ class WildcardingViewProvider {
     </div>
     <div class="rowbody" id="bodyList" hidden>
       <button type="button" class="deadnote" id="deadApprovals" hidden></button>
+      <button type="button" class="deadnote" id="overBroadGrants" hidden></button>
       <ul id="list"></ul>
     </div>
   </section>
@@ -4525,6 +4558,36 @@ class WildcardingViewProvider {
       ? 'Exact Bash or PowerShell approvals that start with something other than a command, or chain'
         + ' several. Claude Code stores them verbatim, so each covers at most its own text and the next'
         + ' variation prompts again. Nothing is removed automatically. '
+        + Object.keys(by).sort().map((key) => key + ': ' + by[key]).join(' · ')
+      : '';
+  }
+
+  // The sibling line (2026-10-13): saved WILDCARD grants whose head is shell grammar
+  // (a keyword, an expansion, the PowerShell call operator) rather than a command, so
+  // they match more than the approval they came from. Same rules as the line above:
+  // only a positive whole count renders, muted, and the click opens the shared picker
+  // filtered to these entries with per-entry removal. It does not add to the badge; the
+  // one-off count there is the established signal and a second suffix would crowd it.
+  let overBroadShown = 0;
+  function overBroadGrantCount(d) {
+    const broad = d && d.overBroadGrants;
+    const count = broad ? Number(broad.count) : 0;
+    return Number.isInteger(count) && count > 0 ? count : 0;
+  }
+  function renderOverBroadGrants(d) {
+    const el = $('overBroadGrants');
+    overBroadShown = overBroadGrantCount(d);
+    el.hidden = !overBroadShown;
+    el.textContent = overBroadShown
+      ? overBroadShown + ' saved wildcard grant' + (overBroadShown === 1
+        ? ' names shell grammar rather than a command and matches'
+        : 's name shell grammar rather than a command and match') + ' more than intended — review'
+      : '';
+    const by = (d && d.overBroadGrants && d.overBroadGrants.byReason) || {};
+    el.title = overBroadShown
+      ? 'Wildcard Bash or PowerShell grants keyed on a shell keyword, an expansion or an operator'
+        + ' instead of a program, such as Bash(for *) or Bash(export *). Each matches every line that'
+        + ' starts that way, whatever it runs. Nothing is removed automatically. '
         + Object.keys(by).sort().map((key) => key + ': ' + by[key]).join(' · ')
       : '';
   }
@@ -4970,6 +5033,7 @@ class WildcardingViewProvider {
       list.appendChild(li);
     }
     renderDeadApprovals(d);
+    renderOverBroadGrants(d);
     applyRows();
     renderRowStates(d);
   }
@@ -4982,6 +5046,9 @@ class WildcardingViewProvider {
   $('permissionsView').addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions' }));
   $('deadApprovals').addEventListener('click', () => {
     if (oneOffShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'dead' } });
+  });
+  $('overBroadGrants').addEventListener('click', () => {
+    if (overBroadShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'over-broad' } });
   });
   $('permissionsRestore').addEventListener('click', () => vscode.postMessage({ type: 'restorePermissions' }));
   $('permissionsImport').addEventListener('click', () => vscode.postMessage({ type: 'importPermissions' }));

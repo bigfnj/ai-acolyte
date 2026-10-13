@@ -144,6 +144,107 @@ function stripEnvPrefixes(cmd) {
   return rest;
 }
 
+// Claude Code's process wrappers, stripped from a Bash entry so the rule keys on the
+// command that actually runs. What decides this is how Claude Code MATCHES, and it is
+// documented (code.claude.com/docs/en/permissions, "Wrappers", read 2026-10-13):
+// "Before matching Bash rules, Claude Code strips a fixed set of wrappers, so a rule
+// like `Bash(npm test *)` also matches `timeout 30 npm test`. The stripped wrappers are
+// `timeout`, `time`, `nice`, `nohup`, and `stdbuf`, plus the shell builtins `command`
+// and `builtin`, and zsh's `noglob`." Not stripped: the query form `command -v`, and
+// zsh's `nocorrect`. "Bare `xargs` is also stripped ... only when `xargs` has no
+// flags." The list "is built in and is not configurable". The shapes accepted below
+// are the ones the wrapper routine in the shipped CLI accepts (read out of Claude Code
+// 2.1.296's binary the same day): a `timeout` duration `^\d+(\.\d+)?[smhd]?$` after
+// its documented options, `nice -n N` or `nice -N`, `stdbuf` with at least one
+// `-i`/`-o`/`-e` mode, `command` with `-p` only. A shape outside those is one that
+// routine reports it "can't be checked before it runs", so it is not stripped here
+// either and the entry stays verbatim.
+//
+// Until 2026-10-13 this pass keyed on the wrapper itself: `timeout 5 rg x` became
+// `Bash(timeout *)` and `nohup make` became `Bash(nohup *)`, while the classifier
+// (src/auto-learn.js deriveBaseInvocation) already stripped `timeout`, `command` and
+// `builtin`. Keying on the inner command is right under either reading of the
+// matcher. The docs say the inner rule matches the wrapped run, so `Bash(rg *)`
+// covers `timeout 5 rg x`. And `Bash(timeout *)` is aimed at text Claude Code has
+// already removed: dead weight if only the stripped command is checked, or, if the
+// raw text were checked as well, a grant for every command `timeout` can run, the
+// rule the classifier refuses to propose for exactly that reason.
+//
+// `env` is NOT stripped, deliberately: the documented list does not name it (only "a
+// leading assignment of certain known-safe environment variables" is stripped), so
+// `env FOO=1 make` still collapses to `Bash(env *)`, a runner root treated like
+// `bash` by this section's design. Stripping a wrapper Claude Code keeps would be the
+// worse error: the rule would never match, the next run would prompt, and this pass
+// would generalize the fresh approval away again, every time. The same binary routine
+// does have an `env` branch, but nothing documents it on the allow path. Bash only:
+// the docs scope this to Bash rules, and `timeout` in PowerShell is timeout.exe, the
+// Windows sleep utility, not a wrapper.
+const TIMEOUT_DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+const TIMEOUT_VALUE = /^[A-Za-z0-9_.+-]+$/;
+
+// How many leading tokens the wrapper at tokens[0] occupies, itself included: 0 when
+// tokens[0] is not a stripped wrapper (including `command -v`, matched as itself, and
+// `xargs` with a flag), -1 when it is one but in a shape that is not stripped.
+function wrapperLength(tokens) {
+  const at = (k) => tokens[k];
+  switch (tokens[0]) {
+    case 'time': case 'nohup': case 'noglob': return 1;
+    case 'builtin': return at(1) === '--' ? 2 : 1;
+    case 'nice':
+      if (at(1) === '-n' && /^-?\d+$/.test(at(2) || '')) return 3;
+      return /^-\d+$/.test(at(1) || '') ? 2 : 1;
+    case 'timeout': {
+      let k = 1;
+      for (let g = at(k); g !== undefined; g = at(k)) {
+        if (['--foreground', '--preserve-status', '--verbose', '-v'].includes(g)) k += 1;
+        else if (/^--(?:kill-after|signal)=[A-Za-z0-9_.+-]+$/.test(g) || /^-[ks][A-Za-z0-9_.+-]+$/.test(g)) k += 1;
+        else if (['--kill-after', '--signal', '-k', '-s'].includes(g) && TIMEOUT_VALUE.test(at(k + 1) || '')) k += 2;
+        else if (g.startsWith('-')) return -1;
+        else break;
+      }
+      return TIMEOUT_DURATION.test(at(k) || '') ? k + 1 : -1;
+    }
+    case 'stdbuf': {
+      let k = 1;
+      for (let g = at(k); g !== undefined; g = at(k)) {
+        if (/^-[ioe]$/.test(g) && at(k + 1) !== undefined) k += 2;
+        else if (/^-[ioe]./.test(g) || /^--(?:input|output|error)=/.test(g)) k += 1;
+        else if (g.startsWith('-')) return -1;
+        else break;
+      }
+      return k > 1 ? k : -1;
+    }
+    case 'command': {
+      let k = 1;
+      for (let g = at(k); g !== undefined && g.startsWith('-') && g !== '--'; g = at(k)) {
+        if (!/^-[pvV]+$/.test(g)) return -1;
+        if (/[vV]/.test(g)) return 0;
+        k += 1;
+      }
+      return at(k) === '--' ? k + 1 : k;
+    }
+    case 'xargs': return at(1) !== undefined && !at(1).startsWith('-') ? 1 : 0;
+    default: return 0;
+  }
+}
+
+// The command a Bash line runs once every leading wrapper is removed, as a SUFFIX of
+// `text` (bashOpensScript measures the stripped prefix by length, so it must be one),
+// or null when a wrapper is present in a shape that is not stripped, or wraps nothing.
+// An inner token that starts with `-` is what the CLI calls "an incomplete fragment"
+// (`time -p make`, `nice --adjustment=5 make`), and is refused the same way.
+function stripBashWrappers(text) {
+  let rest = text;
+  for (let guard = 0; guard < 8; guard += 1) {
+    const tokens = [...rest.matchAll(/\S+/g)];
+    const consumed = tokens.length ? wrapperLength(tokens.map((m) => m[0])) : 0;
+    if (consumed === 0) return rest;
+    if (consumed < 0 || consumed >= tokens.length || tokens[consumed][0].startsWith('-')) return null;
+    rest = rest.slice(tokens[consumed].index);
+  }
+  return null;
+}
+
 // Characters that make a Bash first token something other than a literal command
 // name: an expansion (`$VAR`, `${X}`, `$(cmd)`, a backtick), a grouping or
 // subshell opener (`{`, `(`, `((i++))`), an operator fused onto a word (`a;b`,
@@ -192,21 +293,43 @@ function bashOpensScript(arg, stripped, first) {
 // Generalize a shell command to a root wildcard, retaining one subcommand for
 // mixed-capability dispatchers such as git and package managers.
 function generalizeCommandArg(arg, tool) {
-  const stripped = stripEnvPrefixes(arg);
+  // Env prefixes first, then Claude Code's wrappers (above), so `FOO=1 timeout 5 rg x`
+  // keys on `rg`. A wrapper in a shape that is not stripped leaves the entry verbatim.
+  const stripped = tool === 'Bash' ? stripBashWrappers(stripEnvPrefixes(arg)) : stripEnvPrefixes(arg);
+  if (stripped === null) return `${tool}(${arg})`;
   // A quoted/path executable cannot be represented safely by the legacy
   // first-token wildcard. Leave it exact; Auto Learn can review a normalized
   // family without ever producing malformed `"C:\Program *` permissions.
-  if (/^["']/.test(stripped) || /^(?:\.{0,2}[\\/]|[A-Za-z]:[\\/])/.test(stripped)) {
+  //
+  // "Path" is any first token holding a separator, opening with `~`, or opening with
+  // a drive letter: the same line the classifier draws (src/auto-learn.js
+  // isPathExecutable). Until 2026-10-13 this tested only for a path that OPENED with
+  // `/`, `\`, `./`, `../`, `.\` or `C:\`, so `~/bin/tool x` became `Bash(~/bin/tool *)`,
+  // `.venv/bin/python x.py` became `Bash(.venv/bin/python *)` and `bin/x` became
+  // `Bash(bin/x *)`. Each names one checkout's or one home directory's binary, which
+  // is no command family, and the venv one runs any script handed to it. A separator
+  // in an ARGUMENT is not this case: `cat ~/notes.md` still keys on `cat`.
+  const first = stripped.split(/\s+/)[0] || '';
+  if (/^["']/.test(stripped) || /[\\/]/.test(first) || /^~/.test(first) || /^[A-Za-z]:/.test(first)) {
     return `${tool}(${arg})`;
   }
-  const first = stripped.split(/\s+/)[0] || '';
   if (!first) return `${tool}(${arg})`; // nothing to key on — leave verbatim
   // PowerShell never reaches this with a non-command first token: its caller
-  // admits only `[A-Za-z][\w.-]*` names outside PS_SCRIPT_KEYWORDS. Bash had no
+  // admits only `[\w.-]` names (isPowerShellCommandName: a letter first, or a digit
+  // that does not make a number) outside PS_SCRIPT_KEYWORDS. Bash had no
   // such gate, so it gets one here, and only Bash: `select` and `set` are
   // ordinary PowerShell aliases (Select-Object, Set-Variable), not keywords.
   if (tool === 'Bash' && bashOpensScript(arg, stripped, first)) return `${tool}(${arg})`;
   const parts = stripped.split(/\s+/);
+  // `command -v` / `-V` is the one `command` form Claude Code does not strip: it looks
+  // a name up and runs nothing. It keeps its flags, as a mixed-family root keeps its
+  // subcommand, so the grant is the lookup rather than `Bash(command *)`, whose reach
+  // depends on the very stripping question the wrapper comment above settles.
+  if (tool === 'Bash' && first === 'command' && /^-[pvV]+$/.test(parts[1] || '')) {
+    let end = 1;
+    while (/^-[pvV]+$/.test(parts[end] || '')) end += 1;
+    return `${tool}(command ${parts.slice(1, end).join(' ')} *)`;
+  }
   const normalized = first.toLowerCase().replace(/\.(?:cmd|exe)$/i, '');
   if (MIXED_FAMILY_ROOTS.has(normalized)) {
     const subcommand = parts[1] || '';
@@ -214,6 +337,24 @@ function generalizeCommandArg(arg, tool) {
     return `${tool}(${first} ${subcommand} *)`;
   }
   return `${tool}(${first} *)`;
+}
+
+// A PowerShell token that starts with a digit is a NUMBER when it is a numeric
+// literal, and the statement is then an expression that runs nothing: `42`, `1.5`,
+// `0x1F`, `0b101`, `1e3`, `10kb`, `5l`, `2d`. A range literal (`1..6`) is an
+// expression too. Any other digit-leading token in command position is a command
+// name, so `7z a x.zip` runs 7z. Until 2026-10-13 the gate below admitted only an
+// `[A-Za-z]` first character, so `PowerShell(7z a x.zip)` stayed exact while
+// `Bash(7z a x.zip)` became `Bash(7z *)`. The classifier settled the same question
+// that day (commit 3ebbf04, POWERSHELL_RANGE_LITERAL in src/auto-learn.js): only the
+// range literal is script syntax, and `7z` keeps its root. This pass refuses a little
+// more, every numeric literal and not only the range, because a wildcard on `42`
+// names no program either.
+const PS_NUMERIC_LITERAL =
+  /^(?:0x[0-9a-f]+|0b[01]+|\d+(?:\.\d*)?(?:e[+-]?\d+)?)(?:u?[ysl]|u|n|d)?(?:kb|mb|gb|tb|pb)?$/i;
+function isPowerShellCommandName(first) {
+  if (/^[A-Za-z][\w.-]*$/.test(first)) return true;
+  return /^\d[\w.-]*$/.test(first) && !first.includes('..') && !PS_NUMERIC_LITERAL.test(first);
 }
 
 // Generalize a PowerShell arg. The `& "app.exe" …` call form collapses to a
@@ -227,7 +368,7 @@ function generalizePowerShellArg(arg) {
   if (/^&\s/.test(t)) return `PowerShell(${arg})`;
   const first = t.split(/\s+/)[0] || '';
   const isSimpleCommand =
-    /^[A-Za-z][\w.-]*$/.test(first) && !PS_SCRIPT_KEYWORDS.has(first.toLowerCase());
+    isPowerShellCommandName(first) && !PS_SCRIPT_KEYWORDS.has(first.toLowerCase());
   return isSimpleCommand ? generalizeCommandArg(arg, 'PowerShell') : `PowerShell(${arg})`;
 }
 
@@ -261,6 +402,12 @@ function generalizePermission(perm) {
 // were. `(`, `((` and `[[` open a subshell, arithmetic and a conditional.
 // test/permissions-keywords.test.js holds the exemption list and fails if the
 // classifier gains a word this set lacks.
+//
+// `time` stays here although it is also one of Claude Code's stripped wrappers.
+// stripBashWrappers runs first (2026-10-13), so `time make` keys on `make`, and a
+// bare `time` or `time -p make` is left verbatim by the strip itself. What this entry
+// still decides: a case variant the strip does not take (`Time make`), and
+// src/local-settings.js refusing to promote an existing `Bash(time *)`.
 //
 // A COPY, not an import of BASH_RESERVED, and that is load-bearing.
 // src/fixed-point-cache.js keys its "already a fixed point" verdict on the stat
@@ -649,12 +796,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :579.
+// prunePermissions, whose only caller is processAllowList at :726.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :645 and nowhere else in the
+// reached it, in any of the three: it is called at :792 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is

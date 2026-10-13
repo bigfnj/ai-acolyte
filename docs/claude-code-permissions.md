@@ -101,11 +101,40 @@ NODE_ENV=test npm test       matches Bash(npm test *)
 command npm test  /  builtin npm test
 ```
 
-`deriveBaseInvocation` strips the same set, so the family learned from
-`timeout 30 git status` is `git status` rather than `timeout`. Learning the
-wrapper would have proposed `Bash(timeout *)`, a grant for every command
-`timeout` can run. An unrecognised shape is left alone: `timeout npm test` with
-no duration, or a duration with no command, strips nothing.
+The full list, re-read 2026-10-13: "The stripped wrappers are `timeout`, `time`,
+`nice`, `nohup`, and `stdbuf`, plus the shell builtins `command` and `builtin`,
+and zsh's `noglob`." Not stripped: the query form `command -v` and zsh's
+`nocorrect`. Bare `xargs` is stripped "only when `xargs` has no flags", so
+`xargs -n1 grep x` is matched as an `xargs` command. The list "is built in and is
+not configurable" **[docs: permissions]**.
+
+`deriveBaseInvocation` strips a subset of these (`timeout`, `command`, `builtin`,
+and an env prefix), so the family learned from `timeout 30 git status` is
+`git status` rather than `timeout`. Learning the wrapper would have proposed
+`Bash(timeout *)`, a grant for every command `timeout` can run. An unrecognised
+shape is left alone: `timeout npm test` with no duration, or a duration with no
+command, strips nothing.
+
+The wildcarding pass (`generalizeCommandArg` in `src/permissions.js`) strips the
+whole documented list since 2026-10-13, so an approved `timeout 5 rg x` becomes
+`Bash(rg *)`, not `Bash(timeout *)`. Before that date it keyed on the wrapper,
+which names text Claude Code removes before it consults any rule. The shapes it
+accepts are the ones the wrapper routine in the shipped CLI accepts, read out of
+Claude Code 2.1.296's binary: a `timeout` duration after its documented options,
+`nice -n N` or `nice -N`, `stdbuf` with at least one mode, `command` with `-p`
+only. Any other shape is one that routine reports it "can't be checked before it
+runs", and the entry stays verbatim. `command -v` keeps its flag
+(`Bash(command -v *)`). `env` is not on the list and is not stripped
+**[docs; measured against the binary]**.
+
+**Correction to the env-prefix claim below [docs, read 2026-10-13]:** the page now
+says Claude Code strips "a leading assignment of certain known-safe environment
+variables ... An allow rule won't match past an assignment of any other variable.
+A deny or ask rule matches past any leading assignment." It does not list the safe
+variables. The code still assumes an allow rule matches past ANY leading
+assignment (`stripEnvPrefixes` in `src/permissions.js`, the `environment-prefix`
+handling in `src/auto-learn.js`). That is recorded for a decision, not changed
+here.
 
 An env prefix is the same case, and it used to null the permission outright. It
 no longer does, because the matcher strips it too: `Bash(cat *)` already covers

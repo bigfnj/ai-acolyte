@@ -40,7 +40,11 @@ const BASH_VERBATIM = [
   'Bash(do rm "$f")',
   'Bash(elif [ -d y ])',
   'Bash(else echo no)',
-  'Bash(time make)',
+  // `time make` is no longer here: `time` is one of Claude Code's stripped wrappers and
+  // keys on `make` since 2026-10-13 (test/permissions-wrappers.test.js). The two shapes
+  // the strip refuses still stay verbatim.
+  'Bash(time)',
+  'Bash(time -p make)',
   'Bash(coproc nc -l 8080)',
   'Bash(! grep -q x f)',
   'Bash(trap "rm -rf ~" EXIT)',
@@ -134,6 +138,35 @@ test('a PowerShell entry that opens with a keyword, variable or range stays verb
   }
 });
 
+test('a digit-leading PowerShell command name generalizes; a number or range stays verbatim', () => {
+  // Until 2026-10-13 the PowerShell gate admitted only a letter first, so `7z a x.zip`
+  // stayed exact in PowerShell while `Bash(7z a x.zip)` became `Bash(7z *)`. The
+  // classifier already kept 7z's root and refused only the range literal (3ebbf04).
+  // MUTATION: restore the letter-only gate (`/^[A-Za-z][\w.-]*$/.test(first)` in
+  // generalizePowerShellArg). Every row here stays exact and this fails on the first.
+  // Confirmed 2026-10-13.
+  for (const [entry, expected] of [
+    ['PowerShell(7z a x.zip)', 'PowerShell(7z *)'],
+    ['PowerShell(7za x a.7z)', 'PowerShell(7za *)'],
+    ['PowerShell(7z.exe l x)', 'PowerShell(7z.exe *)'],
+    ['PowerShell(2to3 -w x.py)', 'PowerShell(2to3 *)'],
+  ]) assert.equal(generalizePermission(entry), expected, entry);
+  // Controls: PowerShell reads each of these as a number or a range, so the statement
+  // is an expression and names no program.
+  // MUTATION: drop `!first.includes('..')` from isPowerShellCommandName. `1..6` becomes
+  // `PowerShell(1..6 *)` and this fails. Drop the PS_NUMERIC_LITERAL test instead and
+  // `42` becomes `PowerShell(42 *)`. Both confirmed 2026-10-13.
+  for (const entry of ['PowerShell(1..6)', 'PowerShell(1..6 | ForEach-Object { $_ })', 'PowerShell(-1..5)',
+    'PowerShell(1..$n)', 'PowerShell(42)', 'PowerShell(7)', 'PowerShell(1.5)', 'PowerShell(0x1F)',
+    'PowerShell(0b101)', 'PowerShell(1e3)', 'PowerShell(10kb)', 'PowerShell(10MB)', 'PowerShell(5l)',
+    'PowerShell(2d)', 'PowerShell(1uy)']) {
+    assert.equal(generalizePermission(entry), entry, `${entry} is an expression`);
+  }
+  // Bash is untouched: it has no range operator, so there `1..6` is an attempt to run a
+  // program and was already wildcarded like any other name.
+  assert.equal(generalizePermission('Bash(7z a x.zip)'), 'Bash(7z *)');
+});
+
 test('controls: ordinary commands generalize exactly as they did before the guard', () => {
   const cases = [
     ['Bash(git status)', 'Bash(git status *)'],          // MIXED_FAMILY_ROOTS keep a subcommand
@@ -145,12 +178,14 @@ test('controls: ordinary commands generalize exactly as they did before the guar
     ['Bash(. env.sh)', 'Bash(. *)'],
     ['Bash([ -f x ])', 'Bash([ *)'],                      // exempt: `[` is `test`
     ['Bash(test -f x)', 'Bash(test *)'],
-    // Unchanged on purpose: this pass does not strip `timeout`, `command` or
-    // `builtin`, although the classifier's deriveBaseInvocation does. Out of scope
-    // here, and pinned so a change to it is a decision rather than an accident.
-    ['Bash(timeout 5 rg x)', 'Bash(timeout *)'],
-    ['Bash(command -v rg)', 'Bash(command *)'],
-    ['Bash(builtin cd x)', 'Bash(builtin *)'],
+    // These three were pinned here as "this pass does not strip wrappers" so that a
+    // change would be a decision. It was one, on 2026-10-13: Claude Code strips them
+    // before matching (docs, quoted in src/permissions.js above wrapperLength), so the
+    // rule keys on the inner command. `command -v` is the documented exception and
+    // keeps its flag. test/permissions-wrappers.test.js holds the full table.
+    ['Bash(timeout 5 rg x)', 'Bash(rg *)'],
+    ['Bash(command -v rg)', 'Bash(command -v *)'],
+    ['Bash(builtin cd x)', 'Bash(cd *)'],
     // The env strip is unchanged too, including a quoted value with a space.
     ['Bash(FOO=bar git status)', 'Bash(git status *)'],
     ['Bash(FOO="a b" rg x)', 'Bash(rg *)'],
@@ -207,16 +242,21 @@ test('processAllowList is a fixed point on its own output', () => {
 // stop those copies falling behind the classifier, which is the drift that let
 // `Bash(for *)` happen: two descriptions of "this is not a command", one consulted
 // by the learner and the other by nothing on the generalizer's path.
+// Each exemption names what `Bash(<word> x)` becomes instead, and why.
 const BASH_EXEMPT = new Map([
-  ['source', 'the `.` script runner; wildcarded like bash and sh by this pass\'s design'],
-  ['[', 'the `test` builtin, a fixed-purpose command; wildcarded like test'],
+  ['source', ['Bash(source *)', 'the `.` script runner; wildcarded like bash and sh by this pass\'s design']],
+  ['[', ['Bash([ *)', 'the `test` builtin, a fixed-purpose command; wildcarded like test']],
+  // Added 2026-10-13. `time` is still a reserved word, but Claude Code strips it as a
+  // wrapper before matching, so the rule keys on the command it times.
+  ['time', ['Bash(x *)', 'a wrapper Claude Code strips before matching; the inner command is keyed']],
 ]);
 
-test('every classifier Bash reserved word stays verbatim, bar two named exemptions', () => {
+test('every classifier Bash reserved word stays verbatim, bar three named exemptions', () => {
   for (const word of BASH_RESERVED) {
     const entry = `Bash(${word} x)`;
     if (BASH_EXEMPT.has(word)) {
-      assert.equal(generalizePermission(entry), `Bash(${word} *)`, `${word}: ${BASH_EXEMPT.get(word)}`);
+      const [expected, why] = BASH_EXEMPT.get(word);
+      assert.equal(generalizePermission(entry), expected, `${word}: ${why}`);
       continue;
     }
     // MUTATION: delete 'trap' from BASH_SCRIPT_KEYWORDS. `trap` has no metacharacter,

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { readCodexPermissionSummary, deadShellApprovals } = require('../src/permission-summary');
+const { readCodexPermissionSummary, deadShellApprovals, overBroadShellGrants } = require('../src/permission-summary');
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-permission-summary-'));
@@ -207,5 +207,88 @@ test('the result is memoized on the list contents', () => {
   assert.notEqual(changed, first);
   assert.deepEqual(changed.entries, ['PowerShell(1..6)']);
   // The memo hands one object to every caller, so it must not be writable by them.
+  assert.ok(Object.isFrozen(first) && Object.isFrozen(first.entries) && Object.isFrozen(first.byReason));
+});
+
+// Over-broad wildcard grants (2026-10-13): saved WILDCARD shell entries whose head is
+// shell grammar rather than a command, the shapes the pre-a910daf pass minted. Every
+// entry is synthetic. Each row drives one reason, so dropping that reason from
+// OVER_BROAD_REASONS fails the row named for it.
+const broad = (list) => overBroadShellGrants(list);
+for (const [reason, entry, alsoCounted] of [
+  ['reserved-keyword', 'Bash(for *)', []],
+  ['reserved-keyword', 'Bash(export *)', []],          // the shape found on a real list
+  ['reserved-keyword', 'Bash(eval:*)', []],            // the colon spelling is the same rule
+  ['reserved-keyword', 'PowerShell(foreach *)', []],
+  // An expansion opener has no literal root, so it is always both of these.
+  ['dynamic-executable', 'Bash($EDITOR *)', ['missing-command-root']],
+  ['dynamic-executable', 'Bash([[ *)', ['missing-command-root']],
+  // A range literal and the call operator have no command root at all.
+  ['missing-command-root', 'PowerShell(1..6 *)', []],
+  ['missing-command-root', 'PowerShell(& *)', []],
+  // A bare assignment yields no invocation from extractInvocations; classifyInvocation
+  // is asked directly and reports the missing root.
+  ['missing-command-root', 'Bash(FOO=bar *)', []],
+]) {
+  test(`a wildcard grant whose head is flagged ${reason} is counted: ${entry}`, () => {
+    // MUTATION: drop '${reason}' from OVER_BROAD_REASONS in src/permission-summary.js.
+    // Its per-reason count disappears and, where it is the only reason, the entry stops
+    // counting. Confirmed 2026-10-13, one reason at a time. MUTATION: drop the
+    // classifyInvocation fallback; `Bash(FOO=bar *)` and `PowerShell(& *)`, the two heads
+    // with no invocation, are no longer counted. Confirmed 2026-10-13.
+    const result = broad([entry, 'Bash(git status *)']);
+    assert.equal(result.byReason[reason], 1, `${entry}: ${JSON.stringify(result.byReason)}`);
+    assert.deepEqual(Object.keys(result.byReason).sort(), [reason, ...alsoCounted].sort());
+    assert.deepEqual(result.entries, [entry]);
+    assert.equal(result.count, 1);
+    assert.equal(result.total, 2, 'both wildcard shell entries were examined');
+  });
+}
+
+test('ordinary wildcard grants, runner roots and the two exempt words are not over-broad', () => {
+  // `source` and `[` are reserved to the classifier, but they are the `.` runner and
+  // `test`, which src/permissions.js wildcards by design; flagging them would ask the
+  // user to remove a grant the next approval re-mints.
+  // MUTATION: empty OVER_BROAD_EXEMPT_BASH_HEADS. `Bash(source *)` (reserved-keyword)
+  // and `Bash([ *)` (dynamic-executable) are counted and this fails. Confirmed 2026-10-13.
+  // A head that is only a wrapper the classifier strips (`command`, `timeout 5`) has its
+  // command under the star; the classifier then sees no root, which is an artifact of
+  // cutting the head, not grammar.
+  // MUTATION: drop the `stripped-wrapper` line; `Bash(command *)` is counted as a
+  // missing root. Confirmed 2026-10-13.
+  const result = broad([
+    'Bash(git status *)', 'Bash(bash *)', 'Bash(. *)', 'Bash(source *)', 'Bash([ *)',
+    'Bash(command *)', 'Bash(timeout 5 *)', 'Bash(rm *)', 'PowerShell(Get-ChildItem *)',
+    'PowerShell(select *)', 'PowerShell(7z *)',
+  ]);
+  assert.deepEqual(result, { count: 0, total: 11, byReason: {}, entries: [] });
+  // `source` is exempt in Bash only; PowerShell has no such word to exempt, and a
+  // PowerShell keyword is still flagged next to it.
+  assert.deepEqual(broad(['PowerShell(foreach *)', 'Bash(source *)']).entries, ['PowerShell(foreach *)']);
+});
+
+test('exact entries, the tool-wide grant and non-shell entries are not judged', () => {
+  // Exact entries are deadShellApprovals' half; `Bash(*)` is an explicit tool-wide
+  // grant with no head to classify.
+  // MUTATION: drop the WILDCARD_TAIL test so exact entries are examined too.
+  // `Bash(for f in a b)` is then counted. Confirmed 2026-10-13.
+  const result = broad(['Bash(for f in a b)', 'PowerShell($x = 1)', 'Bash(*)', 'Read(**)',
+    'WebSearch', 'mcp__fixture__tool', 42, null]);
+  assert.deepEqual(result, { count: 0, total: 0, byReason: {}, entries: [] });
+  assert.deepEqual(broad('not a list'), { count: 0, total: 0, byReason: {}, entries: [] });
+});
+
+test('the over-broad result is memoized on the list contents, separately from the one-off memo', () => {
+  const list = ['Bash(export *)', 'Bash(git status *)'];
+  const first = broad(list);
+  // MUTATION: delete the memo early-return in overBroadShellGrants. Every call builds a
+  // fresh object and this identity check fails. Confirmed 2026-10-13.
+  assert.equal(broad(list.slice()), first);
+  // Interleaving the other diagnostic must not evict this memo (two memo cells, not one).
+  dead(list);
+  assert.equal(broad(list), first, 'the one-off memo is a separate cell');
+  const changed = broad(['Bash(for *)', 'Bash(git status *)']);
+  assert.notEqual(changed, first);
+  assert.deepEqual(changed.entries, ['Bash(for *)']);
   assert.ok(Object.isFrozen(first) && Object.isFrozen(first.entries) && Object.isFrozen(first.byReason));
 });

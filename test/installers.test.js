@@ -24,7 +24,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 
@@ -866,3 +866,94 @@ test('uninstall: a live checkout elsewhere is left registered, and named', (t) =
     [{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${live}"`)] }]);
   assert.ok(again.stdout.includes(`left ${live} registered`), again.stdout);
 });
+
+// ── install.sh end to end, through a real bash ───────────────────────────────
+//
+// Everything above feeds install.sh's embedded module to node directly, which
+// cannot see the shell half: how SCRIPT_DIR is spelled, what reaches node, the
+// starter-pack line. Defects lived there (found 2026-10-13), visible only when
+// the script runs under Git Bash on Windows, so these cases run a COPY of the
+// real script from a fake checkout under a temp dir, with HOME pointed at a
+// sandbox beside it -- the real ~/.claude is never involved -- and answer "n" to
+// the seed prompt.
+//
+// Which bash: on Windows, Git for Windows' own, found from `git --exec-path`,
+// never whatever `bash` comes first on PATH, which can be WSL's System32 shim
+// and would run a Linux node against a Linux home. Skipped when there is none.
+// HOME is handed over with forward slashes: Git Bash converts C:/x to /c/x but
+// drops the backslashes of C:\x.
+//
+// The platform seam is a `uname` shim, put first on PATH from INSIDE bash
+// (runSh's launcher), because Git for Windows' bin/bash.exe puts its own
+// /usr/bin ahead of anything inherited, and converted with `cygpath -u` there,
+// because a C:/ entry splits PATH at its colon. install.sh asks `uname -s` and
+// the shim answers, so no variable in the shipped script exists only for tests.
+
+const fwd = (p) => p.split(path.sep).join('/');
+
+function findBash() {
+  if (process.platform !== 'win32') {
+    return spawnSync('bash', ['-c', 'true']).status === 0 ? 'bash' : null;
+  }
+  const exec = spawnSync('git', ['--exec-path'], { encoding: 'utf8' });
+  if (exec.status !== 0) return null;
+  // <git root>/mingw64/libexec/git-core -> <git root>/bin/bash.exe
+  const bash = path.join(path.resolve(exec.stdout.trim(), '..', '..', '..'), 'bin', 'bash.exe');
+  return fs.existsSync(bash) ? bash : null;
+}
+const BASH = findBash();
+const NO_BASH = BASH ? false
+  : (process.platform === 'win32' ? 'no Git for Windows bash.exe found via git --exec-path' : 'no bash on PATH');
+
+// A fake checkout with copies of both scripts, the real starter pack and a stub
+// bin/wildcard-perms (install.sh only chmods it, because "n" declines the seed),
+// plus an empty home, so install.sh's own mkdir of ~/.claude runs too.
+function shCheckout(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-installer-sh-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const checkout = path.join(root, 'checkout');
+  fs.mkdirSync(path.join(checkout, 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(checkout, 'patterns'));
+  for (const name of ['install.sh', 'uninstall.sh']) {
+    fs.copyFileSync(path.join(repoRoot, name), path.join(checkout, name));
+  }
+  fs.copyFileSync(path.join(repoRoot, 'patterns', 'starter-pack.json'),
+    path.join(checkout, 'patterns', 'starter-pack.json'));
+  fs.writeFileSync(path.join(checkout, 'bin', 'wildcard-perms'), '#!/usr/bin/env node\n');
+  const home = path.join(root, 'home');
+  fs.mkdirSync(home);
+  return { root, checkout, home, settings: path.join(home, '.claude', 'settings.json') };
+}
+
+function runSh(box, script, shimDir = null) {
+  const launcher = 'if [ -n "$1" ]; then p="$1"; '
+    + 'if command -v cygpath >/dev/null 2>&1; then p="$(cygpath -u "$p")"; fi; '
+    + 'export PATH="$p:$PATH"; fi; exec bash "$2"';
+  const run = spawnSync(BASH, ['-c', launcher, 'installers-test',
+    shimDir ? fwd(shimDir) : '', fwd(path.join(box.checkout, script))], {
+    input: 'n\n',
+    env: { ...process.env, HOME: fwd(box.home) },
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+  const after = fs.existsSync(box.settings) ? fs.readFileSync(box.settings, 'utf8') : null;
+  return { code: run.status, stdout: run.stdout ?? '', stderr: run.stderr ?? '', after, error: run.error };
+}
+
+test('install.sh end to end: the starter-pack line prints its count, and nothing reaches stderr',
+  { skip: NO_BASH }, (t) => {
+    // Found 2026-10-13 under Git Bash: the count was `node -e "...require('$SCRIPT_DIR/...')"`,
+    // a POSIX path spliced INTO the code, which the Windows node cannot open. It printed
+    // a MODULE_NOT_FOUND stack and "Merges  curated permissions" with no number, and the
+    // install carried on. The same line works on Linux, so only this leg can see it.
+    const box = shCheckout(t);
+    const run = runSh(box, 'install.sh');
+    assert.equal(run.error, undefined, String(run.error));
+    assert.equal(run.code, 0, run.stderr);
+    const count = JSON.parse(fs.readFileSync(path.join(repoRoot, 'patterns', 'starter-pack.json'), 'utf8')).length;
+    assert.ok(count > 0, 'an empty pack would make "Merges 0" indistinguishable from a broken count');
+    assert.match(run.stdout, new RegExp(`^Merges ${count} curated permissions into your allow list\\.$`, 'm'),
+      run.stdout);
+    assert.equal(run.stderr, '', 'nothing on stderr: the old line put a whole MODULE_NOT_FOUND stack there');
+    assert.equal(JSON.parse(run.after).hooks.PostToolUse.length, 1, 'and the hook was registered');
+  });

@@ -7,6 +7,31 @@ SETTINGS="$HOME/.claude/settings.json"
 
 chmod +x "$HOOK_CMD"
 
+# ── Windows under Git Bash, MSYS2 or Cygwin ───────────────────────────────────
+#
+# The node this script runs there is the native Windows build, and it cannot
+# open a POSIX spelling such as /c/repo, or /tmp/x (Git Bash mounts %TEMP% at
+# /tmp). Git Bash quietly converts a path passed as a WHOLE argument or
+# environment variable, which is why HOOK_CMD below reached node intact, but
+# not one embedded inside code. Found 2026-10-13: the starter-pack count ran
+# `require('/c/.../starter-pack.json')`, threw "Cannot find module" with a full
+# stack, and printed "Merges  curated permissions" with no number. The install
+# went on, because a failing $(...) inside an echo does not trip `set -e`.
+# Cygwin leaves arguments alone even when they are whole paths.
+#
+# So the spelling node is given is computed once, here, with cygpath, which
+# Git for Windows, MSYS2 and Cygwin all ship: -m for C:/forward/slashes, -l for
+# the long form of any 8.3 component. Without cygpath, or anywhere else, it
+# stays the POSIX path, which is what Linux and macOS need.
+NODE_DIR="$SCRIPT_DIR"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      NODE_DIR="$(cygpath -m -l "$SCRIPT_DIR")" || NODE_DIR="$SCRIPT_DIR"
+    fi
+    ;;
+esac
+
 # install.ps1 creates this; install.sh did not, so a fresh POSIX machine failed
 # with ENOENT on the write below and `set -e` aborted before the starter-pack
 # prompt. The Windows half has carried the mkdir since it was fixed there.
@@ -191,7 +216,9 @@ EOF
 # ── 2. Optional: seed allow list from starter pack ────────────────────────────
 echo ""
 echo "Starter pack: $SCRIPT_DIR/patterns/starter-pack.md"
-echo "Merges $(node -e "console.log(require('$SCRIPT_DIR/patterns/starter-pack.json').length)") curated permissions into your allow list."
+# The path goes to node as an ARGUMENT, never spliced into the code, so no
+# quoting or path spelling can change what the code says. NODE_DIR: see above.
+echo "Merges $(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).length)' "$NODE_DIR/patterns/starter-pack.json") curated permissions into your allow list."
 echo ""
 read -r -p "Seed your allow list from the starter pack? [y/N] " answer
 

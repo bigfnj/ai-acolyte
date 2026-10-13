@@ -2,14 +2,20 @@
 
 // Run the suite the way CI's node-20 legs see it.
 //
-//   node --require scripts/mask-sqlite.js --test
-//   node --require scripts/mask-sqlite.js --test test/codex-history-store.test.js
+//   node --require ./scripts/mask-sqlite.js --test
+//   node --require ./scripts/mask-sqlite.js --test test/codex-history-store.test.js
+//
+// The `./` is required. `--require` follows require()'s resolution, so the bare
+// spelling `scripts/mask-sqlite.js` is looked up as a PACKAGE and fails with
+// MODULE_NOT_FOUND before a single test runs (measured 2026-10-13, Node 24.19.0).
 //
 // `node:sqlite` arrived in Node 22.5 and stayed flagged until 23.4, so it is present on
-// this repo's dev box (node 24) and absent on both the node-20 CI legs AND on every
-// shipping VS Code extension host. That asymmetry has now cost two separate defects:
+// this repo's dev box (node 24) and absent on the node-20 CI legs. VS Code 1.141.1
+// (Node 24.21.0) loads it; hosts within the ^1.80 engine floor may not, so the
+// `unavailable` tier stays (measured 2026-10-13). When this was written the extension
+// hosts in use could not load it either, and that asymmetry cost two separate defects:
 //
-//   1. The Codex history-store probe reported `partial` on every real extension host,
+//   1. The Codex history-store probe reported `partial` on every such extension host,
 //      and the dashboard ranked that permanent warning above the review count and
 //      suppressed it. Correct on the author's machine, wrong for every user.
 //   2. The test written to FIX that shipped with the same assumption: it built a
@@ -25,6 +31,9 @@
 // not carried over from an earlier run of a smaller suite:
 //   plain      731 tests, 729 pass, 0 fail, 2 skipped
 //   masked     731 tests, 724 pass, 0 fail, 7 skipped
+// and on 2026-10-13, after the archived-Codex-history change:
+//   plain      1132 tests, 1130 pass, 0 fail, 2 skipped
+//   masked     1132 tests, 1122 pass, 0 fail, 10 skipped
 //
 // A test that FAILS under the mask rather than skipping is encoding the author's
 // runtime, which is the whole thing this file exists to surface.

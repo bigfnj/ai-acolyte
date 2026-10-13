@@ -75,7 +75,8 @@ anyway.
 ## Cross-agent Auto Learn
 
 Auto Learn incrementally scans local Claude Code history
-(`~/.claude/projects/**/*.jsonl`) and Codex history (`~/.codex/sessions/**/*.jsonl`). It
+(`~/.claude/projects/**/*.jsonl`) and Codex history (`~/.codex/sessions/**/*.jsonl`, plus
+`~/.codex/archived_sessions/*.jsonl`, where Codex moves an archived thread's transcript). It
 correlates each requested tool call with its matching result. Confirmed successes add positive
 evidence. Confirmed failures are retained as negative evidence and block `auto-safe`
 eligibility; they do not increase the success threshold. Unanswered, incomplete, and pending
@@ -204,7 +205,8 @@ declarations and refuse stale proposals ([reviewRules](codexFeaturesUi.js#L124),
 automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
-removal applies only to supported allow declarations (`vscode-extension/extension.js:3495`).
+removal applies only to supported allow declarations ("Remove this Codex allow rule?",
+`vscode-extension/extension.js:3681`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
 removals (`vscode-extension/extension.js:3439`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed

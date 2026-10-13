@@ -732,7 +732,7 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:2734 -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:2844 -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2048,11 +2048,14 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
 // and 'skipped' matches neither arm of scanTrouble's Codex branch — so no test
 // in this suite had ever driven that branch at all, in either direction.
 //
-// What was behind it: `readThreadStoreIds` needs `node:sqlite`, no shipping VS
-// Code has it, so the probe reported 'partial' on every real extension host,
-// scanTrouble turned that into a permanent 'scan degraded', and the row badge
-// ranked it ABOVE the review count. The user stopped seeing "3 to review" for
-// the life of the install with nothing they could do about it.
+// What was behind it: `readThreadStoreIds` needs `node:sqlite`, the extension
+// hosts in use when this was written could not load it, so the probe reported
+// 'partial' on every one of them, scanTrouble turned that into a permanent
+// 'scan degraded', and the row badge ranked it ABOVE the review count. The user
+// stopped seeing "3 to review" for the life of the install with nothing they
+// could do about it. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within the
+// ^1.80 engine floor may not, so the `unavailable` tier stays (measured
+// 2026-10-13).
 const SCAN_SEED = {
   files: 9, observations: 21, errors: 0, partial: 0, unmatchedResults: 0,
   prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
@@ -2098,6 +2101,9 @@ test('a Codex probe the runtime cannot host is not a degraded scan', async (t) =
 
     // The half that must NOT be quieted with it: a stale rollout directory is a
     // real finding, it is computed without sqlite, and it still has to shout.
+    // This seed carries no `codexHistoryFindings` -- the shape of a state file
+    // written before the counts existed -- so it is also the pin on the fallback
+    // phrase: a stale verdict with nothing to break it down still says so.
     const staleData = structuredClone(unavailableData);
     staleData.autoLearn.scan.codexHistoryStale = true;
     const stale = renderDashboard(app.provider, staleData);
@@ -2105,6 +2111,119 @@ test('a Codex probe the runtime cannot host is not a degraded scan', async (t) =
       'witness:codex-probe -- the real finding was suppressed along with the false alarm. '
       + `The card said "${stale.alScanHealth}"`);
     assert.match(stale.stAutoLearn, /scan degraded/);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// THE SENTENCE THAT WAS WRONG ABOUT WHY. Reproduced on the real box 2026-10-13:
+// four archived Codex threads, nothing moved, and the card said "Codex history
+// store has moved". The probe now persists what its verdict is made of, and the
+// card says that instead.
+test('a stale Codex verdict names what diverged instead of claiming the store moved', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      ...SCAN_SEED, codexHistoryStale: true, codexHistoryInspected: 'exact',
+      codexHistoryReasons: ['4 Codex thread(s) exist in the history store or session index with no rollout file in sessions/, archived_sessions/.'],
+      codexHistoryFindings: { orphans: 4, relocated: 0, projectionAhead: 0, emptyRollouts: 0 },
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.deepEqual(data.autoLearn.scan.codexHistoryFindings, { orphans: 4, relocated: 0, projectionAhead: 0, emptyRollouts: 0 },
+      'witness:stale-phrase -- the findings never reached the panel');
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /4 Codex threads with no transcript/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.doesNotMatch(rendered.alScanHealth, /has moved/,
+      'witness:stale-phrase -- the card still claims a move nobody made');
+    assert.equal(rendered.stAutoLearn, 'scan degraded', 'a real divergence still degrades the row');
+    assert.match(rendered.node('alScanHealth').title, /4 Codex thread\(s\) exist/,
+      'the persisted reason is the hover title, so the user can find out what to do');
+
+    // Each finding has its own words, joined, and singular is singular.
+    const mixed = structuredClone(data);
+    mixed.autoLearn.scan.codexHistoryFindings = { orphans: 1, relocated: 2, projectionAhead: 1, emptyRollouts: 1 };
+    assert.match(renderDashboard(app.provider, mixed).alScanHealth,
+      /1 Codex thread with no transcript · 2 Codex transcripts outside the scanned folders · Codex store ahead of 1 transcript · Codex rollout folders empty beside a populated store/);
+
+    // The control: no reasons, no tooltip left behind from an earlier render.
+    const clean = structuredClone(data);
+    clean.autoLearn.scan = { ...clean.autoLearn.scan, codexHistoryStale: false, codexHistoryReasons: [], codexHistoryFindings: null };
+    const cleared = renderDashboard(app.provider, clean);
+    assert.match(cleared.alScanHealth, /read 9 files cleanly/);
+    assert.equal(cleared.node('alScanHealth').title, '');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// A file the per-scan ingest budget deferred is catch-up, not trouble. The
+// largest archived rollout on the box is 170 MB against a 64 MiB budget, so the
+// archive root makes it three scans of `partial`, and every one of them used to
+// read "scan degraded" over a scan that lost nothing.
+test('a budget-deferred transcript reads as catching up, not as a degraded scan', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, partial: 1, deferredBytes: 111 * 1048576 });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.deferredBytes, 111 * 1048576, 'the bytes left never reached the panel');
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /read 9 files cleanly · catching up on 1 large transcript \(111 MB left\)/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.doesNotMatch(rendered.stAutoLearn, /degraded/,
+      'witness:partial-not-trouble -- a scan that is catching up was badged as degraded');
+
+    // The control: real trouble beside the catch-up still degrades the row, and
+    // the catch-up is still said beside it rather than swallowed.
+    const troubled = structuredClone(data);
+    troubled.autoLearn.scan.errors = 2;
+    const both = renderDashboard(app.provider, troubled);
+    assert.match(both.alScanHealth, /2 unreadable files · catching up on 1 large transcript/);
+    assert.equal(both.stAutoLearn, 'scan degraded');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a skipped unreadable stretch is trouble, unlike a deferral', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, unreadable: 1 });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.unreadable, 1, 'witness:unreadable -- the count never reached the panel');
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /1 file with an unreadable stretch skipped/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.equal(rendered.stAutoLearn, 'scan degraded');
+
+    // The control and the plural: two files, and none is clean.
+    const two = structuredClone(data);
+    two.autoLearn.scan.unreadable = 2;
+    assert.match(renderDashboard(app.provider, two).alScanHealth, /2 files with an unreadable stretch skipped/);
+    const none = structuredClone(data);
+    none.autoLearn.scan.unreadable = 0;
+    assert.match(renderDashboard(app.provider, none).alScanHealth, /read 9 files cleanly/);
   } finally {
     await app.dispose();
   }

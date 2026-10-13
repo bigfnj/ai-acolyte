@@ -357,10 +357,18 @@ function isPowerShellCommandName(first) {
   return /^\d[\w.-]*$/.test(first) && !first.includes('..') && !PS_NUMERIC_LITERAL.test(first);
 }
 
-// Generalize a PowerShell arg. The `& "app.exe" …` call form collapses to a
-// single "run any & invocation" wildcard; plain command/cmdlet names collapse to
-// their root; script-like constructs (variables, keywords, subexpressions) are
-// left verbatim because a first-token wildcard would be nonsense there.
+// Generalize a PowerShell arg. Plain command/cmdlet names collapse to their root;
+// the `& "app.exe" …` call form and script-like constructs (variables, keywords,
+// subexpressions, numbers and ranges) are left verbatim, because a first-token
+// wildcard would be arbitrary execution for `&` and nonsense for the rest.
+//
+// Corrected 2026-10-13: this header used to say the `&` call form "collapses to a
+// single 'run any & invocation' wildcard". The code below keeps it exact, and has
+// since before that date (`/^&\s/` returns the entry unchanged, pinned by
+// `PowerShell(& foo.exe --version)` in test/permissions-keywords.test.js). The
+// `PowerShell(& *)` grant that comment described is what the starter pack seeds by the
+// maintainer's call (docs/engineering-record.md, "The 13 blanket wrapper grants"),
+// never something this pass mints.
 function generalizePowerShellArg(arg) {
   const t = arg.trim();
   // `&` can launch any dynamically chosen executable. A root-wide call-
@@ -796,12 +804,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :726.
+// prunePermissions, whose only caller is processAllowList at :734.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :792 and nowhere else in the
+// reached it, in any of the three: it is called at :800 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is

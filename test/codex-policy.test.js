@@ -2,9 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createCodexRuleStore } = require('../src/codex-rule-store');
 const {
   readEnterpriseBundle,
   enterpriseRequirements,
@@ -280,6 +282,117 @@ test('the effective rule set substitutes the pending file rather than adding it'
   assert.deepEqual(codexRulesArguments(['a.rules', 'b.rules']),
     ['--rules', 'a.rules', '--rules', 'b.rules'],
     '--rules is repeatable, so every member gets its own flag');
+});
+
+// Windows file names are case-insensitive, and the target every caller passes is
+// a hard-coded lowercase `permission-wildcarding.rules`, while the listing reports
+// the spelling on disk. Compared as raw strings the one file was two members, and
+// the substitute replaced only one of them, so the deployed copy was validated
+// beside the candidate. Demonstrated before the fix, 2026-10-13: `files` held
+// both spellings and `effective` held deployed PLUS pending.
+function caseFixture(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-rule-case-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const dir = path.join(home, '.codex', 'rules');
+  fs.mkdirSync(dir, { recursive: true });
+  const onDisk = path.resolve(path.join(dir, 'Permission-Wildcarding.rules'));
+  const neighbour = path.resolve(path.join(dir, 'hand-written.rules'));
+  fs.writeFileSync(onDisk, 'prefix_rule(pattern=["git", "status"], decision="allow")\n');
+  fs.writeFileSync(neighbour, 'prefix_rule(pattern=["rg"], decision="allow")\n');
+  return {
+    home, dir, onDisk, neighbour,
+    lower: path.join(dir, 'permission-wildcarding.rules'),
+    pending: path.resolve(path.join(home, 'candidate.rules')),
+  };
+}
+
+test('a differently-cased target is the deployed file, not a second one, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    const box = caseFixture(t);
+    const plain = codexRuleFileSet({ home: box.home, target: box.lower });
+    assert.deepEqual(plain.files, [box.onDisk, box.neighbour].sort(),
+      'one file, listed once, under the spelling that is on disk');
+
+    const swapped = codexRuleFileSet({ home: box.home, target: box.lower, substitute: box.pending });
+    assert.equal(swapped.files.length, 2, 'the deployed file is one member');
+    assert.equal(swapped.effective.includes(box.onDisk), false,
+      'the deployed copy is REPLACED by the candidate, never validated beside it');
+    assert.equal(swapped.effective.includes(box.pending), true, 'the candidate is evaluated');
+    assert.deepEqual(swapped.effective.slice().sort(), [box.neighbour, box.pending].sort());
+  });
+
+test('a target whose directory is cased differently is still the deployed file, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    const box = caseFixture(t);
+    const shouted = path.join(box.home, '.CODEX', 'RULES', 'permission-wildcarding.rules');
+    const swapped = codexRuleFileSet({ home: box.home, target: shouted, substitute: box.pending });
+    assert.deepEqual(swapped.files, [box.onDisk, box.neighbour].sort(),
+      'the listing spelling wins and the target adds nothing');
+    assert.deepEqual(swapped.effective.slice().sort(), [box.neighbour, box.pending].sort(),
+      'and the substitute stands in for the deployed copy');
+  });
+
+test('a rules directory reached under two spellings contributes each file once, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    // The dedupe on its own. With the target check above keyed, a duplicate can
+    // still arrive from the LISTING: the same directory named twice, differently
+    // cased, is read twice and yields every file under both spellings.
+    const box = caseFixture(t);
+    const set = codexRuleFileSet({ home: box.home, directories: [path.join(box.home, '.CODEX', 'rules')] });
+    assert.deepEqual(set.files, [box.onDisk, box.neighbour].sort(),
+      'the first spelling seen is kept and the second listing adds nothing');
+  });
+
+test('the rule-store inventory lists a differently-cased target once, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    // The inventory walks `files`, so before the fix it listed the one file
+    // twice and every rule in it twice, under the same id: the id hashes a
+    // case-folded path, so the two rows were indistinguishable to a removal.
+    const box = caseFixture(t);
+    const snapshot = (file) => {
+      let content = Buffer.alloc(0);
+      let exists = true;
+      try { content = fs.readFileSync(file); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        exists = false;
+      }
+      return { exists, content, hash: crypto.createHash('sha256').update(content).digest('hex') };
+    };
+    const store = createCodexRuleStore({
+      codexHome: path.join(box.home, '.codex'), target: box.lower,
+      claimsPath: path.join(box.home, 'claims.json'), storePath: path.join(box.home, 'store.json'),
+      backupPath: path.join(box.home, 'backup.json'), snapshot,
+      atomicWrite() { throw new Error('inventory must not write'); }, validate() {},
+    });
+    const inventory = store.inventory();
+    assert.deepEqual(inventory.files.map((file) => file.path).sort(), [box.onDisk, box.neighbour].sort());
+    const ids = inventory.rules.map((rule) => rule.id);
+    assert.equal(ids.length, 2, 'one git-status rule and one rg rule, each listed once');
+    assert.equal(new Set(ids).size, ids.length, 'and no two rows share an id');
+  });
+
+test('case stays significant where the filesystem is case-sensitive', (t) => {
+  // The control, runnable everywhere through the injected platform. On POSIX two
+  // spellings are two files, so the substitute for a lowercase target that does
+  // not match the on-disk name must NOT displace that file: displacing it would
+  // validate a set with a real rules file missing. Asserted on `effective`,
+  // which is the same on a case-sensitive disk (where the lowercase target does
+  // not exist) and on NTFS (where it does, and `files` therefore grows by one).
+  const box = caseFixture(t);
+  const posix = codexRuleFileSet({
+    home: box.home, target: box.lower, substitute: box.pending, platform: 'linux',
+  });
+  assert.equal(posix.effective.includes(box.onDisk), true,
+    'a differently-spelled file is a different file and stays in the set');
+  assert.equal(posix.effective.includes(box.pending), true);
+
+  // And the folding is the platform's rule, not this machine's: injected win32
+  // folds even where the real filesystem would keep the spellings apart.
+  const folded = codexRuleFileSet({
+    home: box.home, target: box.lower, substitute: box.pending, platform: 'win32',
+  });
+  assert.equal(folded.effective.includes(box.onDisk), false, 'win32 semantics fold the two spellings');
+  assert.equal(folded.effective.includes(box.pending), true);
 });
 
 test('a rules directory that cannot be listed is reported, never silently dropped', (t) => {

@@ -2,6 +2,7 @@
 'use strict';
 
 // Resolve every `file:line` reference this repo writes about itself.
+// Write `file:line#identifier` to have the line checked EXACTLY; `--fix-anchored` repoints one that moved.
 //
 // The repo documents its own internals by line number, in BACKLOG.md and in code
 // comments. Line numbers rot on the next edit: BACKLOG.md's own dead-code audit
@@ -29,14 +30,24 @@
 //   UNVERIFIABLE  the prose makes a descriptive claim with no literal string to
 //                 match against. Reported rather than guessed at.
 //
+// A reference that DECLARES its anchor — `file:line#identifier`, or
+// `file:start-end#identifier` — skips every heuristic above. It is OK when that
+// identifier is on the cited line (anywhere in a cited range) as a whole token, and
+// BROKEN otherwise, with the lines it occurs on now. No prose is read. See the block
+// above ANCHOR_RE for the grammar, the token rule and why each edge is where it is.
+//
 // Usage:
-//   node scripts/check-line-refs.js            human-readable report
-//   node scripts/check-line-refs.js --detail   also show the cited and candidate lines
-//   node scripts/check-line-refs.js --json     machine-readable
-//   node scripts/check-line-refs.js --quiet    only the counts
+//   node scripts/check-line-refs.js                 human-readable report
+//   node scripts/check-line-refs.js --detail        also show the cited and candidate lines
+//   node scripts/check-line-refs.js --json          machine-readable
+//   node scripts/check-line-refs.js --quiet         only the counts
+//   node scripts/check-line-refs.js --fix-anchored  repoint every BROKEN anchored reference
+//                                                    whose anchor is on exactly one line now
+//   node scripts/check-line-refs.js --root <dir>    check another checkout instead of this one
 //
 // Exit 1 only when something is BROKEN. STALE does not fail the run, because a
-// verdict that is right most of the time is a report, not a gate.
+// verdict that is right most of the time is a report, not a gate. Under
+// --fix-anchored, exit 1 when an anchored reference is still BROKEN afterwards.
 
 const fs = require('fs');
 const path = require('path');
@@ -54,11 +65,25 @@ const TOLERANCE = 3;
 // The extension-less spelling is enumerated rather than matched as a wildcard so
 // that ordinary prose like "ratio 3:1" can never register as a reference.
 const EXTLESS = ['wildcard-perms', 'recall\\.py'];
+// Group 4 is the DECLARED anchor, the text after `#`; see ANCHOR_RE for its grammar.
+//
+// The group is deliberately WIDER than the grammar: after an identifier start it also
+// takes `.`, `:`, `/` and `-`. That is what turns a malformed anchor such as `#foo-bar`
+// into a captured string that judgeAnchored() reports BROKEN. With the group cut to the
+// grammar, `-bar` fails the trailing lookahead, the regex backtracks to the anchor-less
+// alternative (which `#` satisfies), and a reference its author pinned is handed to the
+// heuristic judge without a word. A `#` followed by anything that cannot start an
+// identifier (a digit, a space) is not an anchor attempt at all and parses exactly as it
+// did before anchors existed. Counted 2026-10-13: no reference in the tree had any `#`
+// after its line number, so this group changed no existing match.
+//
+// The `d` flag records where each group sits on the line, which is how --fix-anchored
+// knows which digits to rewrite without re-parsing the line it is about to edit.
 const REF_RE = new RegExp(
   '(?<![\\w/.-])((?:[A-Za-z0-9_.-]+/)*(?:[A-Za-z0-9_.-]+\\.(?:js|mjs|cjs|ps1|sh|md|json|py|yml|yaml)|' +
     EXTLESS.join('|') +
-    ')):(\\d+)(?:\\s*-\\s*(\\d+))?(?![\\w/.-])',
-  'g'
+    ')):(\\d+)(?:\\s*-\\s*(\\d+))?(?:#([A-Za-z_$][\\w$.:/-]*))?(?![\\w/.-])',
+  'gd'
 );
 
 const REF_RE_TEST = new RegExp(REF_RE.source);
@@ -100,27 +125,197 @@ function stripRefs(text) {
 // are several.
 const IGNORE_MARKER = 'line-refs:ignore';
 
-const SOURCE_EXT = new Set(['.js', '.mjs', '.cjs', '.ps1', '.sh']);
+// `.py`, `.yml` and `.yaml` joined on 2026-10-13. commentRuns() has had a hash-comment
+// branch for all three since it was written, but nothing routed those extensions to it,
+// so the branch was dead code and every citation written in a Python or workflow comment
+// was invisible: memory/recall.py carried one that pointed 214 lines from the site it
+// described (measured at c09daab), and neither this report, its --quiet count nor
+// test/line-refs.test.js could see it. Adding them raised the population from 159
+// references to 160, and that one was the whole catch: the other 159 verdicts came out
+// identical. `.json` stays out: it has no comment syntax, so a reference in it is data,
+// not a claim of ours. Python docstrings are not `#` comments and are still not scanned.
+const SOURCE_EXT = new Set(['.js', '.mjs', '.cjs', '.ps1', '.sh', '.py', '.yml', '.yaml']);
 const EXTLESS_SOURCE = new Set(['wildcard-perms', 'smoke', 'install', 'uninstall']);
 
-function tracked() {
-  return execFileSync('git', ['-C', ROOT, 'ls-files'], { encoding: 'utf8' })
+// Every reader takes the checkout root as a parameter, defaulting to this one. Added
+// 2026-10-13 for --fix-anchored, whose tests have to rewrite files: pointing them at
+// this checkout would edit the real corpus mid-suite, so they build a throwaway git
+// repo and pass its root instead. --root exposes the same seam on the command line.
+function tracked(root = ROOT) {
+  return execFileSync('git', ['-C', root, 'ls-files'], { encoding: 'utf8' })
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
+// Keyed on root AND path, so two checkouts in one process cannot read each other's
+// lines. --fix-anchored clears it after writing; nothing else writes.
 const fileCache = new Map();
-function linesOf(rel) {
-  if (fileCache.has(rel)) return fileCache.get(rel);
+function linesOf(rel, root = ROOT) {
+  const key = root + '\u0000' + rel;
+  if (fileCache.has(key)) return fileCache.get(key);
   let lines = null;
   try {
-    lines = fs.readFileSync(path.join(ROOT, rel), 'utf8').split(/\r?\n/);
+    lines = fs.readFileSync(path.join(root, rel), 'utf8').split(/\r?\n/);
   } catch {
     lines = null;
   }
-  fileCache.set(rel, lines);
+  fileCache.set(key, lines);
   return lines;
+}
+
+// A trailing newline makes split() yield one empty element past the last line.
+function lineCount(lines) {
+  return lines.length && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
+}
+
+// ---------------------------------------------------------------------------
+// Declared anchors: `file:line#identifier` and `file:start-end#identifier`.
+//
+// WHY THIS EXISTS. Everything else in this file recovers the claim from the prose
+// and judges it heuristically, and the STALE verdict that comes out is wrong about
+// one time in three (measured 2026-09-14, docs/engineering-record.md, "`file:line`
+// rot"), which is why no test asserts it. A declared anchor is the author writing
+// the claim down in a form a machine can check with no judgement at all, so it can
+// be asserted. Proposed and costed on 2026-09-27 (the BACKLOG entry "The `file:line`
+// gate catches less than it looks like it catches"), built 2026-10-13.
+//
+// GRAMMAR. One identifier, optionally dotted: `fooBar`, `$scope`, `_out`,
+// `fs.realpathSync`. Each dotted segment must start like an identifier, so `foo..bar`
+// and `foo.5` are malformed. Trailing `.` and `:` are taken as the sentence's
+// punctuation, not the anchor's: `file:3#fooBar.` anchors `fooBar`. No hyphen, no
+// call parens, no spaces: `#foo-bar` and `#foo()` are reported, never guessed at.
+//
+// THE CHECK. OK when the anchor occurs on the cited line, or on any line of a cited
+// range, as a WHOLE TOKEN: not preceded or followed by `[\w$]`, the same boundary
+// class the heuristic's identifier matcher uses (see anchorMatches). So `scan` does
+// not match `scanTrouble`, `_scan` or `$scan`, and does match `this.scan(` and
+// `'scan'`. A dotted anchor is matched literally under the same rule, which makes it
+// a prefix of a member chain: `fs.realpathSync` matches `fs.realpathSync.native(`
+// but not `xfs.realpathSync`. Case-sensitive. One line at a time; an anchor never
+// spans a line break.
+//
+// A CITATION IS NOT AN OCCURRENCE. Every `file:line` token is masked out of a line
+// before it is searched. Without that, a file that cites one of its own symbols would
+// hold the anchor twice, once in code and once in the citation, and --fix-anchored
+// would call every such reference ambiguous and refuse it.
+//
+// It is BROKEN otherwise, and the detail names every line the anchor occurs on now,
+// so a reader can repoint it without searching. Ambiguous basenames, missing files,
+// descending ranges and out-of-bounds lines are BROKEN too, including the ambiguous
+// basename that checkBounds skips for an un-anchored reference: an anchor promises an
+// exact check, a reference that cannot name its file cannot keep that promise, and
+// skipping it would let an anchored reference out of the gate entirely.
+// ---------------------------------------------------------------------------
+const ANCHOR_RE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
+
+// The declared anchor, or null when what follows `#` is not one.
+function parseAnchor(raw) {
+  const text = String(raw).replace(/[.:]+$/, '');
+  return ANCHOR_RE.test(text) ? text : null;
+}
+
+function isAnchored(ref) {
+  return ref.declaredRaw != null;
+}
+
+// Every line (1-based) of `lines` on which `anchor` occurs as a whole token, with
+// citations masked out first. Exported and unit-tested: the token rule is the whole
+// of what makes this check exact, and a fixture corpus can only probe it indirectly.
+function anchorLines(anchor, lines) {
+  const re = new RegExp(
+    '(?<![\\w$])' + anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w$])'
+  );
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    // The substring test is only a fast exit: masking can remove text, never add it.
+    if (!lines[i].includes(anchor)) continue;
+    if (re.test(lines[i].replace(REF_RE, ' '))) hits.push(i + 1);
+  }
+  return hits;
+}
+
+function listLines(hits) {
+  return hits.slice(0, 8).join(', ') + (hits.length > 8 ? ` (+${hits.length - 8} more)` : '');
+}
+
+// What --fix-anchored would write for a BROKEN anchored reference, or why it will not.
+//
+// EXACT, NOT HEURISTIC, and that is the whole difference from the `suggest` field the
+// record forbids bulk-applying. `suggest` comes from an anchor RECOVERED out of prose,
+// which picks a neighbouring symbol often enough to be wrong on its own. This acts
+// only on the anchor the author DECLARED, and only when it occurs on exactly ONE line
+// of the target as a whole token, so there is one possible answer and no ranking.
+// Zero lines (renamed or deleted) and two or more (which one did they mean?) are left
+// for a person, as are descending ranges, which no shift can repair.
+//
+// A RANGE keeps its length and is re-headed ON the anchor: start := the anchor's
+// line, end := end + the same delta. That is exact when the anchor names the range's
+// FIRST line, which is how a range should be anchored (the signature, the heading, the
+// opening statement). An anchor from the middle of a range still ends up inside the
+// fixed range, but its old offset is not recorded anywhere, so the range is re-headed
+// on it, and the FIXED line says "re-headed" so a reader can look. A shift that would
+// run the range past the end of the file is refused rather than clipped.
+function planFix(ref, rel, occurs, count) {
+  const a = '#' + ref.declaredAnchor;
+  if (ref.end < ref.start) {
+    return { kind: 'UNFIXABLE', why: 're-derive both ends by hand, since no shift repairs a descending range' };
+  }
+  if (!occurs.length) {
+    return { kind: 'MISSING', why: `${a} occurs nowhere in ${rel}; repoint by hand or drop the anchor` };
+  }
+  if (occurs.length > 1) {
+    return { kind: 'AMBIGUOUS', why: `${a} occurs on ${occurs.length} lines: ${listLines(occurs)}; repoint by hand` };
+  }
+  const start = occurs[0];
+  const end = ref.end + (start - ref.start);
+  if (end > count) {
+    return {
+      kind: 'UNFIXABLE',
+      why: `${a} occurs only on line ${start}, but the range shifted there would end at ${end}, ` +
+        `past the end of ${rel} (${count} lines); repoint by hand`,
+    };
+  }
+  return { start, end };
+}
+
+function planHint(plan) {
+  if (plan.why) return plan.why;
+  const to = plan.start === plan.end ? `${plan.start}` : `${plan.start}-${plan.end}`;
+  return `it occurs only on line ${plan.start}, so --fix-anchored will repoint this to :${to}`;
+}
+
+// The exact check, used by judge() for the report and by checkBounds() for the test,
+// so the two can never disagree about an anchored reference.
+function judgeAnchored(ref, index, root = ROOT) {
+  const verdict = (v, detail, extra = {}) => ({ ...ref, verdict: v, detail, ...extra });
+  if (!ref.declaredAnchor) {
+    return verdict('BROKEN', `malformed anchor #${ref.declaredRaw}: an anchor is one identifier, ` +
+      'optionally dotted (fooBar, fs.realpathSync), with no hyphen, parens or spaces');
+  }
+  const res = resolveTarget(index, ref.target, ref.source);
+  if (res.missing) return verdict('BROKEN', `no tracked file matches ${ref.target}`);
+  if (res.ambiguous) {
+    return verdict('BROKEN', `ambiguous basename (${res.ambiguous.join(', ')}); an anchored ` +
+      'reference must name one file, so qualify the path');
+  }
+  const rel = res.rel;
+  const lines = linesOf(rel, root);
+  if (!lines) return verdict('BROKEN', `unreadable: ${rel}`, { resolved: rel });
+  const cited = ref.start === ref.end ? `line ${ref.start}` : `lines ${ref.start}-${ref.end}`;
+  const occurs = anchorLines(ref.declaredAnchor, lines);
+  const count = lineCount(lines);
+  const plan = planFix(ref, rel, occurs, count);
+  const extra = { resolved: rel, occurs, plan };
+  let problem;
+  if (ref.end < ref.start) problem = `cites a DESCENDING range ${ref.start}-${ref.end}`;
+  else if (ref.start < 1 || ref.end > count) problem = `${cited} is outside ${rel} (${count} lines)`;
+  else {
+    const hit = occurs.find((h) => h >= ref.start && h <= ref.end);
+    if (hit !== undefined) return verdict('OK', `#${ref.declaredAnchor} on line ${hit}`, extra);
+    problem = `#${ref.declaredAnchor} is not on ${cited}`;
+  }
+  return verdict('BROKEN', `${problem}; ${planHint(plan)}`, extra);
 }
 
 // ---------------------------------------------------------------------------
@@ -387,10 +582,25 @@ function looksLikeSource(rel) {
 
 // ---------------------------------------------------------------------------
 
-function collectRefs(trackedFiles) {
+// The declared-anchor half of a match, plus where its digits sit on the citing line.
+// Columns come from the `d` flag and are what --fix-anchored rewrites; the digit TEXT
+// is kept as written so the fixer can confirm it is replacing what was parsed.
+function anchorFields(m) {
+  const declaredRaw = m[4] === undefined ? null : m[4];
+  return {
+    declaredRaw,
+    declaredAnchor: declaredRaw === null ? null : parseAnchor(declaredRaw),
+    startCol: m.indices[2][0],
+    startText: m[2],
+    endCol: m[3] ? m.indices[3][0] : null,
+    endText: m[3] || null,
+  };
+}
+
+function collectRefs(trackedFiles, root = ROOT) {
   const refs = [];
   for (const rel of trackedFiles) {
-    const lines = linesOf(rel);
+    const lines = linesOf(rel, root);
     if (!lines) continue;
     const ext = path.extname(rel);
     if (ext === '.md') {
@@ -407,7 +617,8 @@ function collectRefs(trackedFiles) {
             end: m[3] ? Number(m[3]) : Number(m[2]),
             raw: m[0],
             context: sliceForRef(line, matches, k, continuation),
-            wideContext: mdUnit(lines, i)
+            wideContext: mdUnit(lines, i),
+            ...anchorFields(m)
           });
         });
       });
@@ -427,7 +638,8 @@ function collectRefs(trackedFiles) {
               end: m[3] ? Number(m[3]) : Number(m[2]),
               raw: m[0],
               context: sliceForRef(line, matches, k, continuation),
-              wideContext: text
+              wideContext: text,
+              ...anchorFields(m)
             });
           });
         });
@@ -437,14 +649,21 @@ function collectRefs(trackedFiles) {
   return refs;
 }
 
-function judge(ref, index) {
+function judge(ref, index, root = ROOT) {
+  // A declared anchor is checked exactly and never reaches the heuristics below: no
+  // prose is read, no anchor is recovered, and no `suggest` is produced. Everything
+  // after this line is what judged every reference before anchors existed, unchanged
+  // but for the root parameter: on the 159 references the tree held at 88a4c1d it
+  // returned the same verdict, detail and suggest, row for row, before and after
+  // anchors were added (diffed 2026-10-13).
+  if (isAnchored(ref)) return judgeAnchored(ref, index, root);
   const res = resolveTarget(index, ref.target, ref.source);
   if (res.missing) return { ...ref, verdict: 'BROKEN', detail: 'no tracked file matches' };
   if (res.ambiguous) {
     return { ...ref, verdict: 'UNVERIFIABLE', detail: 'ambiguous basename: ' + res.ambiguous.join(', ') };
   }
   const rel = res.rel;
-  const lines = linesOf(rel);
+  const lines = linesOf(rel, root);
   if (!lines) return { ...ref, verdict: 'BROKEN', detail: 'unreadable: ' + rel };
   // A trailing newline makes split() yield one empty element past the last line.
   const count = lines.length && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
@@ -572,14 +791,14 @@ function isVacuousSpan(span) {
 // earlier draft of this check that tested only the start line called two such
 // references wrong. 13 references in the tree matched the loose rule and 6 matched the
 // strict one; the difference was entirely ranges.
-function checkVacuous() {
-  const files = tracked();
+function checkVacuous(root = ROOT) {
+  const files = tracked(root);
   const index = buildIndex(files);
   const bad = [];
-  for (const ref of collectRefs(files)) {
+  for (const ref of collectRefs(files, root)) {
     const res = resolveTarget(index, ref.target, ref.source);
     if (res.ambiguous || res.missing) continue;   // checkBounds owns those
-    const lines = linesOf(res.rel);
+    const lines = linesOf(res.rel, root);
     if (!lines) continue;
     const span = lines.slice(ref.start - 1, ref.end);
     if (!span.length) continue;                   // out of bounds is checkBounds' call
@@ -596,11 +815,24 @@ function checkVacuous() {
   return bad;
 }
 
-function checkBounds() {
-  const files = tracked();
+// An ANCHORED reference is held to the exact check here as well, through the same
+// judgeAnchored() the report uses. That is what makes an anchor worth writing: a
+// citation whose anchor has left the cited line fails the suite, where the same drift
+// in an un-anchored citation is at best a STALE row in a report nobody is made to read.
+// It cannot false-positive the way STALE does, because it reads no prose: the author
+// said which token belongs on the line, and the token is there or it is not.
+function checkBounds(root = ROOT) {
+  const files = tracked(root);
   const index = buildIndex(files);
   const broken = [];
-  for (const ref of collectRefs(files)) {
+  for (const ref of collectRefs(files, root)) {
+    if (isAnchored(ref)) {
+      const r = judgeAnchored(ref, index, root);
+      if (r.verdict === 'BROKEN') {
+        broken.push({ ...r, reason: r.detail, where: `${ref.source}:${ref.sourceLine} -> ${ref.raw}` });
+      }
+      continue;
+    }
     const res = resolveTarget(index, ref.target, ref.source);
     if (res.ambiguous) continue; // reported by the full run, not assertable here
     const where = `${ref.source}:${ref.sourceLine} -> ${ref.raw}`;
@@ -608,7 +840,7 @@ function checkBounds() {
       broken.push({ ...ref, reason: `no tracked file matches ${ref.target}`, where });
       continue;
     }
-    const lines = linesOf(res.rel);
+    const lines = linesOf(res.rel, root);
     if (!lines) {
       broken.push({ ...ref, reason: `unreadable: ${res.rel}`, where });
       continue;
@@ -643,13 +875,106 @@ function checkBounds() {
   return broken;
 }
 
+// --fix-anchored: repoint every BROKEN anchored reference that planFix() can answer, and
+// touch nothing else. No un-anchored reference, no OK one, and no byte of a citing file
+// outside the digits being replaced. See planFix() for why this is exact rather than the
+// heuristic `suggest` the record forbids bulk-applying.
+//
+// LINE ENDINGS SURVIVE because nothing is split and re-joined. Each edit splices one run
+// of digits at an offset computed on the raw text, so a CRLF file stays CRLF and a BOM
+// stays where it is. This tree is CRLF in the working copy and LF in the index; a fixer
+// that wrote one back as the other would turn a two-digit repair into a whole-file diff.
+//
+// IDEMPOTENT by construction: a fixed reference is OK, OK references are skipped, and a
+// file is written only when its text changed, so a second run writes nothing.
+//
+// Every edit is verified before ANY file is written: the digits at the computed offset
+// must be the digits that were parsed, or the run throws and leaves the tree untouched.
+function fixAnchored(root = ROOT) {
+  const files = tracked(root);
+  const index = buildIndex(files);
+  const anchored = collectRefs(files, root).filter(isAnchored);
+  const fixed = [];
+  const left = [];
+  const edits = new Map();
+  for (const ref of anchored) {
+    const r = judgeAnchored(ref, index, root);
+    if (r.verdict !== 'BROKEN') continue;
+    const where = `${r.source}:${r.sourceLine}`;
+    // No plan means judgeAnchored stopped before it could look: a malformed anchor, or a
+    // target that is missing, ambiguous or unreadable. Nothing to shift in any of those.
+    if (!r.plan || r.plan.why) {
+      left.push({ ...r, where, kind: r.plan ? r.plan.kind : 'UNFIXABLE', reason: r.plan ? r.plan.why : r.detail });
+      continue;
+    }
+    if (!edits.has(r.source)) edits.set(r.source, []);
+    const list = edits.get(r.source);
+    list.push({ line: r.sourceLine, col: r.startCol, from: r.startText, to: String(r.plan.start) });
+    const range = r.endText !== null;
+    if (range) list.push({ line: r.sourceLine, col: r.endCol, from: r.endText, to: String(r.plan.end) });
+    fixed.push({ ...r, where, to: range ? `${r.plan.start}-${r.plan.end}` : String(r.plan.start), range });
+  }
+  const writes = [];
+  for (const [rel, list] of edits) {
+    const abs = path.join(root, rel);
+    const text = fs.readFileSync(abs, 'utf8');
+    const lineStart = [0];
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) lineStart.push(i + 1);
+    // Right to left, so a splice that changes a number's width cannot move the offset of
+    // an edit still to come. Two anchored references on one line are the case that needs it.
+    const located = list.map((e) => ({ ...e, at: lineStart[e.line - 1] + e.col })).sort((a, b) => b.at - a.at);
+    let out = text;
+    for (const e of located) {
+      if (out.slice(e.at, e.at + e.from.length) !== e.from) {
+        throw new Error(`--fix-anchored: ${rel}:${e.line} does not read "${e.from}" at column ` +
+          `${e.col + 1} any more; nothing was written`);
+      }
+      out = out.slice(0, e.at) + e.to + out.slice(e.at + e.from.length);
+    }
+    if (out !== text) writes.push({ rel, abs, out });
+  }
+  for (const w of writes) fs.writeFileSync(w.abs, w.out, 'utf8');
+  if (writes.length) {
+    for (const key of [...fileCache.keys()]) if (key.startsWith(root + '\u0000')) fileCache.delete(key);
+  }
+  return { examined: anchored.length, fixed, left, written: writes.map((w) => w.rel) };
+}
+
+function runFix(root, quiet) {
+  const report = fixAnchored(root);
+  const out = (s) => process.stdout.write(s);
+  if (!quiet) {
+    for (const f of report.fixed) {
+      out(`${'FIXED'.padEnd(10)} ${f.where}  ${f.raw}  ->  :${f.to}` +
+        (f.range ? '  (range re-headed on the anchor, length kept)' : '') + '\n');
+    }
+    for (const l of report.left) out(`${l.kind.padEnd(10)} ${l.where}  ${l.raw}\n           ${l.reason}\n`);
+  }
+  const n = (k) => report.left.filter((l) => l.kind === k).length;
+  out(`\n--fix-anchored: ${report.fixed.length} fixed, ${n('AMBIGUOUS')} ambiguous, ${n('MISSING')} missing, ` +
+    `${n('UNFIXABLE')} unfixable, of ${report.examined} anchored references\n`);
+  process.exitCode = report.left.length ? 1 : 0;
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const asJson = argv.includes('--json');
   const quiet = argv.includes('--quiet');
-  const files = tracked();
+  const at = argv.indexOf('--root');
+  if (at !== -1 && !argv[at + 1]) {
+    process.stderr.write('check-line-refs: --root needs a directory\n');
+    process.exitCode = 2;
+    return;
+  }
+  const root = at === -1 ? ROOT : path.resolve(argv[at + 1]);
+  if (argv.includes('--fix-anchored')) {
+    runFix(root, quiet);
+    return;
+  }
+  const files = tracked(root);
   const index = buildIndex(files);
-  const results = collectRefs(files).map((r) => judge(r, index));
+  const results = collectRefs(files, root).map((r) => judge(r, index, root));
+  const anchored = results.filter(isAnchored).length;
 
   const counts = {};
   for (const r of results) counts[r.verdict] = (counts[r.verdict] || 0) + 1;
@@ -661,6 +986,7 @@ function main() {
       JSON.stringify(
         {
           total: results.length,
+          anchored,
           counts,
           results: results.map((r) => ({
             source: r.source,
@@ -670,7 +996,10 @@ function main() {
             resolved: r.resolved || null,
             verdict: r.verdict,
             detail: r.detail,
-            suggest: r.suggest || null
+            suggest: r.suggest || null,
+            // The text after `#` as written, so a malformed one shows what was parsed.
+            anchor: r.declaredRaw,
+            occurs: r.occurs || null
           }))
         },
         null,
@@ -684,29 +1013,31 @@ function main() {
       process.stdout.write(`${r.verdict.padEnd(13)} ${r.source}:${r.sourceLine}  ->  ${r.raw}\n`);
       process.stdout.write(`              ${r.detail}\n`);
       if (detail && r.resolved) {
-        const src = linesOf(r.source) || [];
+        const src = linesOf(r.source, root) || [];
         process.stdout.write(`              says    | ${(src[r.sourceLine - 1] || '').trim().slice(0, 150)}\n`);
-        const lines = linesOf(r.resolved) || [];
+        const lines = linesOf(r.resolved, root) || [];
         const show = (n, tag) => {
           const t = (lines[n - 1] || '').trim().slice(0, 110);
           process.stdout.write(`              ${tag} ${r.resolved}:${n}  ${t}\n`);
         };
         show(r.start, 'cited   ');
         for (const s of (r.suggest || []).slice(0, 3)) show(s, 'suggest ');
+        // An anchored reference has no `suggest`, only the exact lines its anchor is on.
+        for (const s of (r.occurs || []).slice(0, 3)) show(s, 'occurs  ');
       }
     }
   }
   if (!asJson) {
     const order = ['OK', 'NEAR', 'STALE', 'BROKEN', 'UNVERIFIABLE'];
     const summary = order.filter((k) => counts[k]).map((k) => `${k} ${counts[k]}`).join(' | ');
-    process.stdout.write(`\n${results.length} references: ${summary}\n`);
+    process.stdout.write(`\n${results.length} references, ${anchored} anchored: ${summary}\n`);
   }
   process.exitCode = bad.length ? 1 : 0;
 }
 
 if (require.main === module) main();
 
-// test/line-refs.test.js is the only importer, and these three are what it takes.
+// test/line-refs.test.js is the only importer, and these are what it takes.
 // `judge`, `buildIndex`, `anchorsFrom`, `findAnchor`, `isStrong` and `flatten` were
 // listed here as well and no file anywhere destructured one of them, so the list was
 // advertising six functions through a door nobody had opened — the first caller to
@@ -717,6 +1048,11 @@ if (require.main === module) main();
 // backtick-stripping bug. They are the smallest seam that can observe it: the
 // symptom is an anchor going missing between those two calls, and nothing the
 // CLI prints distinguishes "no anchor in the prose" from "the anchor was eaten".
+// anchorLines and fixAnchored joined on 2026-10-13, both for test/line-refs.test.js.
+// anchorLines is the token rule that makes the anchored check exact, pinned case by
+// case; fixAnchored is the only way to drive the fixer against a throwaway checkout
+// and inspect what it wrote without going through the CLI's text.
 module.exports = {
   collectRefs, tracked, checkBounds, checkVacuous, isVacuousSpan, stripRefs, anchorsFrom,
+  anchorLines, fixAnchored,
 };

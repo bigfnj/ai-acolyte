@@ -28,6 +28,16 @@
 // send a reader somewhere that does not exist at all, rather than somewhere
 // merely out of date.
 //
+// AN ANCHORED REFERENCE IS ASSERTED IN FULL (since 2026-10-13). One written
+// `file:line#identifier` says which token belongs on the cited line, so checking it
+// reads no prose and cannot cry wolf the way STALE does: the token is on the line or
+// it is not. checkBounds therefore fails an anchored reference whose anchor has left
+// its line, which is the drift the un-anchored half above is blind to. The tests
+// below that build throwaway checkouts pin that check, the token rule, the parse,
+// and --fix-anchored, which repoints a moved anchor only when it is on exactly one
+// line now. Measured 2026-10-13 they cost about 2.4 s together, most of it six
+// fixture `git init`s and two node child processes.
+//
 // Cost: ~0.13 s, because it resolves paths and counts lines and does no
 // per-anchor scan of the target.
 //
@@ -41,10 +51,53 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const {
   checkBounds, checkVacuous, isVacuousSpan, collectRefs, tracked, stripRefs, anchorsFrom,
+  anchorLines, fixAnchored,
 } = require('../scripts/check-line-refs.js');
+
+const CHECKER = path.join(__dirname, '..', 'scripts', 'check-line-refs.js');
+
+// The anchored-reference RATCHET, in the style of the `>= 100` floors below. Anchoring
+// is a migration done a reference at a time, and the failure it guards against is the
+// quiet one: an edit that rewrites a sentence and drops its `#anchor`, or an extractor
+// change that stops parsing the group, leaves every remaining test green while the
+// citation slides back into the unchecked population. Raise this as references are
+// migrated; never lower it to make a failure go away. 1 on 2026-10-13: the citation in
+// memory/recall.py of the `.slice(0, 300)` that cuts the gate compiler's stderr.
+const ANCHORED_FLOOR = 1;
+
+// A throwaway checkout, for the tests that need a corpus of their own: one that MUST
+// hold a broken reference (the real tree must not), or one --fix-anchored may rewrite.
+// The checker enumerates with `git ls-files`, so the files go into an index. Nothing is
+// committed, so no identity is needed, and autocrlf/safecrlf are pinned off so that a
+// machine-wide setting can neither refuse the add nor matter: the checker and the fixer
+// read the WORKING TREE, which is exactly the bytes written here.
+function fixtureRepo(t, files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'line-refs-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const [rel, text] of Object.entries(files)) {
+    const abs = path.join(root, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, text);
+  }
+  const git = (...args) => execFileSync(
+    'git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', ...args],
+    { cwd: root, stdio: 'pipe' }
+  );
+  git('init', '-q');
+  git('add', '-A');
+  return root;
+}
+
+function snapshot(root, files) {
+  return Object.fromEntries(Object.keys(files).map((rel) => [rel, fs.readFileSync(path.join(root, rel)).toString('base64')]));
+}
 
 test('every file:line reference resolves to a real file and a line inside it', () => {
   const broken = checkBounds();
@@ -168,4 +221,236 @@ test('an anchor written AFTER a backticked reference is still extracted', () => 
   const bareAnchors = anchorsFrom(stripRefs(bare)).map((a) => a.text);
   assert.ok(bareAnchors.includes('COMMAND_TOOLS'), JSON.stringify(bareAnchors));
   assert.ok(!bareAnchors.some((a) => a.includes('history-adapters.js')), JSON.stringify(bareAnchors));
+});
+
+// ---------------------------------------------------------------------------
+// Declared anchors, 2026-10-13. See the block above ANCHOR_RE in
+// scripts/check-line-refs.js for the grammar and the semantics these pin.
+// ---------------------------------------------------------------------------
+
+test('the tree keeps at least ANCHORED_FLOOR anchored references', () => {
+  const anchored = collectRefs(tracked()).filter((r) => r.declaredRaw != null);
+  assert.ok(
+    anchored.length >= ANCHORED_FLOOR,
+    `expected at least ${ANCHORED_FLOOR} anchored file:line#identifier references, found ` +
+      `${anchored.length}. Either an edit dropped an anchor (find it and put it back) or the ` +
+      'extractor in scripts/check-line-refs.js stopped parsing them.'
+  );
+});
+
+// The parse, line by line. Rows 1, 5 and 6 are the CONTROL: a reference with no anchor,
+// and the two spellings of a `#` that is not one, must come out exactly as they did
+// before anchors existed, raw text included, or the un-anchored half of the corpus has
+// silently changed meaning.
+test('a declared anchor parses after a line or a range, and a stray # is still not one', (t) => {
+  const root = fixtureRepo(t, {
+    'src/a.js': "'use strict';\nfunction fooBar() {}\n",
+    'notes.md': [
+      '- plain `src/a.js:2` stays un-anchored',
+      '- line `src/a.js:2#fooBar` anchors fooBar',
+      '- range src/a.js:1-2#fs.realpathSync. at the end of a sentence',
+      '- colon src/a.js:2#fooBar: and more prose',
+      '- spaced src/a.js:2 #fooBar is prose after a reference, not an anchor',
+      '- digit src/a.js:2#3 is not an anchor either',
+      '- malformed src/a.js:2#foo-bar is captured whole, so it can be reported',
+      '',
+    ].join('\n'),
+  });
+  const refs = collectRefs(['notes.md'], root);
+  assert.deepEqual(
+    refs.map((r) => [r.sourceLine, r.target, r.start, r.end, r.declaredRaw, r.declaredAnchor]),
+    [
+      [1, 'src/a.js', 2, 2, null, null],
+      [2, 'src/a.js', 2, 2, 'fooBar', 'fooBar'],
+      [3, 'src/a.js', 1, 2, 'fs.realpathSync.', 'fs.realpathSync'],
+      [4, 'src/a.js', 2, 2, 'fooBar:', 'fooBar'],
+      [5, 'src/a.js', 2, 2, null, null],
+      [6, 'src/a.js', 2, 2, null, null],
+      [7, 'src/a.js', 2, 2, 'foo-bar', null],
+    ]
+  );
+  assert.deepEqual([refs[0].raw, refs[4].raw, refs[5].raw], ['src/a.js:2', 'src/a.js:2', 'src/a.js:2']);
+});
+
+// The token rule is the whole of what makes the anchored check exact, so it is pinned
+// case by case rather than through a corpus. Each line below is a way to be wrong.
+test('an anchor matches only as a whole token, and a citation of it is not an occurrence', () => {
+  const lines = [
+    'function scanTrouble() {}',       // 1  a longer identifier
+    'this.scan(x);',                   // 2  a member access: matches
+    'const $scan = _scan;',            // 3  `$` and `_` are identifier characters
+    'fs.realpathSync(p);',             // 4
+    'fs.realpathSync.native(p);',      // 5  a dotted anchor is a prefix of the chain
+    'xfs.realpathSync(p);',            // 6
+    '// see src/a.js:2#scan',          // 7  a CITATION of the anchor, masked out
+    "const name = 'scan';",            // 8  inside a string: still the token
+    // 9: the dot is literal, not a wildcard. The literal anchor has to be on the line
+    // too (here inside a longer name), or the substring fast exit skips the line before
+    // the regex runs and an unescaped dot is never exercised: the first draft of this
+    // case was `fs_realpathSync(p);` alone, and the escape mutation survived it.
+    'fs_realpathSync(p); // fs.realpathSyncAsync',
+    'const $scope = 1;',               // 10 `$` is literal too, not an end-of-input assertion
+  ];
+  assert.deepEqual(anchorLines('scan', lines), [2, 8]);
+  assert.deepEqual(anchorLines('fs.realpathSync', lines), [4, 5]);
+  assert.deepEqual(anchorLines('realpathSync', lines), [4, 5, 6]);
+  assert.deepEqual(anchorLines('$scope', lines), [10]);
+  assert.deepEqual(anchorLines('Scan', lines), [], 'case-sensitive');
+});
+
+test('an anchored reference whose anchor left the cited line fails the bounds gate', (t) => {
+  const root = fixtureRepo(t, {
+    'src/a.js': "'use strict';\nfunction fooBar() {}\nfunction other() {}\n",
+    'lib/x.js': 'const dupe = 1;\n',
+    'pkg/x.js': 'const dupe = 2;\n',
+    'notes.md': [
+      '- right: `src/a.js:2#fooBar`',
+      '- right, anywhere in a range: `src/a.js:1-3#fooBar`',
+      '- moved: `src/a.js:3#fooBar`',
+      '- gone: `src/a.js:2#notThere`',
+      '- malformed: `src/a.js:2#foo-bar`',
+      '- ambiguous file: `x.js:1#dupe`',
+      '- ambiguous file, un-anchored: `x.js:1`, which this gate skips as it always has',
+      '',
+    ].join('\n'),
+  });
+  const broken = checkBounds(root);
+  const by = Object.fromEntries(broken.map((b) => [b.sourceLine, b.reason]));
+  assert.deepEqual(Object.keys(by).map(Number), [3, 4, 5, 6], JSON.stringify(by, null, 2));
+  assert.match(by[3], /#fooBar is not on line 3; it occurs only on line 2/);
+  assert.match(by[4], /#notThere occurs nowhere in src\/a\.js/);
+  assert.match(by[5], /malformed anchor #foo-bar/);
+  assert.match(by[6], /ambiguous basename/);
+});
+
+// Row 1 and row 4 are the CONTROL for "un-anchored verdicts are unchanged": the same
+// prose with no anchor, or with a `#` that is not one, still goes to the heuristic and
+// still comes back STALE with a `suggest`. Rows 2 and 3 carry the same misleading prose
+// and an anchor, and are judged on the anchor alone: OK where the prose would have said
+// STALE, BROKEN where it would have said STALE, and never a `suggest`.
+test('an anchored reference is judged on its anchor alone, never by the prose heuristic', (t) => {
+  const target = ["'use strict';", 'function fooBar() {}'];
+  while (target.length < 9) target.push('// padding, so the prose anchor is past TOLERANCE');
+  target.push('function elsewhereFn() {}', '');
+  const root = fixtureRepo(t, {
+    'src/a.js': target.join('\n'),
+    'notes.md': [
+      '- the prose names `elsewhereFn` at `src/a.js:2`',
+      '- the prose names `elsewhereFn` at `src/a.js:2#fooBar`',
+      '- the prose names `fooBar` at `src/a.js:10#fooBar`',
+      '- the prose names `elsewhereFn` at src/a.js:2#3',
+      '',
+    ].join('\n'),
+  });
+  const run = spawnSync(process.execPath, [CHECKER, '--json', '--root', root], { encoding: 'utf8' });
+  assert.equal(run.status, 1, `exit ${run.status}; an anchored BROKEN row must fail the run\n${run.stderr}`);
+  const report = JSON.parse(run.stdout);
+  assert.deepEqual(
+    report.results.map((r) => [r.sourceLine, r.verdict, r.suggest, r.anchor, r.occurs]),
+    [
+      [1, 'STALE', [10], null, null],
+      [2, 'OK', null, 'fooBar', [2]],
+      [3, 'BROKEN', null, 'fooBar', [2]],
+      [4, 'STALE', [10], null, null],
+    ]
+  );
+  assert.equal(report.anchored, 2);
+});
+
+// One corpus for the fixer tests. Target first, 14 lines, LF:
+//   4 uniqueMover   7-8 twin (twice)   9 rangeHead   12 nearEnd
+// The citing files are CRLF, which is what this tree's working copy is on Windows.
+const MOD_JS = [
+  "'use strict';", '// padding', '// padding',
+  'function uniqueMover() {', '  return 1;', '}',
+  'function twin() { return 2; }', 'const again = twin();',
+  'function rangeHead(a) {', '  return a + 1;', '}',
+  'function nearEnd() {', '  return 3;', '}', '',
+].join('\n');
+const NOTES_BEFORE = [
+  '# Notes',
+  '',
+  '- moved: `src/mod.js:1#uniqueMover`',
+  '- range moved: `src/mod.js:2-4#rangeHead`',
+  '- ambiguous: `src/mod.js:1#twin`',
+  '- missing: `src/mod.js:1#vanished`',
+  '- a range that cannot shift: `src/mod.js:3-6#nearEnd`',
+  '- already right: `src/mod.js:12#nearEnd`',
+  '- two on a line: `src/mod.js:99#uniqueMover` and `src/mod.js:1-2#rangeHead`',
+  '- un-anchored, never touched: `src/mod.js:1` names `uniqueMover`',
+  '',
+].join('\r\n');
+const USE_JS_BEFORE = [
+  "'use strict';",
+  '// Calls the helper at src/mod.js:2#uniqueMover, which has moved.',
+  'module.exports = 1;',
+  '',
+].join('\r\n');
+const FIX_FIXTURE = { 'src/mod.js': MOD_JS, 'notes.md': NOTES_BEFORE, 'src/use.js': USE_JS_BEFORE };
+
+test('--fix-anchored repoints a unique moved anchor exactly, and leaves everything else', (t) => {
+  const root = fixtureRepo(t, FIX_FIXTURE);
+  const report = fixAnchored(root);
+
+  assert.deepEqual(
+    report.fixed.map((f) => `${f.where} ${f.raw} -> ${f.to}`),
+    [
+      'notes.md:3 src/mod.js:1#uniqueMover -> 4',
+      'notes.md:4 src/mod.js:2-4#rangeHead -> 9-11',
+      'notes.md:9 src/mod.js:99#uniqueMover -> 4',
+      'notes.md:9 src/mod.js:1-2#rangeHead -> 9-10',
+      'src/use.js:2 src/mod.js:2#uniqueMover -> 4',
+    ]
+  );
+  assert.deepEqual(report.left.map((l) => [l.where, l.kind]), [
+    ['notes.md:5', 'AMBIGUOUS'],
+    ['notes.md:6', 'MISSING'],
+    ['notes.md:7', 'UNFIXABLE'],
+  ]);
+  assert.match(report.left[0].reason, /#twin occurs on 2 lines: 7, 8/);
+  assert.match(report.left[2].reason, /would end at 15, past the end of src\/mod\.js \(14 lines\)/);
+  assert.deepEqual(report.written.slice().sort(), ['notes.md', 'src/use.js']);
+
+  const notes = fs.readFileSync(path.join(root, 'notes.md'), 'utf8');
+  // Line endings first, so a fixer that re-joins lines fails with a message about
+  // exactly that rather than as an opaque whole-file mismatch below.
+  assert.equal(notes.split('\r\n').length, NOTES_BEFORE.split('\r\n').length, 'CRLF count changed');
+  assert.ok(!/(^|[^\r])\n/.test(notes), 'a bare LF appeared in a CRLF file');
+  assert.equal(notes, NOTES_BEFORE
+    .replace('src/mod.js:1#uniqueMover`\r\n', 'src/mod.js:4#uniqueMover`\r\n')
+    .replace('src/mod.js:2-4#rangeHead', 'src/mod.js:9-11#rangeHead')
+    .replace('src/mod.js:99#uniqueMover', 'src/mod.js:4#uniqueMover')
+    .replace('src/mod.js:1-2#rangeHead', 'src/mod.js:9-10#rangeHead'));
+  assert.equal(
+    fs.readFileSync(path.join(root, 'src/use.js'), 'utf8'),
+    USE_JS_BEFORE.replace('src/mod.js:2#uniqueMover', 'src/mod.js:4#uniqueMover')
+  );
+  assert.equal(fs.readFileSync(path.join(root, 'src/mod.js'), 'utf8'), MOD_JS, 'the target was written');
+
+  // What it refused is still BROKEN, so the gate goes on failing until a person decides.
+  assert.deepEqual(checkBounds(root).map((b) => `${b.source}:${b.sourceLine}`),
+    ['notes.md:5', 'notes.md:6', 'notes.md:7']);
+});
+
+test('a second --fix-anchored run changes nothing', (t) => {
+  const root = fixtureRepo(t, FIX_FIXTURE);
+  fixAnchored(root);
+  const once = snapshot(root, FIX_FIXTURE);
+  const again = fixAnchored(root);
+  assert.deepEqual(again.fixed.map((f) => f.where), [], 'the second run found more to fix');
+  assert.deepEqual(again.written, []);
+  assert.deepEqual(snapshot(root, FIX_FIXTURE), once, 'the second run changed bytes');
+  assert.deepEqual(again.left.map((l) => l.where), ['notes.md:5', 'notes.md:6', 'notes.md:7']);
+});
+
+test('the --fix-anchored CLI reports the run and exits 1 while anything is left BROKEN', (t) => {
+  const root = fixtureRepo(t, FIX_FIXTURE);
+  const run = spawnSync(process.execPath, [CHECKER, '--fix-anchored', '--root', root], { encoding: 'utf8' });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stdout,
+    /--fix-anchored: 5 fixed, 1 ambiguous, 1 missing, 1 unfixable, of 9 anchored references/);
+  assert.match(run.stdout, /FIXED\s+notes\.md:4\s+src\/mod\.js:2-4#rangeHead\s+->\s+:9-11\s+\(range re-headed/);
+  // The CLI wrote what the in-process call writes.
+  assert.equal(fs.readFileSync(path.join(root, 'src/use.js'), 'utf8'),
+    USE_JS_BEFORE.replace('src/mod.js:2#uniqueMover', 'src/mod.js:4#uniqueMover'));
 });

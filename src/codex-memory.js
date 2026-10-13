@@ -236,6 +236,14 @@ const MEMORY_REFERENCE = /(?<![^\s`'"(\[<])(?:rollout_summaries\/[^\s`<>"'()[\]]
 // first missing-reference on a real store (2026-10-13) was a Doodles repo skill
 // cited by two rollout summaries, and it exists in that repo.
 const SKILL_POINTER_KINDS = new Set(['registry', 'summary']);
+// Even there, only Codex's own pointer form counts. The consolidation prompt in
+// Codex 0.161.0 says "If you reference skills, do it in body bullets only (for
+// example: `- Related skill: skills/<skill-name>/SKILL.md`)", yet the same store's
+// MEMORY.md cited the project skill above in two reusable-knowledge body bullets
+// (2026-10-13). Position cannot separate the two; the label can. A pointer written
+// another way goes unchecked: a missed dangling pointer costs less than a false
+// warning that never clears.
+const SKILL_POINTER_LINE = /\brelated skills?\b[*_]*\s*:/i;
 
 function lintFile(result, file, text, selectedPaths) {
   const lines = linesOf(text);
@@ -248,8 +256,9 @@ function lintFile(result, file, text, selectedPaths) {
   // diagnostic per distinct reference, on the line where it first appears.
   const seen = new Set();
   lines.forEach(({ text: lineText }, line) => {
+    const skillPointer = SKILL_POINTER_KINDS.has(file.kind) && SKILL_POINTER_LINE.test(lineText);
     for (const [reference] of lineText.matchAll(MEMORY_REFERENCE)) {
-      if (seen.has(reference) || (reference.startsWith('skills/') && !SKILL_POINTER_KINDS.has(file.kind))) continue;
+      if (seen.has(reference) || (reference.startsWith('skills/') && !skillPointer)) continue;
       seen.add(reference);
       if (reference.split('/').some((part) => part === '.' || part === '..')) {
         addDiagnostic(result, 'unsafe-reference', file.relativePath, `Selected-memory reference contains traversal: ${reference}`, 'warning', line);

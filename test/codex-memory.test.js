@@ -322,7 +322,7 @@ test('explicit UTF-8 BOM provenance accompanies every chunk while native text an
 
 test('native provenance lint checks only selected local references and never reads original rollout paths', (t) => {
   const box = fixture(t);
-  box.write('MEMORY.md', '# Task Group\n## Task 1\n### rollout_summary_files\n- rollout_summaries/found.md\n- rollout_summaries/missing.md\n- skills/found/SKILL.md\n- skills/missing/SKILL.md\nrollout_path: C:/private/original-session.jsonl\n');
+  box.write('MEMORY.md', '# Task Group\n## Task 1\n### rollout_summary_files\n- rollout_summaries/found.md\n- rollout_summaries/missing.md\n- Related skill: skills/found/SKILL.md\n- Related skill: skills/missing/SKILL.md\nrollout_path: C:/private/original-session.jsonl\n');
   box.write('rollout_summaries/found.md', '# Synthetic rollout\n');
   box.write('skills/found/SKILL.md', '# Synthetic skill\n');
   const result = readCodexMemory({ codexHome: box.codexHome });
@@ -334,7 +334,7 @@ test('native provenance lint checks only selected local references and never rea
 
 test('traversing native provenance references are diagnosed and never opened', (t) => {
   const box = fixture(t);
-  box.write('MEMORY.md', '# Task Group\nrollout_summaries/../raw_memories.md\nskills/../SKILL.md\n');
+  box.write('MEMORY.md', '# Task Group\nrollout_summaries/../raw_memories.md\n- Related skill: skills/../SKILL.md\n');
   box.write('raw_memories.md', 'RAW_PRIVATE_FIXTURE\n');
   const result = readCodexMemory({ codexHome: box.codexHome });
   assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), ['unsafe-reference', 'unsafe-reference']);
@@ -350,22 +350,37 @@ test('rollout summaries cite project files, so their skills/ paths are not memor
     '# Session narrative', 'rollout_path: C:/private/original-session.jsonl',
     '- Read and followed `skills/doodle-builder/SKILL.md` before drawing.',
     '- Project copy: Doodles/skills/doodle-builder/SKILL.md',
-    '- Skill: `skills\\doodle-builder\\SKILL.md`', '',
+    '- Skill: `skills\\doodle-builder\\SKILL.md`',
+    '- Related skill: skills/doodle-builder/SKILL.md (the pointer label does not make narrative memory-relative)', '',
   ].join('\n'));
   assert.deepEqual(readCodexMemory({ codexHome: box.codexHome }).diagnostics, [],
     'WITNESS a project-relative skill citation in session narrative is not a missing memory file');
 });
 
-test('skills/ pointers in the registry and the summary are memory-relative and still checked', (t) => {
+test('Related skill: pointers in the registry and the summary are memory-relative and still checked', (t) => {
   const box = fixture(t);
-  box.write('MEMORY.md', '# Task Group\n- skills/found/SKILL.md\n- skills/gone/SKILL.md\n');
-  box.write('memory_summary.md', 'v1\n## General Tips\n- skills/found/SKILL.md\n- skills/lost/SKILL.md\n');
+  box.write('MEMORY.md', '# Task Group\n- Related skill: skills/found/SKILL.md\n- Related skill: skills/gone/SKILL.md\n- **Related skills:** `skills/found/SKILL.md`, `skills/bold/SKILL.md`\n');
+  box.write('memory_summary.md', 'v1\n## General Tips\n- related skill: skills/found/SKILL.md\n- Related skill: skills/lost/SKILL.md\n');
   box.write('skills/found/SKILL.md', '# Synthetic skill\n');
   const result = readCodexMemory({ codexHome: box.codexHome });
   assert.deepEqual(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath, diagnostic.message.split(': ')[1]]), [
     ['missing-reference', 'MEMORY.md', 'skills/gone/SKILL.md'],
+    ['missing-reference', 'MEMORY.md', 'skills/bold/SKILL.md'],
     ['missing-reference', 'memory_summary.md', 'skills/lost/SKILL.md'],
   ]);
+});
+
+// Same store, same day: once rollout summaries were exempt, MEMORY.md still showed
+// one issue. Its reusable-knowledge bullets cite the project's skill the way the
+// fixture below does; Codex's documented memory-skill pointer is "Related skill:".
+test('a registry or summary bullet citing a project skill without the pointer label is not a missing memory file', (t) => {
+  const box = fixture(t);
+  const narrative = '- Authoring skill: `skills/doodle-builder/SKILL.md`; packaged plugin: `plugins/doodle-builder/`.\n'
+    + '- Fix: read `skills/doodle-builder/SKILL.md` and resolve both inputs before drawing.\n';
+  box.write('MEMORY.md', '# Task Group: drawings\n## Reusable knowledge\n' + narrative);
+  box.write('memory_summary.md', 'v1\n## General Tips\n' + narrative);
+  assert.deepEqual(readCodexMemory({ codexHome: box.codexHome }).diagnostics, [],
+    'WITNESS a skills/ path outside the Related skill: form is a citation, not a memory pointer');
 });
 
 test('rollout_summaries/ references are checked in every file kind, but only as whole tokens', (t) => {
@@ -387,7 +402,7 @@ test('rollout_summaries/ references are checked in every file kind, but only as 
 
 test('lint diagnostics carry the 0-based line of the first mention while storage failures stay line-less', (t) => {
   const box = fixture(t);
-  box.write('MEMORY.md', '# Task Group\r\n## Task 1\r\n- rollout_summaries/missing.md\r\n- again rollout_summaries/missing.md\r\n- skills/../SKILL.md\r\n');
+  box.write('MEMORY.md', '# Task Group\r\n## Task 1\r\n- rollout_summaries/missing.md\r\n- again rollout_summaries/missing.md\r\n- Related skill: skills/../SKILL.md\r\n');
   box.write('memory_summary.md', 'v0\nSynthetic summary\n');
   box.write('rollout_summaries/broken.md', Buffer.from([35, 32, 0xC3, 0x28, 10]));
   const result = readCodexMemory({ codexHome: box.codexHome });

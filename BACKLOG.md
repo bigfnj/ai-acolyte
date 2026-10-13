@@ -24,43 +24,32 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Codex coverage: version window, CI, runtime evidence
+### Codex 0.161.0 history shapes the parser does not read yet
 
-- **Declare and exercise a supported version window.** Evidence covers Codex 0.145.0 and
-  0.154.0; this box now runs 0.161.0. No range is declared, and nothing reports a version
-  outside it. Any report must be informational: a warning on every Codex update would be an
-  always-on signal, the defect class 1.6.2 removes.
-- **Provision Codex in CI.** The contract tests skip with a stated reason when the binary is
-  absent; they need no provider auth.
-- **Exercise the runtime harnesses against 0.161.0**, including the wait/exec shapes, and
-  record what is still unobservable through the loopback provider.
-- **A representative matrix of shell wrappers** against the guidance text's claims.
-- **The runtime provenance hash** in `scripts/check-codex-runtime.js` covers
-  `src/policy-exporters.js` but not the local modules it now requires.
+Found 2026-10-13 by running every CLI-only runtime harness against codex-cli 0.161.0.
 
-### Trusted project rule directories
+- **MCP results are invisible.** 0.161.0 no longer writes `event_msg/mcp_tool_call_end`, the
+  only shape `codexMcpObservation` reads; each outcome is now an `event_msg/item_completed`
+  whose item is `{type: "McpToolCall", server, tool, status, result: {content, isError}}`. The
+  parser saw 0 of 5 real outcomes, so reviewed-MCP Auto Learn learns nothing from 0.161.0
+  history. The approvals themselves still apply.
+- **Continued code-mode cells earn no evidence.** With `code_mode`, a yielded `exec` cell's
+  completion arrives in a later `wait` call's output, linked only by a per-session cell id.
+  Such cells are withheld as unknown (safe: no false success, no failure credit) because no
+  join exists.
+- **Harness isolation.** The temp workspaces sit under `%TEMP%`, inside the user's home; Codex
+  walks up to the nearest project root and loaded the home directory's own `AGENTS.md` as
+  project instructions in harness sessions. It went only to the loopback and only into temp
+  evidence, but it makes harness results depend on the user's files.
+- **The POSIX case list of the wrapper runtime matrix has not run.** The Windows list passed
+  13/13 against the guidance; the Linux run was cut short when the container host stopped.
 
-Policy enumeration reads only `<CODEX_HOME>/rules` and never discovers the `.codex/rules`
-directory of a project Codex trusts, while `src/codex-reviewed-plans.js` already enumerates
-`<workspace>/.codex/rules` without checking trust. Measure what Codex 0.161.0 actually loads
-before deciding the fix.
+### The Codex Stop hook's failure reasons never reach the user
 
-### Two Auto Learn surfaces with no configuration, and four option keys with no supplier
-
-- The worker deadline is environment-variable only; no setting reaches it.
-- `defaultTool`, `priorCursors`, and the duplicate `homeDir`/`successThreshold` spellings are
-  read but never supplied, leaving unreachable branches.
-
-### Follow-ups from the archived-thread fix
-
-- **The Codex Stop hook fails on budget deferral.** It treats `partial > 0` as an incomplete
-  scan and exits 1. With `archived_sessions/` a default root since 2026-10-13, a large
-  archived rollout fails the first few Stop hooks per workspace state while it is caught up.
-  `partial` is progress, not failure.
-- **A reported `DatabaseSync` deprecation** (said to be an alias of `Database`, DEP0210, in
-  newer Node). Unverified.
-- **`scripts/smoke.sh`'s "fixed-point cache is back" check** writes a value and reads it
-  straight back, so it can fail only on an I/O error.
+Measured against codex-rs 0.161.0: for a Stop hook, Codex reads stderr only on exit 2 (which
+BLOCKS the run and must never be used here); any other non-zero exit marks the run Failed with
+"hook exited with code N" and nothing else. So every reason the hook has ever printed on
+failure was discarded. Exit 0 with a `systemMessage` is shown as a warning.
 
 ### Follow-ups from the shell-grammar fix
 

@@ -1127,10 +1127,12 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: extension.js:3013 slices this stderr at 300 chars before
-            # showing it. Re-measured 2026-09-14 after MEMORY_DIR was normpath'd and `installed`
-            # became a real byte count: 226 here, and 228 for the sibling refusal above. Both
-            # still fit, and both still name GATES_OUT and MEMORY_DIR inside the slice.
+            # Kept short on purpose: vscode-extension/extension.js:3340#slice cuts this stderr
+            # to 300 chars before showing it (`#slice` is checked by scripts/check-line-refs.js;
+            # this said :3013 until 2026-10-13, when .py comments were first scanned). Re-measured
+            # 2026-09-14 after MEMORY_DIR was normpath'd and `installed` became a real byte count:
+            # 226 here, and 228 for the sibling refusal above. Both still fit, and both still
+            # name GATES_OUT and MEMORY_DIR inside the slice.
             sys.exit(f"[recall] refusing to empty {GATES_OUT} ({installed} bytes): "
                      f"no gate blocks in {MEMORY_DIR}. Check RECALL_MEMORY_DIR, or pass "
                      f"--gates-allow-empty to erase every gate.")

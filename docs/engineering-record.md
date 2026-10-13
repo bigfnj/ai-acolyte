@@ -1450,6 +1450,52 @@ rather than moved has no line to point at. A citation whose whole purpose is to 
 where a retracted figure was wrongly said to live must stay wrong to make its point.
 Both are in the tree on purpose.
 
+**Declared anchors, added 2026-10-13: a citation can now be checked exactly.** Write
+`file:line#identifier` or `file:start-end#identifier`. The anchor is one identifier,
+optionally dotted (`fooBar`, `$scope`, `fs.realpathSync`), with trailing `.` or `:` read
+as sentence punctuation. The reference is OK when the anchor occurs on the cited line, or
+on any line of a cited range, as a whole token: not preceded or followed by `[\w$]`, the
+boundary class the heuristic already uses for identifiers. So `scan` does not match
+`scanTrouble` or `_scan`, does match `this.scan(`, and a dotted anchor is literal, a
+prefix of a member chain. Citations are masked out before the search, so a citation is
+never counted as an occurrence of its own anchor. Anything else is BROKEN, with every
+line the anchor occurs on now. That includes a malformed anchor (`#foo-bar` is captured
+whole and reported, not parsed as `foo`) and an ambiguous basename, which the bounds
+check skips for an un-anchored reference: an anchor promises an exact check, and one
+that cannot name its file cannot keep that promise. An anchored reference never reaches
+the heuristic: no prose is read and no `suggest` is produced. **Because it reads no prose
+it cannot cry wolf, so unlike STALE it is asserted**: `checkBounds`, and with it
+`test/line-refs.test.js`, fails on a BROKEN anchored reference. A count floor,
+`ANCHORED_FLOOR`, stops an edit quietly dropping one. The 159 un-anchored references the
+tree held came out with identical verdicts, details and `suggest` lists, row for row.
+
+**`node scripts/check-line-refs.js --fix-anchored` repoints a moved anchor, and this does
+not contradict "never bulk-apply `suggest`".** That rule stands because `suggest` comes
+from an anchor RECOVERED out of prose, which is wrong about one time in three. The fixer
+acts only on an anchor the author DECLARED, and only when it occurs on exactly one line
+of the target as a whole token. That leaves one possible answer and nothing to rank; the
+judgement was the author's, made when they chose the anchor. It rewrites the cited line
+number to that line and touches nothing else. Zero occurrences (renamed or deleted), two
+or more, descending ranges, unresolvable targets and malformed anchors are reported and
+left alone, and the run exits 1 while any anchored reference stays BROKEN. A range keeps
+its length and is RE-HEADED on the anchor, so the fix is exact when the anchor names the
+range's first line. Anchor ranges that way: the signature, the heading, the opening
+statement. A mid-range anchor still lands inside the fixed range, but its old offset was
+never recorded, and the FIXED line says "re-headed" so it gets looked at. A shift that
+would run past the end of the file is refused rather than clipped. Each edit splices one
+run of digits at a computed offset, verified against the parsed digits before anything
+is written, so CRLF files stay CRLF. A second run writes nothing.
+
+Two limits to know before migrating. A **bare continuation** such as `(:489)` after a
+citation is not extracted at all, because `REF_RE` needs a file token, so it can be
+anchored only by spelling the file out. And **an anchor is only as relocatable as it is
+rare**: the first one in the tree, in `memory/recall.py`, anchors `slice` on the
+gate-compile stderr slice in `vscode-extension/extension.js`, where that token is on 7
+lines. It checks exactly, but if it moves, the fixer lists the 7 lines and leaves it to a
+person. Same day, `.py`, `.yml` and `.yaml` comments started being scanned. That added
+exactly one reference, and it was this one: it had cited a line 327 away from the slice
+it described, and nothing could see it.
+
 ## Optimizations measured and DECLINED — do not re-derive these
 
 Moved out of `BACKLOG.md` on 2026-09-14. Each was built or profiled, not guessed, and

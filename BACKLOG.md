@@ -77,14 +77,17 @@ before deciding the fix.
 
 ### The `file:line` gate catches less than it looks like it catches
 
-`test/line-refs.test.js` fails a citation only when it lands on a missing file, a line past
-the end, a descending range, a blank line or a bare closing brace. A stale citation pointing at
-a plausible line is invisible to CI. **Run `node scripts/check-line-refs.js --quiet` rather
-than trusting a number written here**; on 2026-10-13 it read 217 references with 99 STALE.
-The proposed close is an optional anchor form, `file:line#identifier`, checkable exactly.
-Separately, `SOURCE_EXT` admits no `.py`, `.yml` or `.yaml`, though `commentRuns` already
-handles hash comments, so `memory/recall.py:1130` cites a wrong `extension.js` line that  <!-- line-refs:ignore -->
-nothing can see.
+`test/line-refs.test.js` fails an UN-anchored citation only when it lands on a missing file, a
+line past the end, a descending range, a blank line or a bare closing brace. A stale one
+pointing at a plausible line is invisible to CI. **Run `node scripts/check-line-refs.js --quiet`
+rather than trusting a number written here**; on branch wave-e1 (88a4c1d plus the anchor work,
+2026-10-13) it read 160 references, 1 anchored, with 64 STALE.
+
+**The mechanism landed 2026-10-13; the migration has not.** An anchored citation,
+`file:line#identifier`, is checked exactly and asserted, and `--fix-anchored` repoints one
+whose anchor moved to exactly one other line. See the engineering record, "`file:line` rot".
+Converting the existing corpus waits until code stops moving. The `.py`/`.yml`/`.yaml` blind
+spot is closed, and the `memory/recall.py` citation it hid is corrected and anchored.
 
 ### Tests that fail under parallel load
 

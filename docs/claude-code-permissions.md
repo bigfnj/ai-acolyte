@@ -66,6 +66,16 @@ their own specifier grammar, a `Read(**/x)` path glob or a `Skill(name:args)`
 where the colon is a field separator, and applying command semantics there would
 be an inference whose cost is pruning a rule someone still needs.
 
+Since 2026-10-13 the matcher also models the wrapper and environment strip of
+section 3, for `Bash` only, as Claude Code 2.1.296's allow matcher applies it
+**[measured against the binary]**: a rule is tried against the permission's text and
+against that text after the strip, and a rule ending in `*` is also tried with
+`xargs ` in front of it. So `Bash(rg *)` covers `Bash(timeout 5 rg x)` and `Bash(xargs
+rg x)`, and an exact `Bash(./x.sh)` covers `Bash(nohup ./x.sh)`. The strip is a subset
+of Claude Code's, never a superset, because over-claiming a cover would let
+`processAllowList` prune an entry that is still needed. Deny and ask rules use a
+wider strip in Claude Code; for them this answer stays a subset, as it always was.
+
 ---
 
 ## 2. Compound commands

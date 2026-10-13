@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { ruleMatches, sameRule } = require('./permission-match');
+const { ruleMatches, sameRule, normalizeRule, claudeStripsAssignment, claudeWrapperPrefix, wrapperLength, claudeAllowCandidates } = require('./permission-match');
 
 // Rename codes that are transient on Windows: another process (Claude Code
 // writing settings.json, Defender/Search indexer scanning the temp file, or a
@@ -147,7 +147,8 @@ function isScopeWildcarded(arg) {
 // day) does: the allow-path routine that strips wrappers before an allow rule is
 // consulted first removes a leading `NAME=VALUE ` only while NAME is in one fixed set,
 // and only for a VALUE matching `[A-Za-z0-9_./:-]+`, unquoted. That set is
-// CLAUDE_SAFE_ENV_VARS below, copied verbatim. So `GITHUB_TOKEN=x git push origin` was
+// CLAUDE_SAFE_ENV_VARS in src/permission-match.js, copied verbatim (it moved there the
+// same day, so the matcher models the same strip). So `GITHUB_TOKEN=x git push origin` was
 // generalized to `Bash(git push *)`, a rule Claude Code never matches against that
 // command: not a widening, a prompt loop, each fresh approval generalized away again.
 //
@@ -162,22 +163,8 @@ function isScopeWildcarded(arg) {
 // usual. A deny rule's wider strip changes nothing here; this pass writes allow rules.
 //
 // Bash only: in PowerShell `FOO=1` is not an assignment, and generalizePowerShellArg
-// leaves an entry opening with one verbatim already.
-const CLAUDE_SAFE_ENV_VARS = new Set([
-  'GOEXPERIMENT', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'GO111MODULE', 'RUST_BACKTRACE', 'RUST_LOG',
-  'NODE_ENV', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'PYTEST_DISABLE_PLUGIN_AUTOLOAD',
-  'PYTEST_DEBUG', 'ANTHROPIC_API_KEY', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_TIME', 'CHARSET',
-  'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'TZ', 'LS_COLORS', 'LSCOLORS', 'GREP_COLOR',
-  'GREP_COLORS', 'GCC_COLORS', 'TIME_STYLE', 'BLOCK_SIZE', 'BLOCKSIZE', 'COLUMNS', 'LINES', 'CLICOLOR',
-  'CLICOLOR_FORCE', 'CI', 'DEBIAN_FRONTEND', 'GIT_TERMINAL_PROMPT',
-]);
-const STRIPPED_ENV_VALUE = /^[A-Za-z0-9_./:-]+$/;
-
-// Does Claude Code strip this leading assignment before an allow rule is consulted?
-// `value` is the text after `=` as written, quotes included.
-function claudeStripsAssignment(name, value) {
-  return CLAUDE_SAFE_ENV_VARS.has(name) && STRIPPED_ENV_VALUE.test(value);
-}
+// leaves an entry opening with one verbatim already. claudeStripsAssignment, the test
+// itself, is imported from src/permission-match.js.
 
 // `{ kept, command }`: `command` is the text after every leading assignment, and `kept`
 // the assignments Claude Code does NOT strip, verbatim, from the first of them on (a
@@ -233,84 +220,11 @@ function splitEnvPrefix(cmd) {
 // does have an `env` branch, but nothing documents it on the allow path. Bash only:
 // the docs scope this to Bash rules, and `timeout` in PowerShell is timeout.exe, the
 // Windows sleep utility, not a wrapper.
-const TIMEOUT_DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
-const TIMEOUT_VALUE = /^[A-Za-z0-9_.+-]+$/;
-
-// How many leading tokens the wrapper at tokens[0] occupies, itself included: 0 when
-// tokens[0] is not a stripped wrapper (including `command -v`, matched as itself, and
-// `xargs` with a flag), -1 when it is one but in a shape that is not stripped.
-function wrapperLength(tokens) {
-  const at = (k) => tokens[k];
-  switch (tokens[0]) {
-    case 'time': case 'nohup': case 'noglob': return 1;
-    case 'builtin': return at(1) === '--' ? 2 : 1;
-    case 'nice':
-      if (at(1) === '-n' && /^-?\d+$/.test(at(2) || '')) return 3;
-      return /^-\d+$/.test(at(1) || '') ? 2 : 1;
-    case 'timeout': {
-      let k = 1;
-      for (let g = at(k); g !== undefined; g = at(k)) {
-        if (['--foreground', '--preserve-status', '--verbose', '-v'].includes(g)) k += 1;
-        else if (/^--(?:kill-after|signal)=[A-Za-z0-9_.+-]+$/.test(g) || /^-[ks][A-Za-z0-9_.+-]+$/.test(g)) k += 1;
-        else if (['--kill-after', '--signal', '-k', '-s'].includes(g) && TIMEOUT_VALUE.test(at(k + 1) || '')) k += 2;
-        else if (g.startsWith('-')) return -1;
-        else break;
-      }
-      return TIMEOUT_DURATION.test(at(k) || '') ? k + 1 : -1;
-    }
-    // The allow-path stripper takes only fused modes with a `[LN0-9]+` value
-    // (`/^stdbuf(?:[ \t]+-[ioe][LN0-9]+)+[ \t]+/` in 2.1.296). Until 2026-10-13 this also
-    // took `-o L`, `--output=L` and `-o1M`, which only the safety walker accepts, so
-    // `stdbuf -o L rg x` became `Bash(rg *)`, a rule the matcher never reaches past
-    // that stdbuf: a prompt loop, not a widening.
-    case 'stdbuf': {
-      let k = 1;
-      while (/^-[ioe][LN0-9]+$/.test(at(k) || '')) k += 1;
-      return k === 1 ? -1 : k;
-    }
-    case 'command': {
-      let k = 1;
-      for (let g = at(k); g !== undefined && g.startsWith('-') && g !== '--'; g = at(k)) {
-        if (!/^-[pvV]+$/.test(g)) return -1;
-        if (/[vV]/.test(g)) return 0;
-        k += 1;
-      }
-      return at(k) === '--' ? k + 1 : k;
-    }
-    case 'xargs': return at(1) !== undefined && !at(1).startsWith('-') ? 1 : 0;
-    default: return 0;
-  }
-}
-
-// The leading wrappers Claude Code strips from a line's words, as `{ length, refused }`:
-// `length` tokens come off (every stripped wrapper with its own options), and `refused`
-// says the next token is still a wrapper in a shape that is not stripped, or there is no
-// command after them, or that command starts with `-` (what the CLI calls "an
-// incomplete fragment": `time -p make`, `nice --adjustment=5 make`). Bare `xargs` is
-// taken only as the innermost layer; a wrapper after it is refused.
 //
-// ONE routine for two callers since 2026-10-13: stripBashWrappers below, and the
-// learner's deriveBaseInvocation (src/auto-learn.js), which until then kept its own
-// subset (`timeout`, `command`, `builtin`) and so proposed `Bash(nohup *)`, `Bash(nice
-// *)`, `Bash(stdbuf *)`, `Bash(noglob *)` and `Bash(xargs *)`, and stripped `command -v`,
-// which Claude Code keeps. It is shared by the learner importing it from here, the
-// direction src/fixed-point-cache.js allows: this file is stamped, the learner is not,
-// so no learner edit can change what processAllowList emits. `tokens` are the words as
-// written; names are compared exactly, as the CLI compares them (`Time` and
-// `/usr/bin/timeout` are not stripped).
-function claudeWrapperPrefix(tokens) {
-  let k = 0;
-  for (let guard = 0; guard < 8; guard += 1) {
-    const consumed = wrapperLength(tokens.slice(k));
-    if (consumed === 0) return { length: k, refused: false };
-    const inner = tokens[k + consumed];
-    if (consumed < 0 || inner === undefined || String(inner).startsWith('-')) return { length: k, refused: true };
-    const xargs = tokens[k] === 'xargs';
-    k += consumed;
-    if (xargs) return { length: k, refused: wrapperLength(tokens.slice(k)) !== 0 };
-  }
-  return { length: k, refused: true };
-}
+// The routine itself (wrapperLength, claudeWrapperPrefix) moved to
+// src/permission-match.js on 2026-10-13, so that the matcher models the same strip when
+// it decides coverage; this file imports it, and src/auto-learn.js imports it through
+// this file's exports. Both files are stamped by src/fixed-point-cache.js.
 
 // The command a Bash line runs once every leading wrapper is removed, as a SUFFIX of
 // `text` (bashOpensScript measures the stripped prefix by length, so it must be one),
@@ -644,14 +558,35 @@ function coverIndexKeyUncached(rule) {
 // wildcards in patterns/starter-pack.json and the documented
 // `WebFetch(domain:*)`. Extra keys cost only a bucket probe, because
 // isCoveredBy still decides every answer; a MISSING key changes the answer.
+//
+// Since 2026-10-13 the matcher also tries a Bash rule against the command after Claude
+// Code's allow-path strip, and a rule ending in `*` with `xargs ` in front of it
+// (src/permission-match.js, claudeAllowCandidates and matchesThroughXargs). So
+// `Bash(rg *)`, indexed under `Bash\0rg`, covers `Bash(timeout 5 rg x)` and `Bash(xargs
+// rg x)`, whose own prefixes never reach that key. The keys of the stripped text, and of
+// any candidate text after a leading `xargs `, are added for exactly that reason; without
+// them the index would miss covers the full scan finds, the one error that matters here.
+// A candidate with nothing to strip walks only its own argument, as before.
+function pushBoundaryKeys(keys, tool, arg) {
+  for (let i = 0; i <= arg.length; i += 1) {
+    if (i === arg.length || /[\s:]/.test(arg[i])) {
+      keys.push(`${tool}${KEY_SEP}${arg.slice(0, i).replace(/[\s:]+$/, '')}`);
+    }
+  }
+}
 function coverLookupKeysUncached(specific) {
   const parts = RULE_SHAPE.exec(specific);
   if (!parts) return [];
   const [, tool, arg] = parts;
   const keys = [`${tool}${KEY_SEP}`];
-  for (let i = 0; i <= arg.length; i += 1) {
-    if (i === arg.length || /[\s:]/.test(arg[i])) {
-      keys.push(`${tool}${KEY_SEP}${arg.slice(0, i).replace(/[\s:]+$/, '')}`);
+  pushBoundaryKeys(keys, tool, arg);
+  if (tool === 'Bash') {
+    const candidates = claudeAllowCandidates(specific);
+    for (const candidate of candidates.slice(1)) pushBoundaryKeys(keys, tool, RULE_SHAPE.exec(candidate)[2]);
+    for (const candidate of candidates) {
+      const inner = RULE_SHAPE.exec(candidate)[2];
+      const xargs = /^xargs\s+/.exec(inner);
+      if (xargs) pushBoundaryKeys(keys, tool, inner.slice(xargs[0].length));
     }
   }
   return keys;
@@ -704,7 +639,7 @@ function coverLookupKeysUncached(specific) {
 // bound, and the reason it is not larger.
 //
 // Two deliberate details:
-//   * Only STRINGS are memoized, matching normalizeRule (permission-match.js:81).
+//   * Only STRINGS are memoized, matching normalizeRule (permission-match.js:81#normalizeRule).
 //     An object key is memoized by reference, so the next parse's fresh object
 //     never hits it and each one holds a slot, and itself, until a clear. (Not a
 //     stale ANSWER: ruleMatches refuses non-strings. Corrected 2026-10-13.)
@@ -745,6 +680,7 @@ function coverKeyCacheStats() {
 function createCoverIndex(pool) {
   const indexed = new Map();
   const fallback = [];
+  const exact = new Map();
   for (const rule of pool) {
     // A rule with no `*` cannot cover anything, so it belongs in neither the
     // buckets nor the fallback. escapeLiteral (permission-match.js:59-61)
@@ -763,7 +699,20 @@ function createCoverIndex(pool) {
     // that mattered: star-free entries are what a real allow list accumulates,
     // and with them gone the fallback is 3 rules with no growth axis, so a
     // 3,200-entry list goes from 1,190 ms to 15.6 ms.
-    if (!rule.includes('*')) continue;
+    //
+    // One exception since 2026-10-13: a star-free BASH rule matches the stripped text
+    // of a wrapped command too (`Bash(./x.sh)` covers `Bash(nohup ./x.sh)`, as Claude
+    // Code's allow matcher compares an exact rule with that text). Those go in `exact`,
+    // keyed on the normalized rule and consulted only with a candidate's stripped
+    // forms, so the fallback keeps no growth axis.
+    if (!rule.includes('*')) {
+      const normalized = normalizeRule(rule);
+      if (/^Bash\(/.test(normalized)) {
+        const same = exact.get(normalized);
+        if (same) same.push(rule); else exact.set(normalized, [rule]);
+      }
+      continue;
+    }
     const key = coverIndexKey(rule);
     if (key === null) { fallback.push(rule); continue; }
     const bucket = indexed.get(key);
@@ -775,6 +724,12 @@ function createCoverIndex(pool) {
       const bucket = indexed.get(key);
       if (bucket) out.push(...bucket);
     }
+    if (exact.size && typeof specific === 'string') {
+      for (const candidate of claudeAllowCandidates(specific).slice(1)) {
+        const same = exact.get(candidate);
+        if (same) out.push(...same);
+      }
+    }
     // A rule with a glob in its literal is unreachable by lookup, so the
     // fallback is always consulted. It is small in practice — 27 of 423 here.
     out.push(...fallback);
@@ -783,7 +738,7 @@ function createCoverIndex(pool) {
   return {
     covers: (specific) => narrow(specific).some((rule) => isCoveredBy(specific, rule)),
     coveredBy: (specific) => narrow(specific).filter((rule) => isCoveredBy(specific, rule)),
-    stats: () => ({ indexed: indexed.size, fallback: fallback.length }),
+    stats: () => ({ indexed: indexed.size, fallback: fallback.length, exact: exact.size }),
   };
 }
 
@@ -890,12 +845,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :820.
+// prunePermissions, whose only caller is processAllowList at :775.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :886 and nowhere else in the
+// reached it, in any of the three: it is called at :841 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is

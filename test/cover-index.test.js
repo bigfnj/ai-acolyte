@@ -98,6 +98,37 @@ test('the index agrees with the full scan on adversarial shapes', (t) => {
   assertAgrees(t, ADVERSARIAL, [...CANDIDATES, ...ADVERSARIAL], 'adversarial pool');
 });
 
+// Since 2026-10-13 the matcher models Claude Code's allow-path strip (src/permission-match.js),
+// so a rule covers commands whose own text never reaches its bucket: `Bash(rg *)` covers
+// `Bash(timeout 5 rg x)` and `Bash(xargs rg x)`. The index has to find those as the full
+// scan does. Synthetic shapes throughout.
+const STRIP_POOL = [
+  'Bash(rg *)', 'Bash(rg:*)', 'Bash(git status *)', 'Bash(grep *)', 'Bash(npm test *)', 'Bash(./x.sh)',
+  'Bash(timeout *)', 'Bash(g* *)', 'Bash(git push *)', 'Bash(nohup ./x.sh)', 'Bash(xargs grep *)',
+  'PowerShell(rg *)',
+];
+const STRIP_CANDIDATES = [
+  'Bash(timeout 5 rg x)', 'Bash(nohup timeout 5 nice -n 1 rg x)', 'Bash(time rg)', 'Bash(command -p git status)',
+  'Bash(NODE_ENV=test npm test)', 'Bash(CI=1 nohup npm test --watch)', 'Bash(nohup ./x.sh)', 'Bash(timeout 5 ./x.sh)',
+  'Bash(xargs grep x)', 'Bash(nohup xargs grep x)', 'Bash(xargs -n1 grep x)', 'Bash(xargs nohup grep x)',
+  'Bash(GITHUB_TOKEN=x git push origin)', 'Bash(stdbuf -o L rg x)', 'Bash(stdbuf -oL rg x)',
+  'Bash(timeout 5 rg *)', 'Bash(xargs rg:*)', 'PowerShell(timeout 5 rg x)', 'Bash(nohup timeout npm test)',
+];
+
+test('the index agrees with the full scan on wrapped, env-prefixed and xargs candidates', (t) => {
+  // MUTATION: drop the stripped-candidate keys in coverLookupKeysUncached
+  // (src/permissions.js). `Bash(timeout 5 rg x)` is covered by the scan and not the index,
+  // and this fails. Confirmed 2026-10-13.
+  // MUTATION: drop the keys after a leading `xargs `. `Bash(xargs grep x)` disagrees and
+  // this fails. Confirmed 2026-10-13.
+  assertAgrees(t, STRIP_POOL, [...STRIP_CANDIDATES, ...STRIP_POOL], 'strip pool');
+  // And the covers are real, not vacuous agreement on `false`.
+  const index = createCoverIndex(STRIP_POOL);
+  assert.equal(index.covers('Bash(timeout 5 rg x)'), true);
+  assert.equal(index.covers('Bash(xargs grep x)'), true);
+  assert.equal(index.covers('Bash(GITHUB_TOKEN=x git push origin)'), false);
+});
+
 test('a glob inside a token is still found, via the fallback', (t) => {
   // The case a literal-prefix index cannot see. If these regress, the fallback
   // pool has been mis-classified and coverage silently shrinks.
@@ -192,7 +223,7 @@ test('processAllowList is unchanged on the real allow list, if one is present', 
     `the indexed pipeline must match the full scan over all ${allow.length} live entries`);
 });
 
-test('a rule with no star is not in the pool at all, and could not cover anything if it were', (t) => {
+test('a rule with no star is not in the pool, and covers nothing but what the strip reduces to it', (t) => {
   // escapeLiteral (permission-match.js:59-61) escapes every regex
   // metacharacter INCLUDING `?`, and the only `*` -> `.*` expansion is at :94.
   // So a star-free rule compiles to a fully anchored literal that matches
@@ -211,12 +242,21 @@ test('a rule with no star is not in the pool at all, and could not cover anythin
         `${rule} must not cover ${probe} — the star-free drop depends on it`);
     }
   }
+  // The one exception since 2026-10-13: a star-free BASH rule matches the stripped text
+  // of a wrapped command, as Claude Code's allow matcher compares an exact rule with it.
+  // Such rules are kept in a small exact map, consulted only with a candidate's stripped
+  // forms, so they never join the fallback.
+  assert.equal(isCoveredBy('Bash(nohup git status)', 'Bash(git status)'), true);
 
   // And the optimisation itself: neither indexed nor in the linear fallback.
   const index = createCoverIndex([...starFree, 'Bash(rg *)', 'Bash(g* *)']);
   const stats = index.stats();
   assert.equal(stats.indexed, 1, 'only Bash(rg *) is indexable');
   assert.equal(stats.fallback, 1, 'only Bash(g* *) needs the linear scan');
+  assert.equal(stats.exact, 1, 'only Bash(git status) is a star-free Bash rule');
+  // MUTATION: skip the exact map in createCoverIndex's narrow(). The index misses the
+  // cover the full scan finds and this fails. Confirmed 2026-10-13.
+  assert.ok(index.coveredBy('Bash(nohup git status)').includes('Bash(git status)'));
 
   // On the live list this is 20 of 23 fallback entries, and the fallback is
   // consulted for EVERY candidate — 83% of prunePermissions' isCoveredBy calls

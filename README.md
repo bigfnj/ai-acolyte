@@ -260,7 +260,10 @@ is evaluated per sub-command.
 
 Coverage is one function, `isCoveredBy`, which is `!sameRule && ruleMatches`, built on
 `src/permission-match.js`, the only implementation of Claude Code's matching rules and shared with
-the dashboard so the two cannot drift. Both sweeps are narrowed by an index that deliberately does
+the dashboard so the two cannot drift. It models the same wrapper and known-safe environment strip
+Claude Code's allow matcher applies, as a subset, so `Bash(rg *)` covers `Bash(timeout 5 rg x)` and
+`Bash(xargs rg x)`; the generalizer and the learner share that one routine. Both sweeps are narrowed
+by an index that deliberately does
 not reimplement matching: it narrows the candidate set while `isCoveredBy` still decides every
 answer, so a false positive costs one regex while only a false negative could change a result.
 That asymmetry is why `test/cover-index.test.js` can assert cover-sets identical to the scan's.

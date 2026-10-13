@@ -1810,6 +1810,44 @@ test('an unreadable settings.json gives the lock-contention budget back', async 
   }
 });
 
+test('a completed lock cycle gives the lock-contention budget back', async (t) => {
+  // The third site, after the lock is released: the reset every successful
+  // contended-then-retried write is supposed to reach. The two tests above only
+  // reach the early returns, so removing this one left the whole suite green
+  // (mutation tracker, 2026-10-13). Without it the budget counts contended runs
+  // per WINDOW rather than per contention episode: 20 lost races spread across a
+  // day, each one followed by a retry that wrote successfully, still disable the
+  // retry for good.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    await exhaustRetryBudget(app, env);
+
+    // Uncontended now, and the list is still the non-optimal one the exhausted
+    // runs never managed to write, so the probe falls through and the guarded
+    // write happens. The harness watchers are inert, so the write cannot re-fire
+    // a probe and reach the already-optimal reset instead of this one.
+    app.locks.contended = false;
+    const acquired = app.locks.count;
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.locks.count, acquired + 1, 'precondition: the run took the lock');
+    assert.deepEqual(env.read().permissions.allow, ['Bash(git status *)'],
+      'precondition: and completed the write inside it');
+
+    app.locks.contended = true;
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.retriesScheduled(), 21,
+      'a lock cycle that completed left the retry budget spent, so the next contended '
+      + 'write is abandoned even though the last contention ended in a successful write');
+  } finally {
+    app.locks.contended = false;
+    await app.dispose();
+  }
+});
+
 // ── what the last scan could not read ─────────────────────────────────────────
 //
 // autoLearnCardData copied eleven fields out of the manager's status and not one

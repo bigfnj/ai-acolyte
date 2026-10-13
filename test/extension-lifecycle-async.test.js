@@ -1108,6 +1108,44 @@ test('a same-realm re-activate gets a fresh Auto Learn worker runner', TEST_TIME
   }
 });
 
+test('a same-realm re-activate repeats a once-per-activation warning', TEST_TIMEOUT, async (t) => {
+  // warnOnce dedupes on a module-scope Set that its own comment says is "per
+  // activation", and nothing cleared it: neither activate() nor deactivate()
+  // touched it, so an extension disable/enable or upgrade, which re-activates in
+  // the same realm, never repeated a warning the previous activation had given.
+  //
+  // `backupMirrorPath: '~'` is the one reachable warnOnce caller: it names the
+  // home DIRECTORY, so mirrorBackupPath warns and falls back. It is only asked
+  // when a backup is really written, and backupPolicy short-circuits when the
+  // high-water union is unchanged, so each window below adds an allow entry the
+  // backup has never held before running the pass.
+  const messages = captureConsoleError(t);
+  const home = tempHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const grant = (...extra) => fs.writeFileSync(settingsPath, JSON.stringify(
+    { permissions: { allow: ['Bash(rg *)', ...extra], deny: [] } }, null, 2) + '\n');
+  const warned = () => messages.filter((message) =>
+    /backupMirrorPath "~" is the home directory/.test(message)).length;
+  const app = harness(home, { settings: { backupMirrorPath: '~' } });
+  try {
+    grant('Bash(zzfirst *)');
+    await app.commands.get('permission-wildcarding.runNow')();
+    grant('Bash(zzfirst *)', 'Bash(zzsecond *)');
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(warned(), 1,
+      'precondition: the warning fires, and only once however many writes ask in one activation');
+
+    await app.extension.deactivate();
+    app.reactivate();
+    grant('Bash(zzfirst *)', 'Bash(zzsecond *)', 'Bash(zzthird *)');
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(warned(), 2,
+      'the re-activated extension never repeated the warning: the Set outlived deactivate');
+  } finally {
+    await app.dispose();
+  }
+});
+
 test('an Auto Learn operation arriving after deactivate does not start a worker', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });

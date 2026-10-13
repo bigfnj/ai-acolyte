@@ -242,7 +242,7 @@ function claudePermissionDecision(settings, permissions) {
   const decision = matches.deny.length ? 'deny'
     : matches.ask.length ? 'ask'
       : matches.allow.length ? 'allow' : 'default';
-  return { decision, matches, precedence: ['deny', 'ask', 'allow', 'default'] };
+  return { decision, matches };
 }
 
 // Which of the selected candidates warrant a confirmation step.

@@ -372,10 +372,10 @@ function coverLookupKeysUncached(specific) {
 // bound, and the reason it is not larger.
 //
 // Two deliberate details:
-//   * Only STRINGS are memoized, matching normalizeRule (permission-match.js:79).
-//     A non-string is coerced by RULE_SHAPE.exec, and an object key would be
-//     memoized by reference — so a caller mutating one could be answered from a
-//     stale entry. Passing them straight through removes that hazard entirely.
+//   * Only STRINGS are memoized, matching normalizeRule (permission-match.js:81).
+//     An object key is memoized by reference, so the next parse's fresh object
+//     never hits it and each one holds a slot, and itself, until a clear. (Not a
+//     stale ANSWER: ruleMatches refuses non-strings. Corrected 2026-10-13.)
 //   * The memoized value is an array handed out BY REFERENCE, which is safe only
 //     while every caller treats it as read-only. The one caller is `narrow`
 //     below, which iterates it with for...of and never sorts, pushes or splices;

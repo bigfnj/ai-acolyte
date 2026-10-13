@@ -410,14 +410,38 @@ function codexRuleFileSet(options = {}) {
       }
     }
   }
+  // ONE IDENTITY PER FILE, and on Windows that identity ignores case. The target
+  // is a hard-coded lowercase name (`let codexRulesPath` at extension.js:1065;
+  // `const codexRulesPath` at bin/wildcard-perms:329-330) while readdirSync
+  // returns whatever spelling is on disk, and the three comparisons below used
+  // raw strings. Measured 2026-10-13 with an on-disk
+  // `Permission-Wildcarding.rules` and the lowercase target plus a substitute:
+  // `files` listed the one file under both spellings, the substitute replaced
+  // only the target's, and `effective` validated the deployed copy BESIDE the
+  // candidate, the exact state the note above this function rules out. A target
+  // whose DIRECTORY was cased differently (`.CODEX`) did the same, and the
+  // rule-store inventory, which walks `files`, listed the file and each of its
+  // rules twice. Keyed the way src/codex-reviewed-plans.js:13 and
+  // src/codex-rule-store.js:17 already key paths: resolved, lowercased on win32
+  // only, so a case-sensitive POSIX filesystem keeps two spellings as the two
+  // files they are. The first spelling seen, the on-disk one, is what is
+  // reported. `platform` is injectable so that POSIX rule is testable here.
+  // The keyed check before the push only saves a stat: the keyed Map would drop
+  // that duplicate anyway, so reverting the check alone changes no output.
+  const platform = options.platform || process.platform;
+  const key = (file) => (platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file));
   const target = options.target ? path.resolve(options.target) : null;
-  if (target && !files.some((file) => path.resolve(file) === target) && fs.existsSync(target)) {
+  if (target && !files.some((file) => key(file) === key(target)) && fs.existsSync(target)) {
     files.push(target);
   }
-  const resolved = [...new Set(files.map((file) => path.resolve(file)))].sort();
+  const byKey = new Map();
+  for (const file of files.map((entry) => path.resolve(entry))) {
+    if (!byKey.has(key(file))) byKey.set(key(file), file);
+  }
+  const resolved = [...byKey.values()].sort();
   const substitute = options.substitute ? path.resolve(options.substitute) : null;
   const replaced = substitute && target
-    ? resolved.map((file) => (file === target ? substitute : file))
+    ? resolved.map((file) => (key(file) === key(target) ? substitute : file))
     : substitute && !resolved.length ? [substitute] : resolved.slice();
   // The substitute must be in the set even when the file it replaces has never
   // been written: a first write has no deployed copy to stand in for, and
@@ -446,9 +470,11 @@ function codexRulesArguments(files) {
 // consumed from outside this module, including by tests. Unexported rather than
 // deleted: every one of them is called internally, and MANAGED_POLICY_BLIND_SPOTS
 // reaches the user through enterprisePolicyAssessment's verdict rather than directly.
-// test/dead-exports.test.js is what caught them, on the merge.
+// test/dead-exports.test.js is what caught them, on the merge. CODEX_BUNDLE_CACHE
+// followed on 2026-10-13 off that census's PENDING_REMOVAL list: its one use is the
+// default argument of readEnterpriseBundle, which is how the profile-routing test
+// reaches it.
 module.exports = {
-  CODEX_BUNDLE_CACHE,
   readEnterpriseBundle,
   enterpriseRequirements,
   allowedApprovalPolicies,

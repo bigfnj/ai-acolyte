@@ -230,6 +230,72 @@ test('package.mjs stamps BEFORE it packages, or the stamp dates the wrong side o
       + 'artefact stale, including the one this build just produced');
   });
 
+// The content gate runs on the far side of vsce. Until 2026-10-13 a rejection propagated
+// with nothing between it and the end of package.mjs, leaving the refused VSIX and this
+// build's fresh stamp in the repo root: the exact pair the release check accepts. Driven on
+// junk files against the real checker, because the property is "the checker cannot pass a
+// build the gate refused", not "two files were deleted". package.mjs itself is never run
+// here; test/retired-max-package-gate.test.js pins that it routes the gate through this.
+const builtVsix = (dir) => path.join(dir, 'ai-acolyte-v145.vsix');
+
+test('a VSIX the content gate rejects is quarantined, so the release check cannot pass it',
+  async () => {
+    const { gateOrQuarantine } = await import('../scripts/build-stamp.mjs');
+    withFixture({ root: '1.4.5', ext: '1.4.5', vsix: '1.4.5' }, (dir) => {
+      const stamp = path.join(dir, BUILD_STAMP);
+      assert.equal(runChecker(dir).code, 0, 'precondition: as built, this tree passes the check');
+
+      const rejection = new Error('extension/src/permissions.js: retired enabling symbol applyMax');
+      assert.throws(() => gateOrQuarantine(builtVsix(dir), stamp, () => { throw rejection; }),
+        (error) => error === rejection, "the gate's own error propagates, unchanged");
+      assert.equal(fs.existsSync(builtVsix(dir)), false, 'the refused artefact is gone');
+      assert.equal(fs.existsSync(stamp), false, 'and so is the receipt that vouched for it');
+
+      const { code, out } = runChecker(dir);
+      assert.equal(code, 1, 'the release check passed a build the content gate refused');
+      assert.match(out, /packaging did not produce ai-acolyte-v145\.vsix/);
+    });
+  });
+
+test('an accepted VSIX and its stamp are left exactly where the build wrote them', async () => {
+  // The control. A quarantine that removed the artefact unconditionally would pass the test
+  // above and fail every release.
+  const { gateOrQuarantine } = await import('../scripts/build-stamp.mjs');
+  withFixture({ root: '1.4.5', ext: '1.4.5', vsix: '1.4.5' }, (dir) => {
+    const stamp = path.join(dir, BUILD_STAMP);
+    assert.equal(gateOrQuarantine(builtVsix(dir), stamp, () => 'accepted'), 'accepted');
+    assert.equal(fs.existsSync(builtVsix(dir)), true);
+    assert.equal(fs.existsSync(stamp), true);
+    const { code, out } = runChecker(dir);
+    assert.equal(code, 0, out);
+  });
+});
+
+test('a quarantine that cannot remove a file still reports the gate, and still removes the rest',
+  async () => {
+    // The gate's error says what was wrong with the build; a cleanup failure replacing it
+    // would trade that for an EISDIR. A directory where the stamp should be is the cheapest
+    // removal that reliably fails on every platform (rmSync without `recursive`).
+    const { gateOrQuarantine } = await import('../scripts/build-stamp.mjs');
+    withFixture({ root: '1.4.5', ext: '1.4.5', vsix: '1.4.5', stamp: null }, (dir) => {
+      const stuck = path.join(dir, BUILD_STAMP);
+      fs.mkdirSync(stuck);
+      const said = [];
+      const original = console.error;
+      console.error = (...args) => { said.push(args.join(' ')); };
+      const rejection = new Error('rejected');
+      try {
+        assert.throws(() => gateOrQuarantine(builtVsix(dir), stuck, () => { throw rejection; }),
+          (error) => error === rejection, 'a failed removal must not replace the gate error');
+      } finally {
+        console.error = original;
+      }
+      assert.equal(fs.existsSync(builtVsix(dir)), false, 'the artefact is still removed');
+      assert.equal(said.length, 1, 'the file that could not be removed is named once');
+      assert.ok(said[0].includes(stuck), said[0]);
+    });
+  });
+
 // PowerShell source with comments stripped and backtick line-continuations folded, so a
 // wrapped statement reads as one line and the prose above it cannot satisfy a guard. Sibling
 // of installers.test.js:66 -- both comment forms, blocks first, because the interior lines of

@@ -75,7 +75,7 @@ test('only a portable command family is promotable', () => {
     'PowerShell(Get-LocalUser -Name x)': 'PowerShell(Get-LocalUser *)',
     'Bash(python *)': 'Bash(python *)',                 // already generalized
     'Bash(rg:*)': 'Bash(rg:*)',                         // colon form Claude Code also writes
-    'Bash(PYTHONUTF8=1 python -c x)': 'Bash(python *)', // env prefixes are stripped
+    'Bash(NODE_ENV=test npm test)': 'Bash(npm test *)',  // a known-safe env prefix is stripped
   };
   for (const [entry, expected] of Object.entries(promotable)) {
     assert.equal(promotionFor(entry), expected, entry);
@@ -89,6 +89,10 @@ test('only a portable command family is promotable', () => {
     'Bash(/usr/local/bin/tool run)',                        // absolute path
     'Bash(C:/Users/me/.venv/Scripts/python.exe -c x)',      // windows path
     'Bash(for f in *.txt)',                                 // shell keyword, not a command
+    // Until 2026-10-13 this was promoted as `Bash(python *)`. PYTHONUTF8 is not on Claude
+    // Code's known-safe list, so the rule keeps the assignment (`Bash(PYTHONUTF8=1 python
+    // *)`), which names this machine's environment rather than a portable family.
+    'Bash(PYTHONUTF8=1 python -c x)',
     'mcp__github__create_issue',                            // opaque by construction
     'WebFetch(domain:example.com)',                         // network family, review-only
     'Read(/etc/hosts)', 'Edit', 'Write', 'WebSearch',       // file/tool families

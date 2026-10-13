@@ -45,16 +45,18 @@ const STRIPPED = [
   ['Bash(builtin -- cd x)', 'Bash(cd *)', 'Bash(cd x)'],
   ['Bash(noglob git status)', 'Bash(git status *)', 'Bash(git status)'],
   ['Bash(xargs grep pattern)', 'Bash(grep *)', 'Bash(grep pattern)'],
-  // Stacked, and after an env prefix: every layer comes off.
+  // Stacked, and after an env prefix Claude Code strips: every layer comes off. (Until
+  // 2026-10-13 this row was `FOO=1 timeout 5 git status`; FOO is not on Claude Code's
+  // known-safe list, so that line now stays verbatim, below.)
   ['Bash(nohup timeout 5 nice -n 1 rg x)', 'Bash(rg *)', 'Bash(rg x)'],
-  ['Bash(FOO=1 timeout 5 git status)', 'Bash(git status *)', 'Bash(git status)'],
+  ['Bash(NODE_ENV=test timeout 5 git status)', 'Bash(git status *)', 'Bash(git status)'],
   // The inner command is generalized by the ordinary rules, runners included.
   ['Bash(nohup bash -c "make")', 'Bash(bash *)', 'Bash(bash -c "make")'],
 ];
 
 test('each documented wrapper is stripped and the rule keys on the inner command', () => {
   for (const [entry, expected, inner] of STRIPPED) {
-    // MUTATION: make generalizeCommandArg skip stripBashWrappers (use stripEnvPrefixes
+    // MUTATION: make generalizeCommandArg skip stripBashWrappers (use the env split
     // alone for Bash). `Bash(timeout 5 rg x)` is `Bash(timeout *)` again and this fails
     // on the first row. Confirmed 2026-10-13.
     assert.equal(generalizePermission(entry), expected, entry);
@@ -97,6 +99,8 @@ test('a wrapper in a shape Claude Code does not strip, or wrapping nothing, stay
     'Bash(timeout 5 for x in y)',
     'Bash(timeout 5 $EDITOR x)',
     'Bash(timeout 5 FOO=1 make)',        // timeout would exec a program named FOO=1
+    // After an assignment Claude Code keeps, it strips no wrapper (test/permissions-env.test.js).
+    'Bash(FOO=1 timeout 5 git status)',
   ];
   for (const entry of verbatim) {
     // MUTATION: drop the `tokens[consumed][0].startsWith('-')` refusal in

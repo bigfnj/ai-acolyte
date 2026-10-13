@@ -115,11 +115,11 @@ function planPromotions({ localAllow = [], userAllow = [], userDeny = [] } = {})
 // from it only by that missing argument list, the entry is dead weight.
 //
 // The second test is deliberately narrow: the promoted family must key on the
-// entry's *own* first token. `Bash(PYTHONUTF8=1 python -c x)` generalizes to
-// `Bash(python *)` because env prefixes are stripped, but the command it grants
-// starts with the prefix and so would not match that family — pruning it on the
-// family's account would revoke a permission. Requiring the tokens to agree is
-// what excludes exactly that case.
+// entry's *own* first token, so an env-prefixed entry is never pruned on a family's
+// account. Pruning `Bash(PYTHONUTF8=1 python -c x)` under `Bash(python *)` would revoke
+// a permission (Claude Code keeps that assignment, so the family rule never matches
+// it); since 2026-10-13 such an entry is not promotable either. A known-safe prefix
+// (`NODE_ENV=test`) is skipped too: the safe direction, keeping one entry.
 function redundantUnder(entry, allow) {
   if (grantedBy(entry, allow)) return true;
   const promotion = promotionFor(entry);

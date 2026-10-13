@@ -97,7 +97,7 @@ Stripped, so a rule matches through them **[docs: permissions]**:
 
 ```
 timeout 30 npm test          matches Bash(npm test *)
-NODE_ENV=test npm test       matches Bash(npm test *)
+NODE_ENV=test npm test       matches Bash(npm test *)   (a known-safe variable only; see below)
 command npm test  /  builtin npm test
 ```
 
@@ -127,21 +127,58 @@ runs", and the entry stays verbatim. `command -v` keeps its flag
 (`Bash(command -v *)`). `env` is not on the list and is not stripped
 **[docs; measured against the binary]**.
 
-**Correction to the env-prefix claim below [docs, read 2026-10-13]:** the page now
-says Claude Code strips "a leading assignment of certain known-safe environment
-variables ... An allow rule won't match past an assignment of any other variable.
-A deny or ask rule matches past any leading assignment." It does not list the safe
-variables. The code still assumes an allow rule matches past ANY leading
-assignment (`stripEnvPrefixes` in `src/permissions.js`, the `environment-prefix`
-handling in `src/auto-learn.js`). That is recorded for a decision, not changed
-here.
+### Environment assignments: only a known-safe list is stripped
 
-An env prefix is the same case, and it used to null the permission outright. It
-no longer does, because the matcher strips it too: `Bash(cat *)` already covers
-`LD_PRELOAD=x cat f`, so refusing to propose the rule denied the grant without
-denying the injection. The reason is retained and still bars the automatic path
-through `isAutoSafeCandidate` and `AUTO_UNSAFE_REASONS`, so evidence carrying an
-injection vector can only reach policy through an explicit review.
+The page says Claude Code strips "a leading assignment of certain known-safe
+environment variables, so `Bash(npm test *)` matches `NODE_ENV=test npm test`. An
+allow rule won't match past an assignment of any other variable. A deny or ask rule
+matches past any leading assignment, so `Bash(rm *)` in deny still matches `FOO=bar
+rm -rf tmp/`." **[docs: permissions, read 2026-10-13]** It does not list the
+variables.
+
+Claude Code 2.1.296's binary does **[measured against the binary, 2026-10-13]**. The
+routine that strips wrappers before an allow rule is consulted first removes a
+leading `NAME=VALUE ` only while NAME is one of these 39 and VALUE matches
+`[A-Za-z0-9_./:-]+` (unquoted, no expansion):
+
+```
+GOEXPERIMENT GOOS GOARCH CGO_ENABLED GO111MODULE RUST_BACKTRACE RUST_LOG NODE_ENV
+PYTHONUNBUFFERED PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD PYTEST_DEBUG
+ANTHROPIC_API_KEY LANG LANGUAGE LC_ALL LC_CTYPE LC_TIME CHARSET TERM COLORTERM NO_COLOR
+FORCE_COLOR TZ LS_COLORS LSCOLORS GREP_COLOR GREP_COLORS GCC_COLORS TIME_STYLE BLOCK_SIZE
+BLOCKSIZE COLUMNS LINES CLICOLOR CLICOLOR_FORCE CI DEBIAN_FRONTEND GIT_TERMINAL_PROMPT
+```
+
+It strips assignments only while the line opens with one, before any wrapper, and
+strips no wrapper after an assignment it keeps. The same binary's allow matcher
+tries each rule against the command as written (redirections removed) as well as
+against the stripped text, and when a line opens with any other assignment its own
+"don't ask again" suggestion is the exact rule, assignment included. So
+`Bash(FOO=1 git push *)` matches `FOO=1 git push origin`, and `Bash(git push *)` does
+not. Deny and ask use a wider strip (every assignment, and further exec wrappers such
+as `sudo`, `watch` and `strace`), which is why the page says they match past any
+assignment.
+
+What the code does, since 2026-10-13:
+
+- **The wildcarding pass** (`splitEnvPrefix` and `CLAUDE_SAFE_ENV_VARS` in
+  `src/permissions.js`) strips only those assignments and keeps every other one
+  verbatim in the rule: `NODE_ENV=test npm test` becomes `Bash(npm test *)`,
+  `GITHUB_TOKEN=x git push origin` becomes `Bash(GITHUB_TOKEN=x git push *)`. Before,
+  it stripped any assignment and wrote `Bash(git push *)`, a rule Claude Code never
+  matches against that command, so every run prompted and every fresh approval was
+  generalized away again. A kept assignment followed by a wrapper, or holding a `*`
+  (which the rule would read as a glob), a backslash, a parenthesis or a separator,
+  stays verbatim.
+- **The learner** (`deriveBaseInvocation` in `src/auto-learn.js`, importing the same
+  list) still steps over every assignment to find the command, so risk is judged on
+  what runs, but an assignment Claude Code keeps adds `environment-not-stripped` and
+  withholds the Claude permission: `LD_PRELOAD=x cat f` no longer proposes
+  `Bash(cat *)`. This section used to say `Bash(cat *)` already covers that command;
+  it does not, because LD_PRELOAD is not on the list. The `environment-prefix`
+  reason stays on every assignment and still bars the automatic path through
+  `isAutoSafeCandidate` and `AUTO_UNSAFE_REASONS`. The Codex exporter, which renders
+  argv prefixes, is unchanged.
 
 **Not** stripped: `bash -c`, `python -c`, `npx`, `docker exec`, `devbox run`,
 `direnv exec`, `mise exec`. To approve work inside a runner you must name both,

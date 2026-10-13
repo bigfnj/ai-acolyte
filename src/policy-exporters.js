@@ -1056,6 +1056,16 @@ function candidateClaudePermission(candidate, options) {
   }
   if ((!isAutoSafe(candidate) && !reviewed) || candidateIsComplex(candidate) ||
       (!reviewed && (candidateRiskIsUnsafe(candidate) || candidateHasAutomaticBlock(candidate)))) return null;
+  // An explicit `claudePermission: null` is a rule the learner WITHHELD, not a field it
+  // left out, so it is not re-derived from the prefix below. Added 2026-10-13 with the
+  // learner's `environment-not-stripped` reason, the first withholding reason that is not
+  // also a complexity reason: every earlier one (path, quoted or dynamic executable,
+  // reserved word, call operator, unknown family subcommand, a prefix conflict) makes the
+  // candidate complex, which the line above already refuses. Without this, `LD_PRELOAD=x
+  // cat f` re-acquired the `Bash(cat *)` the learner had just declined to propose. A
+  // candidate built by hand, with no such field, is synthesized exactly as before.
+  if (candidate && Object.prototype.hasOwnProperty.call(candidate, 'claudePermission')
+      && candidate.claudePermission === null) return null;
   if (typeof candidate.claudePermission === 'string') return candidate.claudePermission;
   if (typeof candidate.claude_permission === 'string') return candidate.claude_permission;
 

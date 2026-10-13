@@ -533,6 +533,13 @@ function permissionFor(shell, prefix, blocked) {
   return `${tool}(${prefix.join(' ')} *)`;
 }
 
+// Claude Code's known-safe environment list lives in src/permissions.js, the file the
+// fixed-point cache stamps, and is imported from there: one copy, and the import runs in
+// the direction that cannot let a learner edit change the hook's output. Required here,
+// beside its one consumer, rather than at the top, so that the line references other
+// files make into this module's opening tables do not move.
+const { claudeStripsAssignment } = require('./permissions');
+
 // `timeout [OPTION] DURATION COMMAND` is stripped by Claude Code's matcher, so
 // the family is the inner command. Returns the index of that command, or null
 // when the shape is not the documented one, in which case nothing is stripped
@@ -558,6 +565,17 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   let index = 0;
   const environment = [];
   const strippedWrappers = [];
+  // Set when an assignment is one Claude Code does NOT strip before an allow rule is
+  // consulted: a variable outside its known-safe list, a value that is not plain, or
+  // any assignment after one of those or after a stripped wrapper (its routine strips
+  // assignments only while the line opens with one). Corrected 2026-10-13: this loop
+  // used to treat every leading `VAR=value` as stripped, so `LD_PRELOAD=x cat f` proposed
+  // `Bash(cat *)`, a rule Claude Code never matches against that command (docs, and the
+  // list itself, in src/permissions.js above CLAUDE_SAFE_ENV_VARS). The assignment is
+  // still stepped over to find the command, so risk is judged on what runs; only the
+  // Claude permission is withheld, because the one rule that matches such a run keeps
+  // the assignment verbatim, and the learner never writes a value into a rule.
+  let environmentKept = false;
   // Claude Code strips a leading env assignment, `command`, `builtin` and a
   // `timeout` preamble before matching, so a rule for the inner command covers
   // the wrapped invocation. Learning the wrapper instead would propose
@@ -567,7 +585,14 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
       const token = details[index];
       if (!token) break;
       if (isEnvironmentAssignment(token.value)) {
-        environment.push(token.value.split('=', 1)[0]); index += 1; continue;
+        const name = token.value.split('=', 1)[0];
+        const rawValue = token.raw.slice(token.raw.indexOf('=') + 1);
+        // Sticky: once one is kept, the line no longer opens with an assignment Claude
+        // Code strips, so any after it is kept too, and that needs no test of its own.
+        if (strippedWrappers.length || !token.raw.startsWith(`${name}=`) || !claudeStripsAssignment(name, rawValue)) {
+          environmentKept = true;
+        }
+        environment.push(name); index += 1; continue;
       }
       const name = normalizeRoot(token.value);
       if (name === 'command' || name === 'builtin') {
@@ -603,6 +628,7 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   const prefix = prefixFor(root, argv.slice(1));
   const reasons = [];
   if (environment.length) reasons.push('environment-prefix');
+  if (environmentKept) reasons.push('environment-not-stripped');
   if (strippedWrappers.length) reasons.push('stripped-wrapper');
   if (totalSegments > 1) reasons.push('compound-command');
   if (callOperator) reasons.push('powershell-call-operator');
@@ -615,14 +641,22 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   if (unknownFamily) reasons.push('family-subcommand-unknown');
   if (hasWriteRedirection(command, shell)) reasons.push('write-redirection');
   if (containsScriptSyntax(command, shell)) reasons.push('script-syntax');
-  // An env assignment is deliberately absent. Claude Code strips a leading
-  // `VAR=value` before matching, so `Bash(cat *)` already covers
-  // `LD_PRELOAD=x cat f`: refusing to propose the rule denies the grant without
-  // denying the injection. The reason is kept, and it still bars auto-safe
-  // (isAutoSafeCandidate and AUTO_UNSAFE_REASONS both list it), so evidence
-  // carrying an injection vector can only ever reach policy through a review.
+  // An assignment Claude Code strips (a known-safe variable, a plain value, at the
+  // head of the line) is deliberately absent: `Bash(npm test *)` covers `NODE_ENV=test
+  // npm test`, so refusing to propose it would deny the grant without denying anything.
+  // The `environment-prefix` reason is kept for every assignment, and it still bars
+  // auto-safe (isAutoSafeCandidate and AUTO_UNSAFE_REASONS both list it), so evidence
+  // carrying one can only ever reach policy through a review.
+  //
+  // An assignment Claude Code KEEPS blocks the permission (2026-10-13). This used to say
+  // that `Bash(cat *)` already covers `LD_PRELOAD=x cat f`; it does not, because
+  // LD_PRELOAD is not on the known-safe list, so Claude Code prompts for that run. A
+  // rule proposed from it would be one for a command nobody ran, the line
+  // aggregateObservations does not cross. A family whose evidence mixes such runs with
+  // plain ones therefore gets no Claude rule, the same as when one spelling is a path
+  // executable; its Codex prefix is unaffected.
   const permissionBlocked = pathExecutable || dynamicExecutable || callOperator || reserved ||
-    unknownFamily || Boolean(executable && executable.quoted);
+    unknownFamily || environmentKept || Boolean(executable && executable.quoted);
 
   return {
     ...(metadata && typeof metadata === 'object' ? metadata : {}),

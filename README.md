@@ -248,7 +248,11 @@ or path-rooted executable (a first token holding `/` or `\`, or opening with `~`
 letter) is left verbatim. A Bash entry first loses the wrappers Claude Code
 itself strips before matching (`timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`,
 `noglob`, and `xargs` without flags), so `timeout 5 rg x` keys on `rg`; `command -v` keeps its
-flag. Everything else collapses to `Tool(<root> *)`,
+flag. A leading environment assignment goes too, but only when Claude Code strips it: one of its
+39 known-safe variables (`NODE_ENV`, `CI`, `LANG`, ...) with a plain value. Any other assignment
+stays in the rule as written, `GITHUB_TOKEN=x git push origin` becoming
+`Bash(GITHUB_TOKEN=x git push *)`, because Claude Code will not match `Bash(git push *)` past it
+(docs/claude-code-permissions.md, section 3). Everything else collapses to `Tool(<root> *)`,
 destructive roots included, except the 16 roots in `MIXED_FAMILY_ROOTS`, which keep one
 subcommand, and PowerShell's `&` call form, which stays exact because a root-wide call-operator
 wildcard is arbitrary execution. The safety boundary is `permissions.deny`, which always wins and

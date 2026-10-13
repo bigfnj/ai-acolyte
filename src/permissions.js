@@ -134,14 +134,63 @@ function isScopeWildcarded(arg) {
   return /\*\s*$/.test(arg);
 }
 
-// Strip leading `VAR=value` environment prefixes (quoted or bare) so the command
-// itself is what we key on. "GITHUB_TOKEN=xxx git push" → "git push";
-// "CUDA_HOME=/usr/local/cuda nvcc x.cu" → "nvcc x.cu".
-function stripEnvPrefixes(cmd) {
-  const re = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+/;
+// Leading `VAR=value` assignments, split the way Claude Code's matcher treats them.
+//
+// Until 2026-10-13 every leading assignment was stripped ("GITHUB_TOKEN=xxx git push"
+// → "git push"), on the premise that Claude Code strips any of them before matching.
+// The docs now say otherwise (code.claude.com/docs/en/permissions, "Wrappers", read
+// 2026-10-13): "Claude Code also strips a leading assignment of certain known-safe
+// environment variables, so `Bash(npm test *)` matches `NODE_ENV=test npm test`. An
+// allow rule won't match past an assignment of any other variable. A deny or ask rule
+// matches past any leading assignment." The page does not list the variables. Claude
+// Code 2.1.296's shipped binary (the CLI inside the VS Code extension, read the same
+// day) does: the allow-path routine that strips wrappers before an allow rule is
+// consulted first removes a leading `NAME=VALUE ` only while NAME is in one fixed set,
+// and only for a VALUE matching `[A-Za-z0-9_./:-]+`, unquoted. That set is
+// CLAUDE_SAFE_ENV_VARS below, copied verbatim. So `GITHUB_TOKEN=x git push origin` was
+// generalized to `Bash(git push *)`, a rule Claude Code never matches against that
+// command: not a widening, a prompt loop, each fresh approval generalized away again.
+//
+// The same routine also says what DOES match such a command: the allow matcher tries
+// each rule against the command text as written (redirections removed) as well as
+// against the stripped text, and Claude Code's own "don't ask again" suggestion for a
+// command led by any other assignment is the exact rule, assignment included. So a rule
+// that keeps the assignment verbatim, `Bash(GITHUB_TOKEN=x git push *)`, matches
+// `GITHUB_TOKEN=x git push origin` by the same glob it uses everywhere. That is what this
+// pass now writes: the stripped assignments go, everything from the first kept one to
+// the command stays exactly as written, and the command after it is generalized as
+// usual. A deny rule's wider strip changes nothing here; this pass writes allow rules.
+//
+// Bash only: in PowerShell `FOO=1` is not an assignment, and generalizePowerShellArg
+// leaves an entry opening with one verbatim already.
+const CLAUDE_SAFE_ENV_VARS = new Set([
+  'GOEXPERIMENT', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'GO111MODULE', 'RUST_BACKTRACE', 'RUST_LOG',
+  'NODE_ENV', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'PYTEST_DISABLE_PLUGIN_AUTOLOAD',
+  'PYTEST_DEBUG', 'ANTHROPIC_API_KEY', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_TIME', 'CHARSET',
+  'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'TZ', 'LS_COLORS', 'LSCOLORS', 'GREP_COLOR',
+  'GREP_COLORS', 'GCC_COLORS', 'TIME_STYLE', 'BLOCK_SIZE', 'BLOCKSIZE', 'COLUMNS', 'LINES', 'CLICOLOR',
+  'CLICOLOR_FORCE', 'CI', 'DEBIAN_FRONTEND', 'GIT_TERMINAL_PROMPT',
+]);
+const STRIPPED_ENV_VALUE = /^[A-Za-z0-9_./:-]+$/;
+
+// Does Claude Code strip this leading assignment before an allow rule is consulted?
+// `value` is the text after `=` as written, quotes included.
+function claudeStripsAssignment(name, value) {
+  return CLAUDE_SAFE_ENV_VARS.has(name) && STRIPPED_ENV_VALUE.test(value);
+}
+
+// `{ kept, command }`: `command` is the text after every leading assignment, and `kept`
+// the assignments Claude Code does NOT strip, verbatim, from the first of them on (a
+// safe one after it stays too: the routine strips only while the line opens with one).
+const LEADING_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)\s+/;
+function splitEnvPrefix(cmd) {
   let rest = cmd.trim();
-  while (re.test(rest)) rest = rest.replace(re, '');
-  return rest;
+  let kept = '';
+  for (let m = LEADING_ASSIGNMENT.exec(rest); m; m = LEADING_ASSIGNMENT.exec(rest)) {
+    if (!kept && claudeStripsAssignment(m[1], m[2])) rest = rest.slice(m[0].length);
+    else { kept += m[0]; rest = rest.slice(m[0].length); }
+  }
+  return { kept: kept.trimEnd(), command: rest };
 }
 
 // Claude Code's process wrappers, stripped from a Bash entry so the rule keys on the
@@ -274,15 +323,15 @@ const BASH_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 // segment into `Bash(do *)`. No model of the splitter exists in the repo, so that
 // half is inferred. Neither shape was on the development box's list that day.
 //
-// The env-assignment prefix is still stripped first, deliberately unchanged:
-// Claude Code strips a leading `VAR=value` before matching (documented, and
-// relied on in src/auto-learn.js), so `FOO=1 git status` generalizes to
-// `Bash(git status *)`, which permission-match.js confirms matches the command
-// Claude Code actually checks, `git status`. What that strip cannot vouch for is
-// an assignment whose VALUE holds an expansion: the strip regex takes `\S*`, so
-// `FOO=$(rm -rf ~) git status` splits inside the substitution and the derived
-// "root" is `-rf`. Those, and an assignment with no command after it at all
-// (`Bash(FOO=bar)`, which used to become `Bash(FOO=bar *)`), stay verbatim.
+// The env-assignment prefix is split off first (splitEnvPrefix, above): the
+// assignments Claude Code strips go, and the rest are kept verbatim in the rule, so
+// `NODE_ENV=test npm test` generalizes to `Bash(npm test *)` and `FOO=1 git status` to
+// `Bash(FOO=1 git status *)` (corrected 2026-10-13; this paragraph used to say Claude
+// Code strips ANY leading `VAR=value`). What neither can vouch for is an assignment
+// whose VALUE holds an expansion: the split regex takes `\S*`, so `FOO=$(rm -rf ~) git
+// status` splits inside the substitution and the derived "root" is `-rf`. Those, and an
+// assignment with no command after it at all (`Bash(FOO=bar)`, which used to become
+// `Bash(FOO=bar *)`), stay verbatim.
 function bashOpensScript(arg, stripped, first) {
   if (BASH_SCRIPT_KEYWORDS.has(first.toLowerCase())) return true;
   if (BASH_NON_WORD.test(first) || BASH_ASSIGNMENT.test(first)) return true;
@@ -293,10 +342,19 @@ function bashOpensScript(arg, stripped, first) {
 // Generalize a shell command to a root wildcard, retaining one subcommand for
 // mixed-capability dispatchers such as git and package managers.
 function generalizeCommandArg(arg, tool) {
-  // Env prefixes first, then Claude Code's wrappers (above), so `FOO=1 timeout 5 rg x`
-  // keys on `rg`. A wrapper in a shape that is not stripped leaves the entry verbatim.
-  const stripped = tool === 'Bash' ? stripBashWrappers(stripEnvPrefixes(arg)) : stripEnvPrefixes(arg);
+  // Env prefixes first, then Claude Code's wrappers (above), so `NODE_ENV=test timeout 5
+  // rg x` keys on `rg`. A wrapper in a shape that is not stripped leaves the entry
+  // verbatim. After an assignment Claude Code keeps, it strips no wrapper either (its
+  // routine anchors each wrapper at the start of the line, which the assignment now
+  // holds), so a kept assignment followed by a wrapper stays verbatim rather than
+  // becoming `Bash(FOO=1 timeout *)`. A kept assignment holding a `*` would be read as a
+  // glob in the rule (`GLOB=*.txt` would admit any value), and `\`, `(`, `)`, a backtick
+  // or a separator would not survive as literal rule text; those stay verbatim too.
+  const { kept, command } = tool === 'Bash' ? splitEnvPrefix(arg) : { kept: '', command: arg.trim() };
+  if (kept && (/[*\\()`;|&<>]/.test(kept) || wrapperLength(command.split(/\s+/)) !== 0)) return `${tool}(${arg})`;
+  const stripped = tool === 'Bash' ? stripBashWrappers(command) : command;
   if (stripped === null) return `${tool}(${arg})`;
+  const lead = kept ? `${kept} ` : '';
   // A quoted/path executable cannot be represented safely by the legacy
   // first-token wildcard. Leave it exact; Auto Learn can review a normalized
   // family without ever producing malformed `"C:\Program *` permissions.
@@ -328,15 +386,15 @@ function generalizeCommandArg(arg, tool) {
   if (tool === 'Bash' && first === 'command' && /^-[pvV]+$/.test(parts[1] || '')) {
     let end = 1;
     while (/^-[pvV]+$/.test(parts[end] || '')) end += 1;
-    return `${tool}(command ${parts.slice(1, end).join(' ')} *)`;
+    return `${tool}(${lead}command ${parts.slice(1, end).join(' ')} *)`;
   }
   const normalized = first.toLowerCase().replace(/\.(?:cmd|exe)$/i, '');
   if (MIXED_FAMILY_ROOTS.has(normalized)) {
     const subcommand = parts[1] || '';
     if (!/^[A-Za-z0-9][\w.-]*$/.test(subcommand)) return `${tool}(${arg})`;
-    return `${tool}(${first} ${subcommand} *)`;
+    return `${tool}(${lead}${first} ${subcommand} *)`;
   }
-  return `${tool}(${first} *)`;
+  return `${tool}(${lead}${first} *)`;
 }
 
 // A PowerShell token that starts with a digit is a NUMBER when it is a numeric
@@ -804,12 +862,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :734.
+// prunePermissions, whose only caller is processAllowList at :792.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :800 and nowhere else in the
+// reached it, in any of the three: it is called at :858 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is
@@ -819,8 +877,14 @@ function applyBypass(settings, on) {
 // isPowerShellCommandName is exported (2026-10-13) for src/local-settings.js, whose
 // promotion test asks the same "a command name, not a number or a range" question of a
 // digit-leading root.
+//
+// claudeStripsAssignment is exported (2026-10-13) for src/auto-learn.js, so the
+// learner and this pass share ONE copy of Claude Code's known-safe environment list.
+// The direction is the safe one for the fixed-point cache: the learner imports from
+// this stamped file, never the reverse, so nothing outside the stamp can change what
+// processAllowList emits.
 module.exports = {
-  generalizePermission, BASH_SCRIPT_KEYWORDS, isPowerShellCommandName,
+  generalizePermission, BASH_SCRIPT_KEYWORDS, isPowerShellCommandName, claudeStripsAssignment,
   isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   currentMode, isBypassOn, applyBypass, readBypassState,

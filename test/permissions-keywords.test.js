@@ -186,10 +186,14 @@ test('controls: ordinary commands generalize exactly as they did before the guar
     ['Bash(timeout 5 rg x)', 'Bash(rg *)'],
     ['Bash(command -v rg)', 'Bash(command -v *)'],
     ['Bash(builtin cd x)', 'Bash(cd *)'],
-    // The env strip is unchanged too, including a quoted value with a space.
-    ['Bash(FOO=bar git status)', 'Bash(git status *)'],
-    ['Bash(FOO="a b" rg x)', 'Bash(rg *)'],
-    ['Bash(FOO=$HOME/x rg y)', 'Bash(rg *)'],
+    // These three were pinned here as "the env strip is unchanged too". It changed on
+    // 2026-10-13, as a decision: Claude Code strips only known-safe variables with a plain
+    // value, so these assignments are kept verbatim in the rule, which matches the
+    // command as written (test/permissions-env.test.js holds the table and the evidence).
+    ['Bash(FOO=bar git status)', 'Bash(FOO=bar git status *)'],
+    ['Bash(FOO="a b" rg x)', 'Bash(FOO="a b" rg *)'],
+    ['Bash(FOO=$HOME/x rg y)', 'Bash(FOO=$HOME/x rg *)'],
+    ['Bash(NODE_ENV=test rg x)', 'Bash(rg *)'],
     ['Bash(g++ -O2 x.cc)', 'Bash(g++ *)'],
     ['Bash(git)', 'Bash(git)'],
     // Already-wildcarded and quoted/path entries are untouched.

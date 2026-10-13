@@ -393,7 +393,18 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       if (!Array.isArray(request.requests) || request.requests.length > 4 || request.requests.some(item =>
         !['config/read', 'config/value/write'].includes(item?.method))) throw new Error('Unsupported config worker operation');
       const launch = commandLaunch(request.codexExecutable, ['app-server', '--stdio']);
-      if (!launch.resolved) throw new Error('Codex executable is not reachable');
+      // ONE reason on every platform. commandLaunch resolves only on Windows; on
+      // POSIX it hands the name back unchanged because spawn walks PATH itself, so
+      // a missing executable surfaced as spawn's own ENOENT text instead and every
+      // caller matching "not reachable" (the trusted-project fallback's blindSpots
+      // note among them) read it as some other failure. Measured 2026-10-13: green
+      // on Windows, red on both Ubuntu CI legs. A path-like name is checked here;
+      // a bare name's spawn ENOENT is mapped below.
+      const named = String(request.codexExecutable || '');
+      const pathLike = named.includes('/') || named.includes('\\');
+      if (!launch.resolved || (pathLike && !fs.existsSync(launch.file))) {
+        throw new Error('Codex executable is not reachable');
+      }
       const env = { ...process.env, HOME: request.home, USERPROFILE: request.home, CODEX_HOME: request.codexHome };
       for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
         'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT']) delete env[key];
@@ -401,7 +412,8 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
         env, stdio: ['pipe', 'pipe', 'pipe'] });
       closed = new Promise(resolve => child.once('close', resolve));
       const fail = error => { for (const item of pending.values()) item.reject(error); pending.clear(); };
-      child.once('error', fail);
+      child.once('error', error => fail(error?.code === 'ENOENT'
+        ? new Error('Codex executable is not reachable') : error));
       child.once('exit', () => { if (!closing) fail(new Error('Codex config server exited early')); });
       child.stderr.resume();
       const send = message => child.stdin.write(JSON.stringify(message) + '\n');

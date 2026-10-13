@@ -318,6 +318,43 @@ test('Codex inventory confirmation names the exact rule and source before sendin
   assert.match(app.messages.at(-1).message, /removed 1 Codex allow rule/);
 });
 
+// The other direction of "an option key with zero suppliers": a key SUPPLIED with
+// zero readers. autoLearnManagerOptions() set `homeDir` beside `home` and
+// `successThreshold` beside `threshold`, same values, so the manager's fallback
+// legs for the second spellings were shadowed every time they were supplied and
+// could never fire. Both spellings and both legs were removed 2026-10-13.
+//
+// Re-adding a fallback LEG in the manager is not observable from any caller --
+// that is what made it dead -- so the guard sits on the supplier, which is where
+// the duplicate came from. `calls[0].options` is the object optionsProvider()
+// built, and getAutoLearnManager() hands the same function's output to
+// createAutoLearnManager, so this is the literal the manager receives.
+//
+// The census is textual: a key passes when `options.<key>` appears in
+// createAutoLearnManager's body. That over-accepts (an inner function's own
+// `options` would satisfy it) and never under-accepts today, which is the right
+// way round for a guard that has to survive refactors it knows nothing about.
+test('the extension hands the Auto Learn manager only keys it reads, each under one spelling', async (t) => {
+  const app = await harness(t, { choice: 'Remove' });
+  await app.run();
+  const supplied = app.calls[0].options;
+  // Named first, so a reintroduction fails by name rather than as a census row.
+  for (const alias of ['homeDir', 'successThreshold']) {
+    assert.equal(Object.hasOwn(supplied, alias), false,
+      `\`${alias}\` is a second spelling of a key the manager already reads; it was removed 2026-10-13`);
+  }
+  const source = fs.readFileSync(path.join(rootSrc, 'auto-learn-manager.js'), 'utf8');
+  const body = source.slice(source.indexOf('function createAutoLearnManager('));
+  assert.ok(body.length < source.length, 'precondition: the census found the manager factory');
+  const unread = Object.keys(supplied).filter((key) => !new RegExp(`\\boptions\\.${key}\\b`).test(body));
+  assert.deepEqual(unread, [],
+    'every key the extension supplies must have a reader in createAutoLearnManager');
+  // CONTROL: the census is not vacuous. The two canonical spellings are supplied
+  // and are found, so an empty `unread` above means something.
+  assert.ok(['home', 'threshold'].every((key) => Object.hasOwn(supplied, key)),
+    'precondition: the canonical spellings reach the manager');
+});
+
 test('cancelling a Codex removal performs no mutation', async (t) => {
   const app = await harness(t, { choice: undefined });
   await app.run();

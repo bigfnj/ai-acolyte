@@ -761,8 +761,11 @@ function codexTool(options, shell) {
     // inherit the host's PowerShell/Bash parser merely because they ran there.
     return null;
   }
+  // `tool` is the only override; test/codex-history-shell.test.js pins Bash on
+  // win32 through it. A `defaultTool` leg used to follow, fed by two
+  // scanHistoryFiles forwards that nothing upstream ever set -- no manager, CLI,
+  // script or test supplier (tree-wide grep, 2026-10-13) -- so all three went.
   if (SHELL_TOOLS.has(options.tool)) return options.tool;
-  if (SHELL_TOOLS.has(options.defaultTool)) return options.defaultTool;
   return (options.platform || process.platform) === 'win32' ? 'PowerShell' : 'Bash';
 }
 
@@ -1520,7 +1523,10 @@ function appendedResultIds(source, buffer) {
 // Safe appends read a bounded overlap plus new bytes. Stable observation ids let
 // callers upsert a call when its result arrives on the other side of a cursor.
 function scanHistoryFiles(options = {}) {
-  const priorCursors = options.cursors || options.priorCursors || {};
+  // One spelling. `|| options.priorCursors` was removed 2026-10-13: nothing ever
+  // supplied it, and the manager always passes `cursors` (`{}` is truthy). The
+  // `{}` stays for the scripts and tests that call this with no cursors at all.
+  const priorCursors = options.cursors || {};
   const overlapBytes = Number.isFinite(options.overlapBytes)
     ? Math.max(0, Math.floor(options.overlapBytes))
     : DEFAULT_OVERLAP_BYTES;
@@ -1716,7 +1722,7 @@ function scanHistoryFiles(options = {}) {
         const seed = entry.source === 'codex' && start > 0
           ? codexHeadSeed(file) : null;
         let parsed = parseHistorySlice(entry.source, buffer, {
-          file, baseOffset: start, platform: options.platform, defaultTool: options.defaultTool,
+          file, baseOffset: start, platform: options.platform,
           probeMatcher: options.probeMatcher,
           session: seed && seed.session, cwd: seed && seed.cwd,
         });
@@ -1758,7 +1764,7 @@ function scanHistoryFiles(options = {}) {
                 // identity, because session is part of identityParts.
                 parsed = parseHistorySlice(entry.source, buffer, {
                   file, baseOffset: start, platform: options.platform,
-                  defaultTool: options.defaultTool, probeMatcher: options.probeMatcher,
+                  probeMatcher: options.probeMatcher,
                   ...(start > 0 ? { session: seed && seed.session, cwd: seed && seed.cwd } : {}),
                 });
                 parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));

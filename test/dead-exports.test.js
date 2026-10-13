@@ -119,7 +119,9 @@ const TEST_ONLY = {
   'src/codex-stop-hook.js': ['runCodexStopHook'],
   // Production wraps this read-only primitive in the reviewed proposal API.
   'src/codex-mcp-config.js': ['inspectCodexMcpTool'],
-  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'BASH_RESERVED', 'POWERSHELL_RESERVED', 'classifyInvocation', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
+  // classifyInvocation came off 2026-10-13: src/permission-summary.js
+  // overBroadShellGrants calls it for a wildcard head that has no invocation at all.
+  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'BASH_RESERVED', 'POWERSHELL_RESERVED', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
   // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
   // consumer when the managed-requirements parser was rewritten on 2026-09-24:
   // production now asks enterprisePolicyAssessment, which answers with the degraded

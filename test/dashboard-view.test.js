@@ -1242,6 +1242,76 @@ test('the saved-permissions card names one-off shell approvals and links to them
   }
 });
 
+// Over-broad wildcard grants (2026-10-13): saved WILDCARD shell entries keyed on shell
+// grammar (`Bash(export *)`, `PowerShell(foreach *)`) rather than a command, counted by
+// overBroadShellGrants off the SAME allow list the push already read. Synthetic entries;
+// every one is already a wildcard, so activation's wildcarding pass leaves the list alone.
+test('the saved-permissions card names over-broad wildcard grants and links to them, and goes quiet at zero', async (t) => {
+  const env = setup(t);
+  const broad = ['Bash(export *)', 'PowerShell(foreach *)'];
+  env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(source *)', ...broad], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual(env.read().permissions.allow.slice(2), broad, 'precondition: the list was not rewritten');
+    // MUTATION: drop `overBroadGrants,` from the _push payload. The field is absent and
+    // this fails; the panel then renders nothing. Confirmed 2026-10-13.
+    assert.deepEqual(data.overBroadGrants, { count: 2, total: 4, byReason: { 'reserved-keyword': 2 } },
+      'git status is a command and source is exempt; both wildcards were examined');
+    assert.deepEqual(data.deadApprovals, { count: 0, total: 0, byReason: {} }, 'the sibling diagnostic is separate');
+    assert.ok(ui.view.webview.html.includes('id="overBroadGrants"'), 'the card carries the line');
+
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    const line = panel.dom.byId.get('overBroadGrants');
+    // MUTATION: drop the renderOverBroadGrants(d) call from render(). The line stays
+    // hidden and empty. Confirmed 2026-10-13.
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent,
+      '2 saved wildcard grants name shell grammar rather than a command and match more than intended — review');
+    assert.match(line.title, /Nothing is removed automatically/);
+    assert.match(line.title, /reserved-keyword: 2/);
+    assert.equal(panel.dom.byId.get('deadApprovals').hidden, true, 'no one-offs, so the sibling line stays hidden');
+    assert.equal(panel.dom.byId.get('wcount').textContent, '4 total', 'the badge is unchanged by this line');
+
+    panel.posted.length = 0;
+    line.click();
+    // MUTATION: post the 'dead' filter from this line. The picker then opens the one-off
+    // view instead. Confirmed 2026-10-13.
+    assert.deepEqual(panel.posted, [{ type: 'viewPermissions', selection: { filter: 'over-broad' } }]);
+    ui.on.message(panel.posted[0]);
+    assert.deepEqual(app.executedArgs.at(-1), {
+      id: 'permission-wildcarding.viewPermissions', args: [{ filter: 'over-broad' }],
+    }, 'the route carries the filter to the shared picker unchanged');
+
+    // One grant reads in the singular.
+    env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(export *)'], deny: [] } });
+    app.provider.refresh();
+    await settle();
+    panel.deliver(ui.posted.at(-1));
+    assert.equal(line.textContent,
+      '1 saved wildcard grant names shell grammar rather than a command and matches more than intended — review');
+
+    // Zero is silence: no line, and a click does nothing.
+    env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(source *)'], deny: [] } });
+    app.provider.refresh();
+    await settle();
+    const quiet = ui.posted.at(-1);
+    assert.deepEqual(quiet.overBroadGrants, { count: 0, total: 2, byReason: {} });
+    panel.deliver(quiet);
+    assert.equal(line.hidden, true);
+    assert.equal(line.textContent, '');
+    panel.posted.length = 0;
+    line.click();
+    assert.deepEqual(panel.posted, [], 'a hidden line has nothing to open');
+  } finally {
+    await app.dispose();
+  }
+});
+
 // The memory report is the most expensive thing one push does: measured 6.99 ms
 // and 25 fs syscalls (12 readFileSync + 11 existsSync + 2 readdirSync) against a
 // live corpus. _push called it TWICE — once for the Memory card, once for a

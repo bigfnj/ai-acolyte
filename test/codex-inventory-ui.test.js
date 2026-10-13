@@ -250,6 +250,55 @@ test('the one-off filter over a list with none says so, and the unfiltered picke
   assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory']);
 });
 
+// The over-broad line opens the same picker with `{ filter: 'over-broad' }` (2026-10-13).
+// Synthetic wildcard grants keyed on shell grammar, beside a command wildcard, an exempt
+// runner and a one-off, none of which belong in this view.
+const OVER_BROAD = ['Bash(export *)', 'PowerShell(foreach *)'];
+
+test('the over-broad filter lists only over-broad wildcard grants and removes one through the usual confirmation', async (t) => {
+  const app = await harness(t, {
+    allow: ['Bash(git *)', 'Bash(source *)', 'WebSearch', ...ONE_OFFS, ...OVER_BROAD], choice: 'Remove',
+    pick: (items) => items.find((item) => item.label === OVER_BROAD[0]),
+  });
+  await app.shared({ filter: 'over-broad' });
+  assert.equal(app.pickers.length, 1);
+  const picker = app.pickers[0];
+  assert.equal(picker.config.title, 'Saved permissions · over-broad wildcard grants');
+  // MUTATION: drop the 'over-broad' entry from SAVED_PERMISSION_FILTERS in
+  // vscode-extension/extension.js. The selection is then no view, the picker lists every
+  // entry plus the Codex rule, and this fails. Confirmed 2026-10-13.
+  assert.deepEqual(picker.items.map((item) => item.label), [...OVER_BROAD].sort(),
+    'WITNESS only the over-broad grants are offered, not the one-offs or the exempt runner');
+  assert.ok(picker.items.every((item) => item.agent === 'claude' && /over-broad/.test(item.description)));
+  assert.deepEqual(app.calls.map((call) => call.operation), [],
+    'WITNESS the filtered view reads no Codex inventory');
+  const modal = app.messages.find((item) => item.level === 'warning');
+  // confirmClaudePermissionRemoval words its title for a wildcard; it is the same
+  // per-entry dialog the one-off view reaches.
+  assert.equal(modal?.message, 'Remove this wildcard?',
+    'WITNESS removal is the ordinary per-entry confirmation, not a bulk action');
+  assert.ok(modal.config.detail.includes(OVER_BROAD[0]));
+  const allow = JSON.parse(fs.readFileSync(path.join(app.home, '.claude', 'settings.json'), 'utf8')).permissions.allow;
+  assert.deepEqual(allow, ['Bash(git *)', 'Bash(source *)', 'WebSearch', ...ONE_OFFS, OVER_BROAD[1]],
+    'WITNESS exactly the confirmed entry is removed and every other approval survives');
+});
+
+test('the over-broad filter over a list with none says so, and an unknown filter is the full picker', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'Bash(source *)', ...ONE_OFFS], pick: false });
+  await app.shared({ filter: 'over-broad' });
+  // MUTATION: replace view.empty with the one-off sentence. This fails on the wording.
+  // Confirmed 2026-10-13.
+  assert.equal(app.pickers.length, 0, 'WITNESS no empty picker for an empty filter');
+  assert.match(app.messages.at(-1)?.message || '', /no over-broad wildcard grants are saved now/);
+  // An inherited property name is not a view: the own-property lookup ignores it.
+  // MUTATION: index SAVED_PERMISSION_FILTERS[selection.filter] without the
+  // hasOwnProperty test. `toString` is then a "view" whose `entries` is undefined, the
+  // picker throws, and no picker opens. Confirmed 2026-10-13.
+  await app.shared({ filter: 'toString' });
+  assert.equal(app.pickers.length, 1);
+  assert.equal(app.pickers[0].config.title, 'Saved permissions · Claude + Codex');
+});
+
 for (const [name, options, unavailableLabel] of [
   ['an interrupted Codex approval', { inventory: { pendingApproval: true } }, 'Codex change needs attention'],
   ['a failed Codex inventory read', { inventoryError: 'Fixture policy store is unavailable.' }, 'Codex permissions unavailable'],

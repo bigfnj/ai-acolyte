@@ -8,7 +8,7 @@ const { codexRuleFileSet } = require('./codex-policy');
 const { parseCodexRules } = require('./codex-rule-inventory');
 // The classifier only. src/auto-learn.js has no I/O and never applies anything, so
 // borrowing it keeps this module's promise above: no learner state, no transaction.
-const { extractInvocations } = require('./auto-learn');
+const { extractInvocations, classifyInvocation } = require('./auto-learn');
 
 function readCodexPermissionSummary(options = {}) {
   const set = codexRuleFileSet(options);
@@ -130,4 +130,78 @@ function deadShellApprovals(allow) {
   return value;
 }
 
-module.exports = { readCodexPermissionSummary, deadShellApprovals };
+// Saved WILDCARD shell grants whose head is shell grammar rather than a command: the
+// shapes the wildcarding pass minted before a910daf (2026-10-13), when it keyed every
+// Bash entry on its first token, so one approved loop became `Bash(for *)` and one
+// `export X=1` became `Bash(export *)`. Measured that day with src/permission-match.js:
+// `Bash(for *)` covers `Bash(for f in *; do rm -rf "$f"; done)`, so a rule like this
+// matches far more than the approval it came from. a910daf stopped the pass minting
+// them and, deliberately, removed nothing: a grant a user holds stays until they decide.
+// This is the read-only count that lets them decide; nothing here removes anything.
+//
+// A wildcard's HEAD is its argument minus the trailing `*` (either separator), and the
+// head is what the classifier judges: `reserved-keyword` (`for`, `export`, `eval`,
+// PowerShell `foreach`), `dynamic-executable` (`$EDITOR`, `(`, `{`, `[[`) and
+// `missing-command-root` (`FOO=bar`, a range literal, PowerShell's `&` call operator,
+// which runs whatever follows it). A head with no executable at all, such as a bare
+// assignment, yields no invocation from extractInvocations, so classifyInvocation is
+// asked directly and reports the missing root itself.
+//
+// Two kinds of head are not counted although the classifier names them:
+//   * `source` and `[`, reserved words to the classifier, are the `.` script runner and
+//     the `test` builtin, which src/permissions.js wildcards by design (the BASH_EXEMPT
+//     list in test/permissions-keywords.test.js). Counting them would ask a user to
+//     remove a grant the next approval re-mints. `Bash(bash *)` and `Bash(. *)` are not
+//     counted either: the classifier calls them shell wrappers, which are commands.
+//   * A head that is only a wrapper the classifier strips (`command`, `builtin`,
+//     `timeout 5`). The command it wraps is under the star, so "no root" there is an
+//     artifact of cutting the head, not grammar; `missing-command-root` is dropped when
+//     `stripped-wrapper` is present. Measured 2026-10-13: without this, the
+//     development box's `Bash(command *)` was counted as a missing root.
+//
+// Only wildcard entries are examined, the mirror image of deadShellApprovals above.
+// `Bash(*)` is an explicit tool-wide grant with no head, and is skipped. On the
+// development box (2026-10-13) this counted 2 of 425 wildcard shell grants: one
+// `Bash(export *)` and one `PowerShell(& *)`.
+const OVER_BROAD_REASONS = Object.freeze(['dynamic-executable', 'missing-command-root', 'reserved-keyword']);
+const OVER_BROAD_EXEMPT_BASH_HEADS = new Set(['source', '[']);
+const WILDCARD_TAIL = /[\s:]*\*\s*$/;
+
+// Its own memo cell, for the reason the one above has one: the dashboard asks for both
+// diagnostics on every push, and one shared cell would evict the other each time.
+let overBroadMemo = { key: null, value: null };
+
+function overBroadShellGrants(allow) {
+  const list = Array.isArray(allow) ? allow.filter((entry) => typeof entry === 'string') : [];
+  const key = JSON.stringify(list);
+  if (overBroadMemo.key === key) return overBroadMemo.value;
+  const byReason = {};
+  const entries = [];
+  let total = 0;
+  for (const entry of list) {
+    const match = SHELL_APPROVAL.exec(entry);
+    if (!match || !WILDCARD_TAIL.test(match[2])) continue;
+    const [, tool, arg] = match;
+    const head = arg.replace(WILDCARD_TAIL, '').trim();
+    if (!head) continue;
+    total += 1;
+    if (tool === 'Bash' && OVER_BROAD_EXEMPT_BASH_HEADS.has(head.split(/\s+/)[0])) continue;
+    const invocations = extractInvocations(tool, head);
+    const reasons = new Set(invocations.length
+      ? invocations.flatMap((invocation) => invocation.reasons)
+      : classifyInvocation({ tool, command: head }).reasons);
+    if (reasons.has('stripped-wrapper')) reasons.delete('missing-command-root');
+    const hits = OVER_BROAD_REASONS.filter((reason) => reasons.has(reason));
+    if (!hits.length) continue;
+    entries.push(entry);
+    for (const reason of hits) byReason[reason] = (byReason[reason] || 0) + 1;
+  }
+  // Frozen for the same reason as deadShellApprovals: the memo hands one object to all.
+  const value = Object.freeze({
+    count: entries.length, total, byReason: Object.freeze(byReason), entries: Object.freeze(entries),
+  });
+  overBroadMemo = { key, value };
+  return value;
+}
+
+module.exports = { readCodexPermissionSummary, deadShellApprovals, overBroadShellGrants };

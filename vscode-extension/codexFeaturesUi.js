@@ -111,7 +111,10 @@ function createCodexFeaturesUi(vscode, { readMemory, rebuildMemory, runRules, pr
         `Storage: ${memory.storageState}; feature enablement: ${memory.featureState}`,
         'Feature enablement is not inferred from files. This report does not enable or generate memories.', '',
         ...memory.files.map((file) => `${file.relativePath}: ${file.readable === false ? 'unreadable' : `${file.size} bytes, ${file.lineCount ?? '?'} lines`}`), '',
-        ...memory.diagnostics.map((item) => `${item.relativePath || '(memory root)'}: ${item.message}`)];
+        // The adapter's line is 0-based (a Range line); file:line here counts from 1,
+        // like the search picker's descriptions. Storage failures carry no line.
+        ...memory.diagnostics.map((item) => `${item.relativePath || '(memory root)'}`
+          + `${Number.isSafeInteger(item.line) && item.line >= 0 ? `:${item.line + 1}` : ''}: ${item.message}`)];
       const document = await vscode.workspace.openTextDocument({ language: 'plaintext', content: lines.join('\n') });
       if (disposed) return;
       await vscode.window.showTextDocument(document, { preview: true });

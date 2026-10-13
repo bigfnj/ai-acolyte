@@ -881,6 +881,29 @@ test('a genuinely broken index link is still counted as something to fix', async
   } finally { app.dispose(); }
 });
 
+// A real store's row read "6 files · 1 issues" (2026-10-13). Every count on the
+// Codex memory card is pluralised by its own value; the control keeps the plurals.
+test('the Codex memory row says 1 issue, 1 file and 1 section, and keeps plurals otherwise', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const panel = runPanelScript(ui.view.webview.html);
+    const render = (files, issues, sections) => {
+      panel.deliver({ ...ui.posted[0], codexMemory: { state: 'readable', files, issues,
+        gates: { on: true, count: sections, current: true } } });
+      return [panel.dom.byId.get('stCodexMemory').textContent, panel.dom.byId.get('codexMemoryGatesStatus').textContent];
+    };
+    assert.deepEqual(render(1, 1, 1), ['1 file · 1 issue', 'Native memory gates: 1 section; current.'],
+      'WITNESS a single count reads singular');
+    assert.deepEqual(render(6, 2, 2), ['6 files · 2 issues', 'Native memory gates: 2 sections; current.']);
+    assert.deepEqual(render(0, 0, 0), ['0 files', 'Native memory gates: 0 sections; current.']);
+  } finally { app.dispose(); }
+});
+
 // Claude Code loads the first 200 lines of MEMORY.md and drops the rest in silence. The
 // card watched bytes only, against a self-imposed 12000-byte budget, so it could read
 // green while the tail of the index was already absent from every session. Lines are also

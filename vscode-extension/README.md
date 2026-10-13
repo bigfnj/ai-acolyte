@@ -199,7 +199,7 @@ See the official Codex [rules](https://learn.chatgpt.com/docs/agent-configuratio
 **Import project Codex rules** proposes portable declarations from the workspace's
 `.codex/rules` files for user scope, including overlapping project restrictions. Review
 shows the source, destination and complete proposed declarations. Both preserve original
-declarations and refuse stale proposals ([reviewRules](codexFeaturesUi.js#L121),
+declarations and refuse stale proposals ([reviewRules](codexFeaturesUi.js#L124),
 [prepare](../src/codex-reviewed-plans.js#L214)). This reviewed import is separate from the withdrawn
 automatic workspace export setting.
 
@@ -213,7 +213,7 @@ policy stays read-only. Interrupted writes offer an explicit completion step.
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
 that tool's native user configuration; different future arguments are covered, and the tool
 is not classified as safe. **Undo approval** restores the saved prior setting; changed
-configuration requires review ([reviewMcp](codexFeaturesUi.js#L174),
+configuration requires review ([reviewMcp](codexFeaturesUi.js#L177),
 [restoreCodexMcpApproval](../src/codex-mcp-config.js#L324)). Other tools, server settings and project trust are preserved.
 
 **Configure Codex after-turn learning** adds a Stop hook using the current Auto Learn mode,
@@ -306,7 +306,7 @@ dev/source layout is auto-detected. The status probe works regardless of the pat
 
 The separate **Codex memory** row reads `memory_summary.md`, `MEMORY.md`,
 `rollout_summaries/*.md` and `skills/*/SKILL.md` under the selected Codex home's `memories`
-directory. Raw inputs, sessions and SQLite are excluded ([discoverCodexMemory](../src/codex-memory.js#L96)).
+directory. Raw inputs, sessions and SQLite are excluded ([discoverCodexMemory](../src/codex-memory.js#L101)).
 Ambient diagnostics refresh when sources are created, edited or deleted
 ([codexMemoryLint](codexMemoryLint.js#L66)). Codex line counts are informational; Claude's
 index-line budget is not imposed on the native registry. The extension reports absent or

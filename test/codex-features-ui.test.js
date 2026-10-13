@@ -111,11 +111,13 @@ test('memory search maps explicit UTF-8 BOM provenance for first and later passa
 
 test('memory inspection shows native diagnostics without a Claude line cap or enabling features', async (t) => {
   const f = fixture(t);
-  fs.writeFileSync(path.join(f.root, 'memory_summary.md'), 'v0\n' + 'entry\n'.repeat(230));
+  fs.writeFileSync(path.join(f.root, 'memory_summary.md'), 'v0\n' + 'entry\n'.repeat(230) + 'rollout_summaries/gone.md\n');
   await f.ui.inspectMemory();
   const report = f.seen.opened[0].content;
   assert.match(report, /feature enablement: unknown/);
-  assert.match(report, /does not start with the v1/);
+  assert.match(report, /^memory_summary\.md:1: Native memory_summary\.md does not start with the v1/m);
+  assert.match(report, /^memory_summary\.md:232: Selected-memory reference is missing or unreadable: rollout_summaries\/gone\.md$/m,
+    'a reference diagnostic names the editor line it is on, counted from 1');
   assert.match(report, /MEMORY.md/);
   assert.doesNotMatch(report, /200.line|over budget/);
   assert.equal(fs.existsSync(path.join(f.codexHome, 'config.toml')), false);

@@ -4480,16 +4480,18 @@ class WildcardingViewProvider {
 
   function renderCodexMemory(m) {
     m = m || {};
+    // Every count on this card read plural: a real store showed "1 issues" (2026-10-13).
+    const files = m.files || 0;
     setState('stCodexMemory', m.state === 'absent' ? 'no files yet'
-      : (m.files || 0) + ' files' + (m.state === 'unreadable' ? ' · partly unreadable' : '')
-        + (m.issues ? ' · ' + m.issues + ' issues' : '') + (m.error ? ' · diagnostics unavailable' : ''),
+      : files + ' file' + (files === 1 ? '' : 's') + (m.state === 'unreadable' ? ' · partly unreadable' : '')
+        + (m.issues ? ' · ' + m.issues + ' issue' + (m.issues === 1 ? '' : 's') : '') + (m.error ? ' · diagnostics unavailable' : ''),
       m.state === 'unreadable' || m.issues || m.error ? 'warn' : null);
     $('codexMemoryDir').textContent = m.root || '';
     $('codexMemoryStatus').textContent = m.error || (m.lintEnabled === false ? 'Native diagnostics are disabled. ' : '')
       + 'Codex feature enablement is not inferred. Search reads the current files.';
     var g = m.gates || {};
     $('codexMemoryGatesStatus').textContent = g.error || g.watchError || (g.on
-      ? 'Native memory gates: ' + (g.count == null ? '?' : g.count) + ' sections; ' + (g.current ? 'current' : 'update pending') + '.'
+      ? 'Native memory gates: ' + (g.count == null ? '?' : g.count) + ' section' + (g.count === 1 ? '' : 's') + '; ' + (g.current ? 'current' : 'update pending') + '.'
       : 'Native memory gates are off. Only explicitly marked global sections can be installed.');
   }
 

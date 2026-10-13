@@ -115,7 +115,9 @@ if (-not $cfg["hooks"].Contains("PostToolUse")) {
 # So the scan recognises this TOOL wherever it lives, and an install leaves
 # exactly one registration per matcher, pointing here:
 #   - none found              append a new entry (unchanged behaviour);
-#   - this checkout's found   leave it exactly as it is, bytes included;
+#   - this checkout's found   leave it exactly as it is, bytes included --
+#                             unless it is the bare path, which Windows cannot
+#                             run, and is rewritten to $hookCommand ($respell);
 #   - another checkout's      rewrite that hook's command in place, so its
 #                             entry keeps its matcher, its position and any
 #                             other fields, and say old -> new;
@@ -157,9 +159,9 @@ function Get-WildcardPermsTarget {
 }
 
 # One path, several spellings: backslashes or forward slashes, /d/repo (Git
-# Bash, which is how install.sh writes it on this platform) or D:/repo. Compare
-# the results with -ieq; casing is folded there, not here, so the notice prints
-# the path as the user wrote it.
+# Bash's own) or D:/repo (this script, and install.sh run from Git Bash).
+# Compare the results with -ieq; casing is folded there, not here, so the notice
+# prints the path as the user wrote it.
 function ConvertTo-WindowsPath {
     param([string] $Path)
     $text = $Path.Replace("\", "/")
@@ -167,7 +169,29 @@ function ConvertTo-WindowsPath {
     return $text.TrimEnd("/")
 }
 
-$currentPath = ConvertTo-WindowsPath $hookCmd
+# One file can have more than one spelling even after that folding, found
+# 2026-10-13: an 8.3 short path (C:/Users/SHORTN~1.EXT/...) and its long form
+# name the same checkout. Compared as text they differ, so this checkout
+# registered under its short spelling was "repointed from another checkout",
+# which it is not. Git Bash writes the short form by itself whenever a checkout
+# sits under /tmp. [System.IO.Path]::GetFullPath expands every 8.3 component of
+# the part of a path that exists, even when the file at the end does not,
+# measured under 5.1.26100.9444 and 7.6.6 alike; Get-Item's FullName expands
+# too, but only for an item that exists. It does NOT resolve a junction or a
+# symlink, which install.sh's realpath does: there such a spelling is still
+# repointed, which is harmless. Not rooted, or unparseable (.NET Framework
+# throws on `"`, `<`, `>`, `|`): compared as written.
+function Resolve-LongPath {
+    param([string] $Path)
+    try {
+        if ([System.IO.Path]::IsPathRooted($Path)) {
+            return [System.IO.Path]::GetFullPath($Path).Replace("\", "/").TrimEnd("/")
+        }
+    } catch { }
+    return $Path
+}
+
+$currentPath = Resolve-LongPath (ConvertTo-WindowsPath $hookCmd)
 $entries = @($cfg["hooks"]["PostToolUse"])
 $found = @()
 for ($i = 0; $i -lt $entries.Count; $i++) {
@@ -180,22 +204,33 @@ for ($i = 0; $i -lt $entries.Count; $i++) {
         $command = $h["command"]
         # The three spellings the old exact-match check knew stay THIS checkout
         # whatever the grammar above makes of them, so nothing it called
-        # "already registered" is rewritten now.
+        # "already registered" is ever repointed as another checkout. (A bare
+        # one is still respelled; see $respell below.)
         if ($command -is [string] -and ($command -eq $hookCommand -or $command -eq $hookCmdNormalized -or $command -eq $hookCmd)) {
             $target = $hookCmd
             $isCurrent = $true
         } else {
             $target = Get-WildcardPermsTarget $command
             if ($null -eq $target) { continue }
-            $isCurrent = (ConvertTo-WindowsPath $target) -ieq $currentPath
+            $isCurrent = (Resolve-LongPath (ConvertTo-WindowsPath $target)) -ieq $currentPath
         }
+        # This checkout registered BARE, which is what install.sh used to write
+        # from Git Bash (found 2026-10-13): the C:/.../bin/wildcard-perms that
+        # makes Windows ask how to open the file on every hook fire, the dialog
+        # $hookCommand exists to avoid. It is still this checkout -- never
+        # "another checkout" -- but it is rewritten to $hookCommand below rather
+        # than left as "already registered". A `node ...` spelling of it, any
+        # casing or slash direction, is left exactly as it is.
+        $respell = $isCurrent -and ($command -notmatch '^\s*node\s')
         # "$i/$j" identifies the hook for the rebuild below; indices rather than
         # object identity, which PowerShell's PSObject wrapping makes unreliable.
         $found += [pscustomobject]@{
             id      = "$i/$j"
             hook    = $h
+            command = $command
             target  = $target
             current = $isCurrent
+            respell = $respell
             matcher = "$($entry['matcher'])"
         }
     }
@@ -229,6 +264,10 @@ foreach ($f in $found) {
             }
         } catch { $gone = '' }
         $notices += "[OK] wildcard-perms hook repointed from another checkout: $($f.target) -> $hookCmdNormalized$gone"
+    } elseif ($f.respell) {
+        # In place, like a repoint: same entry, matcher, position and fields.
+        $f.hook["command"] = $hookCommand
+        $notices += "[OK] wildcard-perms hook now runs through node, because Windows cannot run the bare path: $($f.command) -> $hookCommand"
     }
 }
 

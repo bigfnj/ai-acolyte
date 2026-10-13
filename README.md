@@ -35,8 +35,11 @@ cd ai-acolyte
 
 That registers the `PostToolUse` hook. Run it again after moving, renaming or re-cloning
 the checkout: it repoints a registration left by another checkout of this tool instead of
-adding a second one beside it, and prints the old and new paths. For the dashboard in the
-screenshots, install the extension too:
+adding a second one beside it, and prints the old and new paths. On Windows, `./install.sh`
+from Git Bash and `.\install.ps1` register the same `node "<path>"` command, and either one
+rewrites the bare-path registration an older Git Bash install left, which made Windows ask
+how to open the file on every hook fire. For the dashboard in the screenshots, install the
+extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
@@ -411,9 +414,9 @@ given a method it never had.
 
 Both halves need Node 20 or newer, the floor CI tests: `.github/workflows/test.yml` runs the suite
 on every push and pull request across Node 20 and 22 on Linux and Windows, `fail-fast` off so a
-platform-specific failure is never hidden. `install.sh` registers the hook's bare path while
-`install.ps1` registers `node "<path>"`, because a bare extensionless path has no Windows
-association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
+platform-specific failure is never hidden. On Linux and macOS `install.sh` registers the hook's
+bare path; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
+`node "<path>"`, because a bare extensionless path has no Windows association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
 and any left by a checkout that no longer exists, and names, without removing, one that belongs
 to another checkout still on disk. Cutting a GitHub Release builds and
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:

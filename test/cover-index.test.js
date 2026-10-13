@@ -330,6 +330,70 @@ test('the key memo is bounded, and stays correct across an eviction', (t) => {
     ['Bash(git status *)'], 'and the pipeline still collapses after an eviction');
 });
 
+// The test above reads the cap from coverKeyCacheStats(), so it holds for ANY
+// value of COVER_KEY_CACHE_LIMIT. Mutation tracker, 2026-10-13: the cap set to
+// 3 left this file 11/11 green. Here the number is load-bearing rather than
+// copied (src/permissions.js:367-372): one sweep visits every entry once, so a
+// cap below the list length clears mid-sweep and hands the next sweep a cold
+// memo, and 5000 was chosen to keep the 3,200-entry growth case inside one
+// sweep. Pinned the way test/permission-match.test.js pins the matcher cache:
+// the value, and then the reason as a condition. The condition is asserted by
+// behaviour, not as `limit >= 3200`, because a sweep is the thing the cap is for.
+test('the key memo cap is the documented value, and holds the 3,200-entry growth case', () => {
+  const index = createCoverIndex(MEMO_POOL);
+  assert.equal(coverKeyCacheStats().limit, 5000,
+    'witness:cover-key-cache-limit -- the documented bound moved. Change it deliberately: '
+    + 'src/permissions.js argues it from a 3,200-entry growth case that one sweep must fit, '
+    + 'and from 3.5 MB of heap at the cap.');
+
+  // Start from a known state. The memo is module-global and earlier tests leave
+  // it at an arbitrary size, so a clear could otherwise land inside the sweep
+  // below and fail it for a reason that is not the cap. Distinct candidates
+  // until the wholesale clear fires, which leaves exactly the one that tripped it.
+  for (let i = 0; coverKeyCacheStats().size !== 1; i += 1) {
+    assert.ok(i <= 20000, 'precondition: the memo never cleared, so it is not bounded');
+    index.covers(`Bash(zzsettle-${i} run)`);
+  }
+
+  const growth = Array.from({ length: 3200 }, (_, i) => `Bash(zzgrowth-${i} status --short)`);
+  const coldSweep = countBoundaryProbes(() => { for (const c of growth) index.covers(c); });
+  assert.ok(coldSweep > 0, 'precondition: the first sweep walks its candidates');
+  assert.equal(countBoundaryProbes(() => { for (const c of growth) index.covers(c); }), 0,
+    'witness:cover-key-cache-limit -- a second sweep over 3,200 entries must be answered '
+    + 'entirely from the memo; a cap below the list length re-walks it');
+});
+
+// The `typeof` passthrough in coverLookupKeys survived deletion with this file
+// green (mutation tracker, 2026-10-13). It is reachable. settings.local.json's
+// allow array is taken exactly as JSON.parse returned it, checked only by
+// `Array.isArray(local?.permissions?.allow)` at src/local-settings.js:211, and
+// each entry goes on unchanged through partitionLocal -> redundantUnder ->
+// grantedBy -> index.covers, so an array or object entry arrives here. The ANSWER
+// cannot go stale — `ruleMatches` (permission-match.js:120) refuses every
+// non-string before normalizing — so what the guard buys is the
+// memo: a reference key is never hit by the next parse's fresh object, and each
+// one would hold a slot, and the object, until the next wholesale clear.
+test('a non-string candidate is walked every time and never enters the key memo', () => {
+  const index = createCoverIndex(MEMO_POOL);
+  const boxed = new String('Bash(zzboxed status)');
+  const walk = argOf(String(boxed)).length;
+  const before = coverKeyCacheStats().size;
+
+  assert.equal(countBoundaryProbes(() => index.covers(boxed)), walk,
+    'a non-string is still keyed, by its coerced text');
+  assert.equal(countBoundaryProbes(() => index.covers(boxed)), walk,
+    'the SAME object asked again is walked again, not answered from the memo');
+  assert.equal(coverKeyCacheStats().size, before, 'and the memo did not grow');
+  assert.equal(index.covers(boxed), false, 'and the answer is the non-string answer: no coverage');
+
+  // Control: the same text as a primitive IS memoized, so the counter and the
+  // size can see a memo entry when there is one.
+  const text = String(boxed);
+  assert.equal(countBoundaryProbes(() => index.covers(text)), walk, 'control: cold walk');
+  assert.equal(countBoundaryProbes(() => index.covers(text)), 0, 'control: memoized');
+  assert.equal(coverKeyCacheStats().size, before + 1, 'control: one entry added');
+});
+
 
 // Counted from OUTSIDE the module, like countBoundaryProbes above. `\*\s*$` is
 // tested by coverIndexKey for every rule that matches RULE_SHAPE, and that

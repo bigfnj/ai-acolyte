@@ -92,6 +92,37 @@ test('explicitly reviewed Codex export remains narrow and rejects broad wrappers
   assert.equal(validateCodexRulesText(reviewed).valid, true);
 });
 
+// The learner's SHELL_WRAPPERS only raises risk; under `includeReviewed` this exporter
+// never reads risk, so the learner table could not stop a reviewed bare runner prefix.
+// MEASURED 2026-10-13 before the exporter entries existed: the candidate the learner
+// builds from `just build` (prefix ["just"], complex false) rendered as a valid one-token
+// prefix_rule, and the same for make, hyperfine and duckdb. A one-token pattern for any
+// of them runs whatever recipe, benchmarked command or `.shell` line it is handed.
+for (const [root, command] of [
+  ['duckdb', 'duckdb -c "SELECT 1"'], ['hyperfine', "hyperfine 'sleep 1'"],
+  ['just', 'just build'], ['make', 'make all'],
+]) {
+  test(`reviewed Codex export refuses a bare ${root} prefix and keeps a narrower one`, () => {
+    const { classifyInvocation } = require('../src/auto-learn');
+    const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
+    assert.deepEqual(learned.prefix, [root], 'precondition: the learner hands over the bare root');
+    for (const item of [learned, { prefix: [`${root}.exe`] }]) {
+      const rendered = renderCodexRules([item], { includeReviewed: true });
+      // MUTATION: drop '${root}' (or '${root}.exe') from SHELL_WRAPPERS in
+      // src/policy-exporters.js. wrapperIsBroad never runs, the reviewed branch returns
+      // the prefix, and a one-token prefix_rule is emitted. Confirmed 2026-10-13 for each
+      // root and each spelling, one at a time.
+      assert.equal((rendered.match(/prefix_rule\(/g) || []).length, 0,
+        `${JSON.stringify(item.prefix)} must not become a reviewed Codex rule:\n${rendered}`);
+    }
+    // Control: refusal is of the BARE runner only, the same treatment `sh` gets. A
+    // reviewer who narrowed the prefix still gets it, so this is not a blanket ban.
+    // MUTATION: make wrapperIsBroad return true for every wrapper; this assertion fails.
+    const narrow = renderCodexRules([{ prefix: [root, 'build'] }], { includeReviewed: true });
+    assert.ok(compact(narrow).includes('pattern = ' + JSON.stringify([root, 'build'])), narrow);
+  });
+}
+
 test('Codex validator rejects malformed and dangerously broad generated rules', () => {
   assert.equal(validateCodexRulesText('prefix_rule(').valid, false);
   for (const pattern of [

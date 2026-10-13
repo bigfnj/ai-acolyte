@@ -5,6 +5,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK_CMD="$SCRIPT_DIR/bin/wildcard-perms"
 SETTINGS="$HOME/.claude/settings.json"
 
+# Windows under Git Bash, MSYS2 or Cygwin: hand node the C:/ long form, the path
+# install.sh and install.ps1 both register there (install.sh's uname block has
+# the reasons). Git Bash's own conversion of HOOK_CMD keeps any 8.3 component,
+# /tmp included, and Cygwin does not convert it at all.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      HOOK_CMD="$(cygpath -m -l "$SCRIPT_DIR")/bin/wildcard-perms" || HOOK_CMD="$SCRIPT_DIR/bin/wildcard-perms"
+    fi
+    ;;
+esac
+
 HOOK_CMD="$HOOK_CMD" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { isAbsolute } from 'path';
@@ -25,13 +37,13 @@ catch (error) {
   process.exit(1);
 }
 
-// The two installers register two different command strings for the same hook, and
-// an uninstall that knows only one of them can never undo the other. install.sh
-// registers the bare path, because the shebang makes the script directly
-// executable; install.ps1 registers `node "<forward-slash path>"`, because Windows
-// has no shebang support and a bare extensionless path pops a "How do you want to
-// open this file?" dialog on every hook fire. So match on the PATH, not on the
-// spelling of the command that wraps it.
+// The installers register two different command strings for the same hook, and an
+// uninstall that knows only one of them can never undo the other. On Linux and macOS
+// install.sh registers the bare path, because the shebang makes the script directly
+// executable; install.ps1, and install.sh under Git Bash, register `node "<C:/path>"`,
+// because Windows has no shebang support and a bare extensionless path pops a "How do
+// you want to open this file?" dialog on every hook fire (older Git Bash installs left
+// exactly that bare path). So match on the PATH, not on the spelling that wraps it.
 const hookPath = (value) => {
   let text = String(value ?? '').trim();
   const wrapped = /^node\s+(.+)$/i.exec(text);

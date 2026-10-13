@@ -23,12 +23,27 @@ chmod +x "$HOOK_CMD"
 # Git for Windows, MSYS2 and Cygwin all ship: -m for C:/forward/slashes, -l for
 # the long form of any 8.3 component. Without cygpath, or anywhere else, it
 # stays the POSIX path, which is what Linux and macOS need.
+#
+# The hook command changes there too. On Linux and macOS it is the bare path:
+# the shebang plus the chmod above make the file executable. Windows has no
+# shebang support, and an extensionless file has no association, so a bare
+# path makes Windows ask "How do you want to open this file?" on every hook
+# fire. That is why install.ps1 registers `node "<C:/forward/slash path>"`.
+# Found 2026-10-13: this script, run from Git Bash, registered the bare
+# C:/.../bin/wildcard-perms instead, because Git Bash had converted HOOK_CMD on
+# its way into node. HOOK_VIA_NODE=1 makes the module register `node "$HOOK_CMD"`,
+# built from the same C:/ path it compares with, so on Windows both installers
+# write the same command. A bare registration of THIS checkout is rewritten
+# into that form, not left as "already registered".
 NODE_DIR="$SCRIPT_DIR"
+HOOK_VIA_NODE=0
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     if command -v cygpath >/dev/null 2>&1; then
       NODE_DIR="$(cygpath -m -l "$SCRIPT_DIR")" || NODE_DIR="$SCRIPT_DIR"
     fi
+    HOOK_CMD="$NODE_DIR/bin/wildcard-perms"
+    HOOK_VIA_NODE=1
     ;;
 esac
 
@@ -38,12 +53,16 @@ esac
 mkdir -p "$(dirname "$SETTINGS")"
 
 # ── 1. Register PostToolUse hook ──────────────────────────────────────────────
-HOOK_CMD="$HOOK_CMD" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
+HOOK_CMD="$HOOK_CMD" HOOK_VIA_NODE="$HOOK_VIA_NODE" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
 const hookCmd      = process.env.HOOK_CMD;
+// The command written into settings.json: the bare path, or on Windows (see the
+// uname block at the top) `node "<path>"`, exactly install.ps1's spelling.
+const viaNode      = process.env.HOOK_VIA_NODE === '1';
+const hookCommand  = viaNode ? `node "${hookCmd}"` : hookCmd;
 
 // `catch {}` here meant that ANY read failure fell through to `cfg = {}` and
 // the write below replaced the user's whole settings.json with just this hook.
@@ -101,6 +120,13 @@ cfg.hooks.PostToolUse ??= [];
 // "Bash" + "PowerShell" split is a real shape and collapsing it would blind the
 // hook to one tool. Whether the old path still exists does not block anything:
 // running this installer is the statement of which checkout is the hook.
+//
+// One more, on Windows only (viaNode): this checkout registered as a BARE path
+// is rewritten in place to `node "<path>"`, with its own notice. That bare
+// spelling is exactly what this script used to write from Git Bash, and it
+// makes Windows ask how to open the file on every hook fire, so "already
+// registered" would leave the defect standing. A `node ...` spelling of this
+// checkout, in any casing or slash direction, is left exactly as it is.
 const onWindows = process.platform === 'win32';
 
 // The path a hook command runs, if and only if it runs THIS tool: `node <path>`
@@ -125,8 +151,9 @@ const toolTarget = (command) => {
   return tail.test(text) ? text : null;
 };
 
-// On Windows one path has several spellings: `\` or `/`, /d/repo (Git Bash,
-// which is what this script writes there) or D:/repo (install.ps1), any casing.
+// On Windows one path has several spellings: `\` or `/`, /d/repo (Git Bash's
+// own) or D:/repo (install.ps1, and this script, whose HOOK_CMD reaches node in
+// that form there), any casing.
 const nativePath = (p) => {
   if (!onWindows) return p;
   const text = p.replace(/\\/g, '/');
@@ -149,6 +176,7 @@ for (const entry of cfg.hooks.PostToolUse) {
       hook,
       target,
       current: comparable(target) === current,
+      bare: !/^node\s/i.test(hook.command.trim()),
       matcher: typeof entry.matcher === 'string' ? entry.matcher : '',
     });
   }
@@ -168,10 +196,16 @@ for (const f of found) {
     notices.push(`✓ removed a duplicate wildcard-perms hook (matcher ${JSON.stringify(f.matcher)}): ${f.target}`);
   } else if (!f.current) {
     // In place: the hook keeps its key order and any field beside `command`.
-    f.hook.command = hookCmd;
+    f.hook.command = hookCommand;
     const old = nativePath(f.target);
     const gone = isAbsolute(old) && !existsSync(old) ? ' (the old path no longer exists)' : '';
     notices.push(`✓ wildcard-perms hook repointed from another checkout: ${f.target} -> ${hookCmd}${gone}`);
+  } else if (viaNode && f.bare) {
+    // This checkout, but bare on Windows: in place too, and not called another
+    // checkout, because it is not one.
+    const old = f.hook.command;
+    f.hook.command = hookCommand;
+    notices.push(`✓ wildcard-perms hook now runs through node, because Windows cannot run the bare path: ${old} -> ${hookCommand}`);
   }
 }
 
@@ -189,7 +223,7 @@ if (!found.length || notices.length) {
   if (!found.length) {
     cfg.hooks.PostToolUse.push({
       matcher: 'Bash|PowerShell',
-      hooks: [{ type: 'command', command: hookCmd }],
+      hooks: [{ type: 'command', command: hookCommand }],
     });
   }
   // The bytes as FOUND, not the object we are about to write — by now `cfg`

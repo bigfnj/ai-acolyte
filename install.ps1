@@ -115,7 +115,9 @@ if (-not $cfg["hooks"].Contains("PostToolUse")) {
 # So the scan recognises this TOOL wherever it lives, and an install leaves
 # exactly one registration per matcher, pointing here:
 #   - none found              append a new entry (unchanged behaviour);
-#   - this checkout's found   leave it exactly as it is, bytes included;
+#   - this checkout's found   leave it exactly as it is, bytes included --
+#                             unless it is the bare path, which Windows cannot
+#                             run, and is rewritten to $hookCommand ($respell);
 #   - another checkout's      rewrite that hook's command in place, so its
 #                             entry keeps its matcher, its position and any
 #                             other fields, and say old -> new;
@@ -189,13 +191,23 @@ for ($i = 0; $i -lt $entries.Count; $i++) {
             if ($null -eq $target) { continue }
             $isCurrent = (ConvertTo-WindowsPath $target) -ieq $currentPath
         }
+        # This checkout registered BARE, which is what install.sh used to write
+        # from Git Bash (found 2026-10-13): the C:/.../bin/wildcard-perms that
+        # makes Windows ask how to open the file on every hook fire, the dialog
+        # $hookCommand exists to avoid. It is still this checkout -- never
+        # "another checkout" -- but it is rewritten to $hookCommand below rather
+        # than left as "already registered". A `node ...` spelling of it, any
+        # casing or slash direction, is left exactly as it is.
+        $respell = $isCurrent -and ($command -notmatch '^\s*node\s')
         # "$i/$j" identifies the hook for the rebuild below; indices rather than
         # object identity, which PowerShell's PSObject wrapping makes unreliable.
         $found += [pscustomobject]@{
             id      = "$i/$j"
             hook    = $h
+            command = $command
             target  = $target
             current = $isCurrent
+            respell = $respell
             matcher = "$($entry['matcher'])"
         }
     }
@@ -229,6 +241,10 @@ foreach ($f in $found) {
             }
         } catch { $gone = '' }
         $notices += "[OK] wildcard-perms hook repointed from another checkout: $($f.target) -> $hookCmdNormalized$gone"
+    } elseif ($f.respell) {
+        # In place, like a repoint: same entry, matcher, position and fields.
+        $f.hook["command"] = $hookCommand
+        $notices += "[OK] wildcard-perms hook now runs through node, because Windows cannot run the bare path: $($f.command) -> $hookCommand"
     }
 }
 

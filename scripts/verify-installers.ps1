@@ -435,6 +435,78 @@ if (-not $install) {
             "PostToolUse=$($ptu.Count) kept=$($ptu[0].hooks[0].command)"
         Remove-Box $box
     }
+
+    # 13. This checkout registered as the BARE path: exactly what install.sh used
+    #    to write from Git Bash (found 2026-10-13), and what makes Windows ask how
+    #    to open the file on every hook fire. Rewritten in place to the node form,
+    #    its timeout and its neighbour kept, and reported as this checkout -- the
+    #    old exact-match check called it "already registered" and left it.
+    $bareCurrent = {
+        param($real, $stale)
+        $bare = ($real -replace '^node\s+"?', '') -replace '"$', ''
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json $bare) + ', "timeout": 30 }, { "type": "command", "command": "neighbour-tool" } ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $bareCurrent
+    if (-not $box) {
+        Add-Result 'install: rewrites this checkout''s bare path to node' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        Add-Result 'install: rewrites this checkout''s bare path to node' `
+        ($r.code -eq 0 -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 2 -and $ptu[0].hooks[0].command -eq $box.real `
+                -and $ptu[0].hooks[0].timeout -eq 30 -and $ptu[0].hooks[1].command -eq 'neighbour-tool' `
+                -and $r.output -match 'runs through node' -and $r.output -notmatch 'another checkout') `
+            "PostToolUse=$($ptu.Count) command=$($ptu[0].hooks[0].command)"
+        Remove-Box $box
+    }
+
+    # 14. install.sh run from Git Bash registers the SAME command install.ps1 does,
+    #    byte for byte, so neither installer reads the other's registration as
+    #    stale or rewrites it. Same sandbox, same checkout: install.ps1's command
+    #    comes from Get-RealHookCommand, then a copy of the real install.sh runs
+    #    with HOME pointed at the box. Needs Git for Windows' bash, found from
+    #    `git --exec-path` -- never the first bash on PATH, which can be WSL's --
+    #    and is skipped, not failed, without it.
+    $gitBash = $null
+    try {
+        $gitExec = "$(& git --exec-path 2>$null)".Trim()
+        if ($gitExec) {
+            $gitRoot = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetDirectoryName($gitExec)))
+            $candidate = Join-Path $gitRoot 'bin\bash.exe'
+            if ([System.IO.File]::Exists($candidate)) { $gitBash = $candidate }
+        }
+    } catch { $gitBash = $null }
+    if (-not $gitBash) {
+        Write-Host 'SKIP  install.sh (Git Bash) registers install.ps1''s command: no bash.exe found via git --exec-path'
+    } else {
+        $box = New-Box -Source $install -NoFile
+        $real = Get-RealHookCommand -InstallSource $install -BoxDir $box.dir
+        $null = New-Item -Path (Join-Path $box.dir 'bin') -ItemType Directory -Force
+        $null = New-Item -Path (Join-Path $box.dir 'patterns') -ItemType Directory -Force
+        [System.IO.File]::WriteAllText((Join-Path $box.dir 'bin\wildcard-perms'), "#!/usr/bin/env node`n")
+        [System.IO.File]::Copy((Join-Path $repo 'install.sh'), (Join-Path $box.dir 'install.sh'))
+        [System.IO.File]::Copy((Join-Path $repo 'patterns\starter-pack.json'), (Join-Path $box.dir 'patterns\starter-pack.json'))
+        # Forward slashes: Git Bash converts C:/x to /c/x but drops the
+        # backslashes of C:\x. Restored afterwards, unset if it was unset.
+        $savedHome = [System.Environment]::GetEnvironmentVariable('HOME', 'Process')
+        [System.Environment]::SetEnvironmentVariable('HOME', ($box.dir -replace '\\', '/'), 'Process')
+        try {
+            $null = ('n' | & $gitBash (($box.dir -replace '\\', '/') + '/install.sh') 2>&1)
+            $shCode = $LASTEXITCODE
+        } finally {
+            [System.Environment]::SetEnvironmentVariable('HOME', $savedHome, 'Process')
+        }
+        $sh = $null
+        if ([System.IO.File]::Exists($box.settings)) {
+            $sh = @((Get-Content $box.settings -Raw | ConvertFrom-Json).hooks.PostToolUse)[0].hooks[0].command
+        }
+        Add-Result 'install.sh (Git Bash) registers install.ps1''s command' `
+        ($null -ne $real -and $shCode -eq 0 -and $sh -ceq $real) `
+            "exit=$shCode install.ps1=$real install.sh=$sh"
+        Remove-Box $box
+    }
 }
 
 # ── uninstall.ps1 ─────────────────────────────────────────────────────────────
@@ -461,7 +533,7 @@ if (-not $uninstall) {
     # $real is the full command install.ps1 writes, e.g. `node "C:/.../wildcard-perms"`.
     # ConvertTo-Json quotes and escapes it for embedding, so the fixtures never
     # hand-build that string. $bareOf recovers just the path, which is the spelling
-    # install.sh registers.
+    # install.sh registers on Linux and macOS, and left on Windows before 2026-10-13.
     $bareOf = { param($cmd) ($cmd -replace '^node\s+"?', '') -replace '"$', '' }
 
     # 1. Removes only ours, from among a sibling entry and a separate hook group.
@@ -690,9 +762,9 @@ Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
 # A floor, because without one this harness passes by doing nothing. An empty
 # results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
 # this would go green having verified nothing at all -- which is the failure
-# this whole script exists to prevent, turned on itself. It records 24 cases
-# today (16 until the other-checkout cases landed 2026-10-13, 23 until the
-# sandbox-cleanup case joined them the same day); the floor sits
+# this whole script exists to prevent, turned on itself. It records 26 cases
+# today, 25 where Git for Windows is absent (16 until the other-checkout cases
+# landed 2026-10-13, then 23, 24 with the sandbox-cleanup case); the floor sits
 # below that so adding or reordering a case does not break it, but no
 # plausible breakage leaves more than a handful behind.
 $MinimumCases = 18

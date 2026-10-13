@@ -58,12 +58,31 @@ const CODEX_END_MARKER = '# END permission-wildcarding generated rules';
 // a reviewed `Bash(node --version *)` or `Bash(command -v *)`, which rendered before,
 // is now refused like `Bash(just --version *)`. That asymmetry between the two
 // halves predates this change and is not altered by it.
+//
+// The process and exec wrappers in the last row were added 2026-10-13. MEASURED that
+// day against the previous exporter: a reviewed bare or option-only prefix for each of
+// `sudo`, `doas`, `nohup`, `nice`, `time`, `timeout 5`, `stdbuf -oL`, `watch`, `setsid`,
+// `ionice`, `flock lock`, `busybox`, `nsenter` and `strace` rendered as a valid
+// prefix_rule under `includeReviewed`, because none of them was on either table, and
+// each one runs whatever command follows it. The row also takes the wrappers in the
+// same class that nothing had measured yet (`chroot`, `unshare`, `taskset`, `chrt`,
+// `ltrace`, `valgrind`, `builtin`, `noglob`, `nocorrect`, `pkexec`, `su`, `runuser`,
+// `runas`, `script`, `firejail`, `systemd-run`, `gdb`); EXEC_WRAPPER_GRAMMAR and
+// ALWAYS_BROAD_WRAPPERS, beside wrapperIsBroad, give the reason for each one and say
+// how far a reviewed prefix has to go before it is narrow. `env`, `exec`, `eval`,
+// `command` and `xargs` were already refused bare through the learner's table and are
+// not repeated here; their depth rules live in the same two places. Each root is
+// spelled bare and with `.exe`, as above (`sudo.exe` is a real Windows 11 binary).
 const OWN_SHELL_WRAPPERS = [
   'bash', 'bash.exe', 'cmd', 'cmd.exe', 'command.com', 'dash', 'dash.exe',
   'duckdb', 'duckdb.exe', 'fish', 'fish.exe', 'hyperfine', 'hyperfine.exe',
   'just', 'just.exe', 'ksh', 'ksh.exe', 'make', 'make.exe', 'powershell',
   'powershell.exe', 'pwsh', 'pwsh.exe', 'sh', 'sh.exe', 'wsl', 'wsl.exe',
   'zsh', 'zsh.exe',
+  ...['busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice',
+    'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser',
+    'script', 'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time',
+    'timeout', 'unshare', 'valgrind', 'watch'].flatMap((root) => [root, `${root}.exe`]),
 ];
 // The learner normalizes `.exe` away (src/auto-learn.js normalizeRoot) and this
 // module does not (canonicalRoot keeps the suffix), so each learner root is added in
@@ -330,6 +349,126 @@ function innerCommandPrefix(base, prefix) {
   return prefix.slice(k);
 }
 
+// The process and exec wrappers (added 2026-10-13, see OWN_SHELL_WRAPPERS). Each EXECS
+// the command named after its own options, with no shell in between, so it gets the
+// env/xargs treatment above: a reviewed prefix is exactly as narrow as the command it
+// names, `["timeout", "5", "rm"]` is `["rm"]` under a time limit, `["timeout", "5", "sh"]`
+// is `["sh"]`, and a prefix that stops before naming one (`["timeout", "5"]`, `["nice",
+// "-n", "10"]`, `["stdbuf", "-oL"]`, `["flock", "lock"]`) admits any command at all.
+//
+// Per wrapper: `flags` take no value, `values` take the next token, `fused` matches an
+// option carrying its value in the same token, `operands` counts the fixed positional
+// arguments that come before the command (timeout's DURATION, flock's lock file,
+// chroot's NEWROOT, taskset's mask, chrt's priority). The option lists are each tool's
+// own (GNU coreutils for timeout, nice, nohup, stdbuf and chroot; util-linux for setsid,
+// ionice, flock, nsenter, unshare, taskset and chrt; GNU time; strace(1), ltrace(1),
+// valgrind(1); bash/zsh for builtin, noglob, nocorrect), cross-checked against the
+// per-wrapper option tables in Claude Code 2.1.296's binary, read the same day, where
+// one exists. An option a table does not know returns null, which is broad: guessing
+// its arity could take the command for a value or a value for the command.
+//
+// `command` is an exec wrapper too (`command -p` searches a default PATH), except that
+// `-v` and `-V` turn it into a lookup that runs nothing; that case is `LOOKUP` and narrow.
+// `exec` replaces the shell with the command it names (`-a NAME`, `-c`, `-l`). Both were
+// refused bare through the learner's table already, and `["command", "sh"]` and
+// `["exec", "sh"]` rendered until this table existed, because a two-token prefix of a
+// wrapper with no grammar of its own was "narrower".
+const LOOKUP = Symbol('lookup');
+const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
+  timeout: { flags: ['--foreground', '--preserve-status', '--verbose', '-v'],
+    values: ['-k', '-s', '--kill-after', '--signal'], fused: /^(?:-[ks].|--(?:kill-after|signal)=)/, operands: 1 },
+  nice: { values: ['-n', '--adjustment'], fused: /^(?:-n.|--adjustment=|-\d+$)/ },
+  nohup: {},
+  stdbuf: { values: ['-i', '-o', '-e', '--input', '--output', '--error'], fused: /^(?:-[ioe].|--(?:input|output|error)=)/ },
+  time: { flags: ['-p', '-a', '-q', '-v', '--portability', '--append', '--quiet', '--verbose'],
+    values: ['-f', '-o', '--format', '--output'], fused: /^(?:-[fo].|--(?:format|output)=)/ },
+  setsid: { flags: ['-c', '-f', '-w', '--ctty', '--fork', '--wait'], flagPattern: /^-[cfw]+$/ },
+  ionice: { flags: ['-t', '--ignore'], values: ['-c', '-n', '-p', '-P', '-u', '--class', '--classdata', '--pid', '--pgid', '--uid'],
+    fused: /^(?:-[cnpPu].|--(?:class|classdata|pid|pgid|uid)=)/ },
+  // flock's `-c`/`--command` (a shell command line, the `bash -c` case) is deliberately
+  // not listed: before the lock file it is an unknown option, and after it the
+  // leading-dash rule in execWrapperInner refuses it; both are broad.
+  flock: { flags: ['-s', '-x', '-e', '-u', '-n', '-o', '-F', '--shared', '--exclusive', '--unlock', '--nonblock',
+    '--nb', '--close', '--no-fork', '--verbose'], flagPattern: /^-[sxeunoF]+$/,
+  values: ['-w', '-E', '--timeout', '--wait', '--conflict-exit-code'],
+  fused: /^(?:-[wE].|--(?:timeout|wait|conflict-exit-code)=)/, operands: 1 },
+  // A BusyBox applet name is the command; `["busybox", "sh"]` is `["sh"]` by the recursion.
+  busybox: {},
+  nsenter: { flags: ['--all', '--no-fork', '--preserve-credentials', '--follow-context'],
+    flagPattern: /^(?:-[muinpUCTrwaFZ]+|--(?:mount|uts|ipc|net|pid|user|cgroup|time|root|wd)(?:=.*)?)$/,
+    values: ['-t', '-S', '-G', '--target', '--setuid', '--setgid'], fused: /^(?:-[tSG].|--(?:target|setuid|setgid)=)/ },
+  unshare: { values: ['-R', '-w', '-S', '-G', '--root', '--wd', '--setuid', '--setgid', '--propagation',
+    '--setgroups', '--monotonic', '--boottime'],
+  flagPattern: /^(?:-[muinpUCTfrc]+|--(?:mount|uts|ipc|net|pid|user|cgroup|time|fork|kill-child|mount-proc|map-root-user|map-current-user|map-auto|map-users|map-groups|keep-caps|propagation|setgroups|monotonic|boottime|root|wd|setuid|setgid)(?:=.*)?)$/ },
+  chroot: { flags: ['--skip-chdir'], values: ['--userspec', '--groups'], fused: /^--(?:userspec|groups)=/, operands: 1 },
+  taskset: { flags: ['-a', '-c', '-p', '--all-tasks', '--cpu-list', '--pid'], flagPattern: /^-[acp]+$/, operands: 1 },
+  chrt: { flagPattern: /^(?:-[abdefimoprRv]+|--(?:all-tasks|batch|deadline|ext|fifo|idle|max|other|pid|reset-on-fork|rr|verbose))$/,
+    values: ['-T', '-P', '-D', '--sched-runtime', '--sched-period', '--sched-deadline'],
+    fused: /^(?:-[TPD].|--sched-(?:runtime|period|deadline)=)/, operands: 1 },
+  strace: { flagPattern: /^-[cCdDfFhiknqrtTvVwxyzZ]+$/,
+    values: ['-e', '-o', '-p', '-s', '-E', '-P', '-S', '-a', '-b', '-I', '-u', '-X', '-O', '-U', '--output', '--trace',
+      '--expr', '--attach', '--string-limit', '--env', '--trace-path', '--columns', '--user'],
+    fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/ },
+  ltrace: { flagPattern: /^-[bcCfhiLrSStTV]+$/,
+    values: ['-a', '-A', '-e', '-l', '-n', '-o', '-p', '-s', '-u', '-x', '-D', '-F', '-w', '--align', '--config',
+      '--indent', '--library', '--output', '--where'],
+    fused: /^(?:-[aAelnopsuxDFw].|--[a-z-]+=)/ },
+  valgrind: { flagPattern: /^(?:-[vqd]+|--[a-z0-9-]+(?:=.*)?)$/ },
+  builtin: {},
+  noglob: {},
+  nocorrect: {},
+  command: { flagPattern: /^-p+$/, lookup: /^-p*[vV][pvV]*$/ },
+  exec: { flagPattern: /^-[cl]+$/, values: ['-a'], fused: /^-a./ },
+}));
+
+// Wrappers that are broad at ANY depth, so naming a command after them narrows nothing:
+//   * watch: joins its arguments and runs them with `sh -c` (procps watch(1); `-x`
+//     execs instead, and is not modelled, so a reviewed `["watch", "ls"]` admits `watch
+//     ls '; rm -rf x'`). Claude Code agrees this one cannot be checked: its docs list
+//     `watch` among the exec wrappers a prefix rule never auto-approves.
+//   * eval: concatenates its arguments and evaluates them as shell code.
+//   * script: runs `-c COMMAND` through a shell, and with no `-c` starts one.
+//   * sudo, doas, pkexec, su, runuser, runas: they change the identity the command runs
+//     as, so `["sudo", "rm"]` is not as narrow as `["rm"]`: it is a grant to delete as
+//     root what a reviewed `["rm"]` could only delete as the user. `su -c` and `runuser
+//     -c` take a shell command line, `sudo -s`/`-i` start a shell, and `runas` takes the
+//     program as one command-line string.
+//   * firejail: older releases ran the program through `/bin/sh -c` unless
+//     `--shell=none` was given, so its arguments can be shell text.
+//   * systemd-run: many options take values (`-p`, `-E`, `--unit`, `--uid`) and some set
+//     the identity, and this module keeps no table of them, so the named command cannot be
+//     located reliably. Refused rather than guessed.
+//   * gdb: `-ex` and `-x` run debugger commands, which include `shell` and `python`, so
+//     `gdb --args prog` is an interpreter around prog rather than prog.
+const ALWAYS_BROAD_WRAPPERS = new Set([
+  'doas', 'eval', 'firejail', 'gdb', 'pkexec', 'runas', 'runuser', 'script', 'su', 'sudo', 'systemd-run', 'watch',
+]);
+
+// The prefix after an exec wrapper's options and operands: possibly empty, `LOOKUP` for
+// `command -v`, or null when an option is unknown or the "command" is an option.
+function execWrapperInner(base, prefix) {
+  const grammar = EXEC_WRAPPER_GRAMMAR.get(base);
+  const flags = new Set(grammar.flags || []);
+  const values = new Set(grammar.values || []);
+  let k = 1;
+  for (; k < prefix.length; k += 1) {
+    const token = String(prefix[k]);
+    if (token === '--') { k += 1; break; }
+    if (!token.startsWith('-') || token === '-') break;
+    if (grammar.lookup?.test(token)) return LOOKUP;
+    if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
+    if (values.has(token)) { k += 1; continue; }
+    if (grammar.fused?.test(token)) continue;
+    return null;
+  }
+  const inner = prefix.slice(k + (grammar.operands || 0));
+  // A "command" that starts with `-` is an option this walk did not reach, not a
+  // program. flock is the case that needs it: its `-c` comes AFTER the lock file
+  // (`flock lock -c "cmd"`, util-linux flock(1)), so the operand count alone would hand
+  // `["-c"]` on as the command and judge it narrow.
+  return inner.length && String(inner[0]).startsWith('-') ? null : inner;
+}
+
 function wrapperIsBroad(prefix) {
   const root = canonicalRoot(prefix?.[0]);
   if (!SHELL_WRAPPERS.has(root)) return false;
@@ -344,6 +483,14 @@ function wrapperIsBroad(prefix) {
   // ends before naming a command (`["xargs", "-0"]`, `["env", "FOO=1"]`) runs anything.
   if (base === 'env' || base === 'xargs') {
     const inner = innerCommandPrefix(base, prefix);
+    return inner === null || inner.length === 0 || wrapperIsBroad(inner);
+  }
+  // The process and exec wrappers, by the same rule (EXEC_WRAPPER_GRAMMAR above), and the
+  // ones no named command can narrow (ALWAYS_BROAD_WRAPPERS).
+  if (ALWAYS_BROAD_WRAPPERS.has(base)) return true;
+  if (EXEC_WRAPPER_GRAMMAR.has(base)) {
+    const inner = execWrapperInner(base, prefix);
+    if (inner === LOOKUP) return false;
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
   }
   const second = String(prefix[1]).toLowerCase();

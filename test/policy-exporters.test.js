@@ -259,6 +259,115 @@ test('env and xargs are as narrow as the command they name, and broad when they 
   }
 });
 
+// Process and exec wrappers: each runs whatever command follows its own options.
+// MEASURED 2026-10-13 against the previous exporter (fa9db35), with a 117-prefix probe of
+// synthetic prefixes: every bare root below, and every option-only tail further down,
+// rendered as a valid reviewed prefix_rule; 80 of the 117 rendered then and are refused
+// now, and none went the other way. Kept as a LITERAL so a root dropped from the
+// exporter's own row fails here by name.
+const EXEC_WRAPPER_ROOTS = [
+  'busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice', 'ltrace',
+  'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser', 'script',
+  'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time', 'timeout',
+  'unshare', 'valgrind', 'watch',
+];
+
+test('every process and exec wrapper is refused as a bare reviewed prefix, in both spellings', () => {
+  for (const root of EXEC_WRAPPER_ROOTS) {
+    for (const spelling of [root, `${root}.exe`]) {
+      // MUTATION: delete the `...[...].flatMap(...)` row from OWN_SHELL_WRAPPERS
+      // (src/policy-exporters.js). `["busybox"]` renders a one-token rule and this fails;
+      // so do all 31 roots. Confirmed 2026-10-13.
+      assert.equal(codexRuleCount([spelling]), 0, `${JSON.stringify([spelling])} runs whatever follows it`);
+    }
+  }
+});
+
+test('an exec wrapper prefix that stops before naming a command is broad', () => {
+  // The option-only tails: each ends inside the wrapper's own syntax, so the next token
+  // can be any program at all.
+  for (const prefix of [
+    ['timeout', '5'], ['timeout', '-k', '2', '10s'], ['timeout', '--signal=KILL', '5'], ['timeout', '-k'],
+    ['nice', '-n', '10'], ['nice', '-5'], ['stdbuf', '-oL'], ['stdbuf', '-o', 'L'], ['time', '-p'],
+    ['setsid', '-f'], ['ionice', '-c', '3'], ['flock', 'lock'], ['flock', '-n', 'lock'],
+    ['nsenter', '-t', '1', '-m'], ['strace', '-f', '-e', 'trace=open'], ['ltrace', '-c'],
+    ['chroot', '/srv/x'], ['unshare', '-r'], ['taskset', '0x1'], ['chrt', '-f', '10'],
+    ['valgrind', '--tool=memcheck'], ['exec', '-a', 'x'], ['command', '-p'], ['nohup', '--'],
+  ]) {
+    // MUTATION: drop `+ (grammar.operands || 0)` in execWrapperInner. `["timeout", "5"]`
+    // reads `5` as the command and renders. Confirmed 2026-10-13.
+    // MUTATION: delete the EXEC_WRAPPER_GRAMMAR branch in wrapperIsBroad. Every row here
+    // falls to "two tokens, so narrower". Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names no command`);
+  }
+});
+
+test('an exec wrapper is exactly as narrow as the command it names', () => {
+  // Broad: the command it names is itself broad, an option the grammar does not know,
+  // or flock's `-c`, which comes after the lock file and takes a shell command line.
+  for (const prefix of [
+    ['timeout', '5', 'sh'], ['nohup', 'bash', '-c'], ['busybox', 'sh'], ['builtin', 'eval'],
+    ['exec', 'sh'], ['command', 'sh'], ['nice', 'python', '-c'], ['setsid', 'env', 'FOO=1'],
+    ['strace', '-f', 'xargs', 'sh'], ['noglob', 'xargs', '-0'], ['nohup', 'timeout', '5'],
+    ['timeout', '--bogus', '5', 'rm'], ['nice', '--bogus', 'rm'], ['ionice', '-z', 'rm'],
+    ['flock', 'lock', '-c'], ['flock', 'lock', '--command'], ['flock', '--command=x', 'lock'],
+  ]) {
+    // MUTATION: drop `|| wrapperIsBroad(inner)` from the new branch. `["timeout", "5",
+    // "sh"]` renders. Confirmed 2026-10-13.
+    // MUTATION: make an unknown option `continue` instead of returning null.
+    // `["timeout", "--bogus", "5", "rm"]` renders. Confirmed 2026-10-13.
+    // MUTATION: drop the leading-dash refusal at the end of execWrapperInner.
+    // `["flock", "lock", "-c"]` renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} is as broad as what it runs`);
+  }
+  // Controls: a concrete command after the wrapper's options renders, the same decision
+  // 30f92a4 made for xargs (it execs without a shell, so it is no broader than the
+  // command), and `command -v` is a lookup that runs nothing.
+  for (const prefix of [
+    ['timeout', '5', 'rg'], ['timeout', '-k', '2', '10s', 'make', 'test'], ['timeout', '--', '5', 'rg'],
+    ['nice', '-n', '10', 'rg'], ['nohup', 'rg'], ['stdbuf', '-oL', 'grep'], ['time', '-p', 'rg'],
+    ['setsid', 'rg'], ['ionice', '-c', '3', 'rg'], ['flock', '/tmp/l', 'rg'], ['busybox', 'ls'],
+    ['nsenter', '-t', '1', '-m', 'ls'], ['strace', '-f', 'ls'], ['ltrace', '-c', 'ls'],
+    ['chroot', '/srv/x', 'ls'], ['unshare', '-r', 'ls'], ['taskset', '0x1', 'ls'],
+    ['chrt', '-f', '10', 'ls'], ['valgrind', '--tool=memcheck', 'ls'], ['builtin', 'cd'],
+    ['noglob', 'ls'], ['nocorrect', 'ls'], ['command', 'rg'], ['exec', 'rg'],
+    ['command', '-v'], ['command', '-v', 'rg'],
+  ]) {
+    // MUTATION: delete the `grammar.lookup` line in execWrapperInner. `-v` is then an
+    // unknown option, `["command", "-v"]` is refused and this fails. Confirmed
+    // 2026-10-13. (Dropping only the `inner === LOOKUP` return in wrapperIsBroad is an
+    // equivalent mutant: a Symbol has no length and no root, so it falls through to
+    // narrow anyway. The explicit return is kept so that reads as intended.)
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
+  }
+});
+
+test('identity-changing and shell-text wrappers are broad at any depth', () => {
+  // A named command does not narrow these: watch and eval hand their arguments to a
+  // shell, script and firejail can, sudo-like wrappers change who the command runs as,
+  // and gdb and systemd-run carry options this module cannot bound.
+  for (const prefix of [
+    ['watch', 'ls'], ['sudo', 'rm'], ['sudo', '-u', 'root', 'ls'], ['sudo.exe', 'ls'], ['doas', 'ls'],
+    ['pkexec', 'ls'], ['su', '-c'], ['runuser', '-u', 'x', 'ls'], ['runas', '/user:x', 'cmd'],
+    ['eval', 'x'], ['script', '-q'], ['firejail', 'ls'], ['systemd-run', 'ls'], ['gdb', '--args', 'x'],
+  ]) {
+    // MUTATION: delete the ALWAYS_BROAD_WRAPPERS check in wrapperIsBroad. `["watch",
+    // "ls"]` renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+});
+
+test('the Claude side refuses the same wrappers at any depth, by membership', () => {
+  // claudePermissionIsSafe refuses a wrapper root at any depth (64b4eaa), so the new
+  // roots are refused there too. The learner strips the wrappers Claude Code strips, so
+  // a rule like these only reaches the exporter from a shape Claude Code does not strip.
+  for (const permission of ['Bash(timeout *)', 'Bash(nohup rg *)', 'Bash(sudo ls *)', 'Bash(watch *)',
+    'Bash(nice -n *)', 'PowerShell(sudo *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
+});
+
 test('every reviewed cmd prefix is broad: the code switch may follow other switches', () => {
   // cmd.exe takes its command from the first /c or /k after any other switches (/r is
   // an old alias of /c). Checking the second token alone let these three render.

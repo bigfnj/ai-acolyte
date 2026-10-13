@@ -30,9 +30,18 @@ pass=0
 # Captured BEFORE the first CLI invocation, because the very first hook call is what
 # damages it. The fixed-point key is stamped with a hash of the CLI's own code files,
 # so running this script from a git worktree mints a key for the WORKTREE's src/ and
-# writes it into the real ~/.claude/wildcarding/fixed-point.json. The installed hook
-# then misses on every tool call until something rewrites it. Observed twice on
+# writes it into the real ~/.claude/wildcarding/fixed-point.json. Observed twice on
 # 2026-09-24 during a worktree-based change.
+#
+# What that costs is ONE miss, not a miss on every tool call, which is what this said
+# until 2026-10-13. The installed hook's next call misses on the foreign key, finds
+# settings.json already a fixed point, and writes its OWN key (bin/wildcard-perms
+# `run`: `if (!pending) cache.writeFixedPoint(...)`, there since cd1f50c, before this
+# comment was written), so every call after that hits. Measured 2026-10-13 in a temp
+# HOME with a copy of bin/ and src/ given its own code stamp: the copy's hook replaced
+# the key, the checkout's next call rewrote it back, and its next three calls left the
+# file untouched. The restore below is still unconditional, because the contract is
+# the state the run found, and it saves even that one miss.
 #
 # An earlier version read this just before the cold-cache section, which is AFTER the
 # warm hook run — so it faithfully restored an already-replaced key and its own
@@ -330,9 +339,10 @@ esac
 # moment this script is run from anywhere but the checkout the live hook points at.
 # The key is stamped with a hash of the CLI's own code files, so a run from a git
 # worktree mints a key for the WORKTREE's src/ and leaves it in the real
-# ~/.claude/wildcarding/fixed-point.json. The installed hook then misses on every
-# tool call until something rewrites it. Observed twice on 2026-09-24, a
-# worktree-stamped key replacing the installed checkout's.
+# ~/.claude/wildcarding/fixed-point.json, so the installed hook misses once and
+# re-earns its own key on that miss (see the note where FP_ORIGINAL is captured).
+# Observed twice on 2026-09-24, a worktree-stamped key replacing the installed
+# checkout's.
 #
 # Restoring the saved bytes always costs nothing when they are already correct and
 # fixes the case where they are not. The cold-run assertions above have already read

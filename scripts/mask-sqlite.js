@@ -27,13 +27,13 @@
 // run the suite through this preload as well as normally. The two runs should differ
 // only in the SKIP count.
 //
-// Reference numbers on 2026-09-25, for comparison rather than as an assertion. Measured,
-// not carried over from an earlier run of a smaller suite:
-//   plain      731 tests, 729 pass, 0 fail, 2 skipped
-//   masked     731 tests, 724 pass, 0 fail, 7 skipped
-// and on 2026-10-13, after the archived-Codex-history change:
-//   plain      1132 tests, 1130 pass, 0 fail, 2 skipped
-//   masked     1132 tests, 1122 pass, 0 fail, 10 skipped
+// What to compare, run against run on the same commit: `tests` is the same number in
+// both, `fail` is 0 in both, and the masked run's `skipped` is higher by the number of
+// tests that skip when node:sqlite is missing, with `pass` lower by the same amount.
+// No reference counts are kept here, because every commit that adds a test moves them.
+// The dated pairs that used to be here went stale within a day: "1132 tests, 10
+// skipped" masked on 2026-10-13 read 1240 tests and a different skip count by that
+// evening. Measure both runs on the branch being judged.
 //
 // A test that FAILS under the mask rather than skipping is encoding the author's
 // runtime, which is the whole thing this file exists to surface.

@@ -107,7 +107,9 @@ test('malformed scope scalars hold installed instructions while valid non-global
     assert.equal(status.complete, false, `WITNESS malformed scalar holds installed gates: ${scope}`);
     assert.equal(status.compilationState, 'unreadable');
     assert.equal(status.canEnable, false);
-    assert.ok(status.diagnostics.some(item => item.code === 'invalid-scope' && item.line === 2));
+    // The scope is on the file's second line: 0-based line 1 since 2026-10-13, the
+    // convention of the merged array (the merged-array test below says why).
+    assert.ok(status.diagnostics.some(item => item.code === 'invalid-scope' && item.line === 1));
     assert.throws(() => api.refreshNativeCodexGates(box.options), /retained.*unreadable/);
     assert.deepEqual(fs.readFileSync(box.base), installed);
   }
@@ -129,6 +131,50 @@ test('malformed scope scalars hold installed instructions while valid non-global
   assert.equal(result.on, true);
   assert.equal(result.count, 0);
   assert.equal(fs.readFileSync(box.base, 'utf8').includes('Keep this gate'), false);
+});
+
+// inspectNativeCodexGates merges two producers into one `diagnostics` array: the
+// selected-memory reader (src/codex-memory.js), whose `line` is 0-based because it is
+// the VS Code Range line codexMemoryLint publishes, and this module's gate checks, which
+// numbered from 1 until 2026-10-13. One array, two conventions: a consumer rendering the
+// merged list would put every gate error one line low. Normalised to 0-based at the
+// point gate diagnostics enter the array; a human-facing renderer adds 1, as
+// vscode-extension/codexFeaturesUi.js Inspect already does for the reader's lines.
+test('merged native-gate diagnostics share one line convention: 0-based, naming the offending line', (t) => {
+  const box = fixture(t);
+  const memory = '---\nscope: "global\n---\nSee rollout_summaries/missing.md for context.\n<!-- gate -->\n- x\n<!-- /gate -->\n';
+  const files = {
+    'MEMORY.md': memory,
+    'rollout_summaries/nested.md': '---\nscope: global\n---\nintro\n<!-- gate -->\na\n<!-- gate -->\nb\n<!-- /gate -->\n',
+    'rollout_summaries/unpaired.md': '---\nscope: global\n---\nintro\n<!-- /gate -->\n',
+    'rollout_summaries/unclosed.md': '---\nscope: global\nno closing fence\n',
+    // CRLF must not change which line is named.
+    'rollout_summaries/crlf.md': '---\r\nscope: [global\r\n---\r\n',
+  };
+  for (const [relative, text] of Object.entries(files)) box.write(relative, text);
+  const status = api.inspectNativeCodexGates(box.options);
+  // What each code must point at, as text on the 0-based line it names.
+  const marker = {
+    'missing-reference': 'rollout_summaries/missing.md', 'invalid-scope': 'scope:',
+    'nested-gate': '<!-- gate -->', 'unpaired-gate': '<!-- /gate -->', 'unclosed-frontmatter': '---',
+  };
+  const seen = new Set();
+  for (const item of status.diagnostics) {
+    if (item.line === undefined) continue; // storage failures carry no line
+    seen.add(item.code);
+    const lines = fs.readFileSync(item.path, 'utf8').split(/\r?\n/);
+    assert.ok(Number.isSafeInteger(item.line) && item.line >= 0 && item.line < lines.length,
+      `${item.code} line ${item.line} is a 0-based index into ${item.relativePath}`);
+    // MUTATION: push `line` unchanged in gatesFromFile's warn (the old 1-based value).
+    // invalid-scope then names the line after `scope:` and this fails. Confirmed 2026-10-13.
+    assert.ok(lines[item.line].includes(marker[item.code]),
+      `${item.code} in ${item.relativePath} names line ${item.line}: ${JSON.stringify(lines[item.line])}`);
+  }
+  // Both producers really are in the one array, or the check above proves nothing.
+  assert.ok(seen.has('missing-reference'), 'the memory reader contributed a line-bearing diagnostic');
+  for (const code of ['invalid-scope', 'nested-gate', 'unpaired-gate', 'unclosed-frontmatter']) {
+    assert.ok(seen.has(code), `the gate checks contributed ${code}`);
+  }
 });
 
 test('comment-only metadata and separated scope comments preserve an explicit global annotation', (t) => {

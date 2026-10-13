@@ -27,7 +27,8 @@ function positiveInteger(value, fallback, name, minimum = 1) {
 
 // `line` is 0-based: it is the VS Code Range line codexMemoryLint publishes, which
 // otherwise pins every Problem to line 0. Storage failures pass none and keep
-// their old shape. codex-memory-gates numbers its own diagnostics from 1.
+// their old shape. codex-memory-gates merges its own diagnostics into the same array
+// and converts its 1-based row numbers to this convention (2026-10-13).
 function addDiagnostic(result, code, relativePath, message, severity = 'warning', line) {
   const diagnostic = {
     code, severity, relativePath,

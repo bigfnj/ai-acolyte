@@ -88,9 +88,18 @@ function scopeScalar(value) {
   return literal;
 }
 
+// `diagnostics` is the array inspectNativeCodexGates merges with the selected-memory
+// reader's (src/codex-memory.js), whose `line` is 0-based: the VS Code Range line that
+// vscode-extension/codexMemoryLint.js publishes, which a human-facing renderer turns
+// into file:line by adding 1 (codexFeaturesUi.js Inspect). This module counts rows from
+// 1 (row.number), and until 2026-10-13 pushed that count as `line`, so one merged array
+// carried two conventions and a consumer rendering it would name the row below every
+// gate error. warn is the one place gate diagnostics enter the array, so it converts
+// there: callers pass the 1-based row number (or nothing, meaning the first line) and
+// the array holds 0-based lines only.
 function gatesFromFile(file, text, diagnostics) {
-  const rows = lines(text), warn = (code, message, line = 1) => diagnostics.push({ code, severity: 'error', path: file.path,
-    relativePath: file.relativePath, line, message });
+  const rows = lines(text), warn = (code, message, row = 1) => diagnostics.push({ code, severity: 'error', path: file.path,
+    relativePath: file.relativePath, line: row - 1, message });
   let start = 0;
   if (rows[0]) rows[0].text = rows[0].text.replace(/^\uFEFF/, '');
   while (start < rows.length && !rows[start].text.trim()) start++;

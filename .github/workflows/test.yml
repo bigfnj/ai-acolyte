@@ -33,6 +33,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         node: ["20", "22"]
+    env:
+      # The Codex CLI the contract tests run against, pinned (2026-10-13).
+      # scripts/check-codex-version.js refuses a pin that is not a recorded
+      # tested version, so bumping this line without new evidence in
+      # docs/codex-compatibility.md and src/codex-version.js fails the job.
+      CODEX_VERSION: "0.161.0"
     steps:
       - uses: actions/checkout@v5
 
@@ -40,11 +46,42 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      # CODEX ON THE NODE 22 LEGS ONLY (2026-10-13). test/codex-contract.test.js
+      # and test/codex-guidance-matrix.test.js ask the real `codex execpolicy
+      # check` -- the local rule checker, no provider and no auth -- and skipped
+      # here for want of a binary, so CI never asked Codex anything. The npm
+      # package is a launcher plus a per-platform optional dependency
+      # (@openai/codex-linux-x64 / -win32-x64 at the same version), which npm
+      # resolves on both runners; on Windows the global install is a .cmd shim,
+      # the exact shape src/exec-resolve.js exists to launch.
+      #
+      # The Node 20 legs stay WITHOUT Codex on purpose: they exist to catch the
+      # node:sqlite asymmetry, and they keep proving that the suite still passes,
+      # loudly skipping, on a machine that has no Codex at all.
+      #
+      # This is a dependency install, so the "no install step" note below still
+      # holds for the project itself: it has no dependencies of its own.
+      - name: Install pinned Codex CLI
+        if: matrix.node == '22'
+        run: npm install --global @openai/codex@${{ env.CODEX_VERSION }}
+
+      # Fails loudly unless the binary the PRODUCT would launch (same resolver
+      # the tests use) prints exactly the pinned version.
+      - name: Verify the codex the tests will launch
+        if: matrix.node == '22'
+        run: node scripts/check-codex-version.js --expect ${{ env.CODEX_VERSION }}
+
       # No install step on purpose: this project has no runtime dependencies and
       # no devDependencies, so `npm ci` would fail for want of a lockfile. If a
       # dependency is ever added, this is the line that has to change.
+      #
+      # ACOLYTE_REQUIRE_CODEX turns the Codex tests' skip into a FAILURE on the
+      # legs that installed it, so a broken install or resolver cannot quietly
+      # put them back to skipping while the job stays green. Empty on Node 20.
       - name: Test
         run: npm test
+        env:
+          ACOLYTE_REQUIRE_CODEX: ${{ matrix.node == '22' && env.CODEX_VERSION || '' }}
 
       # The pack must stay closed under the Bash -> PowerShell mirroring rule.
       # `npm test` already asserts this, but running the reporter surfaces WHAT

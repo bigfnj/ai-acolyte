@@ -38,6 +38,12 @@ scripts/check-line-refs.js text eol=lf
 scripts/check-codex-runtime.js text eol=lf
 scripts/check-codex-shared-runtime.js text eol=lf
 scripts/check-codex-prune-runtime.js text eol=lf
+# Three shebang'd scripts added 2026-10-13 (Codex version window and CI pin, wrapper
+# matrix, code-mode history), authored LF and kept that way. They are run with `node`
+# explicitly everywhere they are documented, so this is hygiene, not a fix.
+scripts/check-codex-version.js text eol=lf
+scripts/check-codex-wrapper-runtime.js text eol=lf
+scripts/check-codex-code-mode-runtime.js text eol=lf
 scripts/drive-installed.js text eol=lf
 scripts/drive-vscode.js text eol=lf
 scripts/vscode-acceptance/renderer.js text eol=lf

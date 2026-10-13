@@ -13,7 +13,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
-const { createRuntimeContext, runtimeCase, assertAllowed, rolloutFor } = require('./check-codex-runtime');
+const { createRuntimeContext, runtimeCase, assertAllowed, rolloutFor, runtimeShellTool } = require('./check-codex-runtime');
 
 const BOUNDARY = 'Real Codex exec with the staged setCodexHook configuration and staged Stop callback; no editor, synthetic history, provider inference, credentials or persisted hook-trust changes. Scripted loopback responder requests inspected read-only git commands in an isolated empty repository.';
 const ENV_KEYS = ['HOME', 'USERPROFILE', 'CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
@@ -122,9 +122,13 @@ async function main() {
             assert.equal(req.headers.authorization, undefined); assert.equal(req.headers['api-key'], undefined);
             const body = JSON.parse(Buffer.concat(chunks)); evidence.requests++;
             assert.ok(evidence.requests <= (tool ? 2 : 1), 'no hook-triggered tool or model loop');
-            assert.ok(body.tools.some((item) => item.name === 'shell_command'));
+            // Catalog-selected, as in check-codex-runtime.js: 0.161.0 offers only
+            // exec_command where 0.145.0 offered shell_command (2026-10-13).
+            evidence.shellTool ||= runtimeShellTool(body.tools);
+            assert.ok(evidence.shellTool, 'runtime exposed neither shell_command nor exec_command');
+            const shellArgs = evidence.shellTool === 'shell_command' ? { command, workdir: workspace } : { cmd: command, workdir: workspace };
             const item = tool && evidence.requests === 1
-              ? { id: 'fc_stop_fixture', type: 'function_call', name: 'shell_command', call_id: 'call_stop_fixture', arguments: JSON.stringify({ command, workdir: workspace }) }
+              ? { id: 'fc_stop_fixture', type: 'function_call', name: evidence.shellTool, call_id: 'call_stop_fixture', arguments: JSON.stringify(shellArgs) }
               : { id: 'msg_stop_fixture', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Isolated Stop fixture complete.', annotations: [] }] };
             const id = 'response_stop_fixture_' + evidence.requests;
             res.writeHead(200, { 'Content-Type': 'text/event-stream' });

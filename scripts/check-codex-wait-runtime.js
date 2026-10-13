@@ -26,7 +26,14 @@ async function run(name, exitCode) {
   const dir = path.join(root, name), home = path.join(dir, 'home'), codexHome = path.join(home, '.codex'), workspace = path.join(dir, 'workspace');
   for (const target of [codexHome, workspace]) fs.mkdirSync(target, { recursive: true });
   const script = path.join(workspace, 'delay.cjs');
-  fs.writeFileSync(script, `setTimeout(() => { console.log('acolyte-wait-completion-witness'); process.exit(${exitCode}); }, 3500);\n`);
+  // 12 s, not the original 3.5 s (2026-10-13). Codex 0.161.0 on Windows clamps
+  // exec_command's yield_time_ms to at least 10000 ms ("Effective range on
+  // Windows is 10000-30000 ms" in its own tool description), so a 3.5 s process
+  // finished inside the first call, no write_stdin ever happened, and the
+  // separate-wait witness failed on harness drift rather than on the parser.
+  // 0.145.0 honoured the 1000 ms yield; 12 s with 5 s polls stays inside the
+  // five-poll budget on both.
+  fs.writeFileSync(script, `setTimeout(() => { console.log('acolyte-wait-completion-witness'); process.exit(${exitCode}); }, 12000);\n`);
   const childEnv = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome };
   for (const key of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','OPENAI_BASE_URL','OPENAI_ORG_ID','OPENAI_ORGANIZATION','OPENAI_PROJECT_ID','AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT']) delete childEnv[key];
   const observed = { name, exitCode, requests: 0, approvals: 0, calls: [], toolResults: [], commandEvents: [] };
@@ -60,7 +67,7 @@ async function run(name, exitCode) {
           const text = typeof latest.output === 'string' ? latest.output : JSON.stringify(latest.output);
           const session = /Process running with session ID\s+(\d+)/i.exec(text);
           if (session) {
-            item = { type: 'function_call', name: 'write_stdin', call_id: `call_wait_${observed.requests}`, arguments: JSON.stringify({ session_id: Number(session[1]), chars: '', yield_time_ms: 1000, max_output_tokens: 200 }) };
+            item = { type: 'function_call', name: 'write_stdin', call_id: `call_wait_${observed.requests}`, arguments: JSON.stringify({ session_id: Number(session[1]), chars: '', yield_time_ms: 5000, max_output_tokens: 200 }) };
           } else {
             assert.match(text, /Process exited with code|Exit code:/i, 'completed result carries an authoritative exit status');
             assert.ok(observed.toolResults.some((result) => String(result.output).includes('acolyte-wait-completion-witness')),

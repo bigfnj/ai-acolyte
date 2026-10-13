@@ -178,7 +178,14 @@ async function runtimeCase(context, name, enabled, useMemories) {
     observed.inputSha256 = sha(requestText);
     observed.inputBytes = Buffer.byteLength(requestText);
     observed.witnesses = Object.fromEntries(Object.entries(witnesses).map(([key, value]) => [key, requestText.includes(value)]));
-    observed.memoryRootLoaded = requestText.replace(/\\/g, '/').includes(path.join(codexHome, 'memories').replace(/\\/g, '/'));
+    // Either spelling of the same directory. os.tmpdir() can hand back an 8.3
+    // short path (C:\Users\ABCDEF~1\...) and Codex 0.161.0 canonicalizes to the
+    // long one before injecting it, so the literal comparison 0.145.0 satisfied
+    // failed on 0.161.0 with the summary itself loaded (2026-10-13): harness
+    // drift, not a memory-loading result. The witness check above is unchanged.
+    const memoryRoots = [path.join(codexHome, 'memories'), path.join(fs.realpathSync.native(codexHome), 'memories')]
+      .map((root) => root.replace(/\\/g, '/'));
+    observed.memoryRootLoaded = memoryRoots.some((root) => requestText.replace(/\\/g, '/').includes(root));
     observed.stderrBytes = stderrBytes;
     assert.equal(observed.witnesses.instructions, true, 'fixture user instructions must be loaded');
     assert.equal(observed.witnesses.summary, enabled && useMemories, 'WITNESS native memory summary loading must match explicit feature/use state');

@@ -8,11 +8,11 @@
 // inverted match/not_match pair — and then proves that a rejected check leaves
 // the deployed rules file byte-identical with no grant recorded.
 //
-// THESE CANNOT RUN ON GITHUB'S RUNNERS. There is no `codex` binary there and no
-// authentication for one. So they skip, and the skip ANNOUNCES ITSELF on stderr
-// with the reason, because a check that quietly does nothing is worse than an
-// absent one: it reports green and nobody knows the question was never asked.
-// The version that did answer is recorded in the run output for the same reason.
+// No auth is needed (the local rule checker only). Since 2026-10-13 CI's Node 22 legs install a
+// pinned codex and set ACOLYTE_REQUIRE_CODEX, so the last test FAILS there instead of skipping.
+// Anywhere else they skip, and the skip ANNOUNCES ITSELF on stderr with the reason, because a
+// check that quietly does nothing is worse than an absent one: it reports green and nobody knows
+// the question was never asked. The version that answered is in the run output for that reason.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -43,8 +43,8 @@ if (CODEX_VERSION) {
   process.stderr.write(
     '\n[codex-contract] SKIPPED — no reachable `codex` binary ' +
     `(${(probe.stderr || 'exit ' + probe.status).trim().slice(0, 120)}). ` +
-    'NOTHING in this file was verified against a real Codex. This is expected on CI, ' +
-    'where there is no binary and no auth, and it is NOT a pass.\n\n',
+    'NOTHING in this file was verified against a real Codex. This is expected where Codex is not ' +
+    'installed (CI\'s Node 20 legs, by design), and it is NOT a pass.\n\n',
   );
 }
 const skip = CODEX_VERSION ? false : 'no reachable codex binary (see the stderr banner)';
@@ -337,4 +337,17 @@ test('a neighbouring rule file that forbids the prefix blocks the write', { skip
   assert.match(message, /org-overrides\.rules/, 'and names the neighbour that actually decided');
   if (before) assert.ok(fs.readFileSync(rules).equals(before), 'the deployed file is byte-identical');
   t.diagnostic(`WITNESS neighbour conflict refused by ${CODEX_VERSION}: ${message.split('\n')[0]}`);
+});
+
+// THE SKIP MUST NOT BE SILENTLY REACHABLE WHERE CODEX IS PROVISIONED (2026-10-13).
+// .github/workflows/test.yml installs a pinned @openai/codex on its Node 22 legs and sets
+// ACOLYTE_REQUIRE_CODEX to that version. Without this test, a broken install step, a PATH
+// that stopped reaching the npm prefix, or a resolver regression would turn every contract
+// test above back into a skip, and the job would still be green. With it, the job fails and
+// says which. Unset (developer machines, the Node 20 legs), it skips and says so.
+const REQUIRED = process.env.ACOLYTE_REQUIRE_CODEX || '';
+test('a CI leg that provisions Codex really reaches it', { skip: REQUIRED ? false : 'ACOLYTE_REQUIRE_CODEX is not set' }, () => {
+  assert.ok(CODEX_VERSION, `ACOLYTE_REQUIRE_CODEX=${REQUIRED} but no codex binary was reachable: `
+    + `every contract test in this file skipped (${(probe.stderr || 'exit ' + probe.status).trim().slice(0, 160)})`);
+  assert.equal(CODEX_VERSION, `codex-cli ${REQUIRED}`, 'the codex the tests reached is the pinned one');
 });

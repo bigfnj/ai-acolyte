@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Probe exact MCP approval config and persisted outcomes in fresh isolated Codex profiles.
-// Usage: node scripts/check-codex-mcp-runtime.js
+// Usage: node scripts/check-codex-mcp-runtime.js [--extension-dir <source-or-staged-root>]
+// The named subject (default: this checkout) supplies the history parser whose
+// verdict on each actual rollout is checked (2026-10-13).
 // No provider inference, credentials, live policy changes, or extension UI claims.
 'use strict';
 const assert = require('node:assert/strict');
@@ -163,6 +165,10 @@ async function mcpRuntimeCase(context, name, options = {}) {
   }
 }
 async function main() {
+  const argv = process.argv.slice(2);
+  assert.ok(argv.length === 0 || (argv.length === 2 && argv[0] === '--extension-dir'), 'usage: check-codex-mcp-runtime.js [--extension-dir <source-or-staged-root>]');
+  const subject = path.resolve(argv[1] || path.join(__dirname, '..'));
+  const { parseCodexJsonl } = require(path.join(subject, 'src', 'history-adapters.js'));
   const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'acolyte-codex-mcp-runtime-'));
   const versionLaunch = commandLaunch('codex', ['--version']);
   const versionRun = spawnSync(versionLaunch.file, versionLaunch.args, { ...versionLaunch.options, windowsHide:true, encoding:'utf8', timeout:10000 });
@@ -196,18 +202,48 @@ async function main() {
     if(executed)assert.equal(calls[0].params.name,tool);
     const items=observed.events.filter(x=>x.method==='item/completed'&&x.params.item.type==='mcpToolCall');
     assert.equal(items.length,1);assert.equal(items[0].params.item.status,status,name+' actual completion status');
+    // TWO ROLLOUT SHAPES FOR ONE OUTCOME (2026-10-13). Codex 0.145.0 wrote an
+    // event_msg/mcp_tool_call_end with {invocation, result: {Ok|Err}}. Codex
+    // 0.161.0 writes none: the outcome is an event_msg/item_completed whose item
+    // is {type: "McpToolCall", server, tool, status, result: {content, isError}}
+    // or, when declined, {status: "failed", error: {message}}. The harness checks
+    // whichever shape the binary wrote and records which one it was.
     const ends=observed.records.filter(x=>x.type==='event_msg'&&x.payload.type==='mcp_tool_call_end');
-    assert.equal(ends.length,1);assert.equal(ends[0].payload.invocation.server,'fixture');
-    assert.equal(ends[0].payload.invocation.tool,tool);assert.ok(Object.hasOwn(ends[0].payload.result,resultKind));
-    if(resultKind==='Ok') {
-      assert.equal(ends[0].payload.result.Ok.isError,tool==='fail');
-      assert.ok(JSON.stringify(ends[0].payload.result.Ok.content).includes('acolyte-mcp-'+tool+'-witness'));
+    const completions=observed.records.filter(x=>x.type==='event_msg'&&x.payload.type==='item_completed'&&x.payload.item?.type==='McpToolCall');
+    if(ends.length) {
+      results.at(-1).recordShape='mcp_tool_call_end';
+      assert.equal(ends.length,1);assert.equal(ends[0].payload.invocation.server,'fixture');
+      assert.equal(ends[0].payload.invocation.tool,tool);assert.ok(Object.hasOwn(ends[0].payload.result,resultKind));
+      if(resultKind==='Ok') {
+        assert.equal(ends[0].payload.result.Ok.isError,tool==='fail');
+        assert.ok(JSON.stringify(ends[0].payload.result.Ok.content).includes('acolyte-mcp-'+tool+'-witness'));
+      }
+    } else {
+      results.at(-1).recordShape='item_completed/McpToolCall';
+      assert.equal(completions.length,1,name+' the rollout records the MCP outcome in one of the two known shapes');
+      const item=completions[0].payload.item;
+      assert.equal(item.server,'fixture');assert.equal(item.tool,tool);assert.equal(item.status,status,name+' rollout completion status');
+      if(resultKind==='Ok') {
+        assert.equal(item.result?.isError,tool==='fail');
+        assert.ok(JSON.stringify(item.result?.content).includes('acolyte-mcp-'+tool+'-witness'));
+      } else assert.ok(item.error?.message,name+' a declined call records why');
     }
+    // What the product's history parser makes of the same rollout. Recorded per
+    // case and asserted after the loop, so one run reports every case.
+    const parsed=parseCodexJsonl(fs.readFileSync(observed.rollout,'utf8'),{file:observed.rollout}).filter(x=>x.kind==='codex-mcp');
+    results.at(-1).parser={expected:status==='completed'&&tool!=='fail'?'success':'failed',observations:parsed.map(x=>({server:x.mcpServer,tool:x.mcpTool,status:x.status}))};
     assert.equal(observed.configRead.config.mcp_servers.fixture.default_tools_approval_mode,'prompt');
     for(const [key,value] of Object.entries(overrides))assert.equal(observed.configRead.config.mcp_servers.fixture.tools[key].approval_mode,value);
   }
-  const report=path.join(root,'evidence.json');fs.writeFileSync(report,JSON.stringify({status:'passed',root,codexVersion,boundary:'Actual Codex app-server and local MCP; scripted loopback provider, no inference or credentials',results},null,2)+'\n');
-  console.log(JSON.stringify({report}));
+  // The parser verdicts. A rollout shape the parser cannot read yields NO
+  // observation, which looks exactly like a session that called no MCP tool;
+  // on 0.161.0 that is what happened to every case (2026-10-13), and this is
+  // the line that says so instead of passing on the Codex facts alone.
+  const parserMisses=results.filter(r=>r.parser.observations.length!==1||r.parser.observations[0].status!==r.parser.expected||r.parser.observations[0].tool!==r.tool);
+  const status=parserMisses.length?'failed':'passed';
+  const report=path.join(root,'evidence.json');fs.writeFileSync(report,JSON.stringify({status,root,codexVersion,boundary:'Actual Codex app-server and local MCP; scripted loopback provider, no inference or credentials',parserMisses:parserMisses.map(r=>r.name),results},null,2)+'\n');
+  console.log(JSON.stringify({status,codexVersion,shapes:[...new Set(results.map(r=>r.recordShape))],parserMisses:parserMisses.map(r=>`${r.name}: expected ${r.parser.expected}, parser saw ${r.parser.observations.length} MCP observations`),report}));
+  assert.deepEqual(parserMisses.map(r=>r.name),[],`the history parser missed ${parserMisses.length} of ${results.length} actual MCP outcomes on ${codexVersion}`);
 }
 module.exports={createMcpRuntimeContext,writeMcpFixture,mcpRuntimeCase};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

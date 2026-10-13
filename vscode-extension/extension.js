@@ -4039,6 +4039,13 @@ class WildcardingViewProvider {
         issues: codexMemoryReport?.diagnostics?.length || 0,
         error: codexMemoryReport?.error || codexMemoryReport?.watchError || null,
         gates: codexMemoryGatesUi?.status(),
+        // Which codex-cli the configured executable is, against the tested
+        // window. INFORMATION ONLY (src/codex-version.js): cached per binary,
+        // probed in the background, never a reason for a warning badge. No
+        // Codex home, no probe: a Claude-only machine gets no Codex line and
+        // spawns nothing. Required here, not at the top, so no line above moved.
+        cli: fs.existsSync(CODEX_HOME_DIR) ? require('./src/codex-version')
+          .dashboardCodexVersion({ executable: autoLearnConfig().codexExecutable, track: trackChild }) : null,
       },
       local: localCardData(),
       guidance: guidanceCardData(),
@@ -4323,6 +4330,7 @@ class WildcardingViewProvider {
         <button class="restore" id="inspectCodexMemory">Inspect memory sources…</button>
         <div class="muted sub" id="codexMemoryGatesStatus"></div>
         <button class="managed-action" id="codexMemoryGates">Review native memory gates…</button>
+        <div class="muted sub" id="codexCliVersion"></div>
       </div>
     </div>
   </section>
@@ -4764,6 +4772,13 @@ class WildcardingViewProvider {
     $('codexMemoryGatesStatus').textContent = g.error || g.watchError || (g.on
       ? 'Native memory gates: ' + (g.count == null ? '?' : g.count) + ' section' + (g.count === 1 ? '' : 's') + '; ' + (g.current ? 'current' : 'update pending') + '.'
       : 'Native memory gates are off. Only explicitly marked global sections can be installed.');
+    // The configured codex-cli against the tested window. Information only,
+    // whatever the version says: the line keeps its muted class and the row
+    // state above never reads it (src/codex-version.js, 2026-10-13).
+    var cli = m.cli || null;
+    var cliLine = $('codexCliVersion');
+    cliLine.textContent = cli && cli.note ? cli.note : '';
+    cliLine.title = cli && cli.tested ? 'Tested Codex versions: ' + cli.tested.join(', ') : '';
   }
 
   function renderLocal(l) {

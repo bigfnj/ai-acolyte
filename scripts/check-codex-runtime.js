@@ -81,6 +81,91 @@ function hash(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+// WHICH SHELL TOOL THE RUNTIME OFFERS IS VERSION-DEPENDENT, so ask the catalog.
+//
+// Codex 0.145.0 (September 27-28) exposed `shell_command` to this unknown
+// fixture model, and every check here was written against it. Codex 0.161.0
+// (measured 2026-10-13, Windows) exposes only the unified `exec_command` /
+// `write_stdin` pair: default, `unified_exec = false` and `code_mode` catalogs
+// all omit `shell_command`. The old hard assertion therefore failed every
+// runtime case on 0.161.0 before Codex was asked anything, which is harness
+// drift, not a product result. Prefer `shell_command` when it is offered, so
+// older binaries keep exercising the exact shape their evidence names, and fall
+// back to `exec_command` otherwise. The two spell the command differently
+// (`command` vs `cmd`); the product parser accepts both (src/history-adapters.js
+// CODEX_FUNCTION_SHELL_NAMES).
+function runtimeShellTool(tools) {
+  const names = new Set((Array.isArray(tools) ? tools : []).map((tool) => tool?.name));
+  if (names.has('shell_command')) return 'shell_command';
+  if (names.has('exec_command')) return 'exec_command';
+  return null;
+}
+
+// PROVENANCE IS THE MODULES THAT RUN, NOT THE MODULES NAMED (2026-10-13).
+//
+// main() records a hash of each subject module it loads and fails if one
+// changes mid-run. The list used to be six hand-picked files. On main 5f9775a
+// src/policy-exporters.js began requiring src/auto-learn.js (SHELL_WRAPPERS),
+// which requires src/tool-learn.js, so a change to either altered what the
+// exporter emitted without altering the recorded provenance at all. A
+// hand-maintained list beside the code it describes drifts exactly like that.
+//
+// So the roots are the modules main() requires, and the hashed set is their
+// local require() closure, derived from the subject's own source: every
+// `require('./x')` / `require('../x')` string literal, followed transitively,
+// resolved the way Node resolves a relative request. A literal inside a comment
+// is followed too, which can only widen the hashed set. A request that names a
+// computed path is invisible to the scan, which is why main() also fails if any
+// subject module that actually loaded falls outside the closure.
+const PROVENANCE_ROOTS = Object.freeze(['src/exec-resolve.js', 'src/policy-exporters.js', 'src/agent-guidance.js',
+  'src/agent-gates.js', 'src/history-adapters.js', 'src/codex-paths.js']);
+const LOCAL_REQUIRE = /\brequire\(\s*(['"])(\.{1,2}\/[^'"\r\n]+)\1\s*\)/g;
+
+function resolveLocalRequest(fromFile, request) {
+  const base = path.resolve(path.dirname(fromFile), request);
+  for (const candidate of [base, `${base}.js`, `${base}.json`, `${base}.cjs`, path.join(base, 'index.js')]) {
+    try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* next */ }
+  }
+  return null;
+}
+
+function localRequireClosure(root, entries) {
+  const absoluteRoot = path.resolve(root);
+  const relative = (file) => path.relative(absoluteRoot, file).replace(/\\/g, '/');
+  const seen = new Set();
+  const unresolved = [];
+  const pending = entries.map((entry) => path.resolve(absoluteRoot, entry));
+  while (pending.length) {
+    const file = pending.pop();
+    const key = relative(file);
+    if (seen.has(key)) continue;
+    assert.ok(!key.startsWith('..') && !path.isAbsolute(key), `provenance root or dependency escapes the subject: ${file}`);
+    seen.add(key);
+    if (!/\.(c?js)$/.test(file)) continue;
+    for (const match of fs.readFileSync(file, 'utf8').matchAll(LOCAL_REQUIRE)) {
+      const target = resolveLocalRequest(file, match[2]);
+      if (!target) { unresolved.push({ from: key, request: match[2] }); continue; }
+      if (relative(target).startsWith('..')) continue;
+      pending.push(target);
+    }
+  }
+  return { files: [...seen].sort(), unresolved };
+}
+
+function loadedModulesUnder(root) {
+  const prefix = path.resolve(root) + path.sep;
+  return Object.keys(require.cache).filter((file) => file.startsWith(prefix))
+    .map((file) => path.relative(root, file).replace(/\\/g, '/')).sort();
+}
+
+// `shell` names the shell binary for exec_command (its own optional parameter);
+// omitted, Codex uses the user's default shell. shell_command has no such field.
+function runtimeShellArguments(tool, command, workdir, justification, shell) {
+  const common = { workdir, sandbox_permissions: 'require_escalated', justification };
+  if (tool === 'shell_command') return { command, ...common };
+  return shell ? { cmd: command, shell, ...common } : { cmd: command, ...common };
+}
+
 function rolloutFor(codexHome, threadId) {
   const pending = [path.join(codexHome, 'sessions')];
   const found = [];
@@ -119,7 +204,13 @@ async function stopChild(child, closed) {
   // Wait for close, not merely exit: inherited stdout/stderr handles can still
   // be held by the npm shim's Codex child after the shim exits.
   if (await finishesWithin(closed, 5000)) return;
-  if (child.pid && child.exitCode === null && child.signalCode === null) {
+  if (child.pid && child.exitCode === null && child.signalCode === null && process.platform !== 'win32') {
+    // POSIX has no batch shim between us and Codex, so the spawned process is
+    // the app-server (or its node launcher). Only the wrapper matrix runs this
+    // module off Windows (2026-10-13); main() below still targets Windows.
+    child.kill('SIGTERM');
+    assert.ok(await finishesWithin(closed, 5000), `spawned Codex process ${child.pid} did not close after SIGTERM`);
+  } else if (child.pid && child.exitCode === null && child.signalCode === null) {
     // commandLaunch may return an npm batch shim. Terminate only this spawned
     // process tree, or killing cmd.exe alone can leave its app-server running.
     const killed = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'],
@@ -139,7 +230,12 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
   const approvalDecision = context.approvalDecision ?? 'decline';
   const instructionWitnesses = { user: USER_WITNESS, gate: GATE_WITNESS, shadowed: SHADOWED_WITNESS,
     ...context.instructionWitnesses };
-  assert.match(commandName, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'fixture command must be a bare executable name');
+  // `commandLine` sends one exact shell spelling instead of `<bare name> <arg>`.
+  // Only the wrapper matrix (check-codex-wrapper-runtime.js, 2026-10-13) uses it,
+  // because its whole subject is spellings that do not start with a bare name.
+  const commandLine = context.commandLine ?? `${commandName} ${argument}`;
+  if (context.commandLine === undefined) assert.match(commandName, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'fixture command must be a bare executable name');
+  else assert.ok(typeof commandLine === 'string' && commandLine.trim().length > 0, 'an explicit command line must be nonempty');
   assert.ok(['accept', 'decline'].includes(approvalDecision), 'fixture approvals may only accept one call or decline; never amend policy');
   assert.ok(typeof shellWitness === 'string' && shellWitness.length > 0, 'execution witness must be nonempty');
   assert.equal(typeof instructionsExpected, 'boolean', 'managed instruction expectation must be explicit');
@@ -197,12 +293,13 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
         assert.ok(observed.providerRequests <= 2, `${name}: runtime requested an unexpected extra model response`);
         if (observed.providerRequests === 1) {
           firstInstructions = strings([body.instructions, body.input]).join('\n').replace(/\r\n/g, '\n');
-          assert.ok(body.tools?.some((tool) => tool.name === 'shell_command'), `${name}: runtime did not expose shell_command`);
+          observed.shellTool = runtimeShellTool(body.tools);
+          assert.ok(observed.shellTool, `${name}: runtime exposed neither shell_command nor exec_command`);
         }
         const item = observed.providerRequests === 1
-          ? { id: 'fc_runtime_fixture', type: 'function_call', name: 'shell_command', call_id: 'call_runtime_fixture',
-            arguments: JSON.stringify({ command: `${commandName} ${argument}`, workdir: workspace,
-              sandbox_permissions: 'require_escalated', justification: 'Run the isolated harmless Acolyte runtime fixture.' }) }
+          ? { id: 'fc_runtime_fixture', type: 'function_call', name: observed.shellTool, call_id: 'call_runtime_fixture',
+            arguments: JSON.stringify(runtimeShellArguments(observed.shellTool, commandLine, workspace,
+              'Run the isolated harmless Acolyte runtime fixture.', context.shellBinary)) }
           : { id: 'msg_runtime_fixture', type: 'message', role: 'assistant', status: 'completed',
             content: [{ type: 'output_text', text: 'Isolated runtime fixture complete.', annotations: [] }] };
         const responseId = `response_fixture_${observed.providerRequests}`;
@@ -273,7 +370,8 @@ async function runtimeCase(context, name, argument, instructionsExpected) {
         if (message.method === 'item/completed' && message.params?.item?.type === 'commandExecution') {
           const item = message.params.item;
           const next = { id: item.id, status: item.status, exitCode: item.exitCode ?? null,
-            witness: String(item.aggregatedOutput || '').includes(shellWitness) };
+            witness: String(item.aggregatedOutput || '').includes(shellWitness),
+            command: typeof item.command === 'string' ? item.command.slice(0, 400) : null };
           // Codex 0.145 emits a declined completion twice for the same item,
           // first without an exit code and then with -1. Count execution items,
           // retaining any witness, rather than mistaking that update for a rerun.
@@ -389,7 +487,9 @@ async function main() {
     process.env.USERPROFILE = home;
     process.env.CODEX_HOME = codexHome;
     assert.equal(os.homedir(), home, 'home must be isolated before installed modules load');
-    const files = ['src/exec-resolve.js', 'src/policy-exporters.js', 'src/agent-guidance.js', 'src/agent-gates.js', 'src/history-adapters.js', 'src/codex-paths.js'];
+    const provenance = localRequireClosure(extension, PROVENANCE_ROOTS);
+    const files = provenance.files;
+    report.provenance = { roots: PROVENANCE_ROOTS, unresolved: provenance.unresolved };
     report.moduleHashes = Object.fromEntries(files.map((file) => [file, hash(path.join(extension, file))]));
     const { commandLaunch } = require(path.join(extension, 'src/exec-resolve'));
     const { renderCodexRules, mergeGeneratedCodexRules } = require(path.join(extension, 'src/policy-exporters'));
@@ -473,6 +573,12 @@ async function main() {
       assert.equal(fs.existsSync(path.join(home, '.codex')), false, 'custom profile check must not create the default Codex home');
     }
     for (const file of files) assert.equal(hash(path.join(extension, file)), report.moduleHashes[file], `installed module changed during check: ${file}`);
+    // The static closure has to cover what actually ran. A subject module that
+    // loaded but is not in it (a dynamic require the scan cannot see, say)
+    // would be executed without being recorded, so it fails the run here.
+    report.loadedSubjectModules = loadedModulesUnder(extension);
+    const unrecorded = report.loadedSubjectModules.filter((file) => !files.includes(file));
+    assert.deepEqual(unrecorded, [], `subject modules executed outside the recorded provenance: ${unrecorded.join(', ')}`);
     report.status = 'passed';
   } catch (error) {
     report.status = 'failed';
@@ -493,6 +599,7 @@ async function main() {
   }
 }
 
-module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined };
+module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined,
+  runtimeShellTool, runtimeShellArguments, PROVENANCE_ROOTS, localRequireClosure };
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });

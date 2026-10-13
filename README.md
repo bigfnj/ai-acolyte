@@ -244,7 +244,8 @@ because the next tool call fires the hook again and the pass is idempotent.
 
 `generalizePermission` touches only `Bash(...)` and `PowerShell(...)`. An argument already ending
 in `*` is returned as-is, preserving existing wildcards rather than narrowing them, and a quoted
-or path-rooted executable is left verbatim. A Bash entry first loses the wrappers Claude Code
+or path-rooted executable (a first token holding `/` or `\`, or opening with `~` or a drive
+letter) is left verbatim. A Bash entry first loses the wrappers Claude Code
 itself strips before matching (`timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`,
 `noglob`, and `xargs` without flags), so `timeout 5 rg x` keys on `rg`; `command -v` keeps its
 flag. Everything else collapses to `Tool(<root> *)`,

@@ -300,10 +300,19 @@ function generalizeCommandArg(arg, tool) {
   // A quoted/path executable cannot be represented safely by the legacy
   // first-token wildcard. Leave it exact; Auto Learn can review a normalized
   // family without ever producing malformed `"C:\Program *` permissions.
-  if (/^["']/.test(stripped) || /^(?:\.{0,2}[\\/]|[A-Za-z]:[\\/])/.test(stripped)) {
+  //
+  // "Path" is any first token holding a separator, opening with `~`, or opening with
+  // a drive letter: the same line the classifier draws (src/auto-learn.js
+  // isPathExecutable). Until 2026-10-13 this tested only for a path that OPENED with
+  // `/`, `\`, `./`, `../`, `.\` or `C:\`, so `~/bin/tool x` became `Bash(~/bin/tool *)`,
+  // `.venv/bin/python x.py` became `Bash(.venv/bin/python *)` and `bin/x` became
+  // `Bash(bin/x *)`. Each names one checkout's or one home directory's binary, which
+  // is no command family, and the venv one runs any script handed to it. A separator
+  // in an ARGUMENT is not this case: `cat ~/notes.md` still keys on `cat`.
+  const first = stripped.split(/\s+/)[0] || '';
+  if (/^["']/.test(stripped) || /[\\/]/.test(first) || /^~/.test(first) || /^[A-Za-z]:/.test(first)) {
     return `${tool}(${arg})`;
   }
-  const first = stripped.split(/\s+/)[0] || '';
   if (!first) return `${tool}(${arg})`; // nothing to key on — leave verbatim
   // PowerShell never reaches this with a non-command first token: its caller
   // admits only `[\w.-]` names (isPowerShellCommandName: a letter first, or a digit
@@ -787,12 +796,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :717.
+// prunePermissions, whose only caller is processAllowList at :726.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :783 and nowhere else in the
+// reached it, in any of the three: it is called at :792 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is

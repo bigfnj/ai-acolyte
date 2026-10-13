@@ -1045,4 +1045,10 @@ module.exports = {
   // Exported so a stored candidate's flag can be re-derived from its reasons
   // rather than carried forward.
   COMPLEX_REASONS,
+  // Exported for test/permissions-keywords.test.js only. src/permissions.js keeps
+  // its own copies (BASH_SCRIPT_KEYWORDS, PS_SCRIPT_KEYWORDS) and must not import
+  // these, because the fixed-point cache stats that file and not this one; the
+  // test is what keeps the copies from falling behind.
+  BASH_RESERVED,
+  POWERSHELL_RESERVED,
 };

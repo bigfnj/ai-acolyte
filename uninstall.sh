@@ -18,7 +18,7 @@ case "$(uname -s)" in
 esac
 
 HOOK_CMD="$HOOK_CMD" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
 import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
@@ -53,8 +53,21 @@ const hookPath = (value) => {
   // two spellings — and a Windows path is case-insensitive besides.
   const drive = /^\/([A-Za-z])\//.exec(text);
   if (drive) text = `${drive[1]}:/${text.slice(3)}`;
-  return text.replace(/\/+$/, '').toLowerCase();
+  return canonical(text).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 };
+
+// One file can have more than one spelling even after that folding, found
+// 2026-10-13: an 8.3 short path (C:/Users/SHORTN~1.EXT/...) and its long form
+// name the same checkout, and so do a symlinked or junctioned directory and its
+// target. Compared as text they differ, so this checkout's own registration
+// under the other spelling was left in place and named "another checkout".
+// realpath gives a file that exists its one canonical spelling, on Windows the
+// long form; a relative path, or one that does not exist, is compared as written.
+// install.sh's `canonical` is the same function.
+function canonical(p) {
+  if (!isAbsolute(p)) return p;
+  try { return realpathSync.native(p); } catch { return p; }
+}
 
 const target = hookPath(hookCmd);
 const isThisCheckout = (hook) => hookPath(hook?.command) === target;

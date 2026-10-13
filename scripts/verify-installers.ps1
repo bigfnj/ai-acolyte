@@ -80,6 +80,10 @@ try {
 }
 $script:boxesMade = New-Object System.Collections.ArrayList
 $script:boxesLeaked = New-Object System.Collections.ArrayList
+# %TEMP% as given, when it differs from the long root: then it is an 8.3 short
+# spelling of the same folder, which the "8.3 spelling" cases below register.
+$script:ShortRoot = $null
+if ($env:TEMP -ine $script:SandboxRoot -and $env:TEMP.Contains('~')) { $script:ShortRoot = $env:TEMP }
 
 function Remove-Box {
     param($Box)
@@ -507,6 +511,37 @@ if (-not $install) {
             "exit=$shCode install.ps1=$real install.sh=$sh"
         Remove-Box $box
     }
+
+    # 15. This checkout registered under its 8.3 short spelling (found
+    #    2026-10-13): one checkout, two spellings, so "already registered" and no
+    #    write -- before, it was "repointed from another checkout". Git Bash
+    #    writes that spelling by itself for a checkout under /tmp. The short
+    #    spelling is the box path through %TEMP% as given, which keeps its 8.3
+    #    form while the sandbox root is the long one; skipped where they agree.
+    if (-not $script:ShortRoot) {
+        Write-Host 'SKIP  install: this checkout under its 8.3 spelling: %TEMP% has no 8.3 component here'
+    } else {
+        $shortSpelled = {
+            param($real, $stale, $dir)
+            $short = ($script:ShortRoot + $dir.Substring($script:SandboxRoot.Length)) -replace '\\', '/'
+            '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+                + (ConvertTo-Json ('node "' + $short + '/bin/wildcard-perms"')) + ' } ] } ] } }'
+        }
+        $box = New-SeededInstallBox -Content $shortSpelled
+        if (-not $box) {
+            Add-Result 'install: this checkout under its 8.3 spelling' $false 'could not learn the installed hook command'
+        } else {
+            $null = New-Item -Path (Join-Path $box.dir 'bin') -ItemType Directory -Force
+            [System.IO.File]::WriteAllText((Join-Path $box.dir 'bin\wildcard-perms'), '')
+            $before = [System.IO.File]::ReadAllBytes($box.settings)
+            $r = Invoke-Box $box
+            $identical = ([Convert]::ToBase64String($before) -eq [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($box.settings)))
+            Add-Result 'install: this checkout under its 8.3 spelling' `
+            ($r.code -eq 0 -and $identical -and $r.output -match 'already registered' -and $r.output -notmatch 'another checkout') `
+                "identical=$identical exit=$($r.code)"
+            Remove-Box $box
+        }
+    }
 }
 
 # ── uninstall.ps1 ─────────────────────────────────────────────────────────────
@@ -724,6 +759,28 @@ if (-not $uninstall) {
             -and $r.output.Contains($liveSpelled) -and $r.output -match 'another checkout') `
         "exit=$($r.code) unchanged=$((Get-Content $box.settings -Raw) -eq $before)"
     Remove-Box $box
+
+    # 11. This checkout registered under its 8.3 short spelling (found
+    #    2026-10-13): removed as this checkout. Before, it was left in place and
+    #    named "another checkout" -- the uninstaller declining its own hook.
+    #    Skipped where %TEMP% has no 8.3 component, like install case 15.
+    if (-not $script:ShortRoot) {
+        Write-Host 'SKIP  uninstall: removes this checkout under its 8.3 spelling: %TEMP% has no 8.3 component here'
+    } else {
+        $box = New-Box -Source $uninstall -NoFile
+        $null = New-Item -Path (Join-Path $box.dir 'bin') -ItemType Directory -Force
+        [System.IO.File]::WriteAllText((Join-Path $box.dir 'bin\wildcard-perms'), '')
+        $short = (($script:ShortRoot + $box.dir.Substring($script:SandboxRoot.Length)) -replace '\\', '/') + '/bin/wildcard-perms'
+        [System.IO.File]::WriteAllText($box.settings, (& $otherCheckout $short))
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        Add-Result 'uninstall: removes this checkout under its 8.3 spelling' `
+        ($r.code -eq 0 -and $ptu.Count -eq 1 -and $ptu[0].hooks[0].command -eq 'someone-elses-hook' `
+                -and $r.output -match 'removed 1' -and $r.output -notmatch 'another checkout') `
+            "PostToolUse=$($ptu.Count) survivor=$($ptu[0].hooks[0].command) exit=$($r.code)"
+        Remove-Box $box
+    }
 }
 
 # -- cleanup ----------------------------------------------------------------------
@@ -762,9 +819,10 @@ Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
 # A floor, because without one this harness passes by doing nothing. An empty
 # results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
 # this would go green having verified nothing at all -- which is the failure
-# this whole script exists to prevent, turned on itself. It records 26 cases
-# today, 25 where Git for Windows is absent (16 until the other-checkout cases
-# landed 2026-10-13, then 23, 24 with the sandbox-cleanup case); the floor sits
+# this whole script exists to prevent, turned on itself. It records 28 cases
+# today on a box with Git for Windows and an 8.3 %TEMP%, 25 with neither (16
+# until the other-checkout cases landed 2026-10-13, then 23, 24 with the
+# sandbox-cleanup case, 26 with the Git Bash pair); the floor sits
 # below that so adding or reordering a case does not break it, but no
 # plausible breakage leaves more than a handful behind.
 $MinimumCases = 18

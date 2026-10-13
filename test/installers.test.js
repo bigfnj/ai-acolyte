@@ -1104,3 +1104,81 @@ test('install.sh end to end: on Linux and macOS it registers the bare path, and 
     assert.equal(un.code, 0, un.stderr);
     assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
   });
+
+// ── One checkout, two spellings: 8.3 short paths and directory links ─────────
+//
+// Found 2026-10-13: the same checkout registered under an 8.3 short path
+// (C:/Users/SHORTN~1.EXT/...) was "repointed from another checkout" by both
+// installers, and both uninstallers left it in place and named it "another
+// checkout", because the comparison was on the text. Git Bash writes that short
+// form by itself for a checkout under /tmp. Both .sh scripts now compare
+// realpath's spelling, which is the long form on Windows and also resolves
+// directory links. A link is the case that runs everywhere (a symlink on POSIX,
+// a junction on Windows, neither needs privilege); the 8.3 case runs where
+// os.tmpdir() has a short component, which includes GitHub's Windows runners.
+// The .ps1 twins, 8.3 only, are verify-installers.ps1's "8.3 spelling" cases.
+
+// A sandbox holding a real bin/wildcard-perms, because realpath needs a file.
+function realCheckout(t) {
+  const settingsPath = sandbox(t);
+  const dir = path.dirname(path.dirname(settingsPath));
+  const file = path.join(dir, 'checkout', 'bin', 'wildcard-perms');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '#!/usr/bin/env node\n');
+  // How the installer itself would spell it: canonical, forward slashes.
+  return { settingsPath, dir, file, hookCmd: fwd(fs.realpathSync.native(file)) };
+}
+
+function linkedSpelling(box) {
+  const link = path.join(box.dir, 'linked-checkout');
+  fs.symlinkSync(path.join(box.dir, 'checkout'), link, process.platform === 'win32' ? 'junction' : 'dir');
+  return fwd(path.join(link, 'bin', 'wildcard-perms'));
+}
+
+test('install: this checkout through a linked directory is this checkout, not another one', (t) => {
+  const box = realCheckout(t);
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${linkedSpelling(box)}"`)] }]);
+  fs.writeFileSync(box.settingsPath, before);
+
+  const run = runInstaller(box.settingsPath, embeddedModule(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, 'one file, so nothing to repoint and nothing written');
+  assert.match(run.stdout, /already registered/);
+  assert.doesNotMatch(run.stdout, /another checkout/);
+});
+
+test("uninstall: this checkout's registration through a linked directory is removed as this checkout", (t) => {
+  const box = realCheckout(t);
+  fs.writeFileSync(box.settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook(`node "${linkedSpelling(box)}"`)] },
+  ]));
+
+  const run = runInstaller(box.settingsPath, embeddedUninstaller(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  assert.doesNotMatch(run.stdout, /another checkout/, 'its own hook, so not named as somebody else\'s');
+  assert.equal(JSON.parse(run.after).hooks.PostToolUse, undefined);
+});
+
+test('install and uninstall: this checkout under its 8.3 short path is this checkout', (t) => {
+  if (process.platform !== 'win32') return t.skip('8.3 short names are a Windows thing');
+  const box = realCheckout(t);
+  // box.file is spelled through os.tmpdir(), %TEMP%, which keeps its 8.3 form.
+  const short = fwd(box.file);
+  if (short.toLowerCase() === box.hookCmd.toLowerCase()) {
+    return t.skip(`os.tmpdir() has no 8.3 component here (${os.tmpdir()})`);
+  }
+  assert.match(short, /~/, 'the fixture must really be a short spelling for this to mean anything');
+
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${short}"`)] }]);
+  fs.writeFileSync(box.settingsPath, before);
+  const run = runInstaller(box.settingsPath, embeddedModule(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, 'one checkout, two spellings: no write');
+  assert.doesNotMatch(run.stdout, /another checkout/);
+
+  const un = runInstaller(box.settingsPath, embeddedUninstaller(), box.hookCmd);
+  assert.equal(un.code, 0, un.stderr);
+  assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  assert.doesNotMatch(un.stdout, /another checkout/);
+});

@@ -54,7 +54,7 @@ mkdir -p "$(dirname "$SETTINGS")"
 
 # ── 1. Register PostToolUse hook ──────────────────────────────────────────────
 HOOK_CMD="$HOOK_CMD" HOOK_VIA_NODE="$HOOK_VIA_NODE" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
 import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
@@ -160,8 +160,21 @@ const nativePath = (p) => {
   const drive = /^\/([A-Za-z])\//.exec(text);
   return drive ? `${drive[1]}:/${text.slice(3)}` : text;
 };
+// One file can have more than one spelling even after that folding, found
+// 2026-10-13: an 8.3 short path (C:/Users/SHORTN~1.EXT/...) and its long form
+// name the same checkout, and so do a symlinked or junctioned directory and its
+// target. Compared as text they differ, so this checkout registered under the
+// other spelling was "repointed from another checkout", which it is not. (Git
+// Bash produces the short form by itself whenever a checkout sits under /tmp.)
+// realpath gives a file that exists its one canonical spelling, on Windows the
+// long form; a relative path, or one that does not exist, is compared as written,
+// so a stale checkout still reads as stale.
+const canonical = (p) => {
+  if (!isAbsolute(p)) return p;
+  try { return realpathSync.native(p); } catch { return p; }
+};
 const comparable = (p) => {
-  const text = nativePath(p).replace(/\/+$/, '');
+  const text = nativePath(canonical(nativePath(p))).replace(/\/+$/, '');
   return onWindows ? text.toLowerCase() : text;
 };
 

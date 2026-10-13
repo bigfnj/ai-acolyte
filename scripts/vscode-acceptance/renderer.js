@@ -1359,7 +1359,7 @@ async function main() {
       assert.ok(statusCases.includes(fixture.caseId));
       const expected = fixture.caseId === 'status-off' ? 'Native memory gates are off. Only explicitly marked global sections can be installed.'
         : ['held-scope', 'held-marker', 'held-utf8'].includes(fixture.caseId) ? 'Installed native Codex gates were retained: the source compilation is unreadable.'
-          : `Native memory gates: ${fixture.caseId === 'status-zero' ? 0 : 1} sections; current.`;
+          : `Native memory gates: ${fixture.caseId === 'status-zero' ? '0 sections' : '1 section'}; current.`;
       assert.equal(fixture.expectedStatus, expected);
       await memoryDashboardReady();
       const until = Date.now() + 15000;

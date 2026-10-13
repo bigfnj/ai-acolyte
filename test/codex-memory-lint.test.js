@@ -137,6 +137,16 @@ test('Codex diagnostics preserve adapter severities and codes without inventing 
   assert.equal(h.entries.has(summary), false, 'publish must replace all prior Problems');
 });
 
+test('a missing-reference Problem sits on the line that cites it, not on line 0', async (t) => {
+  const h = harness(t);
+  const registry = h.write('MEMORY.md', '# Task Group\n## Task 1\n- rollout_summaries/gone.md\n');
+  h.lint.activate(); await flush();
+  const [diagnostic] = h.entries.get(registry);
+  assert.equal(diagnostic.code, 'missing-reference');
+  assert.deepEqual([diagnostic.range.startLine, diagnostic.range.endLine], [2, 2],
+    'WITNESS the adapter line reaches the published Range');
+});
+
 test('root and directory read failures stay visible in reports without creating fake file Problems', async (t) => {
   const h = harness(t);
   h.lint.readMemory = async () => ({ ...h.descriptor(), storageState: 'unreadable', state: 'unreadable', files: [],

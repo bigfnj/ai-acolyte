@@ -341,6 +341,65 @@ test('traversing native provenance references are diagnosed and never opened', (
   assert.equal(result.chunks.some((chunk) => chunk.text.includes('RAW_PRIVATE_FIXTURE')), false);
 });
 
+// Measured 2026-10-13 on a real store: the dashboard's only Codex memory issue was
+// a rollout summary citing the session's project skill, skills/<x>/SKILL.md, which
+// exists in that repo and never in memories/. Rollout summaries are narrative.
+test('rollout summaries cite project files, so their skills/ paths are not memory pointers', (t) => {
+  const box = fixture(t);
+  box.write('rollout_summaries/session.md', [
+    '# Session narrative', 'rollout_path: C:/private/original-session.jsonl',
+    '- Read and followed `skills/doodle-builder/SKILL.md` before drawing.',
+    '- Project copy: Doodles/skills/doodle-builder/SKILL.md',
+    '- Skill: `skills\\doodle-builder\\SKILL.md`', '',
+  ].join('\n'));
+  assert.deepEqual(readCodexMemory({ codexHome: box.codexHome }).diagnostics, [],
+    'WITNESS a project-relative skill citation in session narrative is not a missing memory file');
+});
+
+test('skills/ pointers in the registry and the summary are memory-relative and still checked', (t) => {
+  const box = fixture(t);
+  box.write('MEMORY.md', '# Task Group\n- skills/found/SKILL.md\n- skills/gone/SKILL.md\n');
+  box.write('memory_summary.md', 'v1\n## General Tips\n- skills/found/SKILL.md\n- skills/lost/SKILL.md\n');
+  box.write('skills/found/SKILL.md', '# Synthetic skill\n');
+  const result = readCodexMemory({ codexHome: box.codexHome });
+  assert.deepEqual(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath, diagnostic.message.split(': ')[1]]), [
+    ['missing-reference', 'MEMORY.md', 'skills/gone/SKILL.md'],
+    ['missing-reference', 'memory_summary.md', 'skills/lost/SKILL.md'],
+  ]);
+});
+
+test('rollout_summaries/ references are checked in every file kind, but only as whole tokens', (t) => {
+  const box = fixture(t);
+  box.write('rollout_summaries/session.md', [
+    '# Session narrative', 'Earlier sessions:',
+    '- rollout_summaries/missing.md',
+    '- notes/rollout_summaries/prefixed.md, docs.rollout_summaries/dotted.md, notes\\rollout_summaries/mixed.md',
+    '- (`rollout_summaries/ticked.md`) [rollout_summaries/bracketed.md] <rollout_summaries/angled.md> "rollout_summaries/quoted.md"', '',
+  ].join('\n'));
+  const result = readCodexMemory({ codexHome: box.codexHome });
+  assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.message.split(': ')[1]), [
+    'rollout_summaries/missing.md', 'rollout_summaries/ticked.md', 'rollout_summaries/bracketed.md',
+    'rollout_summaries/angled.md', 'rollout_summaries/quoted.md',
+  ], 'WITNESS a path that only ends in rollout_summaries/<x>.md is not a memory reference');
+  assert.ok(result.diagnostics.every((diagnostic) => diagnostic.code === 'missing-reference' &&
+    diagnostic.relativePath === 'rollout_summaries/session.md'));
+});
+
+test('lint diagnostics carry the 0-based line of the first mention while storage failures stay line-less', (t) => {
+  const box = fixture(t);
+  box.write('MEMORY.md', '# Task Group\r\n## Task 1\r\n- rollout_summaries/missing.md\r\n- again rollout_summaries/missing.md\r\n- skills/../SKILL.md\r\n');
+  box.write('memory_summary.md', 'v0\nSynthetic summary\n');
+  box.write('rollout_summaries/broken.md', Buffer.from([35, 32, 0xC3, 0x28, 10]));
+  const result = readCodexMemory({ codexHome: box.codexHome });
+  assert.deepEqual(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath, diagnostic.line]), [
+    ['invalid-utf8', 'rollout_summaries/broken.md', undefined],
+    ['missing-reference', 'MEMORY.md', 2],
+    ['unsafe-reference', 'MEMORY.md', 4],
+    ['summary-version', 'memory_summary.md', 0],
+  ]);
+  assert.equal(Object.hasOwn(result.diagnostics[0], 'line'), false, 'a storage failure keeps its prior diagnostic shape');
+});
+
 test('chunk identity distinguishes same-name sources and changes with edits, ranges, renames and profile', (t) => {
   const box = fixture(t);
   const file = box.write('rollout_summaries/shared.md', '# First\nsame content\n');

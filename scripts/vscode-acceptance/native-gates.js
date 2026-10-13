@@ -134,7 +134,7 @@ exports.run = async function run() {
     await check('real filesystem events refresh edited gates, retain a zero sentinel and refill without commands', async () => {
       fs.writeFileSync(registry, source(sentences.updated));
       await expectCurrent(sentences.updated, 'WITNESS native gate watcher refreshes an edited installed body');
-      await statusAction('status-updated', 'Native memory gates: 1 sections; current.');
+      await statusAction('status-updated', 'Native memory gates: 1 section; current.');
       fs.writeFileSync(registry, source(sentences.updated, 'task'));
       const zero = await waitFor(() => { const value = inspect(); return value.count === 0 && value.target.on && value.target.current ? value : null; }, 'WITNESS complete zero keeps the native opt-in marker');
       assert.ok(fs.readFileSync(base, 'utf8').includes(BEGIN));
@@ -142,18 +142,18 @@ exports.run = async function run() {
       await statusAction('status-zero', 'Native memory gates: 0 sections; current.');
       fs.writeFileSync(registry, source(sentences.refilled));
       await expectCurrent(sentences.refilled, 'WITNESS existing empty native marker refills after new explicit annotations');
-      await statusAction('status-refilled', 'Native memory gates: 1 sections; current.');
+      await statusAction('status-refilled', 'Native memory gates: 1 section; current.');
       gates.zero = { count: zero.count, body: zero.body, installedMarker: true };
       return 'Without Scan, Review or refresh commands, real file events update the installed body, retain its explicit opt-in when annotations become nonglobal, and refill it when global annotations return.';
     });
     if (failed()) return;
     await check('effective instruction-file changes migrate native gates while preserving shared and user blocks', async () => {
       assert.equal(inspect().target.path, base); assert.equal(inspect().target.current, true);
-      await statusAction('status-base', 'Native memory gates: 1 sections; current.');
+      await statusAction('status-base', 'Native memory gates: 1 section; current.');
       fs.writeFileSync(override, overrideUser);
       await expectCurrent(sentences.refilled, 'WITNESS creating the override migrates native gates to the active file');
       assert.equal(inspect().target.path, override); assert.equal(fs.readFileSync(base, 'utf8'), baseUser);
-      await statusAction('status-override', 'Native memory gates: 1 sections; current.');
+      await statusAction('status-override', 'Native memory gates: 1 section; current.');
       return 'Creating an override moves only the existing native block from the base into the newly active file and cleans the inactive copy. Both files retain their shared/user bytes.';
     });
     if (failed()) return;
@@ -173,7 +173,7 @@ exports.run = async function run() {
         assertUsers();
         if (caseId !== 'held-utf8') {
           fs.writeFileSync(registry, source(sentences.refilled));
-          await statusAction(caseId + '-repaired', 'Native memory gates: 1 sections; current.');
+          await statusAction(caseId + '-repaired', 'Native memory gates: 1 section; current.');
         }
       }
       await action('remove-unreadable', reviewDetails('Remove gates', inspect()));

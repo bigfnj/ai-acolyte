@@ -25,12 +25,17 @@ function positiveInteger(value, fallback, name, minimum = 1) {
   return value;
 }
 
-function addDiagnostic(result, code, relativePath, message, severity = 'warning') {
-  result.diagnostics.push({
+// `line` is 0-based: it is the VS Code Range line codexMemoryLint publishes, which
+// otherwise pins every Problem to line 0. Storage failures pass none and keep
+// their old shape. codex-memory-gates numbers its own diagnostics from 1.
+function addDiagnostic(result, code, relativePath, message, severity = 'warning', line) {
+  const diagnostic = {
     code, severity, relativePath,
     path: relativePath ? path.join(result.root, ...relativePath.split('/')) : result.root,
     message,
-  });
+  };
+  if (line !== undefined) diagnostic.line = line;
+  result.diagnostics.push(diagnostic);
 }
 
 function unavailable(result, code, relativePath, message) {
@@ -220,21 +225,39 @@ function chunkFile(file, text, root, maxChars, maxLines) {
   return { sourceId, lineCount: lines.length, hasUtf8Bom, chunks };
 }
 
+// A reference must start a token: line start, whitespace, a backtick, a quote,
+// ( [ or <. The old leading \b also matched any forward-slash path that merely
+// ENDED in skills/<x>/SKILL.md (Doodles/skills/x/SKILL.md), while the backslash
+// spelling of the same path never matched, so slash direction decided the warning.
+const MEMORY_REFERENCE = /(?<![^\s`'"(\[<])(?:rollout_summaries\/[^\s`<>"'()[\]]+\.md|skills\/[^\s`<>"'()[\]/]+\/SKILL\.md)\b/g;
+// Codex routes into generated memory skills from the files it loads first, so a
+// skills/<name>/SKILL.md pointer there is memory-relative. Rollout summaries are
+// session narrative and cite the session's PROJECT files by relative path: the
+// first missing-reference on a real store (2026-10-13) was a Doodles repo skill
+// cited by two rollout summaries, and it exists in that repo.
+const SKILL_POINTER_KINDS = new Set(['registry', 'summary']);
+
 function lintFile(result, file, text, selectedPaths) {
-  if (file.kind === 'summary' && linesOf(text)[0]?.text !== 'v1') {
+  const lines = linesOf(text);
+  if (file.kind === 'summary' && lines[0]?.text !== 'v1') {
     addDiagnostic(result, 'summary-version', file.relativePath,
-      'Native memory_summary.md does not start with the v1 format marker. Content was retained for inspection.');
+      'Native memory_summary.md does not start with the v1 format marker. Content was retained for inspection.', 'warning', 0);
   }
   // Only generated-memory references are checked. Never follow rollout_path,
-  // absolute paths, URLs, original sessions or arbitrary Markdown links.
-  const references = new Set(text.match(/\b(?:rollout_summaries\/[^\s`<>"'()[\]]+\.md|skills\/[^\s`<>"'()[\]/]+\/SKILL\.md)\b/g) || []);
-  for (const reference of references) {
-    if (reference.split('/').some((part) => part === '.' || part === '..')) {
-      addDiagnostic(result, 'unsafe-reference', file.relativePath, `Selected-memory reference contains traversal: ${reference}`);
-    } else if (!selectedPaths.has(reference)) {
-      addDiagnostic(result, 'missing-reference', file.relativePath, `Selected-memory reference is missing or unreadable: ${reference}`);
+  // absolute paths, URLs, original sessions or arbitrary Markdown links. One
+  // diagnostic per distinct reference, on the line where it first appears.
+  const seen = new Set();
+  lines.forEach(({ text: lineText }, line) => {
+    for (const [reference] of lineText.matchAll(MEMORY_REFERENCE)) {
+      if (seen.has(reference) || (reference.startsWith('skills/') && !SKILL_POINTER_KINDS.has(file.kind))) continue;
+      seen.add(reference);
+      if (reference.split('/').some((part) => part === '.' || part === '..')) {
+        addDiagnostic(result, 'unsafe-reference', file.relativePath, `Selected-memory reference contains traversal: ${reference}`, 'warning', line);
+      } else if (!selectedPaths.has(reference)) {
+        addDiagnostic(result, 'missing-reference', file.relativePath, `Selected-memory reference is missing or unreadable: ${reference}`, 'warning', line);
+      }
     }
-  }
+  });
 }
 
 /** Read selected native files without changing them or writing any cached index. */

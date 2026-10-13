@@ -342,7 +342,7 @@ function learn(args) {
 
     let result;
     if (action === 'scan') result = manager.scan();
-    else if (action === 'status') result = manager.status();
+    else if (action === 'status') result = { ...manager.status(), codexCli: codexCliStatus(codexHome, learnOption(args, '--codex-executable', 'codex')) };
     else if (action === 'apply') result = manager.apply({ includeReviewed: false });
     else if (action === 'undo') result = manager.undo();
     else if (action === 'hits') result = manager.rebuildManagedHits();
@@ -1426,4 +1426,17 @@ function legacyClaudeMax(args) {
       process.stdout.write(`  note: ${warning}\n`);
     }
   });
+}
+
+// `--learn status` reports `codexCli`: the configured codex-cli against the
+// tested version window (src/codex-version.js, declared 2026-10-13). It is
+// information only. It never changes the exit status, and a build outside the
+// window means "not exercised here", not broken, because Codex ships often and
+// a warning on every update would be an always-on false alarm. Null, with
+// nothing spawned, when there is no Codex home at all, so a Claude-only machine
+// pays nothing. Required lazily so no other verb loads it. Defined down here,
+// below every line the docs cite into this file, so adding it moved none.
+function codexCliStatus(codexHome, executable) {
+  if (!fs.existsSync(codexHome)) return null;
+  return require('../src/codex-version').codexVersionStatus({ executable });
 }

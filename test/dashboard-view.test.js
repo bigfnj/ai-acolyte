@@ -904,6 +904,64 @@ test('the Codex memory row says 1 issue, 1 file and 1 section, and keeps plurals
   } finally { app.dispose(); }
 });
 
+// The Codex CLI version line (2026-10-13) is INFORMATION ONLY: a build outside the tested
+// window must never colour the row or the line, or every Codex update becomes an
+// always-on false alarm. Both halves are driven: the payload builder for real (an
+// unresolvable configured executable, so nothing is spawned and the answer is
+// deterministic), then the webview render with in- and out-of-window statuses.
+test('the Codex CLI version line informs and never warns, whatever the version', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  fs.mkdirSync(path.join(env.tempHome, '.codex'), { recursive: true });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.codexExecutable': 'acolyte-no-such-codex-xyz' } });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const cli = ui.posted[0].codexMemory.cli;
+    assert.equal(cli.version, null, 'the payload builder asked about the configured executable');
+    assert.equal(cli.executable, 'acolyte-no-such-codex-xyz');
+    assert.match(cli.note, /not found/);
+    assert.equal(cli.severity, 'info');
+    assert.match(ui.view.webview.html, /<div class="muted sub" id="codexCliVersion"><\/div>/,
+      'the line is a muted note in the Codex card');
+
+    const panel = runPanelScript(ui.view.webview.html);
+    const show = (status) => {
+      panel.deliver({ ...ui.posted[0], codexMemory: { state: 'readable', files: 1, issues: 0, cli: status } });
+      const line = panel.dom.byId.get('codexCliVersion');
+      return { text: line.textContent, lineClass: line.className, row: panel.dom.byId.get('stCodexMemory').className };
+    };
+    const outside = { version: '0.170.0', inWindow: false, severity: 'info', tested: ['0.145.0', '0.154.0', '0.161.0'],
+      note: 'Codex CLI 0.170.0 is newer than the newest tested version (0.161.0). Information only: nothing is disabled; newer builds have not been exercised here.' };
+    const inside = { ...outside, version: '0.161.0', inWindow: true, note: 'Codex CLI 0.161.0: a tested version (window 0.145.0-0.161.0).' };
+    for (const status of [outside, inside, cli]) {
+      const shown = show(status);
+      assert.equal(shown.text, status.note);
+      assert.doesNotMatch(shown.lineClass, /warn/, `${status.version}: the line is never styled as a warning`);
+      assert.equal(shown.row, 'rowstate', `${status.version}: the version never reaches the row state`);
+    }
+    assert.equal(panel.dom.byId.get('codexCliVersion').title, 'Tested Codex versions: 0.145.0, 0.154.0, 0.161.0');
+    assert.equal(show(null).text, '', 'no status, no line');
+  } finally { await app.dispose(); }
+});
+
+// The configured executable is unresolvable on purpose: without the Codex-home gate the
+// builder would answer "not found" at once, so a null here is the gate and not a probe
+// that simply has not finished yet.
+test('a machine with no Codex home gets no Codex CLI line and no probe', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.codexExecutable': 'acolyte-no-such-codex-xyz' } });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.equal(fs.existsSync(path.join(env.tempHome, '.codex')), false, 'precondition: no Codex home');
+    assert.equal(ui.posted[0].codexMemory.cli, null);
+  } finally { await app.dispose(); }
+});
+
 // Claude Code loads the first 200 lines of MEMORY.md and drops the rest in silence. The
 // card watched bytes only, against a self-imposed 12000-byte budget, so it could read
 // green while the tail of the index was already absent from every session. Lines are also

@@ -1233,7 +1233,8 @@ function defaultCodexValidator(text, context) {
     // the only invocation of this validator builds a context without that key, so
     // the left branch could not be taken. An override nobody can reach is not an
     // extension point, it is a second way for the check and the write to disagree
-    // about which files are visible.
+    // about which files are visible. No `workspaceRoot`, deliberately: a project's
+    // rules never decide a user-scope write (src/codex-policy.js says why).
     const ruleSet = codexRuleFileSet({
       home: context.home, codexHome: context.codexHome, target: context.path, substitute: temp,
     });
@@ -1513,7 +1514,7 @@ function createAutoLearnManager(options = {}) {
   // between the settings write and the claims write of one application.
   const { locked } = createPolicyLock({ lockPath, staleMs: lockStaleMs, now });
   const mcpOptions = { ...(options.codexMcpConfigOptions || {}), home, codexHome, workspaceRoot, codexExecutable };
-  const codexRuleStore = createCodexRuleStore({ codexHome, target: inventoryTarget, workspaceRoot,
+  const codexRuleStore = createCodexRuleStore({ codexHome, home, codexExecutable, target: inventoryTarget, workspaceRoot,
     claimsPath: inventoryClaims, storePath: codexRemovalPath, backupPath: codexBackupPath, snapshot, atomicWrite,
     afterWrite: afterPolicyWrite,
     assertExternalReady: () => assertCodexMcpReady(mcpOptions),

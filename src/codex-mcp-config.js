@@ -163,6 +163,20 @@ function readConfig(options, context) {
   return { snapshot: before, response, user: users[0], semanticHash: semanticHash(users[0].config) };
 }
 
+// Codex's own layered view for one cwd and nothing more: no config.toml is
+// required, nothing is compared or written, and the worker refuses any method
+// but config/read and config/value/write (this sends only the first).
+// src/codex-policy.js asks it which project `.codex` folders a session in that
+// cwd would load, because Codex decides project trust with matching rules a
+// TOML read gets wrong (measured 2026-10-13, codex-cli 0.161.0; the evidence is
+// under "project rule directories" there). `rpc` is injectable as above.
+function readCodexConfigLayers(options = {}) {
+  const context = paths(options);
+  const [response] = rpc([{ method: 'config/read', params: { cwd: options.workspaceRoot || null, includeLayers: true } }], options, context);
+  if (!object(response) || !Array.isArray(response.layers)) throw new Error('Codex config/read did not return layers');
+  return response;
+}
+
 function inspectInternal(options, context, inspectedConfig) {
   const { server, tool } = options;
   if (!validName(server) || !validName(tool)) throw new Error('Codex MCP server and tool names must be exact supported identifiers');
@@ -362,7 +376,8 @@ function finishPending(request, options = {}) {
 }
 
 module.exports = { inspectCodexMcpTool, planCodexMcpApproval, applyCodexMcpApproval,
-  restoreCodexMcpApproval, listCodexMcpApprovals, inspectPending, assertReady, finishPending };
+  restoreCodexMcpApproval, listCodexMcpApprovals, inspectPending, assertReady, finishPending,
+  readCodexConfigLayers };
 
 if (require.main === module && process.argv[2] === '--rpc-worker') {
   const readline = require('node:readline');

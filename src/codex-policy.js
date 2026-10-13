@@ -373,7 +373,9 @@ function enterpriseDecisionFor(bundle, argv) {
 //
 // This is the one definition of "the set", used by the validator before a write
 // and by the "Why did this prompt?" explanation afterwards, so the two cannot
-// disagree about what was checked.
+// disagree about what was checked. Given a `workspaceRoot` it adds the project
+// folders Codex trusts there, which the write validator deliberately does not
+// ask for: both reasons are under "project rule directories" below.
 
 const CODEX_RULE_EXTENSION = '.rules';
 
@@ -386,8 +388,9 @@ function codexRuleDirectories(options = {}) {
 // visible too, and two files carrying the same prefix rule is not the state the
 // write produces.
 function codexRuleFileSet(options = {}) {
+  const project = projectRuleDirectories(options, resolveCodexHome(options), options.platform || process.platform);
   const directories = [
-    ...codexRuleDirectories(options),
+    ...codexRuleDirectories(options), ...project.directories,
     ...(Array.isArray(options.directories) ? options.directories : []),
   ].map((directory) => path.resolve(directory));
   const failures = [];
@@ -451,18 +454,307 @@ function codexRuleFileSet(options = {}) {
     files: resolved,
     effective: substitute ? [...new Set(replaced)] : resolved,
     directories: [...new Set(directories)],
+    // Which members are a trusted project's rather than the user's, for the
+    // rule-store inventory: it lists them read-only and never backs them up.
+    projectDirectories: project.directories.slice(),
     failures,
     // Local rule files are one input. Say so wherever the set is reported.
     blindSpots: [
       'Managed and system-scope Codex policy is not enumerated here: only rule ' +
       'files readable in the directories listed above were checked. Session ' +
       'approval state and sandbox restrictions are also outside this check.',
+      ...project.notes,
     ],
   };
 }
 
 function codexRulesArguments(files) {
   return (Array.isArray(files) ? files : []).flatMap((file) => ['--rules', String(file)]);
+}
+
+// ── project rule directories ──────────────────────────────────────────────────
+//
+// `<project>/.codex/rules` IS LOADED, BUT ONLY FOR A PROJECT CODEX TRUSTS, and the
+// trust test has rules a TOML read gets wrong. Measured 2026-10-13 on codex-cli
+// 0.161.0 in isolated profiles (temp HOME and CODEX_HOME, provider credentials
+// stripped, a scripted loopback model issuing one `exec_command` with
+// `sandbox_permissions: require_escalated`, every approval declined): a project
+// rule allowing the probe suppressed the approval when the project was trusted
+// and did not when it was untrusted or `trust_level = "untrusted"`; a trusted
+// project with NO rule still prompted, so trust alone approves nothing. The
+// same profiles established:
+//
+//   - `config/read` with `includeLayers` lists one `project` layer per existing
+//     `.codex` folder from the project root down to the cwd (root, an
+//     intermediate folder and the cwd were all listed), and an untrusted layer
+//     carries `disabledReason` ("To load project-local config, hooks, and exec
+//     policies, add <path> as a trusted project"). The enabled layers are
+//     exactly the folders whose rules the session obeyed. CODEX_HOME is never
+//     one, even when it sits at the repository root.
+//   - The project root is the nearest ancestor carrying a `project_root_markers`
+//     entry: `.git` by default, and a custom marker was honoured. A `.git`
+//     directory that is not a repository (empty, or holding only a credentials
+//     file) did not count. Inside a repository, trust on the cwd OR on the
+//     repository root enabled the layers, and a linked worktree was trusted
+//     through its main checkout as well as its own path. Outside one, a trusted
+//     PARENT conferred nothing.
+//   - Keys compare case-insensitively on Windows, drive letter and segment case
+//     alike, but otherwise literally: forward slashes, a trailing separator and
+//     an 8.3 short-name key for a long-name cwd were all NOT trusted, while the
+//     long name for an 8.3 cwd was. Every TOML spelling counts: a
+//     `[projects.'p']` or `[projects."p"]` header, a dotted key, an inline table.
+//
+// scripts/check-codex-project-rules-runtime.js re-runs those sessions against
+// whatever Codex is installed, and fails if this module's answer differs from
+// what the session obeyed or if the fallback below is ever WIDER than Codex.
+//
+// So Codex is asked, through the same isolated `config/read` worker the MCP
+// review uses (readCodexConfigLayers in src/codex-mcp-config.js), and the answer
+// is cached until config.toml's size or mtime changes or a candidate `.codex`
+// folder appears or goes, because each ask starts an app-server: about one
+// second here, measured. Only when that route fails (no reachable codex or
+// node, or a reply without readable layers) is config.toml read directly, and
+// that read is deliberately narrower than Codex: an exact `[projects.'<root>']`
+// or `[projects."<root>"]` header with `trust_level = "trusted"` for the
+// workspace root itself, or nothing. What it cannot decide is left OUT and said
+// in `blindSpots`, because a rule reported as governing a session it does not
+// govern is the confident wrong answer this module keeps refusing to give.
+//
+// THE WRITE VALIDATOR DOES NOT ASK FOR THIS, on purpose. Auto Learn writes the
+// USER-scope file, which applies in every project, and `codex execpolicy check`
+// fails the whole check on any unparseable `--rules` member and resolves a
+// conflict toward the stricter decision. Both measured on 0.161.0: a broken
+// neighbour exits 1 ("failed to parse policy"), and a neighbour's `forbidden`
+// turns the user file's `allow` into `forbidden`. With one project's rules in the
+// validation set, the same user-scope write would pass or fail depending on
+// which workspace window ran it, and a malformed file Codex loads only inside
+// that project would block user-scope maintenance everywhere. Project rules
+// belong to the explanation and the inventory, which describe what a session in
+// THIS workspace obeys, not to the check of a file that is not theirs.
+
+const PROJECT_TRUST_CACHE = new Map();
+const PROJECT_TRUST_CACHE_LIMIT = 32;
+const injectedRpcIds = new WeakMap();
+let nextInjectedRpcId = 0;
+
+const USER_SCOPE_ONLY_NOTE =
+  'Project rule folders (<project>/.codex/rules, which Codex loads only for a ' +
+  'project it trusts) are not part of this set: it holds the user-scope rules alone.';
+
+function fileSignature(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch (error) {
+    return error && error.code === 'ENOENT' ? 'absent' : `unreadable:${error && error.code}`;
+  }
+}
+
+function directoryExists(file) {
+  try { return fs.statSync(file).isDirectory(); } catch { return false; }
+}
+
+// A repository the way git itself accepts one: a `.git` FILE (a linked worktree
+// or submodule pointer) or a `.git` directory holding HEAD. The second clause is
+// not pedantry. The home directory of the development box this was measured on
+// has a `.git` directory holding only a credentials file; counted as a marker,
+// it would put every workspace under the home inside one "repository" and start
+// an app-server for folders Codex never considers.
+function repositoryMarker(dir) {
+  const marker = path.join(dir, '.git');
+  try {
+    const stat = fs.statSync(marker);
+    return stat.isFile() || (stat.isDirectory() && fs.existsSync(path.join(marker, 'HEAD')));
+  } catch { return false; }
+}
+
+// The `.codex` folders a session whose cwd is `root` could load. This only
+// decides whether Codex needs asking at all, so it errs WIDE: a custom
+// `project_root_markers` (any spelling, any table) widens it to every ancestor.
+// Too wide costs one cached app-server start; too narrow would hide rules.
+function projectCandidates(root, codexHome, wide, fold) {
+  const chain = [];
+  let repository = false;
+  for (let dir = root; ;) {
+    chain.push(dir);
+    if (!wide && repositoryMarker(dir)) { repository = true; break; }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return (wide || repository ? chain : [root])
+    .map((dir) => path.join(dir, '.codex'))
+    .filter((folder) => fold(folder) !== fold(codexHome) && directoryExists(folder));
+}
+
+// Codex's answer, or null when the reply has a shape this cannot read, which
+// sends the caller to the narrow fallback rather than to a guess.
+function layersVerdict(response, userDirectory, fold) {
+  const directories = [];
+  const notes = [];
+  for (const layer of response.layers) {
+    if (layer?.name?.type !== 'project') continue;
+    const folder = layer.name.dotCodexFolder;
+    if (typeof folder !== 'string' || !path.isAbsolute(folder)) return null;
+    const rules = path.join(folder, 'rules');
+    if (layer.disabledReason) {
+      if (directoryExists(rules)) {
+        notes.push(`${rules} is not loaded: Codex reports that project layer as disabled` +
+          (/trusted project/i.test(String(layer.disabledReason)) ? ' because the project is not trusted' : '') +
+          ', so its rules were not checked.');
+      }
+      continue;
+    }
+    if (fold(rules) !== fold(userDirectory)) directories.push(rules);
+  }
+  return { directories, notes };
+}
+
+// `[projects.'<path>']` and `[projects."<path>"]` headers with the trust_level
+// under each. Any other way of writing a projects entry is flagged, never
+// interpreted: `other` makes the fallback say it saw trust it did not read.
+const PROJECT_HEADER = /^\s*\[\s*projects\s*\.\s*(?:'([^']*)'|"((?:[^"\\]|\\.)*)")\s*\]\s*$/;
+const TRUST_LEVEL = /^\s*trust_level\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*$/;
+
+// A basic-string key, decoding only `\\` and `\"`, the two escapes a Windows
+// path needs. Any other escape returns null and the entry is not read.
+function basicStringKey(body) {
+  let value = '';
+  for (let index = 0; index < body.length; index += 1) {
+    if (body[index] !== '\\') { value += body[index]; continue; }
+    const next = body[index + 1];
+    if (next !== '\\' && next !== '"') return null;
+    value += next;
+    index += 1;
+  }
+  return value;
+}
+
+function projectTrustEntries(text) {
+  const entries = [];
+  let current = null;
+  let topLevel = true;
+  let other = false;
+  let fence = '';
+  for (const raw of String(text == null ? '' : text).split(/\r?\n/)) {
+    // A multi-line string's body is content, not keys: a `[projects.'x']` line
+    // inside developer instructions must not become trust.
+    if (fence) {
+      if (raw.split(fence).length % 2 === 0) fence = '';
+      continue;
+    }
+    const opened = ['"""', "'''"].find((mark) => raw.split(mark).length % 2 === 0);
+    if (opened) { fence = opened; continue; }
+    const line = stripTomlComments(raw);
+    if (/^\s*\[/.test(line)) {
+      topLevel = false;
+      const header = PROJECT_HEADER.exec(line);
+      const key = header ? (header[1] !== undefined ? header[1] : basicStringKey(header[2])) : null;
+      if (key !== null) {
+        current = { key, trust: [] };
+        entries.push(current);
+      } else {
+        current = null;
+        if (/^\s*\[\[?\s*["']?projects\b/.test(line)) other = true;
+      }
+      continue;
+    }
+    if (current) {
+      const trust = TRUST_LEVEL.exec(line);
+      if (trust) current.trust.push(trust[1] !== undefined ? trust[1] : trust[2]);
+      else if (/^\s*trust_level\b/.test(line)) other = true;
+    } else if (topLevel && /^\s*["']?projects["']?\s*[.=]/.test(line)) other = true;
+  }
+  return { entries, other };
+}
+
+function configVerdict(root, candidates, text, reason, platform, fold) {
+  const foldText = (value) => (platform === 'win32' ? String(value).toLowerCase() : String(value));
+  const notes = [`Codex could not be asked which project folders it trusts (${String(reason).slice(0, 200)}), ` +
+    'so config.toml was read directly, and more narrowly than Codex reads it.'];
+  const directories = [];
+  const own = path.join(root, '.codex');
+  const ownRules = path.join(own, 'rules');
+  const { entries, other } = projectTrustEntries(text);
+  if (candidates.some((folder) => fold(folder) === fold(own))) {
+    // Both spellings Codex was measured to accept for a cwd: the path as given,
+    // and its canonical long-name form, which is also the one Codex's own
+    // "add <path> as a trusted project" message names.
+    const forms = new Set([foldText(root)]);
+    try { forms.add(foldText(fs.realpathSync.native(root))); } catch {}
+    const matches = entries.filter((entry) => forms.has(foldText(entry.key)));
+    const levels = matches.flatMap((entry) => (entry.trust.length ? entry.trust : ['(unset)']));
+    if (levels.length && levels.every((level) => level === 'trusted')) directories.push(ownRules);
+    else if (directoryExists(ownRules)) {
+      notes.push(levels.length
+        ? `${ownRules} was not included: config.toml ${levels.some((level) => level === 'trusted')
+          ? 'gives this folder conflicting trust entries' : 'does not mark this folder trusted'}.`
+        : `${ownRules} was not included: config.toml has no [projects] entry naming this exact folder, ` +
+          'and Codex can also trust a folder through its repository or worktree root, which this ' +
+          'reading does not resolve.');
+    }
+  }
+  const enclosing = candidates.filter((folder) => fold(folder) !== fold(own))
+    .map((folder) => path.join(folder, 'rules')).filter(directoryExists);
+  if (enclosing.length) {
+    notes.push(`Rule folders Codex may also load from enclosing folders were not checked: ${enclosing.join(', ')}.`);
+  }
+  if (other) {
+    notes.push('config.toml also declares projects in a form this reading does not interpret ' +
+      '(a dotted key, an inline table or a [projects] table), so no trust was taken from it.');
+  }
+  return { directories, notes };
+}
+
+function projectRuleDirectories(options, codexHome, platform) {
+  if (!options.workspaceRoot) return { directories: [], notes: [USER_SCOPE_ONLY_NOTE] };
+  const root = path.resolve(String(options.workspaceRoot));
+  const fold = (file) => (platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file));
+  const configFile = path.join(codexHome, 'config.toml');
+  const rpc = typeof options.rpc === 'function' ? options.rpc : null;
+  if (rpc && !injectedRpcIds.has(rpc)) injectedRpcIds.set(rpc, ++nextInjectedRpcId);
+  // Everything that can change the answer without changing config.toml is in
+  // the key too: which Codex (and which injected test route) was asked, and for
+  // which profile, workspace and platform.
+  const key = JSON.stringify([rpc ? injectedRpcIds.get(rpc) : 0, String(options.codexExecutable || 'codex'),
+    String(options.nodeExecutable || 'node'), options.home == null ? null : path.resolve(String(options.home)),
+    fold(codexHome), fold(root), platform, fileSignature(configFile)]);
+  let entry = PROJECT_TRUST_CACHE.get(key);
+  if (!entry) {
+    let text = '';
+    try { text = fs.readFileSync(configFile, 'utf8'); } catch {}
+    entry = { text, wide: /project_root_markers/.test(text), signature: null, verdict: null };
+  }
+  // Re-evaluated when the folder set changes even though config.toml did not: a
+  // `.codex` folder created after the first ask is otherwise invisible until the
+  // next config edit, which can be never.
+  const candidates = projectCandidates(root, codexHome, entry.wide, fold);
+  const signature = JSON.stringify(candidates.map(fold));
+  if (entry.signature !== signature) {
+    entry.verdict = candidates.length ? askCodexOrConfig() : { directories: [], notes: [] };
+    entry.signature = signature;
+  }
+  PROJECT_TRUST_CACHE.delete(key);
+  PROJECT_TRUST_CACHE.set(key, entry);
+  while (PROJECT_TRUST_CACHE.size > PROJECT_TRUST_CACHE_LIMIT) {
+    PROJECT_TRUST_CACHE.delete(PROJECT_TRUST_CACHE.keys().next().value);
+  }
+  return { directories: entry.verdict.directories.slice(), notes: entry.verdict.notes.slice() };
+
+  function askCodexOrConfig() {
+    let reason;
+    try {
+      // Required here, not at the top: the MCP module pulls in the policy
+      // writer, and nothing that never passes a workspace root should load it.
+      const { readCodexConfigLayers } = require('./codex-mcp-config');
+      const response = readCodexConfigLayers({ home: options.home, codexHome, workspaceRoot: root,
+        codexExecutable: options.codexExecutable || 'codex', nodeExecutable: options.nodeExecutable, rpc });
+      const verdict = layersVerdict(response, path.join(codexHome, 'rules'), fold);
+      if (verdict) return verdict;
+      reason = 'Codex returned project layers in a shape this tool cannot read';
+    } catch (error) { reason = String((error && error.message) || error); }
+    return configVerdict(root, candidates, entry.text, reason, platform, fold);
+  }
 }
 
 // CODEX_RULE_EXTENSION, MANAGED_POLICY_BLIND_SPOTS, codexRuleDirectories and

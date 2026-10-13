@@ -1659,12 +1659,12 @@ function execFileCaptured(executable, args) {
   });
 }
 
-// One definition of "the set Codex evaluates", shared with the validator that
-// runs before a write (src/codex-policy.js). The diagnostic and the write have
-// to answer the same question or "Why did this prompt?" names a cause the write
-// never checked.
+// One definition of "the set Codex evaluates", shared with the pre-write validator
+// (src/codex-policy.js), so "Why did this prompt?" cannot name a cause the write never
+// checked. The workspace root adds the trusted project folders, which that check omits.
 function codexRuleFileSetFor(cfg) {
-  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null });
+  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null,
+    workspaceRoot: cfg.workspaceRoot, codexExecutable: cfg.codexExecutable });
 }
 
 // `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
@@ -1927,8 +1927,8 @@ async function explainAutoLearnPrompt() {
   if (!rules.length) {
     vscode.window.showInformationMessage('Codex execpolicy analysis', {
       modal: true,
-      detail: 'No enterprise rule governs this command, and no user-scope .rules files are ' +
-        'currently visible, so Codex has no local prefix rule to allow it. ' +
+      detail: 'No enterprise rule governs this command, and no user-scope or trusted-project ' +
+        '.rules files are currently visible, so Codex has no local prefix rule to allow it. ' +
         ruleSet.blindSpots.join(' ') + unreadable + degradedNote,
     });
     return;
@@ -3925,8 +3925,11 @@ class WildcardingViewProvider {
       const entries = settings?.permissions?.[key];
       return entries === undefined || (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'));
     });
+    // Counts trusted project rules too: given a .codex folder, one cached ~1 s Codex config/read per config edit.
+    const codexSummaryConfig = autoLearnConfig();
     const codexPermissions = readCodexPermissionSummary({ home: os.homedir(), codexHome: CODEX_HOME_DIR,
-      target: autoLearnConfig().codexRulesPath });
+      target: codexSummaryConfig.codexRulesPath, workspaceRoot: codexSummaryConfig.workspaceRoot,
+      codexExecutable: codexSummaryConfig.codexExecutable });
     // Saved shell approvals that are one-off scripts (src/permission-summary.js says what
     // counts and why). Off the SAME `allow` this push already read, per the note above:
     // a second readSettings() here would bring back the duplicate read it removed.

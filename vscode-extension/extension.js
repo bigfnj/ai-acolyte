@@ -2152,6 +2152,9 @@ function activate(context) {
   // already read the old runner and is awaiting a promise that holds it, so it
   // still terminates its own worker. The successor simply builds its own.
   autoLearnWorkerRunner = null;
+  // warnOnce promises "once per activation", and the Set outlives deactivate, so
+  // until 2026-10-13 a re-activate stayed silent about a warning already given.
+  warnedOnce.clear();
   // Watch settings.json for any change (Claude Code approval, manual edit, etc.).
   // RelativePattern (not a plain string) — plain strings only watch files inside
   // opened workspace folders, but ~/.claude/settings.json usually isn't one.

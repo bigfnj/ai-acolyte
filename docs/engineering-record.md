@@ -372,24 +372,78 @@ process-group kill (`taskkill /T` on Windows) is what would make this certain.
 
 ### Module state that still survives deactivate
 
-Re-measured 2026-09-10: 28 module-level mutables, **9 reset** by `deactivate()`,
-19 surviving. The five that held real memory are now dropped — `dashboard` and
-`memoryLint` each retained the whole `ExtensionContext`, and
-`autoLearnManager`/`autoLearnManagerKey`/`autoLearnCardCache` held parsed history
-state, the largest thing this extension builds.
+**Re-counted 2026-10-13. The 2026-09-10 count below it is kept for the record and
+is superseded.** Method, so the next count can be compared like for like: every
+column-0 `let` in `vscode-extension/extension.js`, plus every module-scope `const`
+holding a `Set` or `Map`; then, for each name, every assignment, increment,
+`.clear()`, `clearTimeout`/`clearInterval`, or call to a helper that clears it,
+inside the bodies of `activate()` and `deactivate()`. A module-scope `const`
+holding a stateless object (`settingsWriter`) is not counted.
 
-What remains is inert by inspection: eleven timer handles (`debounceTimer`,
-`recallSyncTimer`, `memBounce`, `gatesBounce`, `autoLearnBounce`, `autoLearnTimer`,
-`policyBounce`, `localDrainBounce`, `dashboardBounce`) which are all cleared above
-— holding a dead handle costs nothing — plus scalars (`lockedRetries`,
-`localDrainRetries`, `localDrainAt`, `recallRebuildAt`, `lastRun`,
-`autoLearnLastError`, `autoLearnFailureCount`, `autoLearnNextRetryAt`) and two
-disposed objects (`statusBar`, `policyLock`).
+**38 module-level mutables**: 33 `let` bindings (`let debounceTimer` through
+`let activationGeneration`, plus `let extensionVersionMemo` further down) and 5
+containers (`liveChildren`, `warnedOnce`, `liveTransfers`, and the two watcher
+Maps `memoryCardWatchers` and `gatesCorpusWatchers`). Against `deactivate()`:
 
-Two of the scalars have a real if minor effect across a same-realm re-activate:
-`autoLearnNextRetryAt` carries a backoff over, and `autoLearnFailureCount` carries
-the count that computes it. Not worth a change on its own; worth doing next time
-this file is open.
+- **13 `let` bindings assigned**: `outputChannel` (disposed first), `dashboard`,
+  `memoryLint`, `autoLearnManager`, `autoLearnManagerKey`, `autoLearnCardCache`,
+  `codexFeatureUi`, `codexMemoryLint`, `codexMemoryGatesUi`, `codexMemoryReport`,
+  `deactivated` (set to `true`), and, only when no re-activate happened during the
+  awaited drain, `autoLearnWorkerRunner` and `autoLearnBusy`.
+- **2 containers emptied** by helpers it calls, after killing or destroying what
+  they held: `liveChildren` by `killLiveChildren()`, `liveTransfers` by
+  `abortLiveTransfers()`.
+- **9 timer handles cleared, not nulled**: `debounceTimer`, `recallSyncTimer`,
+  `memBounce`, `gatesBounce`, `autoLearnBounce`, `autoLearnTimer` (an interval),
+  `policyBounce`, `localDrainBounce`, `dashboardBounce`. Holding a dead handle costs
+  nothing. The 2026-09-10 text said "eleven timer handles" and listed these nine;
+  nine is the count.
+- **2 watcher Maps emptied by the host, not by `deactivate()`**: `activate()`
+  registers `disposeMemoryWatchers()` as a context subscription, so they empty when
+  VS Code disposes the subscriptions after `deactivate()` resolves.
+- **12 untouched**: `policyLock`, `lockedRetries`, `lastRun`, `recallRebuildAt`,
+  `autoLearnLastError`, `autoLearnFailureCount`, `autoLearnNextRetryAt`,
+  `localDrainRetries`, `localDrainAt`, `activationGeneration`,
+  `extensionVersionMemo`, `warnedOnce`.
+
+`activate()` resets five: `deactivated = false`, `activationGeneration += 1`,
+`autoLearnBusy = false`, `autoLearnWorkerRunner = null` and, since 2026-10-13,
+`warnedOnce.clear()`. It also repopulates `dashboard`, `memoryLint`,
+`codexFeatureUi`, `codexMemoryGatesUi`, `codexMemoryLint` and `codexMemoryReport`,
+and re-arms `recallSyncTimer`.
+
+(`activationGeneration` is bumped, never reset, by design: it is the counter
+`deactivate()` compares against after its drain.) That leaves **10 names that cross
+a same-realm re-activate with neither function touching them**, each inert or
+minor. `extensionVersionMemo` memoizes this module's own `package.json`, which
+cannot change under it. `policyLock` holds a lock path and closures and no OS
+handle between calls; the 2026-09-10 text called it a "disposed object", but
+nothing disposes it and nothing needs to. `statusBar`, the other "disposed object"
+named then, is no longer a module binding. The other eight are scalars: the retry
+budgets `lockedRetries` and `localDrainRetries`, the timestamps `lastRun`,
+`localDrainAt` and `recallRebuildAt`, and the Auto Learn failure fields
+`autoLearnLastError`, `autoLearnFailureCount` and `autoLearnNextRetryAt`.
+
+`warnedOnce` is the one with a visible effect, and it is not in the 2026-09-10 list
+because it did not exist until 2026-09-24. warnOnce's comment promises "once per
+distinct message, per activation", and nothing cleared the Set, so after a
+re-activate (an extension disable/enable, or an upgrade) a warning the previous
+activation had given was never repeated. Cleared with the other resets at the top
+of `activate()` 2026-10-13, and pinned by "a same-realm re-activate repeats a
+once-per-activation warning" in test/extension-lifecycle-async.test.js, which fails
+with the clear removed (1 warning across two activations, not 2).
+
+Still true 2026-10-13: two of the scalars have a real if minor effect across a
+same-realm re-activate. `autoLearnNextRetryAt` carries a backoff over, and
+`autoLearnFailureCount` carries the count that computes it. Not worth a change on
+its own; worth doing next time this file is open.
+
+Superseded 2026-09-10 count, as written then: 28 module-level mutables, **9 reset**
+by `deactivate()`, 19 surviving. The five that held real memory were dropped then
+and still are: `dashboard` and `memoryLint` each retained the whole
+`ExtensionContext`, and `autoLearnManager`/`autoLearnManagerKey`/
+`autoLearnCardCache` held parsed history state, the largest thing this extension
+builds.
 
 ### Non-interactive runs refuse every output redirection
 

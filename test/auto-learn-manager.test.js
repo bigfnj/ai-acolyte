@@ -1080,6 +1080,54 @@ test('a managed rule that appears later never revokes a grant already written', 
     .includes('Bash(rg --files *)'), 'the existing grant survives the new rule');
 });
 
+// `managedPolicyPath` was listed as an option key with no supplier. It has three
+// now, all scripts -- check-codex-prune-runtime.js, check-codex-restore-runtime.js
+// and check-codex-shared-runtime.js point it at `<home>/.claude/managed-settings.json`
+// -- and that is NOT the default, which src/managed-policy.js puts at
+// `remote-settings.json`. So the key is kept (2026-10-13), but no test supplied it,
+// and it is read twice: once by the stat that keys the policy cache, once by the
+// read behind it. If those two ever name different files, the stamp never moves
+// when the policy does, and the first verdict is served for the manager's life.
+//
+// The default location holds the OPPOSITE verdict throughout, so a read that
+// slipped back to the default is visible on the first assertion, and a stamp that
+// slipped back to it is visible on the second.
+test('a managed policy at a configured path is the one explained, and an edit to it invalidates the cache', (t) => {
+  const home = tempHome(t);
+  const permission = 'Bash(curl *)';
+  const configured = path.join(home, '.claude', 'managed-settings.json');
+  writeJson(path.join(home, '.claude', 'remote-settings.json'), {
+    permissions: { allow: ['Bash(curl:*)'], ask: [], deny: [] },
+  });
+  // mtime is advanced explicitly, as test/managed-policy-cache.test.js does, so
+  // no filesystem's timestamp granularity decides whether the edit is seen.
+  let stamp = Date.now() / 1000;
+  const writePolicy = (permissions) => {
+    writeJson(configured, { permissions });
+    stamp += 10;
+    fs.utimesSync(configured, stamp, stamp);
+  };
+  writePolicy({ allow: [], ask: [], deny: ['Bash(curl:*)'] });
+
+  // CONTROL: without the key, the same home reads the default file and calls
+  // the grant redundant. That is what makes `inert` below attributable.
+  const unconfigured = manager(home, scannerFeed([]), { codexRulesPath: null });
+  assert.equal(unconfigured.explainManaged(permission).verdict, 'redundant',
+    'precondition: the default location is live and says allow');
+
+  const learn = manager(home, scannerFeed([]), { codexRulesPath: null, managedPolicyPath: configured });
+  const first = learn.explainManaged(permission);
+  assert.equal(first.policy, 'present');
+  assert.equal(first.verdict, 'inert',
+    'the configured file denies it; reading the default instead would say redundant');
+
+  // Same manager, same process. Only the configured file changed.
+  writePolicy({ allow: [], ask: [], deny: [] });
+  assert.equal(learn.explainManaged(permission).verdict, 'effective',
+    'an edit to the configured file must invalidate the cache; a stamp taken on the '
+    + 'default path never moves, and the stale `inert` would be served instead');
+});
+
 // `--learn apply` died with a raw TypeError out of policy-exporters whenever a
 // key outlived its candidate. The filter guarded `state.candidates[key]?.autoSafe`
 // on the left of the `||` and then passed the same possibly-absent value

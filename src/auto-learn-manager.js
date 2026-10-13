@@ -1312,11 +1312,16 @@ function defaultCodexValidator(text, context) {
 }
 function createAutoLearnManager(options = {}) {
   const aliases = object(options.paths) ? options.paths : {};
-  const home = path.resolve(options.home || options.homeDir || os.homedir());
+  // One spelling each. The `homeDir` and `successThreshold` legs were removed
+  // 2026-10-13: the extension set both spellings to the same values on one
+  // literal, so each leg was shadowed whenever it was supplied, and no other
+  // caller (CLI, scripts, tests) used them. test/codex-inventory-ui.test.js now
+  // fails if the extension supplies a key this factory does not read.
+  const home = path.resolve(options.home || os.homedir());
   const codexHome = resolveCodexHome({ codexHome: options.codexHome,
-    ...(options.home !== undefined || options.homeDir !== undefined ? { home } : {}) });
+    ...(options.home !== undefined ? { home } : {}) });
   const configuredMode = MODES.has(options.mode) ? options.mode : 'recommend';
-  const configuredThreshold = positive(options.threshold ?? options.successThreshold, 3);
+  const configuredThreshold = positive(options.threshold, 3);
   const workspaceRoot = options.workspaceRoot ? path.resolve(options.workspaceRoot) : null;
   const userDataDir = path.join(home, '.claude', 'wildcarding');
   const workspaceId = workspaceRoot ? hash(Buffer.from(normalizedPath(workspaceRoot), 'utf8')).slice(0, 16) : null;

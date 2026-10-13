@@ -1102,8 +1102,11 @@ function autoLearnConfig() {
 
 function autoLearnManagerOptions(cfg = autoLearnConfig()) {
   return {
-    home: os.homedir(), homeDir: os.homedir(), codexHome: CODEX_HOME_DIR, mode: cfg.mode,
-    threshold: cfg.threshold, successThreshold: cfg.threshold,
+    // One spelling per key: the `homeDir` / `successThreshold` duplicates were
+    // removed 2026-10-13 (they shadowed the manager's fallback legs). Guarded by
+    // test/codex-inventory-ui.test.js, which rejects a key the manager never reads.
+    home: os.homedir(), codexHome: CODEX_HOME_DIR, mode: cfg.mode,
+    threshold: cfg.threshold,
     codexRulesPath: cfg.codexRulesPath, codexExecutable: cfg.codexExecutable,
     workspaceRoot: cfg.workspaceRoot,
     // No `codexHistory` here, on purpose. It pinned the Codex root to

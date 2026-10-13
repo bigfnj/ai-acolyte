@@ -99,19 +99,162 @@ if (-not $cfg["hooks"].Contains("PostToolUse")) {
     $cfg["hooks"]["PostToolUse"] = @()
 }
 
-$already = $false
-foreach ($entry in @($cfg["hooks"]["PostToolUse"])) {
-    if ($entry -is [System.Collections.IDictionary] -and $entry.Contains("hooks")) {
-        foreach ($h in @($entry["hooks"])) {
-            if ($h.command -eq $hookCommand -or $h.command -eq $hookCmdNormalized -or $h.command -eq $hookCmd) {
-                $already = $true
-                break
-            }
+# -- Registrations of this tool from ANY checkout, not only this one ------------
+#
+# The duplicate check used to be an exact string match against the three
+# spellings of THIS checkout's path. Found live 2026-10-13: the development box's
+# PostToolUse hook still pointed at an old checkout of this repo (the directory
+# name from before the rename, v1.4.13, 142 commits behind) while the maintained
+# checkout had been cloned under the new name. Installing from a moved, renamed
+# or re-cloned checkout matched none of the three strings, so it APPENDED a
+# second entry beside the stale one. Both fired on every tool call and the stale
+# one kept running old code: every fix since 1.4.13, the MAX retirement among
+# them, never reached a real tool call, and nothing said so, because
+# "registered" was true. install.sh had the same exact-match shape.
+#
+# So the scan recognises this TOOL wherever it lives, and an install leaves
+# exactly one registration per matcher, pointing here:
+#   - none found              append a new entry (unchanged behaviour);
+#   - this checkout's found   leave it exactly as it is, bytes included;
+#   - another checkout's      rewrite that hook's command in place, so its
+#                             entry keeps its matcher, its position and any
+#                             other fields, and say old -> new;
+#   - more than one under     keep one (this checkout's if present, else the
+#     the same matcher        first, repointed) and remove the rest, per hook,
+#                             reporting each.
+# Per matcher rather than globally because an entry pair split by matcher
+# ("Bash" + "PowerShell") is a real shape -- the uninstallers' own tests carry
+# it -- and collapsing it to one entry would silently stop the hook seeing one
+# of the two tools. Under one matcher, a second copy only ever double-fires.
+#
+# Whether the old checkout still exists does not matter: running this installer
+# IS the statement of which checkout should be the hook. A vanished path is only
+# mentioned in the notice, because it is the likelier case and the user may
+# want to know there is nothing left to clean up.
+
+# The path a hook command runs, if and only if the command runs THIS tool:
+# `node <path>` or a bare `<path>`, the path optionally quoted whole, ending in
+# a `bin` directory holding a file named exactly `wildcard-perms`. Strict on
+# purpose, because a false match REWRITES somebody else's hook: extra
+# arguments, a shell wrapper, an unquoted path with a space in it, another
+# filename (`wildcard-perms.js`, `wildcard-perms-audit`) or a command that only
+# mentions the name all return $null. `-match` is case-insensitive, as a
+# Windows path is.
+function Get-WildcardPermsTarget {
+    param([object] $Command)
+    if ($Command -isnot [string]) { return $null }
+    $text = $Command.Trim()
+    if ($text -match '^node\s+(.+)$') { $text = $Matches[1].Trim() }
+    if ($text -match '^"([^"]+)"$') {
+        $text = $Matches[1]
+    } elseif ($text -match "^'([^']+)'$") {
+        $text = $Matches[1]
+    } elseif ($text -match '\s') {
+        return $null
+    }
+    if ($text -notmatch '[\\/]bin[\\/]wildcard-perms$') { return $null }
+    return $text
+}
+
+# One path, several spellings: backslashes or forward slashes, /d/repo (Git
+# Bash, which is how install.sh writes it on this platform) or D:/repo. Compare
+# the results with -ieq; casing is folded there, not here, so the notice prints
+# the path as the user wrote it.
+function ConvertTo-WindowsPath {
+    param([string] $Path)
+    $text = $Path.Replace("\", "/")
+    if ($text -match '^/([A-Za-z])/(.*)$') { $text = "$($Matches[1]):/$($Matches[2])" }
+    return $text.TrimEnd("/")
+}
+
+$currentPath = ConvertTo-WindowsPath $hookCmd
+$entries = @($cfg["hooks"]["PostToolUse"])
+$found = @()
+for ($i = 0; $i -lt $entries.Count; $i++) {
+    $entry = $entries[$i]
+    if (-not ($entry -is [System.Collections.IDictionary]) -or -not $entry.Contains("hooks")) { continue }
+    $entryHooks = @($entry["hooks"])
+    for ($j = 0; $j -lt $entryHooks.Count; $j++) {
+        $h = $entryHooks[$j]
+        if (-not ($h -is [System.Collections.IDictionary])) { continue }
+        $command = $h["command"]
+        # The three spellings the old exact-match check knew stay THIS checkout
+        # whatever the grammar above makes of them, so nothing it called
+        # "already registered" is rewritten now.
+        if ($command -is [string] -and ($command -eq $hookCommand -or $command -eq $hookCmdNormalized -or $command -eq $hookCmd)) {
+            $target = $hookCmd
+            $isCurrent = $true
+        } else {
+            $target = Get-WildcardPermsTarget $command
+            if ($null -eq $target) { continue }
+            $isCurrent = (ConvertTo-WindowsPath $target) -ieq $currentPath
+        }
+        # "$i/$j" identifies the hook for the rebuild below; indices rather than
+        # object identity, which PowerShell's PSObject wrapping makes unreliable.
+        $found += [pscustomobject]@{
+            id      = "$i/$j"
+            hook    = $h
+            target  = $target
+            current = $isCurrent
+            matcher = "$($entry['matcher'])"
         }
     }
 }
 
-if (-not $already) {
+# Which registration survives under each matcher: this checkout's first, else
+# the first found. New-Object, not @{}: a PowerShell hashtable literal folds
+# key case, and "Bash" and "bash" are different matchers.
+$keepers = New-Object System.Collections.Hashtable
+foreach ($f in $found) { if ($f.current -and -not $keepers.ContainsKey($f.matcher)) { $keepers[$f.matcher] = $f.id } }
+foreach ($f in $found) { if (-not $keepers.ContainsKey($f.matcher)) { $keepers[$f.matcher] = $f.id } }
+
+$notices = @()
+$drop = New-Object System.Collections.Hashtable
+foreach ($f in $found) {
+    if ($keepers[$f.matcher] -ne $f.id) {
+        $drop[$f.id] = $true
+        $notices += "[OK] removed a duplicate wildcard-perms hook (matcher '$($f.matcher)'): $($f.target)"
+    } elseif (-not $f.current) {
+        # In place: the hook keeps its own key order and any field beside
+        # `command` (a timeout, say), and its entry keeps matcher and position.
+        $f.hook["command"] = $hookCommand
+        # Only for the notice. IsPathRooted THROWS on .NET Framework (so under
+        # 5.1) for a path holding `"`, `<`, `>` or `|`, and a cosmetic suffix
+        # must not abort an install that has already decided what to write.
+        $gone = ''
+        $oldPath = ConvertTo-WindowsPath $f.target
+        try {
+            if ([System.IO.Path]::IsPathRooted($oldPath) -and -not [System.IO.File]::Exists($oldPath)) {
+                $gone = ' (the old path no longer exists)'
+            }
+        } catch { $gone = '' }
+        $notices += "[OK] wildcard-perms hook repointed from another checkout: $($f.target) -> $hookCmdNormalized$gone"
+    }
+}
+
+if ($drop.Count -gt 0) {
+    # Removed PER HOOK, the uninstallers' rule: an entry left empty goes, an
+    # entry that also holds a neighbour's hook keeps it, with its matcher.
+    $rebuilt = @()
+    for ($i = 0; $i -lt $entries.Count; $i++) {
+        $entry = $entries[$i]
+        if (-not ($entry -is [System.Collections.IDictionary]) -or -not $entry.Contains("hooks")) { $rebuilt += ,$entry; continue }
+        $entryHooks = @($entry["hooks"])
+        $survivors = @()
+        for ($j = 0; $j -lt $entryHooks.Count; $j++) {
+            $h = $entryHooks[$j]
+            if (-not $drop.ContainsKey("$i/$j")) { $survivors += ,$h }
+        }
+        if ($survivors.Count -eq $entryHooks.Count) { $rebuilt += ,$entry; continue }
+        if ($survivors.Count -gt 0) {
+            $entry["hooks"] = $survivors
+            $rebuilt += ,$entry
+        }
+    }
+    $cfg["hooks"]["PostToolUse"] = $rebuilt
+}
+
+if ($found.Count -eq 0) {
     # Add new PostToolUse entry
     $newHook = [ordered]@{
         matcher = "Bash|PowerShell"
@@ -123,6 +266,9 @@ if (-not $already) {
         )
     }
     $cfg["hooks"]["PostToolUse"] = @(@($cfg["hooks"]["PostToolUse"]) + $newHook)
+}
+
+if ($found.Count -eq 0 -or $notices.Count -gt 0) {
     $cfgJson = ConvertTo-Json $cfg -Depth 100
     # A copy before the only unlocked, non-atomic write to this file in the
     # project. Everything in-process goes through writeFileAtomicSync; this
@@ -131,7 +277,10 @@ if (-not $already) {
         Copy-Item $settingsPath ($settingsPath + ".pre-install-backup") -Force
     }
     [System.IO.File]::WriteAllText($settingsPath, $cfgJson + "`n")
-    Write-Host "[OK] wildcard-perms registered as PostToolUse hook in ~/.claude/settings.json" -ForegroundColor Green
+    if ($found.Count -eq 0) {
+        Write-Host "[OK] wildcard-perms registered as PostToolUse hook in ~/.claude/settings.json" -ForegroundColor Green
+    }
+    foreach ($notice in $notices) { Write-Host $notice -ForegroundColor Green }
 } else {
     Write-Host "[OK] wildcard-perms already registered as PostToolUse hook" -ForegroundColor Green
 }

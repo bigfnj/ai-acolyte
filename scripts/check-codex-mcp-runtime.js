@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // Probe exact MCP approval config and persisted outcomes in fresh isolated Codex profiles.
 // Usage: node scripts/check-codex-mcp-runtime.js [--extension-dir <source-or-staged-root>]
+//   [--write-fixture <path>]
 // The named subject (default: this checkout) supplies the history parser whose
 // verdict on each actual rollout is checked (2026-10-13).
+// `--write-fixture` writes a sanitized copy of all five case rollouts, one
+// session after another, for test/codex-mcp-item-completed.test.js: only the
+// record kinds the parser reads survive, and ids, paths, timestamps and every
+// instruction or message text are replaced (2026-10-13).
 // No provider inference, credentials, live policy changes, or extension UI claims.
 'use strict';
 const assert = require('node:assert/strict');
@@ -168,16 +173,73 @@ async function mcpRuntimeCase(context, name, options = {}) {
     return observed;
   }
 }
+// SYNTHETIC VALUES IN THE REAL STRUCTURE (2026-10-13), the convention of
+// check-codex-code-mode-runtime.js. Kept: the record kinds the history parser
+// reads, in real order -- the namespaced function_call and its output, every
+// event_msg/item_completed (McpToolCall and the UserMessage/AgentMessage items
+// beside it, which the parser must ignore), task_complete -- with Codex's own
+// field names and values for the MCP item (server, tool, status, result or
+// error) untouched. Dropped: developer and user messages, world_state and
+// token records, which carry instructions and nothing the parser reads (on
+// this box they carried the developer's own home AGENTS.md until the harness
+// isolation of 2026-10-13; see check-codex-runtime.js). Replaced: session,
+// turn and record ids, timestamps, durations, every message text, and the
+// session head, which names the cwd.
+function sanitizedMcpFixture(cases) {
+  const lines = [];
+  let clock = 0;
+  const peek = () => new Date(Date.UTC(2026, 9, 13, 13, 0, 0, clock * 10)).toISOString();
+  const stamp = () => { const value = peek(); clock += 1; return value; };
+  cases.forEach(({ records }, index) => {
+    const n = index + 1;
+    const session = `0192dddd-4444-7000-8000-00000000dd0${n}`, turn = `0192dddd-4444-7000-8000-00000000de0${n}`;
+    let ordinal = 0, recordNumber = 0;
+    const push = (type, payload) => { lines.push(JSON.stringify({ timestamp: stamp(), ordinal: ordinal++, type, payload })); };
+    const recordId = (prefix) => `${prefix}_dd${n}${String(++recordNumber).padStart(4, '0')}`;
+    const meta = records.find((record) => record.type === 'session_meta')?.payload || {};
+    const kept = (value) => (typeof value === 'string' ? value : 'unknown');
+    push('session_meta', { session_id: session, id: session, timestamp: peek(), cwd: 'C:\\src\\example',
+      originator: kept(meta.originator), cli_version: kept(meta.cli_version), source: kept(meta.source),
+      model_provider: 'example', base_instructions: 'Synthetic fixture. No real instructions are reproduced here.',
+      history_mode: kept(meta.history_mode) });
+    push('turn_context', { turn_id: turn, cwd: 'C:\\src\\example', approval_policy: 'on-request', sandbox_policy: 'read-only', model: 'example-model' });
+    const wall = (text) => String(text).replace(/Wall time: [0-9.]+ seconds/, 'Wall time: 0.0100 seconds');
+    for (const record of records) {
+      const payload = record.payload || {};
+      if (record.type === 'response_item' && payload.type === 'function_call') {
+        push('response_item', { type: 'function_call', id: payload.id, name: payload.name, namespace: payload.namespace,
+          arguments: payload.arguments, call_id: payload.call_id, internal_chat_message_metadata_passthrough: { turn_id: turn } });
+      } else if (record.type === 'response_item' && payload.type === 'function_call_output') {
+        push('response_item', { type: 'function_call_output', id: recordId('fco'), call_id: payload.call_id,
+          output: Array.isArray(payload.output) ? payload.output.map((part) => ({ ...part, text: wall(part.text) })) : wall(payload.output),
+          internal_chat_message_metadata_passthrough: { turn_id: turn } });
+      } else if (record.type === 'event_msg' && payload.type === 'item_completed' && payload.item) {
+        const item = payload.item.type === 'McpToolCall'
+          ? { ...payload.item, duration: { secs: 0, nanos: payload.item.duration?.nanos ? 1000000 : 0 } }
+          : { type: payload.item.type, id: recordId('item'), content: [{ type: payload.item.type === 'AgentMessage' ? 'Text' : 'text', text: 'Synthetic fixture message.' }] };
+        push('event_msg', { type: 'item_completed', thread_id: session, turn_id: turn, item,
+          started_at_ms: 1791925900000 + clock, completed_at_ms: 1791925900000 + clock });
+      } else if (record.type === 'event_msg' && payload.type === 'task_complete') {
+        push('event_msg', { type: 'task_complete', turn_id: turn });
+      }
+    }
+  });
+  return lines.join('\n') + '\n';
+}
+
 async function main() {
   const argv = process.argv.slice(2);
-  assert.ok(argv.length === 0 || (argv.length === 2 && argv[0] === '--extension-dir'), 'usage: check-codex-mcp-runtime.js [--extension-dir <source-or-staged-root>]');
-  const subject = path.resolve(argv[1] || path.join(__dirname, '..'));
+  const usage = 'usage: check-codex-mcp-runtime.js [--extension-dir <source-or-staged-root>] [--write-fixture <path>]';
+  assert.ok(argv.length % 2 === 0, usage);
+  for (let i = 0; i < argv.length; i += 2) assert.ok(['--extension-dir', '--write-fixture'].includes(argv[i]) && argv[i + 1], usage);
+  const option = (name) => { const at = argv.indexOf(name); return at < 0 ? null : argv[at + 1]; };
+  const subject = path.resolve(option('--extension-dir') || path.join(__dirname, '..'));
   const { parseCodexJsonl } = require(path.join(subject, 'src', 'history-adapters.js'));
   const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'acolyte-codex-mcp-runtime-'));
   const versionLaunch = commandLaunch('codex', ['--version']);
   const versionRun = spawnSync(versionLaunch.file, versionLaunch.args, { ...versionLaunch.options, windowsHide:true, encoding:'utf8', timeout:10000 });
   assert.equal(versionRun.status,0); const codexVersion=versionRun.stdout.trim();
-  const results=[];
+  const results=[], rollouts=[];
   const cases = [
     ['default-prompt-decline','succeed',{},'decline',1,0,'failed','Err'],
     ['exact-approved-success','succeed',{succeed:'approve'},'decline',0,1,'completed','Ok'],
@@ -193,6 +255,7 @@ async function main() {
     // Workspace is its own project root, canary one level up (check-codex-runtime.js, 2026-10-13).
     isolateWorkspaceInstructions(context.workspace);
     const observed=await mcpRuntimeCase(context,name,{tool,approvalDecision:approval,foreignInstructionCheck:true});
+    rollouts.push({name,records:observed.records||[]});
     results.push({name,tool,error:observed.error,approvals:observed.serverRequests.length,executed:observed.mcpCalls.filter(x=>x.method==='tools/call').length,
       items:observed.events.filter(x=>x.method==='item/completed').map(x=>x.params.item),evidence:observed.evidencePath});
     console.log(JSON.stringify(results.at(-1)));
@@ -246,9 +309,17 @@ async function main() {
   // observation, which looks exactly like a session that called no MCP tool;
   // on 0.161.0 that is what happened to every case (2026-10-13), and this is
   // the line that says so instead of passing on the Codex facts alone.
+  // Written before the parser verdict is asserted, so a run against a parser
+  // that misses the shape still leaves the fixture its regression test needs.
+  let fixture=null;
+  if(option('--write-fixture')) {
+    const target=path.resolve(option('--write-fixture'));
+    fs.writeFileSync(target,sanitizedMcpFixture(rollouts));
+    fixture={path:target,sha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(target)).digest('hex')};
+  }
   const parserMisses=results.filter(r=>r.parser.observations.length!==1||r.parser.observations[0].status!==r.parser.expected||r.parser.observations[0].tool!==r.tool);
   const status=parserMisses.length?'failed':'passed';
-  const report=path.join(root,'evidence.json');fs.writeFileSync(report,JSON.stringify({status,root,codexVersion,boundary:'Actual Codex app-server and local MCP; scripted loopback provider, no inference or credentials',parserMisses:parserMisses.map(r=>r.name),results},null,2)+'\n');
+  const report=path.join(root,'evidence.json');fs.writeFileSync(report,JSON.stringify({status,root,codexVersion,boundary:'Actual Codex app-server and local MCP; scripted loopback provider, no inference or credentials',parserMisses:parserMisses.map(r=>r.name),fixture,results},null,2)+'\n');
   console.log(JSON.stringify({status,codexVersion,shapes:[...new Set(results.map(r=>r.recordShape))],parserMisses:parserMisses.map(r=>`${r.name}: expected ${r.parser.expected}, parser saw ${r.parser.observations.length} MCP observations`),report}));
   assert.deepEqual(parserMisses.map(r=>r.name),[],`the history parser missed ${parserMisses.length} of ${results.length} actual MCP outcomes on ${codexVersion}`);
 }

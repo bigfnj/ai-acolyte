@@ -935,17 +935,70 @@ function codexMcpStatus(result) {
   return result.Ok.isError === false ? 'success' : 'unknown';
 }
 
-function codexMcpObservation(record, location, state, file) {
+// THE 0.161.0 SHAPE OF THE SAME OUTCOME. MEASURED 2026-10-13 on codex-cli
+// 0.161.0 (Windows) by scripts/check-codex-mcp-runtime.js, five fresh isolated
+// sessions: the rollout carries NO `mcp_tool_call_end` at all. Each outcome is an
+// `event_msg/item_completed` whose `item` is
+//   {type: "McpToolCall", id, server, tool, arguments, status, result: {content, isError}}
+// for a call that ran, and {status: "failed", error: {message}} with no `result`
+// for one the user declined ("user rejected MCP tool call"). The parser read
+// only the older record, so it saw 0 of 5 real outcomes and reviewed-MCP Auto
+// Learn learned nothing from 0.161.0 history -- silently, because a rollout
+// with no recognised MCP record looks exactly like a session that called none.
+//
+// Outcomes map onto the old shape's meaning, record by record:
+//   completed + isError false -> success   (old: Ok, isError false)
+//   failed    + isError true  -> failed    (old: Ok, isError true)
+//   failed    + error         -> failed    (old: Err; a declined call was Err)
+// Anything else is withheld as unknown, for the reason codexMcpStatus gives: no
+// textual fallback. An `error` beside a `result` is failed, as Ok beside Err is.
+// `failed` is the conservative direction: it blocks auto-safe, never grants.
+function codexMcpItemStatus(item) {
+  if (item.error !== undefined && item.error !== null) return 'failed';
+  if (item.status === 'failed') return 'failed';
+  if (isObject(item.result) && item.result.isError === true) return 'failed';
+  if (item.status !== 'completed' || !isObject(item.result)) return 'unknown';
+  return item.result.isError === false ? 'success' : 'unknown';
+}
+
+// One completion, in either shape, as {callId, server, tool, status}. Only a
+// DIRECT event_msg record confers MCP identity: an item nested anywhere else
+// (a response_item, a message's content) is ignored, as the old shape always was.
+//
+// ONE CALL, ONE IDENTITY, WHICHEVER SHAPE NAMED IT. The new item's `id` is the
+// call id: on all five measured rollouts it equals the `call_id` of the
+// namespaced function_call and of its function_call_output, which is what the
+// old record's `call_id` was. So both shapes hash to the same observation id,
+// and a rollout that carried both would merge them through `mcpCalls` in
+// parseCodexJsonl (one observation, failure wins, a conflicting server or tool
+// withholds) instead of counting the call twice. No measured rollout carries
+// both -- 0.161.0 wrote none of the old records -- so the merge is defence,
+// tested on a derived file rather than on a real one.
+function codexMcpCompletion(record) {
   const payload = record.payload;
-  if (record.type !== 'event_msg' || !isObject(payload) || payload.type !== 'mcp_tool_call_end') return null;
-  const invocation = payload.invocation;
-  if (!isObject(invocation) || !codexMcpName(invocation.server) || !codexMcpName(invocation.tool) ||
-      typeof payload.call_id !== 'string' || !payload.call_id || payload.call_id.length > 512) return null;
+  if (record.type !== 'event_msg' || !isObject(payload)) return null;
+  if (payload.type === 'mcp_tool_call_end') {
+    const invocation = payload.invocation;
+    if (!isObject(invocation)) return null;
+    return { callId: payload.call_id, server: invocation.server, tool: invocation.tool,
+      status: codexMcpStatus(payload.result) };
+  }
+  if (payload.type === 'item_completed' && isObject(payload.item) && payload.item.type === 'McpToolCall') {
+    const item = payload.item;
+    return { callId: item.id, server: item.server, tool: item.tool, status: codexMcpItemStatus(item) };
+  }
+  return null;
+}
+
+function codexMcpObservation(record, location, state, file) {
+  const completion = codexMcpCompletion(record);
+  if (!completion || !codexMcpName(completion.server) || !codexMcpName(completion.tool) ||
+      typeof completion.callId !== 'string' || !completion.callId || completion.callId.length > 512) return null;
   const observation = {
-    id: `codex:${stableHash('codex-mcp', state.session || file || '<text>', payload.call_id)}`,
+    id: `codex:${stableHash('codex-mcp', state.session || file || '<text>', completion.callId)}`,
     source: 'codex', kind: 'codex-mcp', tool: 'CodexMCP', command: 'call',
-    mcpServer: invocation.server, mcpTool: invocation.tool,
-    status: codexMcpStatus(payload.result), callId: payload.call_id,
+    mcpServer: completion.server, mcpTool: completion.tool,
+    status: completion.status, callId: completion.callId,
   };
   if (record.timestamp !== undefined) observation.timestamp = record.timestamp;
   if (state.cwd !== undefined) observation.cwd = state.cwd;

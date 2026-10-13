@@ -821,12 +821,40 @@ harness failed its first case (`acolyte-codex-runtime-MVboeg`). Restored byte-id
 | `check-codex-wrapper-runtime.js` | 13/13 agree + 2 observations | `acolyte-codex-wrapper-runtime-e06QTL` |
 | `check-codex-project-rules-runtime.js` | 11 sessions pass, so the empty `.git` moved no rule or trust result | `acolyte-codex-project-rules-zhhviB` |
 | `check-codex-code-mode-runtime.js` | passes | `acolyte-code-mode-fPP7Qf` |
-| `check-codex-mcp-runtime.js` | every Codex fact and the canary pass; the parser check still fails 5/5 (fixed below) | `acolyte-codex-mcp-runtime-LLYYvB` |
+| `check-codex-mcp-runtime.js` | every Codex fact and the canary pass; the parser check still fails 5/5 on this subject (fixed below) | `acolyte-codex-mcp-runtime-LLYYvB` |
 
 None of those evidence trees contains the home file's content; `acolyte-codex-mcp-runtime-ddsfLK`
 from the section above does. One limit stays: the project-rules harness's plain-folder
 cases still get their project LAYER root from whether the home is a real repository,
 which no empty marker can change without changing what those cases measure.
+
+**MCP outcomes on 0.161.0 reach the history parser.** This closes the product defect the
+section above reports. `codexMcpObservation` in `src/history-adapters.js` now also reads
+`event_msg/item_completed` with an `McpToolCall` item, and maps it onto the old record's
+meaning: `completed` with `isError: false` is success, `isError: true` is failed whatever
+the status, and a declined call (`failed` with `error`, the old `Err`) is failed. An
+`error` beside a `result` is failed, as `Err` beside `Ok` was; anything else (no `isError`,
+a non-boolean one, no result, a status still in progress) is withheld as unknown. Only a
+direct `event_msg` record counts. The item's `id` is the call id (it equals the namespaced
+`function_call`'s `call_id` on all five rollouts), so both shapes hash to the same
+observation id and a rollout carrying both counts the call once; 0.161.0 wrote none of the
+old records, so that merge is tested on a derived file. The sanitized fixture
+`test/fixtures/codex-mcp-item-completed-sanitized.jsonl` is the five case rollouts,
+written by the harness's new `--write-fixture`; two consecutive runs wrote byte-identical
+files. `test/codex-mcp-item-completed.test.js` pins the five real verdicts, the status
+mapping, the spoof refusals, the cross-shape identity against a pre-change pinned id, the
+append-then-full-read identity and a sanitization gate; `test/codex-mcp-history.test.js`
+(the 0.145.0 shape) is unchanged and passes.
+
+The MCP harness against this checkout now passes, parser included: 5/5 cases, verdicts
+failed, success, failed, failed, success (`acolyte-codex-mcp-runtime-NkOEE2`, `-cKyzNs`,
+`-nPg2mE`). Against the pre-change parser it fails 5/5, as recorded above
+(`acolyte-codex-mcp-runtime-LLYYvB`). Mutation: eight parser mutants (the new shape unread,
+a separate identity for it, a decline read as unknown, `completed` as success without
+`isError`, `isError: true` ignored under `completed`, `error` beside `result` ignored, the
+item accepted from any record type, the type matched case-insensitively) were each killed.
+Not changed and not run: `scripts/vscode-acceptance/mcp.js` still asserts the 0.145.0
+`mcp_tool_call_end` record and will fail on 0.161.0 until it accepts both shapes.
 
 ## Recorded CLI and local-state evidence
 
@@ -913,7 +941,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1352`).
+(`codexHeadSeed`, `src/history-adapters.js:1408#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

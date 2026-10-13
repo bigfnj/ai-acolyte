@@ -2864,14 +2864,39 @@ function localDrainEnabled() {
   return vscode.workspace.getConfiguration('permissionWildcarding').get('localDrain.enabled', true);
 }
 
+// The folders whose .claude/settings.local.json this window looks at: one file per
+// open workspace folder, at its root and never beneath it, because
+// localSettingsPath is a single non-recursive join. ONE copy, read by both the
+// drain and the dashboard card. Until 2026-10-13 localCardData carried its own
+// duplicate of this filter, and the duplicate had already drifted: it lacked the
+// trust gate below, so an untrusted window showed dry-run numbers for a file the
+// drain refused to touch.
+//
+// Recursive discovery of nested settings.local.json files was considered and
+// declined, 2026-10-13. A nested clone's approvals were granted for that clone, and
+// promoting them into user scope from a parent window is the same trust problem the
+// gate below exists for. A Claude session running in a subfolder is covered anyway:
+// the CLI hook drains each session's own cwd on every tool call
+// (bin/wildcard-perms:507-515, `hookCwd(input)`).
+//
+// A folder on another file system (a virtual workspace, or a non-file scheme mixed
+// into a multi-root workspace) has an fsPath that names no file on this disk, so
+// reading it would report, and draining it would rewrite, whatever local file sits
+// at the same path. The same `uri.scheme` test codexMemoryLint.js:51 applies. A
+// folder with no scheme at all is kept, as there.
+function localRoots() {
+  return (vscode.workspace.workspaceFolders || [])
+    .filter((folder) => !folder.uri.scheme || folder.uri.scheme === 'file')
+    .map((folder) => folder.uri.fsPath)
+    .filter((root) => fs.existsSync(localSettingsPath(root)));
+}
+
 // Writing into a workspace's .claude/ changes that project's files, so an
 // untrusted window reads but never writes — the same line the Codex
 // workspace-scope rule writer draws.
 function drainableRoots() {
   if (!vscode.workspace.isTrusted) return [];
-  return (vscode.workspace.workspaceFolders || [])
-    .map((folder) => folder.uri.fsPath)
-    .filter((root) => fs.existsSync(localSettingsPath(root)));
+  return localRoots();
 }
 
 function drainOneWorkspace(root, dryRun = false) {
@@ -2976,24 +3001,37 @@ function scheduleLocalDrain(delay = 900) {
 
 // Dashboard numbers come from a dry run over each folder, so the card shows what
 // a click would actually do rather than a raw entry count.
+//
+// The folders are localRoots(), the list drainableRoots() gates, so the card cannot
+// name a file the drain would skip. An untrusted window still lists its files,
+// because naming what is being left alone is a read, but it runs no dry run:
+// promote, prune and kept are null and the card shows dashes. Before 2026-10-13 it
+// computed all three anyway, so an untrusted window read "Project-local approvals:
+// N to drain" over a Drain button that could never act on them.
+//
+// `files` is every file inspected, home-relative, one per root. With two or more
+// folders the payload used to carry only the bare LOCAL_RELATIVE constant, so the
+// subtitle read "2 folders · .claude\settings.local.json" and named no file at all.
 function localCardData() {
-  const roots = (vscode.workspace.workspaceFolders || [])
-    .map((folder) => folder.uri.fsPath)
-    .filter((root) => fs.existsSync(localSettingsPath(root)));
+  const roots = localRoots();
   if (!roots.length) return null;
-  let promote = 0; let prune = 0; let kept = 0; let blocked = false;
-  for (const root of roots) {
-    const report = drainOneWorkspace(root, true);
-    if (report.blocked) { blocked = true; kept += report.kept; continue; }
-    promote += report.promote.length;
-    prune += report.prune.length;
-    kept += report.kept;
+  const trusted = vscode.workspace.isTrusted;
+  let promote = null; let prune = null; let kept = null; let blocked = false;
+  if (trusted) {
+    promote = 0; prune = 0; kept = 0;
+    for (const root of roots) {
+      const report = drainOneWorkspace(root, true);
+      if (report.blocked) { blocked = true; kept += report.kept; continue; }
+      promote += report.promote.length;
+      prune += report.prune.length;
+      kept += report.kept;
+    }
   }
   return {
     folders: roots.length,
-    file: roots.length === 1 ? localSettingsPath(roots[0]).replace(os.homedir(), '~') : LOCAL_RELATIVE,
+    files: roots.map((root) => localSettingsPath(root).replace(os.homedir(), '~')),
     promote, prune, kept, blocked,
-    trusted: vscode.workspace.isTrusted,
+    trusted,
     enabled: localDrainEnabled(),
     lastRun: localDrainAt,
   };
@@ -4497,27 +4535,40 @@ class WildcardingViewProvider {
     const card = $('localCard');
     if (!l) { card.style.display = 'none'; return; }
     card.style.display = '';
-    const pending = l.promote + l.prune;
+    // Null counts mean no dry run ran, which is an untrusted window. A 0 there would
+    // claim the file was checked and found clean, so each renders as the dash the
+    // markup starts with, and the headline says the approvals were not counted.
+    const counted = l.promote != null;
+    const pending = (l.promote || 0) + (l.prune || 0);
+    const count = (n) => (n == null ? '–' : n);
     $('locdot').className = 'dot' + (pending && l.trusted && !l.blocked ? '' : ' idle');
     $('loctext').textContent = l.blocked
       ? 'Project-local approvals - retired MAX state active'
-      : (pending ? 'Project-local approvals: ' + pending + ' to drain' : 'Project-local approvals: drained');
+      : (!counted ? 'Project-local approvals: not counted'
+        : (pending ? 'Project-local approvals: ' + pending + ' to drain' : 'Project-local approvals: drained'));
     $('loctext').style.fontWeight = '600';
+    // One folder names its file outright. Two or more name the count, and every
+    // path goes in the tooltip, on one line. The tooltip also says what the card
+    // cannot list: the CLI hook drains the folder each Claude session runs in,
+    // which is how a subfolder file can be drained while this card shows nothing.
+    const files = l.files || [];
+    const where = files.length > 1 ? files.length + ' folders' : (files[0] || '');
     $('locsub').textContent = l.blocked
       ? 'A retired auto-approve hook, or grants it generated, is still in user scope. Remove the legacy configuration before draining.'
-      : (!l.trusted ? 'workspace not trusted — read-only'
-        : (l.folders > 1 ? l.folders + ' folders · ' + l.file : l.file)
-          + (l.enabled ? '' : ' · auto-drain off'));
-    $('locpromote').textContent = l.promote;
-    $('locprune').textContent = l.prune;
-    $('lockept').textContent = l.kept;
+      : (!l.trusted ? 'workspace not trusted — read-only · ' + where
+        : where + (l.enabled ? '' : ' · auto-drain off'));
+    $('locsub').title = files.join(' · ')
+      + ' · with the CLI hook installed, the folder each Claude session runs in is drained too';
+    $('locpromote').textContent = count(l.promote);
+    $('locprune').textContent = count(l.prune);
+    $('lockept').textContent = count(l.kept);
     $('locpromote').title = 'portable command families that would move to user scope';
     $('locprune').title = 'local entries user scope already grants';
     $('lockept').title = 'entries only this project can justify (script blobs, absolute paths, MCP tools)';
     $('drainLocal').disabled = !l.trusted || !!l.blocked || pending === 0;
-    $('drainLocal').textContent = pending
-      ? '⤴  Drain ' + pending + ' into user scope'
-      : '⤴  Nothing to drain';
+    // Uncounted is not "nothing": the label stays the markup default, disabled.
+    $('drainLocal').textContent = !counted ? '⤴  Drain into user scope'
+      : (pending ? '⤴  Drain ' + pending + ' into user scope' : '⤴  Nothing to drain');
   }
 
   function renderGuidance(g) {

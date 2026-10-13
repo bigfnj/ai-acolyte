@@ -440,8 +440,14 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
 //     located reliably. Refused rather than guessed.
 //   * gdb: `-ex` and `-x` run debugger commands, which include `shell` and `python`, so
 //     `gdb --args prog` is an interpreter around prog rather than prog.
+//   * parallel (added with the interpreter rule, 2026-10-13): GNU parallel runs each
+//     composed command line through a shell ($PARALLEL_SHELL, else the invoking shell;
+//     parallel(1), "--shell"), so `["parallel", "gzip"]` admits `parallel gzip ';' rm -rf
+//     x ::: a`. Unlike xargs, naming the command narrows nothing. Until then it had only
+//     the generic rule, so every two-token parallel prefix rendered.
 const ALWAYS_BROAD_WRAPPERS = new Set([
-  'doas', 'eval', 'firejail', 'gdb', 'pkexec', 'runas', 'runuser', 'script', 'su', 'sudo', 'systemd-run', 'watch',
+  'doas', 'eval', 'firejail', 'gdb', 'parallel', 'pkexec', 'runas', 'runuser', 'script', 'su', 'sudo',
+  'systemd-run', 'watch',
 ]);
 
 // The prefix after an exec wrapper's options and operands: possibly empty, `LOOKUP` for
@@ -467,6 +473,140 @@ function execWrapperInner(base, prefix) {
   // (`flock lock -c "cmd"`, util-linux flock(1)), so the operand count alone would hand
   // `["-c"]` on as the command and judge it narrow.
   return inner.length && String(inner[0]).startsWith('-') ? null : inner;
+}
+
+// Interpreters and shells: a reviewed prefix is narrow only once it PINS the program,
+// i.e. names the script path or module the interpreter will run, or when it is exactly
+// one inert informational form. Decided 2026-10-13. Until then any two-token prefix of
+// these roots was "narrower" unless it held an inline-code flag (INLINE_CODE_FLAGS), so
+// `["python", "-u"]`, `["bash", "-x"]`, `["node", "-r"]` and `["python", "-m"]` each
+// rendered (measured against fa9db35 that day), and each admits whatever the next token
+// is, including the code flag itself: `python -u -c '<anything>'`, `bash -x -c ...`,
+// `node -r x -e ...`, `python -m <any module>`.
+//
+// The walk reads the interpreter's own options until the program: `flags` take no
+// value, `values` take the next token (so `["python", "-W", "ignore"]` names no
+// program), `fused` carry the value in the same token, and `pin` options take the program
+// itself as their value (`python -m MODULE`, `php -f FILE`). A prefix that ends inside
+// the options is broad, which is the "ends in `-u`, `-x`, `-r`, `-m`, `-W`, `-X`, `-O`,
+// `-B`, `--require`" rule, and so is an option a table does not list: guessing that an
+// unknown option takes no value would read its value as the script. That is also how an
+// option that hands over code or stdin is refused: `bash -c`/`-s` (and any cluster
+// holding `c` or `s`), `php -a`/`-S`, fish's `-c`/`-C` and `-` itself are deliberately
+// absent from every table, so they land on "unknown". The one `broad` pattern is node's,
+// for a code URL in a fused preload (`--import=data:...`) that the generic `--x=y` form
+// would otherwise accept. Once a program is pinned the remaining tokens are ITS
+// arguments, so `["python", "-m", "pytest", "-x"]` is narrow; an inline-code flag
+// anywhere is still refused first (30f92a4).
+//
+// `info` is the set of exact second tokens that print and exit before anything runs. The
+// four the decision names (`--version`, `-V`, `--help`, `-h`) are the default; the POSIX
+// shells get only the long two, because there `-h` is `set -h` (hashall) and the shell
+// goes on to read commands, and dash and ksh take `-V` as an editing mode.
+//
+// bun and deno dispatch on a subcommand first. `run`, `serve`, `compile`, `create` and
+// `x` need a target after them (`["deno", "run"]` admits any script or URL); `exec`
+// (bun's shell), `repl` and deno's `eval` are broad at any depth; any other first word,
+// a file or a fixed-purpose subcommand such as `test`, pins. Their top-level options are
+// not modelled (the two entries list none), so any of them is an unknown option and
+// broad, the safe failure.
+const DEFAULT_INFO = new Set(['--version', '-V', '--help', '-h']);
+const SHELL_INFO = new Set(['--version', '--help']);
+const POSIX_SHELL_GRAMMAR = {
+  info: SHELL_INFO, plus: true,
+  // set-option letters that take no value; `c` (code), `s` (stdin), `o`/`O` (a value) are absent
+  flagPattern: /^[-+][abefhiklmnprtuvxBCDEHPT]+$/,
+  flags: ['--login', '--noprofile', '--norc', '--posix', '--restricted', '--verbose', '--debugger', '--noediting',
+    '--dump-strings', '--dump-po-strings', '--pretty-print', '--version', '--help'],
+  // a cluster that ENDS in o/O takes the next token as its value (`-euo pipefail`)
+  values: ['--rcfile', '--init-file'], valuePattern: /^[-+][abefhiklmnprtuvxBCDEHPT]*[oO]$/,
+};
+const PYTHON_GRAMMAR = {
+  info: DEFAULT_INFO,
+  flagPattern: /^(?:-[bBdEhiIOPqRsSuvVx?]+|--(?:version|help|help-env|help-xoptions|help-all)|-\d[\d.]*(?:-(?:32|64|arm64))?|-V:\S+)$/,
+  values: ['-W', '-X', '--check-hash-based-pycs'], fused: /^(?:-[WX].|--check-hash-based-pycs=)/,
+  pin: ['-m'], pinFused: /^-m./,
+};
+const INTERPRETER_GRAMMAR = new Map(Object.entries({
+  python: PYTHON_GRAMMAR, python3: PYTHON_GRAMMAR, py: PYTHON_GRAMMAR,
+  node: {
+    info: new Set([...DEFAULT_INFO, '-v']),
+    flags: ['-i', '--interactive', '-c', '--check', '--inspect', '--inspect-brk', '--inspect-wait', '--no-warnings',
+      '--trace-warnings', '--enable-source-maps', '--expose-gc', '--trace-uncaught', '--pending-deprecation',
+      '--no-deprecation', '--throw-deprecation', '--trace-deprecation', '--preserve-symlinks',
+      '--preserve-symlinks-main', '--test', '--watch', '--abort-on-uncaught-exception', '--experimental-vm-modules',
+      '--experimental-strip-types', '--no-experimental-strip-types', '--experimental-transform-types',
+      '--frozen-intrinsics', '--no-addons', '--trace-exit', '--zero-fill-buffers'],
+    values: ['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions', '--env-file',
+      '--env-file-if-exists', '--inspect-port', '--title', '--input-type', '--watch-path', '--test-reporter',
+      '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--redirect-warnings',
+      '--unhandled-rejections', '--icu-data-dir', '--openssl-config', '--report-dir', '--diagnostic-dir'],
+    // `--import=data:text/javascript,...` and friends carry the code in the option itself,
+    // fused or as the next token
+    broad: /^--(?:require|import|loader|experimental-loader)=data:/, broadValue: /^data:/,
+    fused: /^--[a-z0-9-]+=/,
+  },
+  ruby: {
+    info: DEFAULT_INFO,
+    flagPattern: /^(?:-[acdlnpsSvwy]+|-W\d?|-x\S*|-0\d*|-K\w|--(?:verbose|yydebug|jit|disable-gems|version|help))$/,
+    values: ['-I', '-r', '-C', '-F'], fused: /^(?:-[IrCF].|--(?:enable|disable|dump|encoding|external-encoding|internal-encoding)=)/,
+  },
+  perl: {
+    info: DEFAULT_INFO,
+    flagPattern: /^(?:-[acnpsStTuUwWX]+|-[lC0]\d*|-i\S*|-[vh])$/,
+    values: ['-I', '-M', '-m', '-D'], fused: /^-[IMmDxV]./,
+  },
+  php: {
+    info: DEFAULT_INFO,
+    flagPattern: /^-[nHeilmqsvw?]+$|^--(?:ini|version|help)$/,
+    values: ['-c', '-d', '-z', '-t', '--rf', '--rc', '--re', '--rz', '--ri'], fused: /^-[cdzt]./,
+    // `-a` (the interactive shell) and `-S` (the built-in web server) are absent: each runs
+    // code this prefix does not name
+    pin: ['-f'], pinFused: /^-f./,
+  },
+  bash: POSIX_SHELL_GRAMMAR, sh: POSIX_SHELL_GRAMMAR, dash: POSIX_SHELL_GRAMMAR, ksh: POSIX_SHELL_GRAMMAR,
+  zsh: POSIX_SHELL_GRAMMAR,
+  fish: {
+    info: SHELL_INFO,
+    flags: ['-i', '--interactive', '-l', '--login', '-n', '--no-execute', '-N', '--no-config', '-P', '--private',
+      '--print-rusage-self', '--version', '--help'],
+    values: ['-d', '--debug', '-o', '--debug-output', '-f', '--features', '-p', '--profile'],
+    fused: /^--(?:debug|debug-output|features|profile)=/,
+  },
+  bun: { info: DEFAULT_INFO, subcommands: { target: ['run', 'x', 'create'], broad: ['exec', 'repl'] } },
+  deno: { info: DEFAULT_INFO, subcommands: { target: ['run', 'serve', 'compile', 'x'], broad: ['repl', 'eval'] } },
+}));
+
+function interpreterIsBroad(base, prefix) {
+  const grammar = INTERPRETER_GRAMMAR.get(base);
+  const rest = prefix.slice(1).map(String);
+  if (rest.length === 1 && grammar.info.has(rest[0])) return false;
+  const flags = new Set(grammar.flags || []);
+  const values = new Set(grammar.values || []);
+  const pins = new Set(grammar.pin || []);
+  let k = 0;
+  for (; k < rest.length; k += 1) {
+    const token = rest[k];
+    if (token === '--') { k += 1; break; }
+    if (!(token.startsWith('-') || (grammar.plus && token.startsWith('+')))) break;
+    if (grammar.broad?.test(token)) return true;
+    if (pins.has(token)) return k + 1 >= rest.length;                     // `-m MODULE`: pinned once named
+    if (grammar.pinFused?.test(token)) return false;
+    if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
+    if (values.has(token) || grammar.valuePattern?.test(token)) {
+      if (grammar.broadValue?.test(rest[k + 1] ?? '')) return true;
+      k += 1; continue;
+    }
+    if (grammar.fused?.test(token)) continue;
+    return true;                                                          // an option this table does not know
+  }
+  if (k >= rest.length || rest[k] === '-') return true;                   // no program named
+  if (!grammar.subcommands) return false;                                 // a script path or module name
+  const word = rest[k];
+  if (grammar.subcommands.broad.includes(word)) return true;
+  if (!grammar.subcommands.target.includes(word)) return false;
+  const target = rest[k + 1];
+  return target === undefined || target.startsWith('-');
 }
 
 function wrapperIsBroad(prefix) {
@@ -505,10 +645,19 @@ function wrapperIsBroad(prefix) {
     if (['-c', '-command', '-encodedcommand', '-enc'].includes(second)) return true;
     return !['-file', '-f'].includes(second) || prefix.length < 3;
   }
-  if (['bash', 'bash.exe', 'dash', 'dash.exe', 'fish', 'fish.exe', 'ksh', 'ksh.exe', 'sh', 'sh.exe', 'zsh', 'zsh.exe'].includes(root)) {
-    return ['-c', '-lc'].includes(second);
+  // Interpreters and shells: narrow only once the program is pinned (INTERPRETER_GRAMMAR
+  // above). The POSIX shells used to be checked on the second token alone (`-c`, `-lc`),
+  // which let `["bash", "-x"]`, `["bash", "-ec"]` and `["sh", "-s"]` render.
+  if (INTERPRETER_GRAMMAR.has(base)) return interpreterIsBroad(base, prefix);
+  // Every other runner (npm, npx, uvx, make, just, java, ...): a prefix that ends in an
+  // option has not reached anything it could pin, and the next token could be the very
+  // switch that hands over code (`npx -c`, `npm --prefix x exec`), so it is broad unless it
+  // is exactly an informational form. Value options are not modelled for these roots, so
+  // `["make", "-C", "dir"]` still renders; that is recorded, not solved, here.
+  if (String(prefix[prefix.length - 1]).startsWith('-')) {
+    return !(prefix.length === 2 && DEFAULT_INFO.has(String(prefix[1])));
   }
-  return prefix.length < 2;
+  return false;
 }
 
 function candidateIsWrapper(candidate, prefix) {

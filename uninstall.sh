@@ -6,7 +6,8 @@ HOOK_CMD="$SCRIPT_DIR/bin/wildcard-perms"
 SETTINGS="$HOME/.claude/settings.json"
 
 HOOK_CMD="$HOOK_CMD" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
 const hookCmd      = process.env.HOOK_CMD;
@@ -44,9 +45,78 @@ const hookPath = (value) => {
 };
 
 const target = hookPath(hookCmd);
-const isOurs = (hook) => hookPath(hook?.command) === target;
+const isThisCheckout = (hook) => hookPath(hook?.command) === target;
+
+// A registration of this tool from ANOTHER checkout. Found live 2026-10-13: the
+// development box's hook pointed at an old checkout of this repo while the
+// maintained one had been cloned under a new name, and an uninstall run from the
+// new checkout matched nothing, said "nothing removed", and left the old hook
+// firing. The installers now repoint such a registration; the uninstaller is
+// more conservative, because removing a hook is not something the user asked
+// for on behalf of a checkout they did not run it from:
+//   - this checkout's                       removed (unchanged behaviour);
+//   - another checkout's, target file gone  removed too: it can only fail on
+//                                           every tool call. False positives: an
+//                                           unreachable drive, and on Windows a
+//                                           Git Bash mount such as /tmp that
+//                                           node cannot resolve (/c/... is
+//                                           converted first).
+//                                           Both cost only a hook of this tool,
+//                                           during an uninstall of this tool;
+//   - another checkout's, still on disk     LEFT, and named in the output, so
+//                                           "nothing removed" is not the whole
+//                                           story. That checkout's own
+//                                           uninstaller removes it.
+// The grammar is install.sh's toolTarget, strict for the same reason: only a
+// command that runs a `bin/wildcard-perms` file and nothing else is ours, so
+// `wildcard-perms-audit` or a command that merely mentions the name never is.
+// A relative path cannot be checked for existence, so it counts as still there.
+const onWindows = process.platform === 'win32';
+const toolTarget = (command) => {
+  if (typeof command !== 'string') return null;
+  let text = command.trim();
+  const wrapped = (onWindows ? /^node\s+(.+)$/i : /^node\s+(.+)$/).exec(text);
+  if (wrapped) text = wrapped[1].trim();
+  const quoted = /^"([^"]+)"$/.exec(text) || /^'([^']+)'$/.exec(text);
+  if (quoted) text = quoted[1];
+  else if (/\s/.test(text)) return null;
+  const tail = onWindows ? /[\\/]bin[\\/]wildcard-perms$/i : /\/bin\/wildcard-perms$/;
+  return tail.test(text) ? text : null;
+};
+const nativePath = (p) => {
+  if (!onWindows) return p;
+  const text = p.replace(/\\/g, '/');
+  const drive = /^\/([A-Za-z])\//.exec(text);
+  return drive ? `${drive[1]}:/${text.slice(3)}` : text;
+};
+const isGone = (hook) => {
+  const found = toolTarget(hook?.command);
+  if (found === null) return false;
+  const p = nativePath(found);
+  return isAbsolute(p) && !existsSync(p);
+};
+const isOurs = (hook) => isThisCheckout(hook) || isGone(hook);
 
 const installed = Array.isArray(cfg.hooks?.PostToolUse) ? cfg.hooks.PostToolUse : [];
+
+// Other checkouts' registrations, for the output: the gone ones are removed with
+// ours, the live ones are left and named. See above.
+const goneCheckouts = [];
+const otherCheckouts = [];
+for (const entry of installed) {
+  if (!Array.isArray(entry?.hooks)) continue;
+  for (const hook of entry.hooks) {
+    if (isThisCheckout(hook)) continue;
+    const found = toolTarget(hook?.command);
+    if (found !== null) (isGone(hook) ? goneCheckouts : otherCheckouts).push(found);
+  }
+}
+const reportOthers = () => {
+  for (const other of otherCheckouts) {
+    console.log(`- left ${other} registered: it is another checkout of this tool and it still exists.`);
+    console.log("  Run that checkout's uninstaller to remove it.");
+  }
+};
 
 // Removed PER HOOK, not per entry. Dropping the whole entry took any hook that
 // happened to share its `hooks` array with ours — somebody else's tool, deleted
@@ -72,6 +142,7 @@ for (const entry of installed) {
 // success — which is exactly what every PowerShell install got.
 if (!removed) {
   console.log(`- no wildcard-perms hook registered in ${settingsPath}; nothing removed`);
+  reportOthers();
   process.exit(0);
 }
 
@@ -81,5 +152,7 @@ if (cfg.hooks && !Object.keys(cfg.hooks).length) delete cfg.hooks;
 
 writeFileSync(settingsPath, JSON.stringify(cfg, null, 2) + '\n');
 console.log(`✓ removed ${removed} wildcard-perms PostToolUse hook${removed === 1 ? '' : 's'} from ${settingsPath}`);
+for (const gone of goneCheckouts) console.log(`  including ${gone}, from a checkout that no longer exists`);
+reportOthers();
 console.log('  Allow-list entries stay as they are — this removes the hook, not your permissions.');
 EOF

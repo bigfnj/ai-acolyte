@@ -33,8 +33,10 @@ cd ai-acolyte
 ./install.sh            # or .\install.ps1 on Windows PowerShell
 ```
 
-That registers the `PostToolUse` hook. For the dashboard in the screenshots, install
-the extension too:
+That registers the `PostToolUse` hook. Run it again after moving, renaming or re-cloning
+the checkout: it repoints a registration left by another checkout of this tool instead of
+adding a second one beside it, and prints the old and new paths. For the dashboard in the
+screenshots, install the extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
@@ -411,7 +413,9 @@ Both halves need Node 20 or newer, the floor CI tests: `.github/workflows/test.y
 on every push and pull request across Node 20 and 22 on Linux and Windows, `fail-fast` off so a
 platform-specific failure is never hidden. `install.sh` registers the hook's bare path while
 `install.ps1` registers `node "<path>"`, because a bare extensionless path has no Windows
-association. Neither uninstaller touches the allow list. Cutting a GitHub Release builds and
+association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
+and any left by a checkout that no longer exists, and names, without removing, one that belongs
+to another checkout still on disk. Cutting a GitHub Release builds and
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:
 `syncVersion`'s `MANIFESTS` list (`scripts/sync-version.mjs:21`) covers both
 `vscode-extension/package.json`, which drives the sidebar badge, and the root `package.json`,

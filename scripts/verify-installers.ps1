@@ -211,6 +211,178 @@ if (-not $install) {
             -and (Get-Content $bk -Raw) -match 'SessionStart') `
         "exists=$(Test-Path $bk)"
     Remove-Item -Recurse -Force $box.dir
+
+    # 8-12. A registration from ANOTHER checkout of this tool. Found live
+    #    2026-10-13: the development box's hook still pointed at an old checkout
+    #    (the pre-rename directory, v1.4.13, 142 commits behind) because the
+    #    duplicate check was an exact match on THIS checkout's path, so installing
+    #    from the re-cloned checkout appended a second entry and the stale one kept
+    #    running old code. Each fixture is built from the command install.ps1
+    #    really writes in its sandbox (Get-RealHookCommand), so "current" is never
+    #    a reconstructed spelling, and from a stale path under the sandbox that
+    #    does not exist on disk -- the likelier case, and the notice says so.
+    function New-SeededInstallBox {
+        param([scriptblock]$Content)
+        $box = New-Box -Source $install -NoFile
+        $real = Get-RealHookCommand -InstallSource $install -BoxDir $box.dir
+        if (-not $real) { return $null }
+        $box.real = $real
+        $box.stale = ($box.dir -replace '\\', '/') + '/old-checkout/bin/wildcard-perms'
+        [System.IO.File]::WriteAllText($box.settings, (& $Content $real $box.stale $box.dir))
+        return $box
+    }
+    # Every hook command in PostToolUse that names this tool, by the same tail the
+    # installer keys on, so "exactly one" counts what would actually fire.
+    function Get-ToolHooks {
+        param($Cfg)
+        $out = @()
+        foreach ($entry in @($Cfg.hooks.PostToolUse)) {
+            foreach ($h in @($entry.hooks)) {
+                if ("$($h.command)" -match '[\\/]bin[\\/]wildcard-perms"?$') { $out += "$($h.command)" }
+            }
+        }
+        return ,$out
+    }
+
+    # 8. Stale `node "<old>"` in the MIDDLE of three entries, under a matcher the
+    #    installer never writes, with a field beside `command`: repointed in place,
+    #    so position, matcher and timeout all survive and nothing is appended.
+    $staleMiddle = {
+        param($real, $stale)
+        '{
+  "model": "claude-opus-5",
+  "hooks": {
+    "SessionStart": [ { "hooks": [ { "type": "command", "command": "other-tool" } ] } ],
+    "PostToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "first-neighbour" } ] },
+      { "matcher": "Bash|PowerShell|Edit", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $stale + '"')) + ', "timeout": 30 } ] },
+      { "matcher": "Write", "hooks": [ { "type": "command", "command": "last-neighbour" } ] }
+    ]
+  }
+}'
+    }
+    $box = New-SeededInstallBox -Content $staleMiddle
+    if (-not $box) {
+        Add-Result 'install: repoints another checkout in place' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        $tool = Get-ToolHooks $after
+        Add-Result 'install: repoints another checkout in place' `
+        ($r.code -eq 0 -and $ptu.Count -eq 3 -and $tool.Count -eq 1 `
+                -and $ptu[1].hooks[0].command -eq $box.real -and $ptu[1].matcher -eq 'Bash|PowerShell|Edit' `
+                -and $ptu[1].hooks[0].timeout -eq 30 `
+                -and $ptu[0].hooks[0].command -eq 'first-neighbour' -and $ptu[2].hooks[0].command -eq 'last-neighbour' `
+                -and $null -ne $after.hooks.SessionStart -and $after.model -eq 'claude-opus-5' `
+                -and $r.output.Contains($box.stale) -and $r.output -match 'repointed' -and $r.output -match 'no longer exists') `
+            "PostToolUse=$($ptu.Count) toolHooks=$($tool.Count) middle=$($ptu[1].hooks[0].command) matcher=$($ptu[1].matcher)"
+        Remove-Item -Recurse -Force $box.dir
+    }
+
+    # 9. Control: commands that only MENTION the tool are somebody else's. None is
+    #    a registration of it, so they stay byte-for-byte and ours is appended.
+    $lookalikes = @(
+        'wildcard-perms-audit --since today',
+        'node "C:/tools/x/bin/wildcard-perms.js"',
+        'C:/tools/bin/wildcard-perms-old',
+        'echo C:/tools/bin/wildcard-perms',
+        'node "C:/tools/x/bin/wildcard-perms" --seed'
+    )
+    $mentions = {
+        param($real, $stale)
+        $hooks = ($lookalikes | ForEach-Object { '{ "type": "command", "command": ' + (ConvertTo-Json $_) + ' }' }) -join ', '
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash", "hooks": [ ' + $hooks + ' ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $mentions
+    if (-not $box) {
+        Add-Result 'install: leaves commands that only mention it' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        $kept = @($ptu[0].hooks | ForEach-Object { $_.command })
+        $same = ($kept.Count -eq $lookalikes.Count)
+        for ($k = 0; $same -and $k -lt $kept.Count; $k++) { $same = ($kept[$k] -ceq $lookalikes[$k]) }
+        Add-Result 'install: leaves commands that only mention it' `
+        ($r.code -eq 0 -and $same -and $ptu.Count -eq 2 -and $ptu[1].hooks[0].command -eq $box.real `
+                -and $r.output -notmatch 'repointed' -and $r.output -notmatch 'duplicate') `
+            "PostToolUse=$($ptu.Count) untouched=$same"
+        Remove-Item -Recurse -Force $box.dir
+    }
+
+    # 10. Already this checkout: no write at all, so no backup and the same bytes.
+    $currentOnly = {
+        param($real, $stale)
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json $real) + ' }, { "type": "command", "command": "neighbour-tool" } ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $currentOnly
+    if (-not $box) {
+        Add-Result 'install: this checkout already registered is a no-op' $false 'could not learn the installed hook command'
+    } else {
+        $before = [System.IO.File]::ReadAllBytes($box.settings)
+        $r = Invoke-Box $box
+        $afterBytes = [System.IO.File]::ReadAllBytes($box.settings)
+        $identical = ([Convert]::ToBase64String($before) -eq [Convert]::ToBase64String($afterBytes))
+        Add-Result 'install: this checkout already registered is a no-op' `
+        ($r.code -eq 0 -and $identical -and -not (Test-Path ($box.settings + '.pre-install-backup')) `
+                -and $r.output -match 'already registered') `
+            "identical=$identical backup=$(Test-Path ($box.settings + '.pre-install-backup'))"
+        Remove-Item -Recurse -Force $box.dir
+    }
+
+    # 11. Two stale registrations under ONE matcher, the second sharing its entry
+    #    with a neighbour and spelled as a bare backslash path: the first is
+    #    repointed, the second removed per hook, so the neighbour and its entry stay.
+    $twoStale = {
+        param($real, $stale, $dir)
+        $second = ($dir -replace '/', '\') + '\older-checkout\bin\wildcard-perms'
+        '{ "hooks": { "PostToolUse": [
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $stale + '"')) + ' } ] },
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": "neighbour-tool" }, { "type": "command", "command": ' + (ConvertTo-Json $second) + ' } ] }
+] } }'
+    }
+    $box = New-SeededInstallBox -Content $twoStale
+    if (-not $box) {
+        Add-Result 'install: two stale registrations leave one' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        $tool = Get-ToolHooks $after
+        Add-Result 'install: two stale registrations leave one' `
+        ($r.code -eq 0 -and $tool.Count -eq 1 -and $ptu.Count -eq 2 -and $ptu[0].hooks[0].command -eq $box.real `
+                -and @($ptu[1].hooks).Count -eq 1 -and $ptu[1].hooks[0].command -eq 'neighbour-tool' `
+                -and $r.output -match 'repointed' -and $r.output -match 'removed a duplicate' `
+                -and $r.output -match 'older-checkout') `
+            "toolHooks=$($tool.Count) PostToolUse=$($ptu.Count) second=$(@($ptu[1].hooks).Count)"
+        Remove-Item -Recurse -Force $box.dir
+    }
+
+    # 12. Stale AND current under one matcher -- the exact state the old installer
+    #    left on the development box. This checkout's is kept as it is and the
+    #    stale one goes; nothing is repointed, because nothing needs to be.
+    $staleAndCurrent = {
+        param($real, $stale)
+        '{ "hooks": { "PostToolUse": [
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $stale + '"')) + ' } ] },
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json $real) + ' } ] }
+] } }'
+    }
+    $box = New-SeededInstallBox -Content $staleAndCurrent
+    if (-not $box) {
+        Add-Result 'install: stale beside current keeps only current' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        Add-Result 'install: stale beside current keeps only current' `
+        ($r.code -eq 0 -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 1 -and $ptu[0].hooks[0].command -eq $box.real `
+                -and $r.output -match 'removed a duplicate' -and $r.output.Contains($box.stale) -and $r.output -notmatch 'repointed') `
+            "PostToolUse=$($ptu.Count) kept=$($ptu[0].hooks[0].command)"
+        Remove-Item -Recurse -Force $box.dir
+    }
 }
 
 # ── uninstall.ps1 ─────────────────────────────────────────────────────────────
@@ -390,6 +562,44 @@ if (-not $uninstall) {
             "exists=$(Test-Path $bk) removalExit=$($r.code)"
         Remove-Item -Recurse -Force $box.dir
     }
+
+    # 9-10. Another checkout's registration (found live 2026-10-13, see install
+    #    case 8). Removed when its target file is gone, because then it can only
+    #    fail on every tool call; LEFT, and named, when that checkout still exists,
+    #    because it is not this checkout's to remove.
+    $otherCheckout = {
+        param($path)
+        '{ "model": "x", "hooks": { "PostToolUse": [
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $path + '"')) + ' } ] },
+  { "matcher": "Bash", "hooks": [ { "type": "command", "command": "someone-elses-hook" } ] }
+] } }'
+    }
+
+    $box = New-Box -Source $uninstall -NoFile
+    $gone = ($box.dir -replace '\\', '/') + '/gone-checkout/bin/wildcard-perms'
+    [System.IO.File]::WriteAllText($box.settings, (& $otherCheckout $gone))
+    $r = Invoke-Box $box
+    $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+    $ptu = @($after.hooks.PostToolUse)
+    Add-Result 'uninstall: removes a vanished checkout too' `
+    ($r.code -eq 0 -and $ptu.Count -eq 1 -and $ptu[0].hooks[0].command -eq 'someone-elses-hook' `
+            -and $r.output.Contains($gone) -and $r.output -match 'no longer exists') `
+        "PostToolUse=$($ptu.Count) survivor=$($ptu[0].hooks[0].command)"
+    Remove-Item -Recurse -Force $box.dir
+
+    $box = New-Box -Source $uninstall -NoFile
+    $live = Join-Path $box.dir 'other-checkout\bin\wildcard-perms'
+    $null = New-Item -Path (Split-Path -Parent $live) -ItemType Directory -Force
+    [System.IO.File]::WriteAllText($live, '')
+    $liveSpelled = $live -replace '\\', '/'
+    [System.IO.File]::WriteAllText($box.settings, (& $otherCheckout $liveSpelled))
+    $before = Get-Content $box.settings -Raw
+    $r = Invoke-Box $box
+    Add-Result 'uninstall: leaves a live other checkout, and says so' `
+    ($r.code -eq 0 -and (Get-Content $box.settings -Raw) -eq $before -and $r.output -match 'nothing removed' `
+            -and $r.output.Contains($liveSpelled) -and $r.output -match 'another checkout') `
+        "exit=$($r.code) unchanged=$((Get-Content $box.settings -Raw) -eq $before)"
+    Remove-Item -Recurse -Force $box.dir
 }
 
 # ── report ────────────────────────────────────────────────────────────────────
@@ -405,10 +615,11 @@ Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
 # A floor, because without one this harness passes by doing nothing. An empty
 # results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
 # this would go green having verified nothing at all -- which is the failure
-# this whole script exists to prevent, turned on itself. It records 16 cases
-# today; the floor sits below that so adding or reordering a case does not
-# break it, but no plausible breakage leaves more than a handful behind.
-$MinimumCases = 12
+# this whole script exists to prevent, turned on itself. It records 23 cases
+# today (16 until the other-checkout cases landed 2026-10-13); the floor sits
+# below that so adding or reordering a case does not break it, but no
+# plausible breakage leaves more than a handful behind.
+$MinimumCases = 18
 if ($total -lt $MinimumCases) {
     Write-Host ("FAIL  harness floor: recorded $total cases, expected at least $MinimumCases")
     Write-Host '      A run this short means cases stopped registering, not that they passed.'

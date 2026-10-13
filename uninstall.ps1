@@ -72,6 +72,59 @@ function ConvertTo-OrderedDict {
     return $InputObject
 }
 
+# A registration of this tool from ANOTHER checkout. Found live 2026-10-13: the
+# development box's hook pointed at an old checkout of this repo while the
+# maintained one had been cloned under a new name, and an uninstall run from the
+# new checkout matched nothing, said "nothing removed", and left the old hook
+# firing. install.ps1 now repoints such a registration; this script is more
+# conservative, because removing a hook is not something the user asked for on
+# behalf of a checkout they did not run it from:
+#   - this checkout's                       removed (unchanged behaviour);
+#   - another checkout's, target file gone  removed too: it can only fail on
+#                                           every tool call. False positives: an
+#                                           unreachable drive, and a Git Bash
+#                                           mount such as /tmp that .NET cannot
+#                                           resolve (/c/... is converted first).
+#                                           Both cost only a hook of this tool,
+#                                           during an uninstall of this tool;
+#   - another checkout's, still on disk     LEFT, and named in the output, so
+#                                           "nothing removed" is not the whole
+#                                           story. Its own uninstaller removes it.
+# Same strict grammar as install.ps1's Get-WildcardPermsTarget (its comment has
+# the reasoning): `node <path>` or a bare `<path>`, optionally quoted whole,
+# ending in bin\wildcard-perms or bin/wildcard-perms, nothing else. A relative
+# path cannot be checked for existence, so it counts as still there.
+function Get-WildcardPermsTarget {
+    param([object] $Command)
+    if ($Command -isnot [string]) { return $null }
+    $text = $Command.Trim()
+    if ($text -match '^node\s+(.+)$') { $text = $Matches[1].Trim() }
+    if ($text -match '^"([^"]+)"$') {
+        $text = $Matches[1]
+    } elseif ($text -match "^'([^']+)'$") {
+        $text = $Matches[1]
+    } elseif ($text -match '\s') {
+        return $null
+    }
+    if ($text -notmatch '[\\/]bin[\\/]wildcard-perms$') { return $null }
+    return $text
+}
+
+function Test-GoneRegistration {
+    param([string] $Path)
+    $native = $Path.Replace("\", "/")
+    if ($native -match '^/([A-Za-z])/(.*)$') { $native = "$($Matches[1]):/$($Matches[2])" }
+    # [System.IO.File], not Test-Path: no provider, so no wildcard expansion of
+    # `[` in a user's path and no dependence on the current PowerShell drive.
+    # IsPathRooted THROWS on .NET Framework (so under 5.1) for a path holding
+    # `"`, `<`, `>` or `|`; such a path is not provably gone, so it stays.
+    try {
+        return ([System.IO.Path]::IsPathRooted($native) -and -not [System.IO.File]::Exists($native))
+    } catch {
+        return $false
+    }
+}
+
 $raw = Get-Content $settingsPath -Raw
 if ([string]::IsNullOrWhiteSpace($raw)) {
     # Present but empty is somebody else's mid-write window, not "no hooks".
@@ -97,6 +150,8 @@ if ($cfg -is [System.Collections.IDictionary] -and $cfg.Contains("hooks") `
 $target = ConvertTo-HookPath $hookCmd
 $kept = @()
 $removed = 0
+$goneCheckouts = @()
+$otherCheckouts = @()
 # Removed PER HOOK, not per entry. Dropping the whole entry took any hook that
 # happened to share its `hooks` array with ours — somebody else's tool, deleted
 # silently by our uninstaller. The rule was copied from a per-hook filter in
@@ -111,7 +166,15 @@ foreach ($entry in $installed) {
     $mine = @()
     $survivors = @()
     foreach ($h in @($entry["hooks"])) {
-        if ((ConvertTo-HookPath $h.command) -eq $target) { $mine += $h } else { $survivors += $h }
+        if ((ConvertTo-HookPath $h.command) -eq $target) { $mine += $h; continue }
+        $other = Get-WildcardPermsTarget $h.command
+        if ($null -ne $other -and (Test-GoneRegistration $other)) {
+            $mine += $h
+            $goneCheckouts += $other
+            continue
+        }
+        if ($null -ne $other) { $otherCheckouts += $other }
+        $survivors += $h
     }
     if ($mine.Count -eq 0) { $kept += $entry; continue }
     $removed += $mine.Count
@@ -125,8 +188,15 @@ foreach ($entry in $installed) {
 
 # Report what happened rather than success regardless: another checkout's hook, or a
 # hook someone removed by hand, must not read as "removed".
+function Write-OtherCheckouts {
+    foreach ($other in $otherCheckouts) {
+        Write-Host "- left $other registered: it is another checkout of this tool and it still exists." -ForegroundColor Yellow
+        Write-Host "  Run that checkout's uninstaller to remove it." -ForegroundColor Yellow
+    }
+}
 if ($removed -eq 0) {
     Write-Host "- no wildcard-perms hook registered in $settingsPath; nothing removed" -ForegroundColor Yellow
+    Write-OtherCheckouts
     exit 0
 }
 
@@ -145,4 +215,8 @@ $cfgJson = ConvertTo-Json $cfg -Depth 100
 Copy-Item $settingsPath ($settingsPath + ".pre-uninstall-backup") -Force
 [System.IO.File]::WriteAllText($settingsPath, $cfgJson + "`n")
 Write-Host "[OK] removed $removed wildcard-perms PostToolUse hook(s) from ~/.claude/settings.json" -ForegroundColor Green
+foreach ($gone in $goneCheckouts) {
+    Write-Host "     including $gone, from a checkout that no longer exists" -ForegroundColor Green
+}
+Write-OtherCheckouts
 Write-Host "Allow-list entries stay as they are - this removes the hook, not your permissions." -ForegroundColor Cyan

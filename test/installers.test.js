@@ -98,13 +98,13 @@ function catchBlockContaining(code, needle) {
 }
 
 // Returns { code, stdout, stderr, after } — `after` being the bytes on disk.
-function runInstaller(settingsPath, source) {
+function runInstaller(settingsPath, source, hookCmd = HOOK_CMD) {
   let code = 0;
   let stdout = '';
   let stderr = '';
   try {
     stdout = execFileSync(process.execPath, ['--input-type=module', '-e', source], {
-      env: { ...process.env, SETTINGS: settingsPath, HOOK_CMD },
+      env: { ...process.env, SETTINGS: settingsPath, HOOK_CMD: hookCmd },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -231,7 +231,7 @@ test('install.sh registers the hook command bare, with no shell wrapper', (t) =>
   //           +17.6 ms, `powershell.exe -Command node ...` +1059 ms, which is 18x
   //           the whole hook.
   //   undo  — both uninstallers recover the hook path by unwrapping
-  //           `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:36) and otherwise
+  //           `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:37) and otherwise
   //           compare the command verbatim against the bare path. A wrapped
   //           registration matches NEITHER branch, so it is never recognised as
   //           ours: the hook becomes UN-UNINSTALLABLE, `./uninstall.sh` reports
@@ -351,7 +351,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   // Banned: `cmd /c node ...` (+17.6 ms per tool call) and
   // `powershell.exe -Command node ...` (+1059 ms, 18x the whole hook). The
   // stronger reason is undo, not speed: both uninstallers recover the hook path
-  // with `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:36), a wrapped command
+  // with `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:37), a wrapped command
   // matches neither that nor the bare-path comparison, and the hook would become
   // UN-UNINSTALLABLE while still firing on every tool call.
   //
@@ -415,7 +415,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   //
   // Case-insensitive, deliberately, and this is where the two halves of the guard
   // used to disagree with each other and with the contract they cite. The
-  // uninstallers are the contract: uninstall.sh:36 matches `/^node\s+(.+)$/i` and
+  // uninstallers are the contract: uninstall.sh:37 matches `/^node\s+(.+)$/i` and
   // uninstall.ps1:28 uses `-match`, which is case-insensitive in PowerShell. Both
   // recover the hook path from `NODE "…"` perfectly well. The twin case in
   // scripts/verify-installers.ps1 has always matched case-insensitively for that
@@ -584,4 +584,285 @@ test("the README's install command names the version a build actually produces",
       + `packaging produces ${ext.version}. The README warns that installing an equal or `
       + 'lower version is a silent no-op, so a stale number here is the failure it describes.');
   }
+});
+
+// ── A registration from another checkout of this tool ────────────────────────
+//
+// Found live 2026-10-13. The development box's PostToolUse hook still pointed at
+// an old checkout of this repo (the directory name from before the rename,
+// v1.4.13, 142 commits behind) while the maintained checkout had been cloned
+// under the new name. Both installers' duplicate check was an exact match on
+// THIS checkout's path, so installing from the new checkout APPENDED a second
+// entry; both fired on every tool call, the stale one kept running old code, and
+// no fix since 1.4.13 reached a real tool call. Nothing reported it, because
+// "registered" was true.
+//
+// Appended here rather than beside the install.sh cases above: other files cite
+// this one by line number. The PowerShell twins are install cases 8-12 and
+// uninstall cases 9-10 in scripts/verify-installers.ps1, which run under
+// Windows PowerShell 5.1 in the `installers` CI job.
+
+const hook = (command, more = {}) => ({ type: 'command', command, ...more });
+
+// A settings.json with keys and a hook group of somebody else's around the
+// PostToolUse array under test, so preservation is asserted every time.
+const settingsWith = (postToolUse) => JSON.stringify({
+  model: 'claude-opus-5',
+  permissions: { allow: ['Bash(rg *)'], deny: ['Bash(rm -rf /*)'] },
+  hooks: {
+    SessionStart: [{ hooks: [hook('other-tool')] }],
+    PostToolUse: postToolUse,
+  },
+}, null, 2) + '\n';
+
+// Every PostToolUse command that runs this tool, by the tail the installers key
+// on: "exactly one" has to count what would actually fire.
+const toolHooks = (cfg) => (cfg.hooks?.PostToolUse ?? [])
+  .flatMap((entry) => entry.hooks ?? [])
+  .map((h) => h.command)
+  .filter((command) => /[\\/]bin[\\/]wildcard-perms"?$/.test(command));
+
+function assertNeighboursKept(after) {
+  assert.equal(after.model, 'claude-opus-5');
+  assert.deepEqual(after.permissions, { allow: ['Bash(rg *)'], deny: ['Bash(rm -rf /*)'] });
+  assert.deepEqual(after.hooks.SessionStart, [{ hooks: [hook('other-tool')] }],
+    "a co-located hook group is not ours to touch");
+}
+
+test('install: a registration from another checkout is repointed in place, not duplicated', (t) => {
+  const settingsPath = sandbox(t);
+  // install.ps1's `node "<path>"` spelling, at a path that does not exist, under a
+  // matcher neither installer writes, in the MIDDLE of three entries, with a
+  // field beside `command`: everything an in-place rewrite has to keep.
+  const stale = path.join(path.dirname(path.dirname(settingsPath)), 'old-checkout', 'bin', 'wildcard-perms');
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash', hooks: [hook('first-neighbour')] },
+    { matcher: 'Bash|PowerShell|Edit', hooks: [hook(`node "${stale}"`, { timeout: 30 })] },
+    { matcher: 'Write', hooks: [hook('last-neighbour')] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+
+  // The defect, asserted directly: before the fix this was [stale, HOOK_CMD].
+  assert.deepEqual(toolHooks(after), [HOOK_CMD],
+    'exactly one registration of the tool, pointing at this checkout');
+  assert.deepEqual(after.hooks.PostToolUse, [
+    { matcher: 'Bash', hooks: [hook('first-neighbour')] },
+    { matcher: 'Bash|PowerShell|Edit', hooks: [hook(HOOK_CMD, { timeout: 30 })] },
+    { matcher: 'Write', hooks: [hook('last-neighbour')] },
+  ], 'repointed where it was: same position, matcher and timeout, neighbours untouched');
+  assert.deepEqual(Object.keys(after.hooks.PostToolUse[1].hooks[0]), ['type', 'command', 'timeout'],
+    'rewritten in place, so the hook keeps its key order');
+  assertNeighboursKept(after);
+  assert.ok(run.stdout.includes(`${stale} -> ${HOOK_CMD}`), `the notice names old -> new:\n${run.stdout}`);
+  assert.match(run.stdout, /no longer exists/);
+  assert.ok(fs.readFileSync(settingsPath + '.pre-install-backup', 'utf8').includes('old-checkout'),
+    'and the way back still holds the old registration');
+});
+
+test("install: the bare-path spelling install.sh itself writes is recognised from another checkout too", (t) => {
+  const settingsPath = sandbox(t);
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook('/old/checkout/bin/wildcard-perms')] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+  assert.deepEqual(after.hooks.PostToolUse, [{ matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] }]);
+  assertNeighboursKept(after);
+});
+
+test('install: a command that only mentions the tool is not a registration of it', (t) => {
+  // The control. A false match REWRITES somebody else's hook, so the grammar is
+  // strict and each of these names the tool without being it: another
+  // filename, extra arguments, a prefix command, no `bin` directory, a directory
+  // that merely ends in "bin".
+  const lookalikes = [
+    'wildcard-perms-audit --since today',
+    'node "/tools/x/bin/wildcard-perms.js"',
+    '/tools/bin/wildcard-perms-old',
+    'echo /tools/bin/wildcard-perms',
+    'node "/tools/x/bin/wildcard-perms" --seed',
+    '/tools/wildcard-perms',
+    '/tools/sbin/wildcard-perms',
+  ];
+  const settingsPath = sandbox(t);
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash', hooks: lookalikes.map((command) => hook(command)) },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+  assert.deepEqual(after.hooks.PostToolUse, [
+    { matcher: 'Bash', hooks: lookalikes.map((command) => hook(command)) },
+    { matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] },
+  ], 'every lookalike untouched and in order, and ours appended as if none were there');
+  assert.doesNotMatch(run.stdout, /repointed|duplicate/);
+  assertNeighboursKept(after);
+});
+
+test('install: this checkout already registered leaves the file byte-identical', (t) => {
+  // Both installers' spellings of THIS checkout: install.sh's bare path and
+  // install.ps1's `node "<path>"`. Neither may be rewritten into the other.
+  for (const spelling of [HOOK_CMD, `node "${HOOK_CMD}"`]) {
+    const settingsPath = sandbox(t);
+    const before = settingsWith([
+      { matcher: 'Bash|PowerShell', hooks: [hook(spelling), hook('neighbour-tool')] },
+    ]);
+    fs.writeFileSync(settingsPath, before);
+
+    const run = runInstaller(settingsPath, embeddedModule());
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(run.after, before, `${spelling}: no write at all`);
+    assert.equal(fs.existsSync(settingsPath + '.pre-install-backup'), false,
+      `${spelling}: nothing written, so no backup either`);
+    assert.match(run.stdout, /already registered/);
+  }
+});
+
+test('install: several stale registrations under one matcher leave exactly one', (t) => {
+  const settingsPath = sandbox(t);
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook('node "/old/a/bin/wildcard-perms"')] },
+    // Shares its entry with a neighbour, so removal has to be per hook.
+    { matcher: 'Bash|PowerShell', hooks: [hook('neighbour-tool'), hook('/old/b/bin/wildcard-perms')] },
+    // Alone in its entry, so the entry goes with it.
+    { matcher: 'Bash|PowerShell', hooks: [hook('/old/c/bin/wildcard-perms')] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+  assert.deepEqual(after.hooks.PostToolUse, [
+    { matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] },
+    { matcher: 'Bash|PowerShell', hooks: [hook('neighbour-tool')] },
+  ], 'the first is repointed, the others removed, the neighbour and its entry kept');
+  assert.ok(run.stdout.includes('/old/a/bin/wildcard-perms -> '), run.stdout);
+  // One notice per removal, each naming its path.
+  assert.match(run.stdout, /removed a duplicate[^\n]*\/old\/b\/bin\/wildcard-perms/);
+  assert.match(run.stdout, /removed a duplicate[^\n]*\/old\/c\/bin\/wildcard-perms/);
+  assertNeighboursKept(after);
+});
+
+test('install: a stale registration beside this checkout is removed, and this one kept as it is', (t) => {
+  // The exact state the pre-fix installer left behind: the stale entry first,
+  // the appended one second. Nothing needs repointing, only the stale one goes.
+  const settingsPath = sandbox(t);
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook('/old/checkout/bin/wildcard-perms')] },
+    { matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+  assert.deepEqual(after.hooks.PostToolUse, [{ matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] }]);
+  assert.match(run.stdout, /removed a duplicate[^\n]*\/old\/checkout\/bin\/wildcard-perms/);
+  assert.doesNotMatch(run.stdout, /repointed/);
+});
+
+test('install: registrations split across matchers are each repointed, none removed', (t) => {
+  // One entry per tool is a real shape (the uninstaller tests above carry it).
+  // Collapsing it to one entry would leave the hook blind to PowerShell calls,
+  // silently; under DIFFERENT matchers a second registration is coverage, not a
+  // duplicate.
+  const settingsPath = sandbox(t);
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash', hooks: [hook('/old/checkout/bin/wildcard-perms')] },
+    { matcher: 'PowerShell', hooks: [hook('/old/checkout/bin/wildcard-perms')] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.after).hooks.PostToolUse, [
+    { matcher: 'Bash', hooks: [hook(HOOK_CMD)] },
+    { matcher: 'PowerShell', hooks: [hook(HOOK_CMD)] },
+  ]);
+  assert.doesNotMatch(run.stdout, /duplicate/);
+});
+
+test('install: Windows spellings count as this tool on Windows, and only there', (t) => {
+  // `NODE "C:\...\BIN\Wildcard-Perms"`: case and backslashes fold on Windows,
+  // where a path is case-insensitive and `\` separates. On POSIX `\` is a
+  // filename character, `BIN` is another directory and `NODE` is not a command,
+  // so the same string is somebody else's and must be left alone.
+  const settingsPath = sandbox(t);
+  const spelled = 'NODE "C:\\Old\\Checkout\\BIN\\Wildcard-Perms"';
+  fs.writeFileSync(settingsPath, settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(spelled)] }]));
+
+  const run = runInstaller(settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  const ptu = JSON.parse(run.after).hooks.PostToolUse;
+  if (process.platform === 'win32') {
+    assert.deepEqual(ptu, [{ matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] }]);
+  } else {
+    assert.deepEqual(ptu, [
+      { matcher: 'Bash|PowerShell', hooks: [hook(spelled)] },
+      { matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] },
+    ]);
+  }
+
+  // And on Windows, Git Bash's /c/... spelling of THIS checkout is this
+  // checkout, not a stale one: install.sh run from Git Bash and install.ps1 run
+  // from PowerShell must agree that the other's registration is current.
+  if (process.platform === 'win32') {
+    const second = sandbox(t);
+    const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook('/c/Repo/bin/wildcard-perms')] }]);
+    fs.writeFileSync(second, before);
+    const again = runInstaller(second, embeddedModule(), 'C:/repo/bin/wildcard-perms');
+    assert.equal(again.code, 0, again.stderr);
+    assert.equal(again.after, before, 'one checkout, two spellings: no write');
+  }
+});
+
+test('uninstall: a registration whose checkout no longer exists is removed too', (t) => {
+  // Before, an uninstall run from the new checkout matched nothing, said
+  // "nothing removed", and left a hook that can only fail on every tool call.
+  const settingsPath = sandbox(t);
+  const gone = path.join(path.dirname(path.dirname(settingsPath)), 'gone-checkout', 'bin', 'wildcard-perms');
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook(`node "${gone}"`)] },
+    { matcher: 'Bash', hooks: [hook('neighbour')] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedUninstaller());
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+  assert.deepEqual(after.hooks.PostToolUse, [{ matcher: 'Bash', hooks: [hook('neighbour')] }]);
+  assertNeighboursKept(after);
+  assert.match(run.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  assert.ok(run.stdout.includes(gone), run.stdout);
+  assert.match(run.stdout, /no longer exists/);
+});
+
+test('uninstall: a live checkout elsewhere is left registered, and named', (t) => {
+  // Not this checkout's to remove: the user ran THIS checkout's uninstaller.
+  // Leaving it silently was the old "nothing removed" story, so it is named.
+  const settingsPath = sandbox(t);
+  const live = path.join(path.dirname(path.dirname(settingsPath)), 'other-checkout', 'bin', 'wildcard-perms');
+  fs.mkdirSync(path.dirname(live), { recursive: true });
+  fs.writeFileSync(live, '');
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${live}"`)] }]);
+  fs.writeFileSync(settingsPath, before);
+
+  const run = runInstaller(settingsPath, embeddedUninstaller());
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, 'nothing of this checkout, so nothing written');
+  assert.match(run.stdout, /nothing removed/);
+  assert.ok(run.stdout.includes(`left ${live} registered`), run.stdout);
+
+  // Beside this checkout's own registration: ours goes, the live one stays.
+  const both = sandbox(t);
+  fs.writeFileSync(both, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD), hook(`node "${live}"`)] },
+  ]));
+  const again = runInstaller(both, embeddedUninstaller());
+  assert.equal(again.code, 0, again.stderr);
+  assert.deepEqual(JSON.parse(again.after).hooks.PostToolUse,
+    [{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${live}"`)] }]);
+  assert.ok(again.stdout.includes(`left ${live} registered`), again.stdout);
 });

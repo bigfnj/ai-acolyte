@@ -32,7 +32,7 @@ function ConvertTo-HookPath {
     if ($text -match '^/([A-Za-z])/(.*)$') {
         $text = "$($Matches[1]):/$($Matches[2])"
     }
-    return $text.TrimEnd("/").ToLowerInvariant()
+    return (Resolve-LongPath $text).TrimEnd("/").ToLowerInvariant()
 }
 
 if (-not (Test-Path $settingsPath)) {
@@ -123,6 +123,24 @@ function Test-GoneRegistration {
     } catch {
         return $false
     }
+}
+
+# One file can have more than one spelling even after ConvertTo-HookPath's
+# folding, found 2026-10-13: an 8.3 short path (C:/Users/SHORTN~1.EXT/...) and its
+# long form name the same checkout. Compared as text they differ, so this
+# checkout's own registration under the short spelling was left in place and
+# named "another checkout", and nothing was removed. GetFullPath expands every
+# 8.3 component of the part of a path that exists, under 5.1 and 7 alike; it does
+# not resolve a junction or symlink. Defined here, below its caller, because
+# ConvertTo-HookPath first runs further down. install.ps1 has the same function.
+function Resolve-LongPath {
+    param([string] $Path)
+    try {
+        if ([System.IO.Path]::IsPathRooted($Path)) {
+            return [System.IO.Path]::GetFullPath($Path).Replace("\", "/").TrimEnd("/")
+        }
+    } catch { }
+    return $Path
 }
 
 $raw = Get-Content $settingsPath -Raw

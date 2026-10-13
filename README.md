@@ -35,8 +35,11 @@ cd ai-acolyte
 
 That registers the `PostToolUse` hook. Run it again after moving, renaming or re-cloning
 the checkout: it repoints a registration left by another checkout of this tool instead of
-adding a second one beside it, and prints the old and new paths. For the dashboard in the
-screenshots, install the extension too:
+adding a second one beside it, and prints the old and new paths. On Windows, `./install.sh`
+from Git Bash and `.\install.ps1` register the same `node "<path>"` command, and either one
+rewrites the bare-path registration an older Git Bash install left, which made Windows ask
+how to open the file on every hook fire. For the dashboard in the screenshots, install the
+extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
@@ -93,15 +96,15 @@ matrix and dated evidence are in
 
 Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2219`).
 It lists local rules and confirms removal of a selected literal allow declaration
-(`vscode-extension/extension.js:3517`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:3681`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
 (`vscode-extension/extension.js:3439`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
-(`src/auto-learn-manager.js:1341`). Codex derived guidance has separate policy and run
-evidence (`src/auto-learn-manager.js:1728`); observed runs are not reported as measured
+(`src/auto-learn-manager.js:1361`). Codex derived guidance has separate policy and run
+evidence (`src/auto-learn-manager.js:1770`); observed runs are not reported as measured
 approval prompts. Actual restore and guidance controls now pass in a staged VS Code
 host, with deliberate no-op controls that fail the intended checks. The detailed
 development evidence and supported boundaries remain in the compatibility document.
@@ -334,7 +337,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2309`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2499`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
@@ -411,9 +414,9 @@ given a method it never had.
 
 Both halves need Node 20 or newer, the floor CI tests: `.github/workflows/test.yml` runs the suite
 on every push and pull request across Node 20 and 22 on Linux and Windows, `fail-fast` off so a
-platform-specific failure is never hidden. `install.sh` registers the hook's bare path while
-`install.ps1` registers `node "<path>"`, because a bare extensionless path has no Windows
-association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
+platform-specific failure is never hidden. On Linux and macOS `install.sh` registers the hook's
+bare path; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
+`node "<path>"`, because a bare extensionless path has no Windows association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
 and any left by a checkout that no longer exists, and names, without removing, one that belongs
 to another checkout still on disk. Cutting a GitHub Release builds and
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:

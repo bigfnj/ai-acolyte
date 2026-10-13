@@ -40,7 +40,7 @@ const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi
 const { CodexMemoryLint } = require('./codexMemoryLint');
 const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
 const { createPermissionActions } = require('./permissionActions');
-const { readCodexPermissionSummary } = require('./src/permission-summary');
+const { readCodexPermissionSummary, deadShellApprovals } = require('./src/permission-summary');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, readCompiled, compiledPath } = require('./src/agent-gates');
@@ -1102,13 +1102,21 @@ function autoLearnConfig() {
 
 function autoLearnManagerOptions(cfg = autoLearnConfig()) {
   return {
-    home: os.homedir(), homeDir: os.homedir(), codexHome: CODEX_HOME_DIR, mode: cfg.mode,
-    threshold: cfg.threshold, successThreshold: cfg.threshold,
+    // One spelling per key: the `homeDir` / `successThreshold` duplicates were
+    // removed 2026-10-13 (they shadowed the manager's fallback legs). Guarded by
+    // test/codex-inventory-ui.test.js, which rejects a key the manager never reads.
+    home: os.homedir(), codexHome: CODEX_HOME_DIR, mode: cfg.mode,
+    threshold: cfg.threshold,
     codexRulesPath: cfg.codexRulesPath, codexExecutable: cfg.codexExecutable,
     workspaceRoot: cfg.workspaceRoot,
+    // No `codexHistory` here, on purpose. It pinned the Codex root to
+    // `sessions/` alone and overrode the manager's default, which also reads
+    // `archived_sessions/`: archiving a thread MOVES its rollout there (measured
+    // 2026-10-13), so the pin dropped every archived thread's calls from the
+    // corpus. Both folders hang off CODEX_HOME_DIR, which the manager already
+    // gets as `codexHome` above and which is in the cache key below.
     paths: {
       claudeHistory: PROJECTS_DIR,
-      codexHistory: CODEX_SESSIONS_DIR,
       claudeSettings: SETTINGS,
       codexRules: cfg.codexRulesPath,
     },
@@ -1148,11 +1156,36 @@ function autoLearnWorkerPath() {
   return fs.existsSync(repository) ? repository : packaged;
 }
 
+// The worker deadline from `autoLearn.workerTimeoutSeconds`, in ms, or undefined.
+// Before 2026-10-13 only PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS could set it.
+//
+// UNDEFINED UNLESS THE USER SET IT, which is why this reads inspect() and not
+// get(): get() returns the manifest default (300) whether or not anyone chose
+// it, and a number here outranks the env var in the runner, so an untouched
+// setting would silently cancel an env override that already works.
+//
+// globalValue ONLY. The key is machine-scoped so that a cloned repository's
+// .vscode/settings.json cannot set it to 0 and leave a wedged worker holding
+// teardown open; VS Code ignores a machine setting at workspace scope, and
+// reading only the user tier here keeps that true even if an inspect() result
+// carried one. Anything that is not a finite number >= 0 counts as unset: an
+// invalid value keeps the deadline rather than switching it off.
+function autoLearnWorkerTimeoutMs() {
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  if (typeof config.inspect !== 'function') return undefined;
+  const seconds = config.inspect('autoLearn.workerTimeoutSeconds')?.globalValue;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.round(seconds * 1000);
+}
+
 function getAutoLearnWorkerRunner() {
   if (!autoLearnWorkerRunner) {
     autoLearnWorkerRunner = createAutoLearnWorkerRunner({
       workerPath: autoLearnWorkerPath(),
       optionsProvider: () => autoLearnManagerOptions(),
+      // The function itself, re-read by the runner on every operation: the
+      // runner outlives every configuration change, so a number would be frozen.
+      timeoutMs: autoLearnWorkerTimeoutMs,
       onMutation: () => invalidateAutoLearnManager(),
     });
   }
@@ -1289,10 +1322,24 @@ function autoLearnScanHealth(stats) {
     // `codexHistoryInspected: 'partial'` is the other half: the comparison could
     // not be made, which is not an answer of `false`. `'unavailable'` is a
     // different statement again — the probe needs `node:sqlite` and the host
-    // does not have it — and it is passed through UNCHANGED rather than folded
-    // into 'partial', because scanTrouble treats only the latter as trouble.
+    // cannot load it. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within the
+    // ^1.80 engine floor may not, so the `unavailable` tier stays (measured
+    // 2026-10-13). It is passed through UNCHANGED rather than folded into
+    // 'partial', because scanTrouble treats only the latter as trouble.
     codexHistoryStale: stats.codexHistoryStale === true,
     codexHistoryInspected: stats.codexHistoryInspected || 'skipped',
+    // What `stale` is made of, so the card can say WHICH divergence it saw. The
+    // fixed sentence it replaced ("history store has moved") was wrong about the
+    // one case anyone actually hit: four archived threads, nothing moved.
+    codexHistoryFindings: stats.codexHistoryFindings && typeof stats.codexHistoryFindings === 'object'
+      ? stats.codexHistoryFindings : null,
+    // Three, because it is a hover title and not a report; the output channel
+    // gets every one.
+    codexHistoryReasons: (Array.isArray(stats.codexHistoryReasons) ? stats.codexHistoryReasons : []).slice(0, 3),
+    // Budget deferral is catch-up and is drawn as such, beside the count of what
+    // is left. A skipped unreadable stretch is the lost-bytes case, and trouble.
+    deferredBytes: count(stats.deferredBytes),
+    unreadable: count(stats.unreadable),
   };
 }
 
@@ -1358,6 +1405,7 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     const result = await runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold });
     autoLearnFailureCount = 0;
     autoLearnNextRetryAt = 0;
+    logScanTrouble(result);
     const manager = getAutoLearnManager();
     const status = managerStatus(manager);
     const counts = countAutoLearnCandidates(
@@ -1639,12 +1687,12 @@ function execFileCaptured(executable, args) {
   });
 }
 
-// One definition of "the set Codex evaluates", shared with the validator that
-// runs before a write (src/codex-policy.js). The diagnostic and the write have
-// to answer the same question or "Why did this prompt?" names a cause the write
-// never checked.
+// One definition of "the set Codex evaluates", shared with the pre-write validator
+// (src/codex-policy.js), so "Why did this prompt?" cannot name a cause the write never
+// checked. The workspace root adds the trusted project folders, which that check omits.
 function codexRuleFileSetFor(cfg) {
-  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null });
+  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null,
+    workspaceRoot: cfg.workspaceRoot, codexExecutable: cfg.codexExecutable });
 }
 
 // `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
@@ -1907,8 +1955,8 @@ async function explainAutoLearnPrompt() {
   if (!rules.length) {
     vscode.window.showInformationMessage('Codex execpolicy analysis', {
       modal: true,
-      detail: 'No enterprise rule governs this command, and no user-scope .rules files are ' +
-        'currently visible, so Codex has no local prefix rule to allow it. ' +
+      detail: 'No enterprise rule governs this command, and no user-scope or trusted-project ' +
+        '.rules files are currently visible, so Codex has no local prefix rule to allow it. ' +
         ruleSet.blindSpots.join(' ') + unreadable + degradedNote,
     });
     return;
@@ -1991,6 +2039,9 @@ function registerAutoLearnWatchers(context) {
   for (const [base, pattern] of [
     [path.join(os.homedir(), '.claude'), 'projects/**/*.jsonl'],
     [CODEX_HOME_DIR, 'sessions/**/*.jsonl'],
+    // Flat, no date folders: archiving moves a rollout here (2026-10-13), and
+    // the scan reads it, so a move is a change worth a scan.
+    [CODEX_HOME_DIR, 'archived_sessions/*.jsonl'],
   ]) {
     try {
       const watcher = vscode.workspace.createFileSystemWatcher(
@@ -2088,6 +2139,53 @@ function registerLocalWatchers(context) {
   // drain: the one above is registered before attach() and is the one under test.
 }
 
+// The panel has room for a phrase and a three-reason hover title. The full
+// reasons -- which say which folders were compared and why the verdict is what
+// it is -- had nowhere to go, so a user looking at "scan degraded" could not find
+// out what to do about it. One line per reason, to the shared channel.
+//
+// Only when the set CHANGES. A scan runs every few minutes and on every
+// transcript write, and a persisting condition would otherwise append the same
+// lines for as long as the window is open. The manager writes reasons with
+// directory names only, so nothing here is a path it did not already persist.
+//
+// Never allowed to throw into the scan: the channel API is absent from some test
+// hosts, and a logging failure must not turn a scan that returned into one the
+// card reports as failed.
+let lastScanTroubleLog = '';
+function logScanTrouble(result) {
+  try {
+    if (!result || typeof result !== 'object') return;
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const lines = [];
+    if (result.blindScan) lines.push('nothing was enumerated, so the cursor map was preserved');
+    for (const reason of Array.isArray(result.codexHistoryReasons) ? result.codexHistoryReasons : []) {
+      lines.push(`Codex history: ${reason}`);
+    }
+    if (result.codexHistoryInspected === 'partial') lines.push('the Codex history-store check ran degraded');
+    if (result.errors) lines.push(`${plural(result.errors, 'file', 'files')} could not be read`);
+    if (result.unreadable) {
+      lines.push(`${plural(result.unreadable, 'file', 'files')} had an unreadable stretch that was skipped`);
+    }
+    if (result.retainedObservations) {
+      lines.push(`${plural(result.retainedObservations, 'observation hash', 'observation hashes')} held over the cap`);
+    }
+    if (result.unmatchedResults) {
+      lines.push(`${plural(result.unmatchedResults, 'result', 'results')} could not be matched to a call`);
+    }
+    const signature = lines.join('\n');
+    if (signature === lastScanTroubleLog) return;
+    lastScanTroubleLog = signature;
+    if (!lines.length) return;
+    const channel = sharedChannel();
+    if (!channel) return;
+    const stamp = new Date().toISOString();
+    for (const line of lines) channel.appendLine(`[${stamp}] Auto Learn scan: ${line}`);
+  } catch (error) {
+    console.error('ai-acolyte: could not log Auto Learn scan trouble —', error);
+  }
+}
+
 // Created on first use and disposed with the extension. Lazy rather than built
 // in activate, because the mocked-vscode activation test does not stub every
 // window API and a channel nobody opened costs nothing.
@@ -2122,6 +2220,8 @@ function activate(context) {
   // released here or the second activation is muted for its whole lifetime.
   deactivated = false;
   activationGeneration += 1;
+  // A re-activate logs to a fresh channel, so current trouble is not "seen" yet.
+  lastScanTroubleLog = '';
   // The busy latch, released unconditionally here. deactivate() only clears it
   // when it is still the current generation — correctly, because a successor's
   // in-flight scan must not have its latch cleared by a predecessor's
@@ -2152,6 +2252,9 @@ function activate(context) {
   // already read the old runner and is awaiting a promise that holds it, so it
   // still terminates its own worker. The successor simply builds its own.
   autoLearnWorkerRunner = null;
+  // warnOnce promises "once per activation", and the Set outlives deactivate, so
+  // until 2026-10-13 a re-activate stayed silent about a warning already given.
+  warnedOnce.clear();
   // Watch settings.json for any change (Claude Code approval, manual edit, etc.).
   // RelativePattern (not a plain string) — plain strings only watch files inside
   // opened workspace folders, but ~/.claude/settings.json usually isn't one.
@@ -2864,14 +2967,39 @@ function localDrainEnabled() {
   return vscode.workspace.getConfiguration('permissionWildcarding').get('localDrain.enabled', true);
 }
 
+// The folders whose .claude/settings.local.json this window looks at: one file per
+// open workspace folder, at its root and never beneath it, because
+// localSettingsPath is a single non-recursive join. ONE copy, read by both the
+// drain and the dashboard card. Until 2026-10-13 localCardData carried its own
+// duplicate of this filter, and the duplicate had already drifted: it lacked the
+// trust gate below, so an untrusted window showed dry-run numbers for a file the
+// drain refused to touch.
+//
+// Recursive discovery of nested settings.local.json files was considered and
+// declined, 2026-10-13. A nested clone's approvals were granted for that clone, and
+// promoting them into user scope from a parent window is the same trust problem the
+// gate below exists for. A Claude session running in a subfolder is covered anyway:
+// the CLI hook drains each session's own cwd on every tool call
+// (bin/wildcard-perms:507-515, `hookCwd(input)`).
+//
+// A folder on another file system (a virtual workspace, or a non-file scheme mixed
+// into a multi-root workspace) has an fsPath that names no file on this disk, so
+// reading it would report, and draining it would rewrite, whatever local file sits
+// at the same path. The same `uri.scheme` test codexMemoryLint.js:51 applies. A
+// folder with no scheme at all is kept, as there.
+function localRoots() {
+  return (vscode.workspace.workspaceFolders || [])
+    .filter((folder) => !folder.uri.scheme || folder.uri.scheme === 'file')
+    .map((folder) => folder.uri.fsPath)
+    .filter((root) => fs.existsSync(localSettingsPath(root)));
+}
+
 // Writing into a workspace's .claude/ changes that project's files, so an
 // untrusted window reads but never writes — the same line the Codex
 // workspace-scope rule writer draws.
 function drainableRoots() {
   if (!vscode.workspace.isTrusted) return [];
-  return (vscode.workspace.workspaceFolders || [])
-    .map((folder) => folder.uri.fsPath)
-    .filter((root) => fs.existsSync(localSettingsPath(root)));
+  return localRoots();
 }
 
 function drainOneWorkspace(root, dryRun = false) {
@@ -2976,24 +3104,37 @@ function scheduleLocalDrain(delay = 900) {
 
 // Dashboard numbers come from a dry run over each folder, so the card shows what
 // a click would actually do rather than a raw entry count.
+//
+// The folders are localRoots(), the list drainableRoots() gates, so the card cannot
+// name a file the drain would skip. An untrusted window still lists its files,
+// because naming what is being left alone is a read, but it runs no dry run:
+// promote, prune and kept are null and the card shows dashes. Before 2026-10-13 it
+// computed all three anyway, so an untrusted window read "Project-local approvals:
+// N to drain" over a Drain button that could never act on them.
+//
+// `files` is every file inspected, home-relative, one per root. With two or more
+// folders the payload used to carry only the bare LOCAL_RELATIVE constant, so the
+// subtitle read "2 folders · .claude\settings.local.json" and named no file at all.
 function localCardData() {
-  const roots = (vscode.workspace.workspaceFolders || [])
-    .map((folder) => folder.uri.fsPath)
-    .filter((root) => fs.existsSync(localSettingsPath(root)));
+  const roots = localRoots();
   if (!roots.length) return null;
-  let promote = 0; let prune = 0; let kept = 0; let blocked = false;
-  for (const root of roots) {
-    const report = drainOneWorkspace(root, true);
-    if (report.blocked) { blocked = true; kept += report.kept; continue; }
-    promote += report.promote.length;
-    prune += report.prune.length;
-    kept += report.kept;
+  const trusted = vscode.workspace.isTrusted;
+  let promote = null; let prune = null; let kept = null; let blocked = false;
+  if (trusted) {
+    promote = 0; prune = 0; kept = 0;
+    for (const root of roots) {
+      const report = drainOneWorkspace(root, true);
+      if (report.blocked) { blocked = true; kept += report.kept; continue; }
+      promote += report.promote.length;
+      prune += report.prune.length;
+      kept += report.kept;
+    }
   }
   return {
     folders: roots.length,
-    file: roots.length === 1 ? localSettingsPath(roots[0]).replace(os.homedir(), '~') : LOCAL_RELATIVE,
+    files: roots.map((root) => localSettingsPath(root).replace(os.homedir(), '~')),
     promote, prune, kept, blocked,
-    trusted: vscode.workspace.isTrusted,
+    trusted,
     enabled: localDrainEnabled(),
     lastRun: localDrainAt,
   };
@@ -3528,8 +3669,16 @@ async function showSavedPermissionPicker(selection) {
     const settings = readSettingsState();
     const allow = Array.isArray(settings.settings?.permissions?.allow)
       ? settings.settings.permissions.allow.filter((entry) => typeof entry === 'string') : [];
-    const items = allow.sort().map((permission) => ({
-      label: permission, description: 'Claude · allow', agent: 'claude',
+    // `{ filter: 'dead' }` comes from the dashboard's one-off-approvals line (2026-10-13).
+    // The set is recomputed from THIS read, not carried from the push that drew the line:
+    // the list can change while the panel is open, and a row offered for removal must be
+    // one that is on disk now. deadShellApprovals is memoized on the list, so an unchanged
+    // list costs nothing here. Codex is skipped for this view: the diagnostic is about
+    // Claude's verbatim shell approvals and has nothing to say about prefix rules.
+    // Removal is the ordinary per-entry confirmation below; nothing is removed in bulk.
+    const dead = selection?.filter === 'dead' ? new Set(deadShellApprovals(allow).entries) : null;
+    const items = allow.filter((permission) => !dead || dead.has(permission)).sort().map((permission) => ({
+      label: permission, description: dead ? 'Claude · allow · one-off script' : 'Claude · allow', agent: 'claude',
     }));
     const permissions = settings.settings?.permissions;
     const claudeComplete = settings.state !== SETTINGS_UNREADABLE
@@ -3541,7 +3690,7 @@ async function showSavedPermissionPicker(selection) {
       detail: 'Claude settings.json could not be fully read as permission lists. Known entries are shown; check the file and reload this list.', unavailable: true,
     });
     let inventory;
-    try {
+    if (!dead) try {
       inventory = await runAutoLearnWorker('codexInventory');
       if (inventory.pendingApproval) items.push({
         label: 'Codex change needs attention', description: 'Codex · read-only',
@@ -3554,12 +3703,22 @@ async function showSavedPermissionPicker(selection) {
         detail: String(error.message || error), unavailable: true });
     }
     if (deactivated) return;
+    // The list was cleared (or edited) after the dashboard drew its line. An empty
+    // QuickPick reads as "the filter failed", so say what is true instead.
+    if (dead && !items.length) {
+      vscode.window.showInformationMessage('AI Acolyte: no one-off shell approvals are saved now.');
+      return;
+    }
     // A sidebar row is a read-only hint. Re-read the inventory before reviewing
     // it so ownership, pending changes and the removal hash are current.
     let pick = selection?.agent === 'codex' && items.find((item) => item.rule
       && item.rule.path === selection.path && item.rule.start === selection.start
       && JSON.stringify(item.rule.pattern) === JSON.stringify(selection.pattern));
-    if (!pick) pick = await vscode.window.showQuickPick(items, {
+    if (!pick) pick = await vscode.window.showQuickPick(items, dead ? {
+      title: 'Saved permissions · one-off shell approvals',
+      placeHolder: 'Exact approvals that cover at most their own text; choose one to inspect or remove',
+      matchOnDescription: true, matchOnDetail: true,
+    } : {
       title: 'Saved permissions · Claude + Codex',
       placeHolder: 'Filter by command, agent or file; choose an entry to inspect or remove',
       matchOnDescription: true, matchOnDetail: true,
@@ -3794,8 +3953,22 @@ class WildcardingViewProvider {
       const entries = settings?.permissions?.[key];
       return entries === undefined || (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'));
     });
+    // Counts trusted project rules too: given a .codex folder, one cached ~1 s Codex config/read per config edit.
+    const codexSummaryConfig = autoLearnConfig();
     const codexPermissions = readCodexPermissionSummary({ home: os.homedir(), codexHome: CODEX_HOME_DIR,
-      target: autoLearnConfig().codexRulesPath });
+      target: codexSummaryConfig.codexRulesPath, workspaceRoot: codexSummaryConfig.workspaceRoot,
+      codexExecutable: codexSummaryConfig.codexExecutable });
+    // Saved shell approvals that are one-off scripts (src/permission-summary.js says what
+    // counts and why). Off the SAME `allow` this push already read, per the note above:
+    // a second readSettings() here would bring back the duplicate read it removed.
+    // Memoized on the list, so a push over an unchanged list does no classification.
+    // Read-only, and a diagnostic: if it ever throws, the card loses one line, not the
+    // whole dashboard.
+    let deadApprovals = { count: 0, total: 0, byReason: {} };
+    try {
+      const dead = deadShellApprovals(allow);
+      deadApprovals = { count: dead.count, total: dead.total, byReason: dead.byReason };
+    } catch { /* keep the empty shape: the line simply does not render */ }
     const wildcards = allow.filter((p) => p.includes('*')).sort();
     // What Wildcard Now would actually change. The "specific" tally is not that
     // number: an entry with no `*` is often one the pass can never generalize
@@ -3851,6 +4024,7 @@ class WildcardingViewProvider {
         ...allow.map((permission) => ({ agent: 'claude', label: permission, value: permission })),
         ...codexPermissions.allowRules.map((rule) => ({ agent: 'codex', label: JSON.stringify(rule.pattern), ...rule })),
       ],
+      deadApprovals,
       wildcardCount: wildcards.length,
       specificCount: allow.length - wildcards.length,
       pendingWildcard,
@@ -3977,6 +4151,16 @@ class WildcardingViewProvider {
   .memissues { margin: 8px 2px 6px; font-size: 11px; }
   .memlink { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
   .memlink:hover { text-decoration: underline; }
+  /* The one-off approvals line: muted like a note, not tinted like a warning, because
+     a false positive would invite deleting an approval that still works. A button so
+     it is reachable by keyboard; [hidden] restated because display:block beats the
+     attribute. */
+  button.deadnote { display: block; width: 100%; margin: 2px 2px 8px; padding: 0; border: none;
+                    background: transparent; text-align: left; cursor: pointer; font: inherit;
+                    font-size: 11px; color: var(--vscode-descriptionForeground); }
+  button.deadnote:hover { color: var(--vscode-textLink-foreground); text-decoration: underline; }
+  button.deadnote:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+  button.deadnote[hidden] { display: none; }
   .buttonrow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
   .buttonrow button { margin: 0; }
 
@@ -4177,7 +4361,10 @@ class WildcardingViewProvider {
       <span class="chev">▸</span><span class="glyph">✱</span>
       <span class="rowname">Saved permissions</span><span class="rowstate" id="wcount"></span>
     </div>
-    <div class="rowbody" id="bodyList" hidden><ul id="list"></ul></div>
+    <div class="rowbody" id="bodyList" hidden>
+      <button type="button" class="deadnote" id="deadApprovals" hidden></button>
+      <ul id="list"></ul>
+    </div>
   </section>
 
 <script nonce="${nonce}">
@@ -4303,7 +4490,43 @@ class WildcardingViewProvider {
     const complete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable'
       && d.codexPermissions?.complete === true;
     const known = (d.savedPermissions || []).length;
-    setState('wcount', complete ? known + ' total' : (known ? known + '+' : '?') + ' known');
+    // No tone for the one-off count: it is a note, not a warning (see oneOffApprovals).
+    const oneOff = oneOffApprovals(d);
+    setState('wcount', (complete ? known + ' total' : (known ? known + '+' : '?') + ' known')
+      + (oneOff ? ' · ' + oneOff + ' one-off' : ''));
+  }
+
+  // Shared by the Saved permissions badge above and the line in its body below, the way
+  // scanTrouble is shared by the Auto Learn badge and card, so the two can never
+  // disagree. Only a positive whole count renders; zero, absent and malformed all mean
+  // there is nothing to say. Deliberately muted everywhere: the count is a heuristic
+  // over stored text, and a tinted warning would push a user to delete approvals, some
+  // of which may still be doing exactly what they want.
+  function oneOffApprovals(d) {
+    const dead = d && d.deadApprovals;
+    const count = dead ? Number(dead.count) : 0;
+    return Number.isInteger(count) && count > 0 ? count : 0;
+  }
+
+  // Read-only. The click opens the ordinary saved-permissions picker filtered to these
+  // entries, where each removal is still confirmed one at a time; there is no bulk
+  // removal, on purpose.
+  let oneOffShown = 0;
+  function renderDeadApprovals(d) {
+    const el = $('deadApprovals');
+    oneOffShown = oneOffApprovals(d);
+    el.hidden = !oneOffShown;
+    el.textContent = oneOffShown
+      ? oneOffShown + ' saved shell approval' + (oneOffShown === 1 ? ' is a one-off script' : 's are one-off scripts')
+        + ' that will prompt again on any variation — review'
+      : '';
+    const by = (d && d.deadApprovals && d.deadApprovals.byReason) || {};
+    el.title = oneOffShown
+      ? 'Exact Bash or PowerShell approvals that start with something other than a command, or chain'
+        + ' several. Claude Code stores them verbatim, so each covers at most its own text and the next'
+        + ' variation prompts again. Nothing is removed automatically. '
+        + Object.keys(by).sort().map((key) => key + ': ' + by[key]).join(' · ')
+      : '';
   }
 
   function timeAgo(ts) {
@@ -4355,18 +4578,58 @@ class WildcardingViewProvider {
     // card reading perfectly healthy.
     const health = $('alScanHealth');
     const s = a.scan;
-    if (!s) { health.textContent = ''; health.className = 'memissues'; return; }
+    if (!s) { health.textContent = ''; health.className = 'memissues'; health.title = ''; return; }
     const trouble = scanTrouble(s);
+    // The persisted Codex reasons, on hover. The line itself has room for a
+    // phrase; the reason says which folders were compared and why. Empty when
+    // there are none, so a cleared condition does not leave a stale tooltip.
+    health.title = (s.codexHistoryReasons || []).join(' · ');
     if (trouble.length) {
       health.className = 'memissues';
       health.style.color = 'var(--vscode-charts-yellow, #d29922)';
-      health.textContent = '⚠ last scan: ' + trouble.join(' · ');
+      health.textContent = '⚠ last scan: ' + trouble.join(' · ') + catchUp(s);
     } else {
       health.className = 'memissues muted';
       health.style.color = '';
       health.textContent = '✓ last scan read ' + s.files + ' file' + (s.files === 1 ? '' : 's')
-        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '');
+        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '') + catchUp(s);
     }
+  }
+
+  // A file the per-scan ingest budget deferred is CATCH-UP: the cursor stopped
+  // on a record boundary and the next scan continues from it. It used to be a
+  // trouble entry, "N partly read", which put "scan degraded" on the row for
+  // every scan it took a big transcript to catch up -- three, for the 170 MB
+  // archived rollout measured 2026-10-13 -- over a scan that lost nothing. So
+  // it is said beside the verdict, in both branches, and never as the verdict.
+  function catchUp(s) {
+    if (!s.partial) return '';
+    let left = '';
+    if (s.deferredBytes) {
+      const mb = s.deferredBytes / 1048576;
+      left = ' (' + (mb < 0.1 ? '<0.1' : mb < 10 ? mb.toFixed(1) : String(Math.round(mb))) + ' MB left)';
+    }
+    return ' · catching up on ' + s.partial + ' large transcript' + (s.partial === 1 ? '' : 's') + left;
+  }
+
+  // What the stale verdict is made of, from the counts the probe persisted.
+  // The fixed sentence it replaced, "Codex history store has moved", was wrong
+  // about the one case anyone hit: four archived threads, nothing moved. The
+  // fallback is for a state file written before the counts existed, and it is
+  // the phrase the old sentence ended with, so a stale verdict is never silent.
+  function codexStalePhrase(s) {
+    const f = s.codexHistoryFindings || {};
+    const count = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+    const parts = [];
+    if (f.orphans) parts.push(count(f.orphans, 'Codex thread', 'Codex threads') + ' with no transcript');
+    if (f.relocated) {
+      parts.push(count(f.relocated, 'Codex transcript', 'Codex transcripts') + ' outside the scanned folders');
+    }
+    if (f.projectionAhead) {
+      parts.push('Codex store ahead of ' + count(f.projectionAhead, 'transcript', 'transcripts'));
+    }
+    if (f.emptyRollouts) parts.push('Codex rollout folders empty beside a populated store');
+    return parts.length ? parts.join(' · ') : 'Codex rollout directory is stale';
   }
 
   // Shared by the card body and the collapsed row badge, so the two can never
@@ -4380,20 +4643,27 @@ class WildcardingViewProvider {
     if (s.blindScan) trouble.push('nothing enumerated — cursor map preserved');
     // Second, for the same reason: a scan of a directory Codex has stopped
     // writing to looks healthy on every other number here.
-    if (s.codexHistoryStale) trouble.push('Codex history store has moved — rollout directory is stale');
+    if (s.codexHistoryStale) trouble.push(codexStalePhrase(s));
     // 'partial' ONLY, and 'unavailable' deliberately absent. That state means the
     // probe cannot run on this runtime at all: readThreadStoreIds needs
-    // node:sqlite, which no shipping VS Code carries, so this branch used to fire
-    // on every real extension host on every scan, for ever. A check that is
-    // inapplicable is not a degraded check, and reporting it as one cost the user
-    // the actionable count in the row badge above. The half that is real,
-    // codexHistoryStale, is computed from the session index and the migration
-    // directory without sqlite and still fires on the line above.
+    // node:sqlite, and on a host that cannot load it this branch used to fire on
+    // every scan, for ever. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within
+    // the ^1.80 engine floor may not, so the unavailable tier stays (measured
+    // 2026-10-13). A check that is inapplicable is not a degraded check, and
+    // reporting it as one cost the user the actionable count in the row badge
+    // above. The half that is real, codexHistoryStale, is computed from the
+    // session index against the rollout folders without sqlite and still fires
+    // on the line above.
     //
     // No backtick in this comment on purpose, same as the one further down: this
     // function lives inside the webview template literal.
     else if (s.codexHistoryInspected === 'partial') trouble.push('Codex history-store check ran degraded');
     if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
+    // Bytes that had no record boundary at all and were STEPPED OVER, so they
+    // are lost to the evidence rather than deferred. Unlike partial, this is.
+    if (s.unreadable) {
+      trouble.push(s.unreadable + ' file' + (s.unreadable === 1 ? '' : 's') + ' with an unreadable stretch skipped');
+    }
     // "The evidence cap is over its limit and cannot get back under it." Distinct
     // from the pruned count, which is what came OUT: this is what would not go. No
     // backtick in this comment on purpose - it lives inside the webview template
@@ -4402,7 +4672,8 @@ class WildcardingViewProvider {
       trouble.push(s.retainedObservations + ' observation hash'
         + (s.retainedObservations === 1 ? '' : 'es') + ' held over the cap');
     }
-    if (s.partial) trouble.push(s.partial + ' partly read');
+    // No partial entry: a budget deferral is catch-up and is drawn beside the
+    // verdict by catchUp above, never as trouble.
     if (s.unmatchedResults) {
       trouble.push(s.unmatchedResults + ' unmatched result' + (s.unmatchedResults === 1 ? '' : 's'));
     }
@@ -4514,27 +4785,40 @@ class WildcardingViewProvider {
     const card = $('localCard');
     if (!l) { card.style.display = 'none'; return; }
     card.style.display = '';
-    const pending = l.promote + l.prune;
+    // Null counts mean no dry run ran, which is an untrusted window. A 0 there would
+    // claim the file was checked and found clean, so each renders as the dash the
+    // markup starts with, and the headline says the approvals were not counted.
+    const counted = l.promote != null;
+    const pending = (l.promote || 0) + (l.prune || 0);
+    const count = (n) => (n == null ? '–' : n);
     $('locdot').className = 'dot' + (pending && l.trusted && !l.blocked ? '' : ' idle');
     $('loctext').textContent = l.blocked
       ? 'Project-local approvals - retired MAX state active'
-      : (pending ? 'Project-local approvals: ' + pending + ' to drain' : 'Project-local approvals: drained');
+      : (!counted ? 'Project-local approvals: not counted'
+        : (pending ? 'Project-local approvals: ' + pending + ' to drain' : 'Project-local approvals: drained'));
     $('loctext').style.fontWeight = '600';
+    // One folder names its file outright. Two or more name the count, and every
+    // path goes in the tooltip, on one line. The tooltip also says what the card
+    // cannot list: the CLI hook drains the folder each Claude session runs in,
+    // which is how a subfolder file can be drained while this card shows nothing.
+    const files = l.files || [];
+    const where = files.length > 1 ? files.length + ' folders' : (files[0] || '');
     $('locsub').textContent = l.blocked
       ? 'A retired auto-approve hook, or grants it generated, is still in user scope. Remove the legacy configuration before draining.'
-      : (!l.trusted ? 'workspace not trusted — read-only'
-        : (l.folders > 1 ? l.folders + ' folders · ' + l.file : l.file)
-          + (l.enabled ? '' : ' · auto-drain off'));
-    $('locpromote').textContent = l.promote;
-    $('locprune').textContent = l.prune;
-    $('lockept').textContent = l.kept;
+      : (!l.trusted ? 'workspace not trusted — read-only · ' + where
+        : where + (l.enabled ? '' : ' · auto-drain off'));
+    $('locsub').title = files.join(' · ')
+      + ' · with the CLI hook installed, the folder each Claude session runs in is drained too';
+    $('locpromote').textContent = count(l.promote);
+    $('locprune').textContent = count(l.prune);
+    $('lockept').textContent = count(l.kept);
     $('locpromote').title = 'portable command families that would move to user scope';
     $('locprune').title = 'local entries user scope already grants';
     $('lockept').title = 'entries only this project can justify (script blobs, absolute paths, MCP tools)';
     $('drainLocal').disabled = !l.trusted || !!l.blocked || pending === 0;
-    $('drainLocal').textContent = pending
-      ? '⤴  Drain ' + pending + ' into user scope'
-      : '⤴  Nothing to drain';
+    // Uncounted is not "nothing": the label stays the markup default, disabled.
+    $('drainLocal').textContent = !counted ? '⤴  Drain into user scope'
+      : (pending ? '⤴  Drain ' + pending + ' into user scope' : '⤴  Nothing to drain');
   }
 
   function renderGuidance(g) {
@@ -4685,6 +4969,7 @@ class WildcardingViewProvider {
       li.textContent = 'Saved permissions incomplete. Open View / remove permissions for details.';
       list.appendChild(li);
     }
+    renderDeadApprovals(d);
     applyRows();
     renderRowStates(d);
   }
@@ -4695,6 +4980,9 @@ class WildcardingViewProvider {
   $('alUndo').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnUndo' }));
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
   $('permissionsView').addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions' }));
+  $('deadApprovals').addEventListener('click', () => {
+    if (oneOffShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'dead' } });
+  });
   $('permissionsRestore').addEventListener('click', () => vscode.postMessage({ type: 'restorePermissions' }));
   $('permissionsImport').addEventListener('click', () => vscode.postMessage({ type: 'importPermissions' }));
   $('codexHook').addEventListener('click', () => vscode.postMessage({ type: 'codexHook' }));

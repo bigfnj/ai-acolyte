@@ -195,6 +195,55 @@ test('reserved and dynamic command forms never seed permissions', () => {
   assert.ok(dynamic.reasons.includes('dynamic-executable'));
 });
 
+// A leading numeric range literal is PowerShell expression syntax, not a command root.
+// Measured 2026-10-13 before the fix: `1..6` came back as root `1..6`, reasons
+// [`unknown-command`] only, `complex: false`, and a live `PowerShell(1..6 *)`, a
+// permission for a program that does not exist which would also have matched any
+// later `1..6 ...` statement.
+test('a PowerShell range literal is script syntax with no command root', () => {
+  for (const command of ['1..6', '1..6 | ForEach-Object { $_ }', '-1..5', '1..$n | % { $_ }']) {
+    const [item] = extractInvocations('PowerShell', command);
+    // MUTATION: drop `!rangeLiteral` from the root expression in deriveBaseInvocation.
+    // root becomes '1..6' again, the reason flips to the `shell-structure` alias and
+    // `PowerShell(1..6 *)` is emitted. Confirmed 2026-10-13.
+    assert.equal(item.root, null, `${command}: a range literal is not a root`);
+    assert.equal(item.claudePermission, null, `${command}: no permission for a non-command`);
+    assert.ok(item.reasons.includes('missing-command-root'), `${command}: ${item.reasons}`);
+    assert.ok(!item.reasons.includes('shell-structure'),
+      `${command}: shell-structure is the alias for a present root, exclusive with missing-command-root`);
+    // MUTATION: drop the startsWithRangeLiteral line from containsScriptSyntax. root
+    // stays null, so only this reason disappears. Confirmed 2026-10-13.
+    assert.ok(item.reasons.includes('script-syntax'), `${command}: ${item.reasons}`);
+    assert.equal(item.complex, true);
+    assert.equal(item.risk, 'shell');
+  }
+});
+
+test('a command whose name starts with a digit is still a command', () => {
+  // The control. `7z` is a real root and must keep its permission in both shells and
+  // in its `.exe` spelling; `git status` is the unrelated baseline.
+  // MUTATION: loosen POWERSHELL_RANGE_LITERAL to /^-?\d/ (any leading digit). `7z`
+  // then reads as an expression, loses its root and its permission. Confirmed 2026-10-13.
+  for (const [tool, command, permission] of [
+    ['PowerShell', '7z a x.zip', 'PowerShell(7z *)'],
+    ['PowerShell', '7z.exe a x.zip', 'PowerShell(7z.exe *)'],
+    ['Bash', '7z a x.zip', 'Bash(7z *)'],
+    ['PowerShell', 'git status', 'PowerShell(git status *)'],
+  ]) {
+    const [item] = extractInvocations(tool, command);
+    assert.equal(item.claudePermission, permission, `${tool} ${command}`);
+    assert.ok(!item.reasons.includes('script-syntax'), `${tool} ${command}: ${item.reasons}`);
+    assert.ok(!item.reasons.includes('missing-command-root'), `${tool} ${command}`);
+  }
+  // Bash has no range operator (its form is `{1..6}`, already caught by the `{`
+  // opener), so there `1..6` is an attempt to run a program and keeps its root.
+  // MUTATION: drop the PowerShell check from startsWithRangeLiteral; this fails.
+  // Confirmed 2026-10-13.
+  const [bash] = extractInvocations('Bash', '1..6');
+  assert.equal(bash.root, '1..6');
+  assert.ok(!bash.reasons.includes('script-syntax'), String(bash.reasons));
+});
+
 test('trailing wildcard input remains stable and never gains a second wildcard', () => {
   const [bash] = extractInvocations('Bash', 'git *');
   assert.equal(bash.claudePermission, null);

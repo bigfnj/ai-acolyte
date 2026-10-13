@@ -51,11 +51,19 @@ const DEFAULT_REAP_GRACE_MS = 30000;
 // module controls; waiting for it to be honoured is not.
 const DEFAULT_TERMINATE_DEADLINE_MS = 5000;
 
-// Overridable: `timeoutMs` on the runner (what the tests use), else
-// PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS in the environment, which is the only
-// lever available to a user, since a VS Code setting the package manifest does
-// not declare is not readable through getConfiguration(). 0 or a negative value
-// disables the deadline, which is what attaching a debugger to the worker needs.
+// Overridable, first answer wins: `timeoutMs` on the runner, else
+// PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS in the environment, else the default.
+// 0 or a negative value disables the deadline, which is what attaching a
+// debugger to the worker needs.
+//
+// `timeoutMs` may be a FUNCTION, called at the start of every operation. That is
+// how the extension's `autoLearn.workerTimeoutSeconds` setting reaches a runner
+// built once per activation: the configuration listener invalidates the manager,
+// never the runner, so a number captured at construction would ignore every
+// later edit until a window reload (2026-10-13). The function returns undefined
+// when the user has not set the key, which is what keeps the env var working.
+// Re-reading per operation re-reads the env var too; nothing depended on it
+// being frozen at construction.
 function resolveWorkerTimeout(value) {
   for (const candidate of [value, process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS]) {
     if (candidate === undefined || candidate === null || candidate === '') continue;
@@ -72,7 +80,16 @@ function createAutoLearnWorkerRunner(options = {}) {
   const workerFactory = typeof options.workerFactory === 'function'
     ? options.workerFactory : (filename, workerOptions) => new Worker(filename, workerOptions);
   const onMutation = typeof options.onMutation === 'function' ? options.onMutation : () => {};
-  const timeoutMs = resolveWorkerTimeout(options.timeoutMs);
+  // A provider that THROWS falls through to the env var and the default rather
+  // than failing the operation or disabling the deadline: this number is a
+  // backstop, and a broken settings read is not a reason to lose it.
+  const currentTimeout = () => {
+    let value = options.timeoutMs;
+    if (typeof value === 'function') {
+      try { value = value(); } catch { value = undefined; }
+    }
+    return resolveWorkerTimeout(value);
+  };
   const positive = (value, fallback) =>
     (Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : fallback);
   const reapGraceMs = positive(options.reapGraceMs, DEFAULT_REAP_GRACE_MS);
@@ -106,6 +123,8 @@ function createAutoLearnWorkerRunner(options = {}) {
 
   function execute(operation, args) {
     if (deactivating) return Promise.reject(new Error('Auto Learn is deactivating'));
+    // Per operation, not per runner: see resolveWorkerTimeout above.
+    const timeoutMs = currentTimeout();
     return new Promise((resolve, reject) => {
       let worker;
       try {

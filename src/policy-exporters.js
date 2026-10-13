@@ -4,14 +4,79 @@
 // candidate; these exporters are the final safety boundary before it becomes a
 // Claude wildcard or a Codex executable-policy rule.
 
+// The one thing taken from the learner, and only to REFUSE more; see SHELL_WRAPPERS
+// below for why that direction, and only that one, is safe to share.
+const { SHELL_WRAPPERS: LEARNER_SHELL_WRAPPERS } = require('./auto-learn');
+
 const GENERATED_FORMAT_VERSION = 1;
 const CODEX_BEGIN_MARKER = '# BEGIN permission-wildcarding generated rules';
 const CODEX_END_MARKER = '# END permission-wildcarding generated rules';
 
-const SHELL_WRAPPERS = new Set([
+// `duckdb`, `hyperfine`, `just` and `make` (each with its `.exe` spelling, because
+// canonicalRoot keeps the suffix) added 2026-10-13, alongside the same four in the
+// learner's own SHELL_WRAPPERS in src/auto-learn.js. That table only raises risk; it
+// cannot stop this exporter. MEASURED that day: a reviewed candidate the learner builds
+// from `just build`, `make all`, `hyperfine 'sleep 1'` or `duckdb -c "SELECT 1"` carries
+// the bare prefix `[root]`, is not `complex`, and rendered as a valid `prefix_rule` with
+// that one-token pattern under `includeReviewed`: nothing here refused it, and the
+// validator below bans only bare python, curl, git and PowerShell. A one-token pattern
+// for any of the four is arbitrary execution, by recipe, by benchmarked command or by
+// `.shell`. Membership here makes `wrapperIsBroad` refuse the bare prefix while still
+// allowing a reviewed, narrower one (`["just", "build"]`), which is exactly how `sh` and
+// `bash` are already treated. On the Claude side the bare `Bash(<root> *)` was already
+// refused (it is on neither root list); membership also refuses a reviewed multi-token
+// form such as `Bash(just --version *)`, as for every wrapper here.
+//
+// The gap that sentence used to record ("NOT the full list of runners the learner
+// knows: node, npx, uvx, xargs and others are absent") is closed as of 2026-10-13.
+// MEASURED that day: of the learner's 43 SHELL_WRAPPERS roots, 27 were absent from
+// this table, and every one of the 27 rendered a reviewed bare prefix (`["node"]`,
+// `["npx"]`, `["uvx"]`, `["xargs"]`, `["parallel"]`, `["env"]`, `["eval"]`,
+// `["iex"]`, ...) as a valid one-token `prefix_rule` under `includeReviewed`, each
+// a grant to run whatever program or code its arguments name; 99 leaks counting
+// the `.exe` and `.cmd` spellings. So the table below is now the UNION
+// of this module's own list and the learner's, in each spelling canonicalRoot can
+// hand over: the bare name, `.exe`, and `.cmd`, which is how npm, npx, pnpm and
+// yarn are installed on Windows and which NETWORK_OR_INSTALL_ROOTS already spells.
+//
+// BACKLOG records the two tables as "not interchangeable", and they still are not:
+// the learner's membership only raises risk, this one refuses rules, and this one
+// keeps entries the learner lacks (`command.com`, every `.exe`). A union is correct
+// for the REFUSAL direction specifically, and only for it. Refusing more is the safe
+// failure here, so a root the learner adds can only make this gate stricter; and the
+// import can never shrink this module's own extras, because OWN_SHELL_WRAPPERS stays
+// a literal that is unioned in, not replaced. That is also why this does not break
+// the "independent copy, so a bug in one does not propagate" rule the auto-safe
+// tables below follow. That rule guards against a gate silently OPENING; through a
+// union, the learner's table can only close this one further. The one way it could
+// open is the learner DROPPING a root only it lists, which is why
+// test/policy-exporters.test.js names every newly covered root as a literal, so a
+// removal there fails here. The narrower-prefix rule in wrapperIsBroad is untouched:
+// a reviewed `["node", "--version"]` or `["npx", "tsc"]` still renders, exactly as
+// `["just", "build"]` does. On the Claude side the union does what membership has
+// always done there (claudePermissionIsSafe refuses a wrapper root at any depth), so
+// a reviewed `Bash(node --version *)` or `Bash(command -v *)`, which rendered before,
+// is now refused like `Bash(just --version *)`. That asymmetry between the two
+// halves predates this change and is not altered by it.
+const OWN_SHELL_WRAPPERS = [
   'bash', 'bash.exe', 'cmd', 'cmd.exe', 'command.com', 'dash', 'dash.exe',
-  'fish', 'fish.exe', 'ksh', 'ksh.exe', 'powershell', 'powershell.exe',
-  'pwsh', 'pwsh.exe', 'sh', 'sh.exe', 'wsl', 'wsl.exe', 'zsh', 'zsh.exe',
+  'duckdb', 'duckdb.exe', 'fish', 'fish.exe', 'hyperfine', 'hyperfine.exe',
+  'just', 'just.exe', 'ksh', 'ksh.exe', 'make', 'make.exe', 'powershell',
+  'powershell.exe', 'pwsh', 'pwsh.exe', 'sh', 'sh.exe', 'wsl', 'wsl.exe',
+  'zsh', 'zsh.exe',
+];
+// The learner normalizes `.exe` away (src/auto-learn.js normalizeRoot) and this
+// module does not (canonicalRoot keeps the suffix), so each learner root is added in
+// every spelling a candidate prefix can carry. A root that already has a suffix, or
+// is not a plain name at all (`.`), is added as written.
+function exporterSpellings(root) {
+  const name = String(root).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_+-]*$/.test(name)) return [name];
+  return [name, `${name}.exe`, `${name}.cmd`];
+}
+const SHELL_WRAPPERS = new Set([
+  ...OWN_SHELL_WRAPPERS,
+  ...[...LEARNER_SHELL_WRAPPERS].flatMap(exporterSpellings),
 ]);
 
 const DESTRUCTIVE_OR_ADMIN_ROOTS = new Set([

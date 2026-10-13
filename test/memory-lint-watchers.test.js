@@ -974,8 +974,8 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // callers of compileGates — so honouring `enabled` here would switch automatic gate
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
-// this repo, from the pinned-`memory.dir` bug, and is why `memoryStoreDirs`
-// (extension.js:2374) overrides `dir` before calling this.
+// this repo, from the pinned-`memory.dir` bug, and is why
+// `memoryStoreDirs` (extension.js:2515-2516) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

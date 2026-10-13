@@ -270,14 +270,100 @@ test('the environment can override the deadline when no option is passed',
       });
       const outcome = await outcomeWithin(runner.run('scan'));
       assert.match(outcome, /did not answer within 60ms/,
-        'the env override is the only lever a user has: a VS Code setting the package '
-        + `manifest does not declare is not readable through getConfiguration() — got "${outcome}"`);
+        'the env override is the lever for anyone who has not set '
+        + `autoLearn.workerTimeoutSeconds, and for the CLI-side callers — got "${outcome}"`);
       await runner.deactivate();
     } finally {
       if (previous === undefined) delete process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
       else process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS = previous;
     }
   });
+
+// ── a deadline supplied as a function ──────────────────────────────────────────
+//
+// The extension builds ONE runner per activation and its configuration listener
+// never rebuilds it, so a number handed over at construction would ignore every
+// later edit to `autoLearn.workerTimeoutSeconds` until a window reload. It hands
+// over a function instead, which answers undefined when the key is unset so the
+// env var below keeps working (2026-10-13). These four pin the runner's half of
+// that contract; test/extension-lifecycle-async.test.js pins the extension's.
+async function withWorkerTimeoutEnv(value, body) {
+  const previous = process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
+  if (value === undefined) delete process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
+  else process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS = value;
+  try { return await body(); } finally {
+    if (previous === undefined) delete process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
+    else process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS = previous;
+  }
+}
+
+test('a function-valued deadline is re-read on every operation', TEST_TIMEOUT, () =>
+  withWorkerTimeoutEnv(undefined, async () => {
+    let current = 60;
+    let reads = 0;
+    const runner = createAutoLearnWorkerRunner({
+      workerPath: 'worker.js',
+      timeoutMs: () => { reads += 1; return current; },
+      workerFactory: () => new SilentWorker(),
+    });
+    assert.match(await outcomeWithin(runner.run('scan')), /did not answer within 60ms/);
+    // A Settings edit between two operations, same runner.
+    current = 30;
+    const second = await outcomeWithin(runner.run('apply'));
+    assert.match(second, /did not answer within 30ms/,
+      `a deadline captured at construction ignores every later edit until a reload — got "${second}"`);
+    assert.equal(reads, 2, 'read once per operation, at its start');
+    await runner.deactivate();
+  }));
+
+test('a function that answers undefined falls through to the environment', TEST_TIMEOUT, () =>
+  withWorkerTimeoutEnv('45', async () => {
+    // What the extension's provider returns while the setting is unset. A
+    // provider that answered the manifest default instead would outrank this.
+    const runner = createAutoLearnWorkerRunner({
+      workerPath: 'worker.js',
+      timeoutMs: () => undefined,
+      workerFactory: () => new SilentWorker(),
+    });
+    const outcome = await outcomeWithin(runner.run('scan'));
+    assert.match(outcome, /did not answer within 45ms/,
+      `an unset setting must leave the env override in force — got "${outcome}"`);
+    await runner.deactivate();
+  }));
+
+test('a function that answers 0 disables the deadline, even over the environment', TEST_TIMEOUT, () =>
+  withWorkerTimeoutEnv('40', async () => {
+    const worker = new SilentWorker();
+    const runner = createAutoLearnWorkerRunner({
+      workerPath: 'worker.js',
+      timeoutMs: () => 0,
+      workerFactory: () => worker,
+    });
+    const job = runner.run('scan');
+    let settled = false;
+    job.then(() => { settled = true; }, () => { settled = true; });
+    // Five times the env deadline: had 0 been read as "unset", this has fired.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(settled, false, 'an explicit 0 is a value, not a miss: it must outrank the env var');
+    worker.emit('message', { ok: true, result: 'late' });
+    worker.emit('exit', 0);
+    assert.equal(await job, 'late');
+    await runner.deactivate();
+  }));
+
+test('a provider that throws keeps the deadline instead of failing the operation', TEST_TIMEOUT, () =>
+  withWorkerTimeoutEnv('50', async () => {
+    const runner = createAutoLearnWorkerRunner({
+      workerPath: 'worker.js',
+      timeoutMs: () => { throw new Error('settings unreadable'); },
+      workerFactory: () => new SilentWorker(),
+    });
+    const outcome = await outcomeWithin(runner.run('scan'));
+    assert.match(outcome, /did not answer within 50ms/,
+      'a broken settings read must neither fail the scan nor switch the backstop off — '
+      + `got "${outcome}"`);
+    await runner.deactivate();
+  }));
 
 // ── the reap ───────────────────────────────────────────────────────────────────
 //

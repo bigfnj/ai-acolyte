@@ -75,7 +75,8 @@ anyway.
 ## Cross-agent Auto Learn
 
 Auto Learn incrementally scans local Claude Code history
-(`~/.claude/projects/**/*.jsonl`) and Codex history (`~/.codex/sessions/**/*.jsonl`). It
+(`~/.claude/projects/**/*.jsonl`) and Codex history (`~/.codex/sessions/**/*.jsonl`, plus
+`~/.codex/archived_sessions/*.jsonl`, where Codex moves an archived thread's transcript). It
 correlates each requested tool call with its matching result. Confirmed successes add positive
 evidence. Confirmed failures are retained as negative evidence and block `auto-safe`
 eligibility; they do not increase the success threshold. Unanswered, incomplete, and pending
@@ -204,7 +205,8 @@ declarations and refuse stale proposals ([reviewRules](codexFeaturesUi.js#L124),
 automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
-removal applies only to supported allow declarations (`vscode-extension/extension.js:3495`).
+removal applies only to supported allow declarations ("Remove this Codex allow rule?",
+`vscode-extension/extension.js:3681`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
 removals (`vscode-extension/extension.js:3439`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
@@ -227,8 +229,10 @@ The other Auto Learn settings are `permissionWildcarding.autoLearn.enabled` (def
 **true**), `permissionWildcarding.autoLearn.intervalMinutes` (default **5**),
 `permissionWildcarding.autoLearn.debounceSeconds` (default **20** — the quiet window a
 watcher-driven scan waits out, so a burst of transcript writes coalesces into one scan), and
-`permissionWildcarding.autoLearn.codexExecutable` (default `codex`). The full list of all 17
-settings is at the end of this file.
+`permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
+`permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
+how long one worker operation may run before the extension stops waiting). The full list of
+all 18 settings is at the end of this file.
 
 ### Future local CPU assistance
 
@@ -448,14 +452,15 @@ dashboard title-bar buttons.
 
 ## Every setting
 
-All 17 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
+All 18 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
 
-One knob is deliberately **not** here, because it is not a VS Code setting. The Auto Learn
-worker deadline is `PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` (default 300000, `0` disables
-it). It is an environment variable rather than a manifest key, so `getConfiguration()` cannot
-read it and the Settings UI cannot show it. Raise it only if a legitimately slow scan is being
-killed; the deadline exists so a worker wedged in a synchronous filesystem call cannot hold
-teardown open forever.
+The Auto Learn worker deadline, `autoLearn.workerTimeoutSeconds`, is the one that needs a
+word. It exists so a worker wedged in a synchronous filesystem call cannot hold teardown open
+forever; raise it only if a legitimately slow scan is being cut off. It is **machine-scoped**:
+VS Code ignores it in workspace and folder settings, and the extension reads only the user
+value, so a repository's `.vscode/settings.json` cannot switch the deadline off. While it is unset, the older environment override
+`PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` (milliseconds, `0` disables) still applies; once
+set, the setting wins. An edit applies to the next scan, with no reload.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -467,6 +472,7 @@ teardown open forever.
 | `autoLearn.debounceSeconds` | `20` | Quiet window a watcher-driven scan waits out |
 | `autoLearn.codexScope` | `"user"` | `user` / `off` — where generated Codex rules land. `workspace` was withdrawn |
 | `autoLearn.codexExecutable` | `"codex"` | Binary used for `codex execpolicy check` |
+| `autoLearn.workerTimeoutSeconds` | `300` | Seconds one worker operation may run before the extension stops waiting; `0` disables. Machine-scoped: a workspace value is ignored |
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation |
 | `gates.enabled` | `true` | Keep the memory-gates block installed on activation |

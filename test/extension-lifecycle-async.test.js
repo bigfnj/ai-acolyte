@@ -298,7 +298,10 @@ function harness(tempHome, options = {}) {
       getConfiguration() {
         return {
           get: (key, fallback) => (key in settings ? settings[key] : fallback),
-          inspect: () => ({}),
+          // `options.inspected` maps a key to the per-tier object VS Code's
+          // inspect() returns. Held by reference, so a test can change a tier
+          // mid-session the way the Settings UI does; absent keys stay `{}`.
+          inspect: (key) => (options.inspected && key in options.inspected ? options.inspected[key] : {}),
           update: async (key, value) => { settings[key] = value; },
         };
       },
@@ -345,11 +348,14 @@ function harness(tempHome, options = {}) {
           ...runnerOptions,
           // The production deadline is 300000 ms, chosen against the manager's
           // own 180000 ms execFile timeouts. A test cannot wait that out, so it
-          // says how long it is prepared to wait; omitted, the runner's real
-          // default applies and every existing test here keeps its old
-          // behaviour. `timeoutMs: 0` would disable it, which is NOT what an
-          // unset option means — hence the explicit undefined.
-          timeoutMs: options.workerTimeoutMs,
+          // may say how long it is prepared to wait (`workerTimeoutMs`), which
+          // replaces whatever the extension passed. Omitted, the EXTENSION'S own
+          // `timeoutMs` goes through untouched -- since 2026-10-13 that is the
+          // function reading `autoLearn.workerTimeoutSeconds`, which answers
+          // undefined while `inspected` holds nothing for it, so the runner's
+          // real default applies and every older test here keeps its behaviour.
+          timeoutMs: Object.hasOwn(options, 'workerTimeoutMs')
+            ? options.workerTimeoutMs : runnerOptions.timeoutMs,
           workerFactory: (_filename, workerOptions) => {
             // These fixtures wedge/count the requested Auto Learn operations.
             // Native gate reconciliation is an independent activation job; let
@@ -1108,6 +1114,44 @@ test('a same-realm re-activate gets a fresh Auto Learn worker runner', TEST_TIME
   }
 });
 
+test('a same-realm re-activate repeats a once-per-activation warning', TEST_TIMEOUT, async (t) => {
+  // warnOnce dedupes on a module-scope Set that its own comment says is "per
+  // activation", and nothing cleared it: neither activate() nor deactivate()
+  // touched it, so an extension disable/enable or upgrade, which re-activates in
+  // the same realm, never repeated a warning the previous activation had given.
+  //
+  // `backupMirrorPath: '~'` is the one reachable warnOnce caller: it names the
+  // home DIRECTORY, so mirrorBackupPath warns and falls back. It is only asked
+  // when a backup is really written, and backupPolicy short-circuits when the
+  // high-water union is unchanged, so each window below adds an allow entry the
+  // backup has never held before running the pass.
+  const messages = captureConsoleError(t);
+  const home = tempHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const grant = (...extra) => fs.writeFileSync(settingsPath, JSON.stringify(
+    { permissions: { allow: ['Bash(rg *)', ...extra], deny: [] } }, null, 2) + '\n');
+  const warned = () => messages.filter((message) =>
+    /backupMirrorPath "~" is the home directory/.test(message)).length;
+  const app = harness(home, { settings: { backupMirrorPath: '~' } });
+  try {
+    grant('Bash(zzfirst *)');
+    await app.commands.get('permission-wildcarding.runNow')();
+    grant('Bash(zzfirst *)', 'Bash(zzsecond *)');
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(warned(), 1,
+      'precondition: the warning fires, and only once however many writes ask in one activation');
+
+    await app.extension.deactivate();
+    app.reactivate();
+    grant('Bash(zzfirst *)', 'Bash(zzsecond *)', 'Bash(zzthird *)');
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(warned(), 2,
+      'the re-activated extension never repeated the warning: the Set outlived deactivate');
+  } finally {
+    await app.dispose();
+  }
+});
+
 test('an Auto Learn operation arriving after deactivate does not start a worker', TEST_TIMEOUT, async (t) => {
   const home = tempHome(t);
   const app = harness(home, { settings: { 'autoLearn.enabled': true } });
@@ -1526,7 +1570,7 @@ test('a worker still wedged at teardown is failed on its deadline and then reape
     // per reload, plus a `context.subscriptions` that never drains.
     //
     // Terminating earlier is not the fix and is not what this asserts. The
-    // drain-before-terminate order is deliberate (autoLearnWorkerRunner.js:130-133):
+    // drain-before-terminate order is deliberate (autoLearnWorkerRunner.js:151-154):
     // a worker between two policy writes must reach its own result or the
     // manager's JS rollback is lost. The deadline settles the JOB as a failure,
     // which is all the drain needs, and leaves the reaping exactly where it was.
@@ -1565,6 +1609,120 @@ test('a worker still wedged at teardown is failed on its deadline and then reape
       await app.dispose();
     }
   });
+
+// `autoLearn.workerTimeoutSeconds`, end to end through the REAL runner. Until
+// 2026-10-13 the deadline was reachable only through the env var, because
+// getConfiguration() cannot read a key the manifest does not declare. The
+// extension builds one runner per activation and the configuration listener never
+// rebuilds it, so the setting arrives as a function the runner re-reads per
+// operation. These drive a manual scan against a worker that never answers and
+// read the deadline back out of the error the scan reports; no config event is
+// fired, so a second value can only be seen if it is re-read.
+const DEADLINE_KEY = 'autoLearn.workerTimeoutSeconds';
+
+// A scan that never settles must fail by name here, not spend the file timeout.
+async function manualScanWithin(app, ms) {
+  let settled = false;
+  const scan = Promise.resolve(app.commands.get('permission-wildcarding.autoLearnScan')())
+    .finally(() => { settled = true; });
+  await Promise.race([scan, tick(ms)]);
+  return { settled, scan, error: app.errors.at(-1) || '' };
+}
+
+// The VS Code half of the contract, which no harness can see: the stubbed
+// getConfiguration() answers for any key, declared or not, and has no notion of
+// scope. Undeclared, the real one cannot read the key at all; window-scoped, a
+// repository's .vscode/settings.json could set 0 and turn the backstop off.
+test('the manifest declares the deadline setting machine-scoped, with the runner\'s own default', () => {
+  const extensionDir = path.dirname(extensionPath);
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, 'package.json'), 'utf8'));
+  const setting = manifest.contributes?.configuration?.properties?.[`permissionWildcarding.${DEADLINE_KEY}`];
+  assert.ok(setting, 'an undeclared key is unreadable through getConfiguration()');
+  assert.equal(setting.scope, 'machine',
+    'any wider scope lets a cloned repository disable the deadline from its own settings file');
+  assert.equal(setting.type, 'number');
+  assert.equal(setting.minimum, 0);
+  const runner = fs.readFileSync(path.join(extensionDir, 'autoLearnWorkerRunner.js'), 'utf8');
+  const runnerDefault = Number(/const DEFAULT_WORKER_TIMEOUT_MS = (\d+);/.exec(runner)?.[1]);
+  assert.ok(runnerDefault > 0, 'precondition: the runner default was found');
+  assert.equal(setting.default * 1000, runnerDefault,
+    'the Settings UI must show the default the runner actually applies when the key is unset');
+});
+
+async function withDeadlineEnv(value, body) {
+  const previous = process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
+  if (value === undefined) delete process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
+  else process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS = value;
+  try { return await body(); } finally {
+    if (previous === undefined) delete process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS;
+    else process.env.PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS = previous;
+  }
+}
+
+test('the worker deadline setting reaches the runner, and an edit applies to the next scan',
+  TEST_TIMEOUT, (t) => withDeadlineEnv(undefined, async () => {
+    const home = tempHome(t);
+    const inspected = { [DEADLINE_KEY]: { defaultValue: 300, globalValue: 0.08 } };
+    // Background scans off, so the only worker built is the one each manual
+    // scan asks for.
+    const app = harness(home, {
+      settings: { 'autoLearn.enabled': false }, wedgeWorker: true, inspected,
+    });
+    try {
+      const first = await manualScanWithin(app, 2000);
+      assert.equal(first.settled, true,
+        'the scan never settled: the setting did not reach the runner, so the 300 s default applied');
+      assert.match(first.error, /did not answer within 80ms/,
+        'seconds from the user tier, converted to ms, are the deadline');
+
+      // Edited in Settings. Same runner, no configuration event.
+      inspected[DEADLINE_KEY] = { defaultValue: 300, globalValue: 0.04 };
+      const second = await manualScanWithin(app, 2000);
+      assert.match(second.error, /did not answer within 40ms/,
+        `a deadline frozen at the runner's construction ignores the edit — got "${second.error}"`);
+      assert.equal(app.workers.length, 2, 'precondition: one worker per scan');
+    } finally {
+      for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+      await app.dispose();
+    }
+  }));
+
+test('an unset or workspace-only deadline setting leaves the env override in force, and an explicit 0 disables it',
+  TEST_TIMEOUT, (t) => withDeadlineEnv('60', async () => {
+    const home = tempHome(t);
+    const inspected = {};
+    // get() answers the manifest default, as VS Code's does. A provider that
+    // read get() would hand the runner 300000 ms and silently outrank the env var.
+    const app = harness(home, {
+      settings: { 'autoLearn.enabled': false, [DEADLINE_KEY]: 300 }, wedgeWorker: true, inspected,
+    });
+    try {
+      const unset = await manualScanWithin(app, 2000);
+      assert.match(unset.error, /did not answer within 60ms/,
+        `an unset setting must leave the env override in force — got "${unset.error}"`);
+
+      // A repository's .vscode/settings.json trying to switch the backstop off.
+      // The key is machine-scoped and only the user tier is read.
+      inspected[DEADLINE_KEY] = { defaultValue: 300, workspaceValue: 0 };
+      const workspace = await manualScanWithin(app, 2000);
+      assert.equal(workspace.settled, true,
+        'a workspace value disabled the deadline: only globalValue may be honoured');
+      assert.match(workspace.error, /did not answer within 60ms/);
+
+      // The user's own 0 is a value, not a miss: it outranks the env var.
+      inspected[DEADLINE_KEY] = { defaultValue: 300, globalValue: 0 };
+      const errorsBefore = app.errors.length;
+      const off = await manualScanWithin(app, 300);
+      assert.equal(off.settled, false,
+        'an explicit 0 must disable the deadline; five times the env value has passed');
+      assert.equal(app.errors.length, errorsBefore, 'and nothing was reported as a timeout');
+      app.workers.at(-1).release();
+      await off.scan;
+    } finally {
+      for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+      await app.dispose();
+    }
+  }));
 
 // Cancel on the 32MB model download was a no-op on every real download, and the shape of
 // httpsGetFollow is why. It followed redirects itself and returned the req it had just

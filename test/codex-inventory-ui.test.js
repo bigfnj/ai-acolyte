@@ -206,6 +206,50 @@ test('shared picker reaches Claude specific permission removal and cancellation 
   assert.equal(fs.readFileSync(settingsPath, 'utf8'), before, 'WITNESS cancelling the Claude confirmation must preserve settings');
 });
 
+// The dashboard's one-off-approvals line opens this picker with `{ filter: 'dead' }`
+// (2026-10-13). Synthetic entries: the shapes a real list held, not real entries.
+const ONE_OFFS = ['PowerShell($stamp = Get-Date)', 'PowerShell(1..6 | ForEach-Object { $_ })'];
+
+test('the one-off filter lists only one-off shell approvals and removes one through the usual confirmation', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'WebSearch', ...ONE_OFFS], choice: 'Remove',
+    pick: (items) => items.find((item) => item.label === ONE_OFFS[1]) });
+  await app.shared({ filter: 'dead' });
+  assert.equal(app.pickers.length, 1);
+  const picker = app.pickers[0];
+  assert.equal(picker.config.title, 'Saved permissions · one-off shell approvals');
+  // MUTATION: ignore the filter (read `selection?.filter` as never 'dead'). The picker
+  // then lists Bash(git *), WebSearch and the Codex rule too. Confirmed 2026-10-13.
+  assert.deepEqual(picker.items.map((item) => item.label), [...ONE_OFFS].sort(),
+    'WITNESS only the one-off entries are offered');
+  assert.ok(picker.items.every((item) => item.agent === 'claude' && /one-off/.test(item.description)));
+  // MUTATION: run the Codex inventory for this view as well. Confirmed 2026-10-13.
+  assert.deepEqual(app.calls.map((call) => call.operation), [],
+    'WITNESS the filtered view reads no Codex inventory');
+  const modal = app.messages.find((item) => item.level === 'warning');
+  assert.equal(modal?.message, 'Remove this Claude permission?',
+    'WITNESS removal is the ordinary per-entry confirmation, not a bulk action');
+  assert.ok(modal.config.detail.includes(ONE_OFFS[1]));
+  const allow = JSON.parse(fs.readFileSync(path.join(app.home, '.claude', 'settings.json'), 'utf8')).permissions.allow;
+  assert.deepEqual(allow, ['Bash(git *)', 'WebSearch', ONE_OFFS[0]],
+    'WITNESS exactly the confirmed entry is removed and every other approval survives');
+});
+
+test('the one-off filter over a list with none says so, and the unfiltered picker is unchanged', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'WebSearch'], pick: false });
+  await app.shared({ filter: 'dead' });
+  // MUTATION: drop the empty-filter early return. An empty QuickPick opens instead.
+  // Confirmed 2026-10-13.
+  assert.equal(app.pickers.length, 0, 'WITNESS no empty picker for an empty filter');
+  assert.match(app.messages.at(-1)?.message || '', /no one-off shell approvals are saved now/);
+  // Control: the same list without the filter is the full mixed picker, Codex included.
+  await app.shared();
+  assert.equal(app.pickers.length, 1);
+  assert.equal(app.pickers[0].config.title, 'Saved permissions · Claude + Codex');
+  assert.deepEqual(app.pickers[0].items.filter((item) => item.agent === 'claude').map((item) => item.label),
+    ['Bash(git *)', 'WebSearch']);
+  assert.deepEqual(app.calls.map((call) => call.operation), ['codexInventory']);
+});
+
 for (const [name, options, unavailableLabel] of [
   ['an interrupted Codex approval', { inventory: { pendingApproval: true } }, 'Codex change needs attention'],
   ['a failed Codex inventory read', { inventoryError: 'Fixture policy store is unavailable.' }, 'Codex permissions unavailable'],
@@ -272,6 +316,43 @@ test('Codex inventory confirmation names the exact rule and source before sendin
   assert.deepEqual(app.calls[1].args, [{ rules: [{ id: app.rule.id, path: app.rulesPath, fileHash: app.rule.fileHash }] }],
     'WITNESS remove must carry the selected declaration and original inventory hash');
   assert.match(app.messages.at(-1).message, /removed 1 Codex allow rule/);
+});
+
+// The other direction of "an option key with zero suppliers": a key SUPPLIED with
+// zero readers. autoLearnManagerOptions() set `homeDir` beside `home` and
+// `successThreshold` beside `threshold`, same values, so the manager's fallback
+// legs for the second spellings were shadowed every time they were supplied and
+// could never fire. Both spellings and both legs were removed 2026-10-13.
+//
+// Re-adding a fallback LEG in the manager is not observable from any caller --
+// that is what made it dead -- so the guard sits on the supplier, which is where
+// the duplicate came from. `calls[0].options` is the object optionsProvider()
+// built, and getAutoLearnManager() hands the same function's output to
+// createAutoLearnManager, so this is the literal the manager receives.
+//
+// The census is textual: a key passes when `options.<key>` appears in
+// createAutoLearnManager's body. That over-accepts (an inner function's own
+// `options` would satisfy it) and never under-accepts today, which is the right
+// way round for a guard that has to survive refactors it knows nothing about.
+test('the extension hands the Auto Learn manager only keys it reads, each under one spelling', async (t) => {
+  const app = await harness(t, { choice: 'Remove' });
+  await app.run();
+  const supplied = app.calls[0].options;
+  // Named first, so a reintroduction fails by name rather than as a census row.
+  for (const alias of ['homeDir', 'successThreshold']) {
+    assert.equal(Object.hasOwn(supplied, alias), false,
+      `\`${alias}\` is a second spelling of a key the manager already reads; it was removed 2026-10-13`);
+  }
+  const source = fs.readFileSync(path.join(rootSrc, 'auto-learn-manager.js'), 'utf8');
+  const body = source.slice(source.indexOf('function createAutoLearnManager('));
+  assert.ok(body.length < source.length, 'precondition: the census found the manager factory');
+  const unread = Object.keys(supplied).filter((key) => !new RegExp(`\\boptions\\.${key}\\b`).test(body));
+  assert.deepEqual(unread, [],
+    'every key the extension supplies must have a reader in createAutoLearnManager');
+  // CONTROL: the census is not vacuous. The two canonical spellings are supplied
+  // and are found, so an empty `unread` above means something.
+  assert.ok(['home', 'threshold'].every((key) => Object.hasOwn(supplied, key)),
+    'precondition: the canonical spellings reach the manager');
 });
 
 test('cancelling a Codex removal performs no mutation', async (t) => {

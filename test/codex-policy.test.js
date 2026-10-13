@@ -2,9 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createCodexRuleStore } = require('../src/codex-rule-store');
+const { createAutoLearnManager } = require('../src/auto-learn-manager');
 const {
   readEnterpriseBundle,
   enterpriseRequirements,
@@ -282,6 +285,117 @@ test('the effective rule set substitutes the pending file rather than adding it'
     '--rules is repeatable, so every member gets its own flag');
 });
 
+// Windows file names are case-insensitive, and the target every caller passes is
+// a hard-coded lowercase `permission-wildcarding.rules`, while the listing reports
+// the spelling on disk. Compared as raw strings the one file was two members, and
+// the substitute replaced only one of them, so the deployed copy was validated
+// beside the candidate. Demonstrated before the fix, 2026-10-13: `files` held
+// both spellings and `effective` held deployed PLUS pending.
+function caseFixture(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-rule-case-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const dir = path.join(home, '.codex', 'rules');
+  fs.mkdirSync(dir, { recursive: true });
+  const onDisk = path.resolve(path.join(dir, 'Permission-Wildcarding.rules'));
+  const neighbour = path.resolve(path.join(dir, 'hand-written.rules'));
+  fs.writeFileSync(onDisk, 'prefix_rule(pattern=["git", "status"], decision="allow")\n');
+  fs.writeFileSync(neighbour, 'prefix_rule(pattern=["rg"], decision="allow")\n');
+  return {
+    home, dir, onDisk, neighbour,
+    lower: path.join(dir, 'permission-wildcarding.rules'),
+    pending: path.resolve(path.join(home, 'candidate.rules')),
+  };
+}
+
+test('a differently-cased target is the deployed file, not a second one, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    const box = caseFixture(t);
+    const plain = codexRuleFileSet({ home: box.home, target: box.lower });
+    assert.deepEqual(plain.files, [box.onDisk, box.neighbour].sort(),
+      'one file, listed once, under the spelling that is on disk');
+
+    const swapped = codexRuleFileSet({ home: box.home, target: box.lower, substitute: box.pending });
+    assert.equal(swapped.files.length, 2, 'the deployed file is one member');
+    assert.equal(swapped.effective.includes(box.onDisk), false,
+      'the deployed copy is REPLACED by the candidate, never validated beside it');
+    assert.equal(swapped.effective.includes(box.pending), true, 'the candidate is evaluated');
+    assert.deepEqual(swapped.effective.slice().sort(), [box.neighbour, box.pending].sort());
+  });
+
+test('a target whose directory is cased differently is still the deployed file, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    const box = caseFixture(t);
+    const shouted = path.join(box.home, '.CODEX', 'RULES', 'permission-wildcarding.rules');
+    const swapped = codexRuleFileSet({ home: box.home, target: shouted, substitute: box.pending });
+    assert.deepEqual(swapped.files, [box.onDisk, box.neighbour].sort(),
+      'the listing spelling wins and the target adds nothing');
+    assert.deepEqual(swapped.effective.slice().sort(), [box.neighbour, box.pending].sort(),
+      'and the substitute stands in for the deployed copy');
+  });
+
+test('a rules directory reached under two spellings contributes each file once, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    // The dedupe on its own. With the target check above keyed, a duplicate can
+    // still arrive from the LISTING: the same directory named twice, differently
+    // cased, is read twice and yields every file under both spellings.
+    const box = caseFixture(t);
+    const set = codexRuleFileSet({ home: box.home, directories: [path.join(box.home, '.CODEX', 'rules')] });
+    assert.deepEqual(set.files, [box.onDisk, box.neighbour].sort(),
+      'the first spelling seen is kept and the second listing adds nothing');
+  });
+
+test('the rule-store inventory lists a differently-cased target once, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    // The inventory walks `files`, so before the fix it listed the one file
+    // twice and every rule in it twice, under the same id: the id hashes a
+    // case-folded path, so the two rows were indistinguishable to a removal.
+    const box = caseFixture(t);
+    const snapshot = (file) => {
+      let content = Buffer.alloc(0);
+      let exists = true;
+      try { content = fs.readFileSync(file); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        exists = false;
+      }
+      return { exists, content, hash: crypto.createHash('sha256').update(content).digest('hex') };
+    };
+    const store = createCodexRuleStore({
+      codexHome: path.join(box.home, '.codex'), target: box.lower,
+      claimsPath: path.join(box.home, 'claims.json'), storePath: path.join(box.home, 'store.json'),
+      backupPath: path.join(box.home, 'backup.json'), snapshot,
+      atomicWrite() { throw new Error('inventory must not write'); }, validate() {},
+    });
+    const inventory = store.inventory();
+    assert.deepEqual(inventory.files.map((file) => file.path).sort(), [box.onDisk, box.neighbour].sort());
+    const ids = inventory.rules.map((rule) => rule.id);
+    assert.equal(ids.length, 2, 'one git-status rule and one rg rule, each listed once');
+    assert.equal(new Set(ids).size, ids.length, 'and no two rows share an id');
+  });
+
+test('case stays significant where the filesystem is case-sensitive', (t) => {
+  // The control, runnable everywhere through the injected platform. On POSIX two
+  // spellings are two files, so the substitute for a lowercase target that does
+  // not match the on-disk name must NOT displace that file: displacing it would
+  // validate a set with a real rules file missing. Asserted on `effective`,
+  // which is the same on a case-sensitive disk (where the lowercase target does
+  // not exist) and on NTFS (where it does, and `files` therefore grows by one).
+  const box = caseFixture(t);
+  const posix = codexRuleFileSet({
+    home: box.home, target: box.lower, substitute: box.pending, platform: 'linux',
+  });
+  assert.equal(posix.effective.includes(box.onDisk), true,
+    'a differently-spelled file is a different file and stays in the set');
+  assert.equal(posix.effective.includes(box.pending), true);
+
+  // And the folding is the platform's rule, not this machine's: injected win32
+  // folds even where the real filesystem would keep the spellings apart.
+  const folded = codexRuleFileSet({
+    home: box.home, target: box.lower, substitute: box.pending, platform: 'win32',
+  });
+  assert.equal(folded.effective.includes(box.onDisk), false, 'win32 semantics fold the two spellings');
+  assert.equal(folded.effective.includes(box.pending), true);
+});
+
 test('a rules directory that cannot be listed is reported, never silently dropped', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-rule-fail-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -299,4 +413,378 @@ test('a rules directory that cannot be listed is reported, never silently droppe
   // or every machine without Codex would report a permanent fault.
   const absent = codexRuleFileSet({ home, directories: [path.join(home, 'nope')] });
   assert.deepEqual(absent.failures, []);
+});
+
+// ── trusted project rule folders ──────────────────────────────────────────────
+//
+// What Codex itself does was measured, not assumed (2026-10-13, codex-cli
+// 0.161.0, isolated profiles; the evidence is in src/codex-policy.js under
+// "project rule directories"): `<project>/.codex/rules` governs a session only
+// when the project is trusted, and `config/read` with includeLayers reports each
+// project layer with a `disabledReason` when it is not. These tests pin how that
+// answer is used. The injected `rpc` returns the measured reply shape.
+const measuredDisabledReason = (cwd) => 'To load project-local config, hooks, and exec policies, ' +
+  `add ${cwd.toLowerCase()} as a trusted project in config.toml.`;
+const projectLayer = (folder, disabledReason) => ({ name: { type: 'project', dotCodexFolder: folder },
+  version: 'fixture', ...(disabledReason ? { disabledReason } : {}) });
+function layersRpc(layersFor, calls = []) {
+  return (requests) => {
+    calls.push(requests);
+    return requests.map((request) => ({ config: {}, layers: layersFor(request.params.cwd) }));
+  };
+}
+const codexAbsent = () => () => { throw new Error('Codex config RPC refused: Codex executable is not reachable'); };
+// Counts, rather than throws: a throwing route is caught and sends the lookup to
+// the config.toml fallback, so "it threw" cannot show that Codex was not asked.
+function countingRpc() {
+  const rpc = (requests) => { rpc.calls += 1; return requests.map(() => ({ config: {}, layers: [] })); };
+  rpc.calls = 0;
+  return rpc;
+}
+
+function projectFixture(t) {
+  // Long-name form, so the path a test writes into config.toml is the one the
+  // fallback compares (os.tmpdir() can be an 8.3 short name on Windows).
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-project-rules-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  // The fixture is its own repository root, so no folder above it -- a real
+  // repository, or a real ~/.codex, on the machine running the suite -- can
+  // become a candidate.
+  fs.mkdirSync(path.join(base, '.git'));
+  fs.writeFileSync(path.join(base, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  const home = path.join(base, 'home');
+  const codexHome = path.join(home, '.codex');
+  const workspace = path.join(base, 'Workspace');
+  const projectRules = path.join(workspace, '.codex', 'rules');
+  fs.mkdirSync(path.join(codexHome, 'rules'), { recursive: true });
+  fs.mkdirSync(projectRules, { recursive: true });
+  const userFile = path.join(codexHome, 'rules', 'permission-wildcarding.rules');
+  const projectFile = path.join(projectRules, 'project.rules');
+  fs.writeFileSync(userFile, 'prefix_rule(pattern=["rg"], decision="allow")\n');
+  fs.writeFileSync(projectFile, 'prefix_rule(pattern=["fd"], decision="allow")\n');
+  const config = path.join(codexHome, 'config.toml');
+  const writeConfig = (text) => fs.writeFileSync(config, text);
+  const trust = (key, level = 'trusted') => writeConfig(`[projects.'${key}']\ntrust_level = "${level}"\n`);
+  return { base, home, codexHome, workspace, projectRules, userFile, projectFile, config, writeConfig, trust };
+}
+
+test('a trusted project rule folder joins the set, because Codex says it loads it', (t) => {
+  const box = projectFixture(t);
+  const calls = [];
+  const set = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace,
+    rpc: layersRpc((cwd) => [projectLayer(path.join(cwd, '.codex'))], calls) });
+  assert.deepEqual(set.files, [box.userFile, box.projectFile].sort());
+  assert.deepEqual(set.projectDirectories, [box.projectRules]);
+  assert.ok(set.directories.includes(box.projectRules));
+  assert.equal(calls.length, 1, 'Codex was asked once');
+  assert.deepEqual(calls[0], [{ method: 'config/read', params: { cwd: box.workspace, includeLayers: true } }],
+    'about this workspace, with its layers');
+});
+
+test('an untrusted project rule folder stays out, and the set says why', (t) => {
+  // The mutation this exists to kill: ignore `disabledReason` and every project
+  // folder Codex lists -- trusted or not -- would join the set, so "Why did this
+  // prompt?" would cite a rule the session never loaded.
+  const box = projectFixture(t);
+  const set = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace,
+    rpc: layersRpc((cwd) => [projectLayer(path.join(cwd, '.codex'), measuredDisabledReason(cwd))]) });
+  assert.deepEqual(set.files, [box.userFile], 'the untrusted project file is not evaluated');
+  assert.deepEqual(set.projectDirectories, []);
+  assert.ok(set.blindSpots.some((note) => note.includes(box.projectRules) && /not trusted/.test(note)),
+    'and the omission is reported, naming the folder');
+});
+
+test('with no workspace root the set is the user-scope rules, and it says so', (t) => {
+  const box = projectFixture(t);
+  const rpc = countingRpc();
+  const set = codexRuleFileSet({ home: box.home, rpc });
+  assert.deepEqual(set.files, [box.userFile]);
+  assert.equal(rpc.calls, 0);
+  assert.ok(set.blindSpots.some((note) => /user-scope rules alone/.test(note)));
+});
+
+test('Codex is asked only when a .codex folder it could load exists', (t) => {
+  const box = projectFixture(t);
+  fs.rmSync(path.join(box.workspace, '.codex'), { recursive: true });
+  const empty = countingRpc();
+  assert.deepEqual(codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc: empty }).files,
+    [box.userFile]);
+  assert.equal(empty.calls, 0, 'no project folder, nothing to ask about');
+  // CODEX_HOME is never a project layer (measured with it at a repository
+  // root), so a workspace that contains it has nothing to ask about either.
+  const home = countingRpc();
+  assert.deepEqual(codexRuleFileSet({ home: box.home, workspaceRoot: box.home, rpc: home }).files,
+    [box.userFile]);
+  assert.equal(home.calls, 0, 'CODEX_HOME is not a candidate project folder');
+});
+
+// The shape found on the development box: a home directory whose `.git` holds
+// only a credentials file. Codex did not treat it as a repository (measured), and
+// counting it would put every workspace under the home inside one "repository".
+// Needs a temp directory that is not itself inside a real repository.
+function insideRepository(dir) {
+  for (let current = path.resolve(dir); ;) {
+    const marker = path.join(current, '.git');
+    try {
+      const stat = fs.statSync(marker);
+      if (stat.isFile() || fs.existsSync(path.join(marker, 'HEAD'))) return true;
+    } catch {}
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+test('a .git that is not a repository does not pull enclosing folders in',
+  { skip: insideRepository(os.tmpdir()) && 'the temp directory is inside a git repository' }, (t) => {
+    const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-project-marker-')));
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+    const home = path.join(base, 'home');
+    const outer = path.join(base, 'outer');
+    const workspace = path.join(outer, 'ws');
+    const outerRules = path.join(outer, '.codex', 'rules');
+    fs.mkdirSync(outerRules, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(outerRules, 'outer.rules'), 'prefix_rule(pattern=["fd"], decision="allow")\n');
+    fs.mkdirSync(path.join(outer, '.git'));
+    fs.writeFileSync(path.join(outer, '.git', 'credentials'), '');
+    const notRepository = countingRpc();
+    assert.deepEqual(codexRuleFileSet({ home, workspaceRoot: workspace, rpc: notRepository }).files, []);
+    assert.equal(notRepository.calls, 0, 'the enclosing folder is not a candidate');
+
+    // The control: make it a repository and the enclosing folder is a candidate,
+    // and joins the set when Codex reports its layer enabled (measured: the
+    // repository root, an intermediate folder and the cwd were all listed).
+    fs.writeFileSync(path.join(outer, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    const calls = [];
+    const set = codexRuleFileSet({ home, workspaceRoot: workspace,
+      rpc: layersRpc(() => [projectLayer(path.join(outer, '.codex'))], calls) });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(set.files, [path.join(outerRules, 'outer.rules')]);
+  });
+
+test('Codex is asked again only when config.toml or the candidate folders change', (t) => {
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  let trusted = true;
+  const calls = [];
+  const rpc = layersRpc((cwd) => [projectLayer(path.join(cwd, '.codex'),
+    trusted ? undefined : measuredDisabledReason(cwd))], calls);
+  const ask = () => codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc });
+  assert.ok(ask().files.includes(box.projectFile));
+  assert.ok(ask().files.includes(box.projectFile));
+  assert.equal(calls.length, 1, 'an unchanged config.toml reuses the answer: each ask starts an app-server');
+
+  // What Codex would say changes only because config.toml did, so until it is
+  // edited the cached answer stands.
+  trusted = false;
+  assert.ok(ask().files.includes(box.projectFile));
+  assert.equal(calls.length, 1);
+  fs.appendFileSync(box.config, '# trust withdrawn\n');
+  assert.equal(ask().files.includes(box.projectFile), false, 'an edited config.toml is asked about again');
+  assert.equal(calls.length, 2);
+
+  // A .codex folder that appears is asked about too, with config.toml untouched:
+  // otherwise it stays invisible until the next config edit.
+  fs.mkdirSync(path.join(box.base, '.codex'));
+  ask();
+  assert.equal(calls.length, 3);
+});
+
+test('codex absent: config.toml is read directly, and the set says so', (t) => {
+  // The real worker and a codex that does not exist: the route a machine with
+  // no reachable Codex actually takes.
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  const set = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace,
+    codexExecutable: path.join(box.base, 'no-such-codex.exe') });
+  assert.deepEqual(set.files, [box.userFile, box.projectFile].sort(),
+    'an exact trusted [projects] entry for the workspace root counts');
+  assert.ok(set.blindSpots.some((note) => /Codex could not be asked/.test(note) && /not reachable/.test(note)),
+    'the fallback names itself and why it was taken');
+});
+
+test('the config.toml fallback trusts only an exact trusted entry for the workspace root', (t) => {
+  const box = projectFixture(t);
+  const ws = box.workspace;
+  // A fresh failing route per call is a fresh cache entry, so two configs of
+  // equal size written within one timestamp tick cannot share an answer.
+  const read = (text, extra = {}) => {
+    box.writeConfig(text);
+    return codexRuleFileSet({ home: box.home, workspaceRoot: ws, rpc: codexAbsent(), ...extra });
+  };
+  const included = (set) => set.files.includes(box.projectFile);
+  const header = (key, level = 'trusted') => `[projects.'${key}']\ntrust_level = "${level}"\n`;
+
+  assert.equal(included(read(header(ws))), true, 'single-quoted header');
+  assert.equal(included(read(`[projects."${ws.replace(/\\/g, '\\\\')}"]\ntrust_level = "trusted"\n`)), true,
+    'basic-string header with escaped separators');
+  assert.equal(included(read(`model = "x"\n\n${header(ws)}\n[features]\nplugins = false\n`)), true,
+    'among other tables');
+
+  // Measured as NOT trusted by Codex: excluded here too.
+  assert.equal(included(read(header(ws.replace(/\\/g, '/')))), process.platform !== 'win32',
+    'forward slashes are a different key on Windows');
+  assert.equal(included(read(header(ws + path.sep))), false, 'a trailing separator is a different key');
+  assert.equal(included(read(header(path.dirname(ws)))), false, 'a trusted parent confers nothing');
+
+  const untrusted = read(header(ws, 'untrusted'));
+  assert.equal(included(untrusted), false);
+  assert.ok(untrusted.blindSpots.some((note) => /does not mark this folder trusted/.test(note)));
+
+  const none = read('model = "x"\n');
+  assert.equal(included(none), false);
+  assert.ok(none.blindSpots.some((note) => /no \[projects\] entry naming this exact folder/.test(note)));
+
+  // Spellings Codex accepts but this reading does not interpret: left out and
+  // said, never guessed at.
+  const dotted = read(`projects.'${ws}'.trust_level = "trusted"\n`);
+  assert.equal(included(dotted), false);
+  assert.ok(dotted.blindSpots.some((note) => /does not interpret/.test(note)));
+  const inline = read(`[projects]\n'${ws}' = { trust_level = "trusted" }\n`);
+  assert.equal(included(inline), false);
+  assert.ok(inline.blindSpots.some((note) => /does not interpret/.test(note)));
+
+  // A header inside a multi-line string is string content.
+  assert.equal(included(read(`developer_instructions = """\n${header(ws)}"""\n`)), false);
+});
+
+test('the fallback folds case on Windows only, and refuses conflicting entries', (t) => {
+  const box = projectFixture(t);
+  const read = (text, platform) => {
+    box.writeConfig(text);
+    return codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc: codexAbsent(), platform });
+  };
+  const included = (set) => set.files.some((file) => file.toLowerCase() === box.projectFile.toLowerCase());
+  // Measured: Codex on Windows trusted a key differing from the cwd in drive
+  // letter and in segment case. The platform is injected, so this runs anywhere.
+  const shouted = box.workspace.toUpperCase();
+  assert.equal(included(read(`[projects.'${shouted}']\ntrust_level = "trusted"\n`, 'win32')), true,
+    'win32 folds case');
+  assert.equal(included(read(`[projects.'${shouted}']\ntrust_level = "trusted"\n`, 'linux')), false,
+    'a case-sensitive platform does not');
+  // Two entries for the one folder that disagree are not resolved by guessing.
+  const conflicting = read(`[projects.'${box.workspace}']\ntrust_level = "trusted"\n` +
+    `[projects.'${shouted}']\ntrust_level = "untrusted"\n`, 'win32');
+  assert.equal(included(conflicting), false);
+  assert.ok(conflicting.blindSpots.some((note) => /conflicting trust entries/.test(note)));
+});
+
+function storeFor(box, extra = {}) {
+  const writes = new Map();
+  const snapshot = (file) => {
+    if (writes.has(file)) {
+      const content = writes.get(file);
+      return { exists: true, content, hash: crypto.createHash('sha256').update(content).digest('hex') };
+    }
+    let content = Buffer.alloc(0);
+    let exists = true;
+    try { content = fs.readFileSync(file); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      exists = false;
+    }
+    return { exists, content, hash: crypto.createHash('sha256').update(content).digest('hex') };
+  };
+  const store = createCodexRuleStore({
+    codexHome: box.codexHome, home: box.home, codexExecutable: path.join(box.base, 'no-such-codex.exe'),
+    target: box.userFile, workspaceRoot: box.workspace,
+    claimsPath: path.join(box.base, 'claims.json'), storePath: path.join(box.base, 'store.json'),
+    backupPath: path.join(box.base, 'backup.json'), snapshot,
+    atomicWrite(file, content) { writes.set(file, Buffer.from(content)); }, validate() {}, ...extra,
+  });
+  return { store, writes };
+}
+
+test('the rule-store inventory lists a trusted project rule read-only and never backs it up', (t) => {
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  const { store, writes } = storeFor(box);
+  const inventory = store.inventory();
+  const project = inventory.rules.find((rule) => rule.path === box.projectFile);
+  const user = inventory.rules.find((rule) => rule.path === box.userFile);
+  assert.ok(project, 'the trusted project rule is listed');
+  assert.equal(project.removable, false, 'and is read-only: this store only writes inside CODEX_HOME');
+  assert.match(project.reason, /Project rule file/);
+  assert.equal(inventory.files.find((file) => file.path === box.projectFile).scope, 'project');
+  assert.equal(user.removable, true, 'the user rule beside it stays removable');
+  assert.throws(() => store.remove({ rules: [project] }), /stale or read-only/);
+
+  store.backup();
+  // The catalog keys paths case-folded on win32 (src/codex-policy-backup.js).
+  const saved = JSON.parse(writes.get(path.join(box.base, 'backup.json')).toString('utf8'))
+    .files.map((file) => file.path.toLowerCase());
+  assert.ok(saved.includes(box.userFile.toLowerCase()), 'the user file is backed up');
+  assert.equal(saved.includes(box.projectFile.toLowerCase()), false,
+    'the project file is not: restore refuses any path outside this CODEX_HOME');
+});
+
+test('a workspace root spelled in another case still finds its trusted project rules, on Windows',
+  { skip: process.platform !== 'win32' }, (t) => {
+    // VS Code hands over a lowercase drive letter; config.toml keys and the disk
+    // may spell segments differently. The trusted file must still be recognised
+    // as the project's, or it would be offered for removal.
+    const box = projectFixture(t);
+    box.trust(box.workspace[0].toUpperCase() + box.workspace.slice(1));
+    const spelled = box.workspace[0].toLowerCase() + box.workspace.slice(1).replace(/Workspace$/, 'WORKSPACE');
+    const { store } = storeFor(box, { workspaceRoot: spelled });
+    const project = store.inventory().rules.find((rule) => rule.path.toLowerCase() === box.projectFile.toLowerCase());
+    assert.ok(project, 'the trusted project rule is listed');
+    assert.equal(project.removable, false);
+  });
+
+// A stand-in codex on PATH, in the shape npm installs it, that records every
+// argument list it is given and answers execpolicy check with "allow".
+function installRecordingCodex(dir, name, log) {
+  fs.mkdirSync(dir, { recursive: true });
+  if (process.platform === 'win32') {
+    const shim = path.join(dir, `${name}.cmd`);
+    fs.writeFileSync(shim, `@echo off\r\n>>"${log}" echo %*\r\necho {"decision":"allow"}\r\n`, 'utf8');
+    return shim;
+  }
+  const shim = path.join(dir, name);
+  fs.writeFileSync(shim, `#!/bin/sh\necho "$@" >> '${log}'\necho '{"decision":"allow"}'\n`, 'utf8');
+  fs.chmodSync(shim, 0o755);
+  return shim;
+}
+
+test('the user-scope write check never sees a trusted project rule, even one that forbids the write', (t) => {
+  // The project forbids exactly the prefix being learned, and a second project
+  // file does not parse. In the check, either would fail a user-scope write that
+  // is valid in every other project (measured on 0.161.0: the neighbour's
+  // forbidden wins, and an unparseable --rules member exits 1).
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  fs.writeFileSync(box.projectFile, 'prefix_rule(pattern=["git"], decision="forbidden")\n');
+  const broken = path.join(box.projectRules, 'broken.rules');
+  fs.writeFileSync(broken, 'prefix_rule(pattern=["git" decision=\n');
+  // The control: the same project IS in the set the explanation and inventory
+  // use, so its absence from the check below is the design, not a miss.
+  const visible = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc: codexAbsent() });
+  assert.ok(visible.files.includes(box.projectFile) && visible.files.includes(broken));
+
+  const bin = path.join(box.base, 'bin');
+  const log = path.join(box.base, 'codex-arguments.log');
+  installRecordingCodex(bin, 'wcprojectscopecodex', log);
+  const manager = createAutoLearnManager({ home: box.home, codexHome: box.codexHome, workspaceRoot: box.workspace,
+    codexRulesPath: box.userFile, codexExecutable: 'wcprojectscopecodex', threshold: 1, mode: 'recommend',
+    claudeSettingsPath: null, managedPolicy: { present: false, unreadable: false },
+    historyScanner: () => ({ observations: [{ id: 'project-scope', source: 'codex', tool: 'Bash',
+      command: 'git status', status: 'success', cwd: box.workspace }], cursors: {}, files: [{ source: 'codex', mode: 'full' }] }),
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }) });
+  manager.scan();
+  const before = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${before}`;
+  let applied;
+  try { applied = manager.applyCodex(); } finally { process.env.PATH = before; }
+  assert.equal(applied.appliedCount, 1, 'the user-scope write went through');
+  // The Windows launcher quotes each argument; the shell script does not.
+  const checks = fs.readFileSync(log, 'utf8').replace(/"/g, '').split(/\r?\n/)
+    .filter((line) => /execpolicy check/.test(line));
+  assert.ok(checks.length >= 1, 'the real validator ran the stand-in codex');
+  for (const line of checks) {
+    assert.ok(line.includes(path.join(box.codexHome, 'rules')), 'it checked the user-scope set');
+    assert.equal(line.toLowerCase().includes(box.projectRules.toLowerCase()), false,
+      'and no project rule file was passed to it');
+  }
 });

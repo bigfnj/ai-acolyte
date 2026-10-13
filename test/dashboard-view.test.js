@@ -136,8 +136,12 @@ function harness(tempHome, opts = {}) {
       },
     },
     workspace: {
-      isTrusted: true,
-      workspaceFolders: [{ uri: { fsPath: path.join(tempHome, 'workspace') } }],
+      // `opts.isTrusted` and `opts.workspaceFolders` override the one trusted folder
+      // every other test runs in. Both were hard-coded, so the Project-local card was
+      // only ever rendered for a single trusted folder, which is the one shape whose
+      // subtitle named its file and whose counts the drain could act on.
+      isTrusted: opts.isTrusted ?? true,
+      workspaceFolders: opts.workspaceFolders ?? [{ uri: { fsPath: path.join(tempHome, 'workspace') } }],
       createFileSystemWatcher(pattern) {
         return { pattern, onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} };
       },
@@ -728,7 +732,7 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:2734 -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:2844 -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -1227,6 +1231,70 @@ test('a Codex-only saved list is populated while Claude has no permissions', asy
     assert.equal(rows[0].children[0].textContent, '["git","status"]');
     assert.equal(rows[0].children[1].textContent, 'Codex');
     assert.notEqual(rows[0].className, 'empty', 'absence of Claude wildcards must not erase Codex approvals');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// One-off shell approvals (2026-10-13): saved exact entries that open with something
+// that is not a command, or chain several, counted by deadShellApprovals off the SAME
+// allow list the push already read. Synthetic entries only, and every one is a shape
+// the wildcarding pass leaves alone, so activation does not rewrite the list under test.
+test('the saved-permissions card names one-off shell approvals and links to them, and goes quiet at zero', async (t) => {
+  const env = setup(t);
+  const oneOffs = ['PowerShell($stamp = Get-Date)', 'PowerShell(1..6 | ForEach-Object { $_ })'];
+  env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(./scripts/build.sh --release)', ...oneOffs], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual(env.read().permissions.allow.slice(2), oneOffs, 'precondition: the list was not rewritten');
+    // MUTATION: drop `deadApprovals,` from the _push payload. The field is absent and
+    // this fails; the panel then renders nothing. Confirmed 2026-10-13.
+    assert.deepEqual(data.deadApprovals, {
+      count: 2, total: 3,
+      byReason: { 'compound-command': 1, 'dynamic-executable': 1, 'missing-command-root': 2, 'script-syntax': 1 },
+    }, 'the star rule is not examined; the path executable is examined and not counted');
+
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    const line = panel.dom.byId.get('deadApprovals');
+    // MUTATION: drop the renderDeadApprovals(d) call from render(). The line stays
+    // hidden and empty while the badge still counts, which is the disagreement the
+    // shared helper exists to prevent. Confirmed 2026-10-13.
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent,
+      '2 saved shell approvals are one-off scripts that will prompt again on any variation — review');
+    assert.match(line.title, /Nothing is removed automatically/);
+    // MUTATION: drop the one-off suffix from the wcount badge. Confirmed 2026-10-13.
+    assert.equal(panel.dom.byId.get('wcount').textContent, '4 total · 2 one-off');
+    assert.equal(panel.dom.byId.get('wcount').className, 'rowstate', 'a note, not a warn tone');
+
+    panel.posted.length = 0;
+    line.click();
+    // MUTATION: post viewPermissions without the selection. The picker then opens the
+    // full mixed list instead of these entries. Confirmed 2026-10-13.
+    assert.deepEqual(panel.posted, [{ type: 'viewPermissions', selection: { filter: 'dead' } }]);
+    ui.on.message(panel.posted[0]);
+    assert.deepEqual(app.executedArgs.at(-1), {
+      id: 'permission-wildcarding.viewPermissions', args: [{ filter: 'dead' }],
+    }, 'the route carries the filter to the shared picker unchanged');
+
+    // Zero is silence: no line, no badge suffix, and a click does nothing.
+    env.write({ permissions: { allow: ['Bash(git status *)', 'Bash(./scripts/build.sh --release)'], deny: [] } });
+    app.provider.refresh();
+    await settle();
+    const quiet = ui.posted.at(-1);
+    assert.deepEqual(quiet.deadApprovals, { count: 0, total: 1, byReason: {} });
+    panel.deliver(quiet);
+    assert.equal(line.hidden, true);
+    assert.equal(line.textContent, '');
+    assert.equal(panel.dom.byId.get('wcount').textContent, '2 total');
+    panel.posted.length = 0;
+    line.click();
+    assert.deepEqual(panel.posted, [], 'a hidden line has nothing to open');
   } finally {
     await app.dispose();
   }
@@ -1800,6 +1868,44 @@ test('an unreadable settings.json gives the lock-contention budget back', async 
   }
 });
 
+test('a completed lock cycle gives the lock-contention budget back', async (t) => {
+  // The third site, after the lock is released: the reset every successful
+  // contended-then-retried write is supposed to reach. The two tests above only
+  // reach the early returns, so removing this one left the whole suite green
+  // (mutation tracker, 2026-10-13). Without it the budget counts contended runs
+  // per WINDOW rather than per contention episode: 20 lost races spread across a
+  // day, each one followed by a retry that wrote successfully, still disable the
+  // retry for good.
+  const env = setup(t);
+  env.write({ permissions: { allow: FIFTEEN, deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    await settle();
+    await exhaustRetryBudget(app, env);
+
+    // Uncontended now, and the list is still the non-optimal one the exhausted
+    // runs never managed to write, so the probe falls through and the guarded
+    // write happens. The harness watchers are inert, so the write cannot re-fire
+    // a probe and reach the already-optimal reset instead of this one.
+    app.locks.contended = false;
+    const acquired = app.locks.count;
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.locks.count, acquired + 1, 'precondition: the run took the lock');
+    assert.deepEqual(env.read().permissions.allow, ['Bash(git status *)'],
+      'precondition: and completed the write inside it');
+
+    app.locks.contended = true;
+    env.write({ permissions: { allow: NON_OPTIMAL, deny: [] } });
+    await app.commands.get('permission-wildcarding.runNow')();
+    assert.equal(app.retriesScheduled(), 21,
+      'a lock cycle that completed left the retry budget spent, so the next contended '
+      + 'write is abandoned even though the last contention ended in a successful write');
+  } finally {
+    app.locks.contended = false;
+    await app.dispose();
+  }
+});
+
 // ── what the last scan could not read ─────────────────────────────────────────
 //
 // autoLearnCardData copied eleven fields out of the manager's status and not one
@@ -2000,11 +2106,14 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
 // and 'skipped' matches neither arm of scanTrouble's Codex branch — so no test
 // in this suite had ever driven that branch at all, in either direction.
 //
-// What was behind it: `readThreadStoreIds` needs `node:sqlite`, no shipping VS
-// Code has it, so the probe reported 'partial' on every real extension host,
-// scanTrouble turned that into a permanent 'scan degraded', and the row badge
-// ranked it ABOVE the review count. The user stopped seeing "3 to review" for
-// the life of the install with nothing they could do about it.
+// What was behind it: `readThreadStoreIds` needs `node:sqlite`, the extension
+// hosts in use when this was written could not load it, so the probe reported
+// 'partial' on every one of them, scanTrouble turned that into a permanent
+// 'scan degraded', and the row badge ranked it ABOVE the review count. The user
+// stopped seeing "3 to review" for the life of the install with nothing they
+// could do about it. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within the
+// ^1.80 engine floor may not, so the `unavailable` tier stays (measured
+// 2026-10-13).
 const SCAN_SEED = {
   files: 9, observations: 21, errors: 0, partial: 0, unmatchedResults: 0,
   prunedObservations: 0, prunedCursors: 0, prunedCandidates: 0, prunedGrants: 0,
@@ -2050,6 +2159,9 @@ test('a Codex probe the runtime cannot host is not a degraded scan', async (t) =
 
     // The half that must NOT be quieted with it: a stale rollout directory is a
     // real finding, it is computed without sqlite, and it still has to shout.
+    // This seed carries no `codexHistoryFindings` -- the shape of a state file
+    // written before the counts existed -- so it is also the pin on the fallback
+    // phrase: a stale verdict with nothing to break it down still says so.
     const staleData = structuredClone(unavailableData);
     staleData.autoLearn.scan.codexHistoryStale = true;
     const stale = renderDashboard(app.provider, staleData);
@@ -2057,6 +2169,119 @@ test('a Codex probe the runtime cannot host is not a degraded scan', async (t) =
       'witness:codex-probe -- the real finding was suppressed along with the false alarm. '
       + `The card said "${stale.alScanHealth}"`);
     assert.match(stale.stAutoLearn, /scan degraded/);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// THE SENTENCE THAT WAS WRONG ABOUT WHY. Reproduced on the real box 2026-10-13:
+// four archived Codex threads, nothing moved, and the card said "Codex history
+// store has moved". The probe now persists what its verdict is made of, and the
+// card says that instead.
+test('a stale Codex verdict names what diverged instead of claiming the store moved', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, {
+      ...SCAN_SEED, codexHistoryStale: true, codexHistoryInspected: 'exact',
+      codexHistoryReasons: ['4 Codex thread(s) exist in the history store or session index with no rollout file in sessions/, archived_sessions/.'],
+      codexHistoryFindings: { orphans: 4, relocated: 0, projectionAhead: 0, emptyRollouts: 0 },
+    });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.deepEqual(data.autoLearn.scan.codexHistoryFindings, { orphans: 4, relocated: 0, projectionAhead: 0, emptyRollouts: 0 },
+      'witness:stale-phrase -- the findings never reached the panel');
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /4 Codex threads with no transcript/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.doesNotMatch(rendered.alScanHealth, /has moved/,
+      'witness:stale-phrase -- the card still claims a move nobody made');
+    assert.equal(rendered.stAutoLearn, 'scan degraded', 'a real divergence still degrades the row');
+    assert.match(rendered.node('alScanHealth').title, /4 Codex thread\(s\) exist/,
+      'the persisted reason is the hover title, so the user can find out what to do');
+
+    // Each finding has its own words, joined, and singular is singular.
+    const mixed = structuredClone(data);
+    mixed.autoLearn.scan.codexHistoryFindings = { orphans: 1, relocated: 2, projectionAhead: 1, emptyRollouts: 1 };
+    assert.match(renderDashboard(app.provider, mixed).alScanHealth,
+      /1 Codex thread with no transcript · 2 Codex transcripts outside the scanned folders · Codex store ahead of 1 transcript · Codex rollout folders empty beside a populated store/);
+
+    // The control: no reasons, no tooltip left behind from an earlier render.
+    const clean = structuredClone(data);
+    clean.autoLearn.scan = { ...clean.autoLearn.scan, codexHistoryStale: false, codexHistoryReasons: [], codexHistoryFindings: null };
+    const cleared = renderDashboard(app.provider, clean);
+    assert.match(cleared.alScanHealth, /read 9 files cleanly/);
+    assert.equal(cleared.node('alScanHealth').title, '');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// A file the per-scan ingest budget deferred is catch-up, not trouble. The
+// largest archived rollout on the box is 170 MB against a 64 MiB budget, so the
+// archive root makes it three scans of `partial`, and every one of them used to
+// read "scan degraded" over a scan that lost nothing.
+test('a budget-deferred transcript reads as catching up, not as a degraded scan', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, partial: 1, deferredBytes: 111 * 1048576 });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.deferredBytes, 111 * 1048576, 'the bytes left never reached the panel');
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /read 9 files cleanly · catching up on 1 large transcript \(111 MB left\)/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.doesNotMatch(rendered.stAutoLearn, /degraded/,
+      'witness:partial-not-trouble -- a scan that is catching up was badged as degraded');
+
+    // The control: real trouble beside the catch-up still degrades the row, and
+    // the catch-up is still said beside it rather than swallowed.
+    const troubled = structuredClone(data);
+    troubled.autoLearn.scan.errors = 2;
+    const both = renderDashboard(app.provider, troubled);
+    assert.match(both.alScanHealth, /2 unreadable files · catching up on 1 large transcript/);
+    assert.equal(both.stAutoLearn, 'scan degraded');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a skipped unreadable stretch is trouble, unlike a deferral', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, unreadable: 1 });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.unreadable, 1, 'witness:unreadable -- the count never reached the panel');
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth, /1 file with an unreadable stretch skipped/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.equal(rendered.stAutoLearn, 'scan degraded');
+
+    // The control and the plural: two files, and none is clean.
+    const two = structuredClone(data);
+    two.autoLearn.scan.unreadable = 2;
+    assert.match(renderDashboard(app.provider, two).alScanHealth, /2 files with an unreadable stretch skipped/);
+    const none = structuredClone(data);
+    none.autoLearn.scan.unreadable = 0;
+    assert.match(renderDashboard(app.provider, none).alScanHealth, /read 9 files cleanly/);
   } finally {
     await app.dispose();
   }
@@ -2312,6 +2537,173 @@ test('partial Codex instruction installation is reported consistently in cards a
           'WITNESS partial gates badge must have warning tone');
       }
     }
+  } finally {
+    await app.dispose();
+  }
+});
+
+// ── the Project-local card ──────────────────────────────────────────────────────
+// BACKLOG "The Project-local card reports on a path it did not watch", fixed
+// 2026-10-13. localCardData carried its own copy of the folder filter, without the
+// trust gate drainableRoots applies, so an untrusted window showed dry-run numbers
+// the drain refused to act on. With two or more folders the payload held only the
+// bare LOCAL_RELATIVE constant, so the subtitle named no file. Neither showed here,
+// because the harness pinned the one shape where both are invisible: a single
+// trusted folder. Nothing in the suite rendered the card at all.
+
+// Every outcome against a user scope holding Bash(rg *): dotnet build promotes as
+// a family (and its local entry is then pruned under it), rg needle is already
+// covered so it is pruned, and the script blob is kept, since only the project
+// that approved it can justify it. So promote 1, prune 2, kept 1.
+const LOCAL_MIX = ['Bash(dotnet build src/App.csproj)', 'Bash(rg needle)', 'PowerShell($x = 1; ls)'];
+
+function seedLocal(root, allow = LOCAL_MIX) {
+  const file = path.join(root, '.claude', 'settings.local.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ permissions: { allow } }, null, 2) + '\n');
+  return file;
+}
+
+// The display form the extension builds under this harness, whose os.homedir()
+// is the temp home.
+function tilde(tempHome, file) { return file.replace(tempHome, '~'); }
+
+async function localCard(app) {
+  const ui = fakeView();
+  app.provider.resolveWebviewView(ui.view);
+  await settle();
+  const data = ui.posted.at(-1);
+  return { local: data.local, rendered: renderDashboard(app.provider, data) };
+}
+
+test('with two folders open the Project-local card names both files, not the bare file name', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: [] } });
+  const files = ['alpha', 'bravo'].map((name) => seedLocal(path.join(env.tempHome, name)));
+  // Auto-drain off, so activation leaves both files for the dry run to count.
+  const app = harness(env.tempHome, {
+    workspaceFolders: files.map((file) => ({ uri: { fsPath: path.dirname(path.dirname(file)) } })),
+    settings: { 'localDrain.enabled': false },
+  });
+  try {
+    const { local, rendered } = await localCard(app);
+    const shown = files.map((file) => tilde(env.tempHome, file));
+    assert.deepEqual(local.files, shown, 'one home-relative path per folder inspected');
+    assert.equal(local.folders, 2);
+    assert.equal(local.promote, 2, 'precondition: both folders were dry-run, trusted');
+
+    const sub = rendered.node('locsub');
+    assert.equal(sub.textContent, '2 folders · auto-drain off');
+    for (const file of shown) {
+      assert.ok(sub.title.includes(file), 'the subtitle tooltip names ' + file);
+    }
+    assert.equal(sub.title.split(' · ').slice(0, 2).join(' · '), shown.join(' · '),
+      'the paths are joined on one line, in folder order');
+    assert.match(sub.title, /CLI hook/,
+      'the tooltip says the hook drains session folders this card cannot list');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('an untrusted window names its Project-local file but shows no dry-run counts, and the drain stays refused', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: [] } });
+  const file = seedLocal(path.join(env.tempHome, 'workspace'));
+  const before = fs.readFileSync(file, 'utf8');
+  // Auto-drain left ON, so activation's own drain pass is the first refusal tested.
+  const app = harness(env.tempHome, { isTrusted: false });
+  try {
+    const { local, rendered } = await localCard(app);
+    assert.equal(local.trusted, false);
+    assert.deepEqual(local.files, [tilde(env.tempHome, file)], 'the file left alone is still named');
+    assert.deepEqual([local.promote, local.prune, local.kept], [null, null, null],
+      'no dry run over a workspace the drain will not touch, so no numbers');
+
+    for (const id of ['locpromote', 'locprune', 'lockept']) {
+      assert.equal(rendered.node(id).textContent, '–', id + ' shows the placeholder dash, not a count');
+    }
+    assert.equal(rendered.node('loctext').textContent, 'Project-local approvals: not counted',
+      'the headline neither counts nor claims "drained"');
+    assert.equal(rendered.node('locsub').textContent,
+      'workspace not trusted — read-only · ' + tilde(env.tempHome, file));
+    assert.equal(rendered.node('stLocal').textContent, 'workspace not trusted');
+    assert.equal(rendered.node('drainLocal').disabled, true);
+    assert.equal(rendered.node('drainLocal').textContent, '⤴  Drain into user scope',
+      'an uncounted file is not "Nothing to drain"');
+
+    // The gate on the drain itself is unchanged: activation drained nothing, and
+    // the command, reachable from the palette with the button disabled, refuses.
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'activation left the untrusted file alone');
+    await app.commands.get('permission-wildcarding.drainLocal')();
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'a manual drain left it alone too');
+    assert.deepEqual(env.read().permissions.allow, ['Bash(rg *)'], 'nothing reached user scope');
+    assert.ok(app.statuses.some((message) => message.includes('workspace is not trusted — local drain skipped')),
+      'the refusal is said, not silent');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The control for the test above: the same file in a trusted window is counted,
+// the single-folder subtitle is the path itself, and the drain does what the
+// counts said it would.
+test('a trusted window shows the Project-local dry-run counts, and the drain acts on them', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: [] } });
+  const file = seedLocal(path.join(env.tempHome, 'workspace'));
+  const app = harness(env.tempHome, { settings: { 'localDrain.enabled': false } });
+  try {
+    const { local, rendered } = await localCard(app);
+    assert.equal(local.trusted, true);
+    assert.deepEqual([local.promote, local.prune, local.kept], [1, 2, 1]);
+    for (const [id, n] of [['locpromote', '1'], ['locprune', '2'], ['lockept', '1']]) {
+      assert.equal(String(rendered.node(id).textContent), n, id + ' shows its count');
+    }
+    assert.equal(rendered.node('loctext').textContent, 'Project-local approvals: 3 to drain');
+    assert.equal(rendered.node('locsub').textContent, tilde(env.tempHome, file) + ' · auto-drain off',
+      'one folder keeps the path itself as the subtitle');
+    assert.equal(rendered.node('drainLocal').disabled, false);
+    assert.equal(rendered.node('drainLocal').textContent, '⤴  Drain 3 into user scope');
+
+    await app.commands.get('permission-wildcarding.drainLocal')();
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow, ['PowerShell($x = 1; ls)']);
+    assert.ok(env.read().permissions.allow.includes('Bash(dotnet build *)'));
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The card and the drain take their folders from one function, localRoots. Two
+// copies of the filter is how the card came to show numbers for an untrusted
+// workspace, and only a folder one copy keeps and the other drops can tell a
+// second copy from the first. A non-file folder whose fsPath happens to exist on
+// this disk is that folder: the shared filter drops it, the old copy did not.
+test('the Project-local card and the drain read one folder filter, so a folder the drain skips is not listed', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const realFile = seedLocal(path.join(env.tempHome, 'alpha'), ['Bash(dotnet build src/App.csproj)']);
+  const virtualFile = seedLocal(path.join(env.tempHome, 'virtual'), ['Bash(dotnet build src/App.csproj)']);
+  const virtualBefore = fs.readFileSync(virtualFile, 'utf8');
+  const app = harness(env.tempHome, {
+    workspaceFolders: [
+      { uri: { scheme: 'file', fsPath: path.join(env.tempHome, 'alpha') } },
+      { uri: { scheme: 'vscode-vfs', fsPath: path.join(env.tempHome, 'virtual') } },
+    ],
+    settings: { 'localDrain.enabled': false },
+  });
+  try {
+    assert.ok(fs.existsSync(virtualFile),
+      'precondition: the skipped folder HAS a file, so only the filter can be what drops it');
+    const { local } = await localCard(app);
+    assert.deepEqual(local.files, [tilde(env.tempHome, realFile)], 'the card lists the file-scheme folder only');
+    assert.equal(local.promote, 1, 'and counts only it');
+
+    await app.commands.get('permission-wildcarding.drainLocal')();
+    assert.deepEqual(JSON.parse(fs.readFileSync(realFile, 'utf8')).permissions.allow, [],
+      'the folder the card listed is the folder the drain drained');
+    assert.equal(fs.readFileSync(virtualFile, 'utf8'), virtualBefore,
+      'and the folder the card left out is the folder the drain left alone');
   } finally {
     await app.dispose();
   }

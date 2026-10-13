@@ -63,12 +63,37 @@ const CREDENTIAL_ROOTS = new Set([
 // fetches and runs an arbitrary package by name, so the executable that matters is its
 // argument, not the root. Omitting it made `Bash(uvx *)` a plain root grant, which is what
 // the development box's allow list actually held.
+//
+// `duckdb`, `hyperfine`, `just` and `make` added 2026-10-13. The first three held a bare
+// `Bash(<root> *)` and `PowerShell(<root> *)` grant on that same list (re-read that day;
+// `make` held none, and is added on the same evidence as `just`). Before this, each
+// classified as risk 'unknown' with only `unknown-command`, so nothing marked a root
+// grant for review.
+// They fit neither family table: none dispatches a fixed subcommand set, and each runs
+// work named by an argument or a file the argument names. Per-root evidence, from each
+// tool's own documentation:
+//   * duckdb: an interpreter. Its CLI dot-commands include `.shell CMD ARGS...` and
+//     `.system CMD ARGS...`, both documented as "Run CMD with ARGS... in a system shell",
+//     and `COPY (query) TO 'file'` writes the result to a file. Closer to `python -c`
+//     than to a query tool, and `python` has always been here.
+//   * hyperfine: "Each argument is an executable and its arguments", run directly or,
+//     with `-S`/`--shell`, through a shell. That is the `xargs`/`parallel` shape.
+//   * just: runs recipes from a justfile; recipe lines are "shell recipes" by default,
+//     invoked by the command the `shell` setting names.
+//   * make: recipe lines "are executed by invoking a new sub-shell for each line"
+//     (GNU make manual, Recipe Execution).
+// `just` and `make` mirror `npm`, `pnpm` and `yarn`, which sit here because `run`
+// executes whatever the project's scripts say. A recipe name is a pointer into a
+// project file, not a command, so a grant on the root is a grant on every recipe the
+// file will ever hold. They are deliberately NOT given FAMILY tables: recipe names are
+// per-project, so there is no fixed subcommand set to narrow to.
 const SHELL_WRAPPERS = new Set([
-  '.', 'bash', 'bun', 'cmd', 'cmd.exe', 'command', 'dash', 'deno', 'env',
-  'eval', 'exec', 'fish', 'iex', 'invoke-expression', 'java', 'ksh', 'mshta',
-  'node', 'npm', 'npx', 'parallel', 'perl', 'php', 'pnpm', 'powershell',
-  'powershell.exe', 'pwsh', 'py', 'python', 'python3', 'ruby', 'rundll32', 'sh',
-  'source', 'uvx', 'wsl', 'xargs', 'yarn', 'zsh',
+  '.', 'bash', 'bun', 'cmd', 'cmd.exe', 'command', 'dash', 'deno', 'duckdb',
+  'env', 'eval', 'exec', 'fish', 'hyperfine', 'iex', 'invoke-expression',
+  'java', 'just', 'ksh', 'make', 'mshta', 'node', 'npm', 'npx', 'parallel',
+  'perl', 'php', 'pnpm', 'powershell', 'powershell.exe', 'pwsh', 'py', 'python',
+  'python3', 'ruby', 'rundll32', 'sh', 'source', 'uvx', 'wsl', 'xargs', 'yarn',
+  'zsh',
 ]);
 const WRITE_ROOTS = new Set([
   'add-content', 'chmod', 'chown', 'copy-item', 'cp', 'dd', 'install', 'ln',
@@ -470,9 +495,32 @@ function hasWriteRedirection(command, shell) {
   return false;
 }
 
+// A PowerShell statement that OPENS with a numeric range literal (`1..6`, `-1..5`,
+// `1..$n`) is an expression, not a command: the parser reads a leading number in
+// expression mode and `..` as the range operator, so `1..6 | ForEach-Object {...}`
+// enumerates six integers and runs nothing called `1..6`. Before 2026-10-13 the
+// tokenizer handed `1..6` over as an ordinary root and the learner emitted a live
+// `PowerShell(1..6 *)` with only `unknown-command` and `complex: false`; the BACKLOG
+// entry on stored approvals that can never be wildcarded measured it on a real list.
+// Now it is `script-syntax` here plus `missing-command-root` (deriveBaseInvocation).
+//
+// Deliberately narrow. It needs digits, then `..`, at the very start of the statement,
+// so a command whose name merely begins with a digit is untouched (`7z a x.zip` is a
+// real root and stays one), and no other number-shaped opener is claimed: a bare `42`
+// or `1.5` is also expression mode, but nothing observed needs it, and widening this
+// later is cheaper than explaining a reclassified command. Bash is excluded on purpose:
+// it has no range operator (its form is the brace expansion `{1..6}`, already caught
+// by the `{` opener), so in Bash `1..6` really is an attempt to run a program.
+const POWERSHELL_RANGE_LITERAL = /^-?\d+\.\./;
+function startsWithRangeLiteral(text, shell) {
+  return normalizeShell(shell) === 'powershell' &&
+    POWERSHELL_RANGE_LITERAL.test(String(text || '').trimStart());
+}
+
 function containsScriptSyntax(command, shell) {
   const text = String(command || '');
   if (/\$\(|`[^`]+`|<\(|>\(/.test(text)) return true;
+  if (startsWithRangeLiteral(text, shell)) return true;
   return normalizeShell(shell) === 'powershell' && /(?:^|\s)(?:@?\{|@\(|\$\(|\.\s+[^.])/.test(text);
 }
 
@@ -541,7 +589,14 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   const executableValue = executable ? executable.value : '';
   const pathExecutable = Boolean(executable && isPathExecutable(executableValue));
   const dynamicExecutable = Boolean(executableValue && /^(?:\$|[(@{\[])/.test(executableValue));
-  const root = executableValue && !dynamicExecutable ? basenamePortable(executableValue) : null;
+  // A range literal is not a command root, so it gets none: root null is what makes
+  // classifyInvocation report `missing-command-root` (not the `shell-structure` alias)
+  // and what leaves permissionFor with no prefix to wildcard. The `script-syntax`
+  // reason comes from containsScriptSyntax below, off the same predicate.
+  const rangeLiteral = Boolean(executable && !executable.quoted &&
+    startsWithRangeLiteral(executableValue, shell));
+  const root = executableValue && !dynamicExecutable && !rangeLiteral
+    ? basenamePortable(executableValue) : null;
   const argv = executable ? details.slice(index).map((token) => token.value) : [];
   const normalized = normalizeRoot(root);
   const reserved = shell === 'powershell' ? POWERSHELL_RESERVED.has(normalized) : BASH_RESERVED.has(normalized);
@@ -990,4 +1045,13 @@ module.exports = {
   // Exported so a stored candidate's flag can be re-derived from its reasons
   // rather than carried forward.
   COMPLEX_REASONS,
+  // Exported for test/permissions-keywords.test.js only. src/permissions.js keeps
+  // its own copies (BASH_SCRIPT_KEYWORDS, PS_SCRIPT_KEYWORDS) and must not import
+  // these, because the fixed-point cache stats that file and not this one; the
+  // test is what keeps the copies from falling behind.
+  BASH_RESERVED,
+  POWERSHELL_RESERVED,
+  // Consumed by src/policy-exporters.js, which unions it into its own refusal table.
+  // Only ever to refuse more: see the comment above SHELL_WRAPPERS there.
+  SHELL_WRAPPERS,
 };

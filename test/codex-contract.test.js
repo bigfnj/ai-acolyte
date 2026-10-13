@@ -199,13 +199,9 @@ test('an inverted match/not_match pair is rejected by the binary, per rule', { s
   for (const rule of EMITTED) {
     // Swap the two lists in this rule only, leaving the rest of the file alone,
     // so the rejection names THIS rule and not some neighbour.
-    const swapped = rule.text
-      .replace(/match = \[([\s\S]*?)\]/, (whole, body) => `match = [@@MATCH@@${body}@@`)
-      .replace(/not_match = \[([\s\S]*?)\]/, (whole, body) => `not_match = [${body}]`);
     const matchBody = /\n    match = \[([\s\S]*?)\n    \],/.exec(rule.text);
     const notBody = /\n    not_match = \[([\s\S]*?)\n    \],/.exec(rule.text);
     assert.ok(matchBody && notBody, `could not isolate the example lists of ${rule.pattern}`);
-    void swapped;
     const mutant = rule.text
       .replace(matchBody[0], '\n    match = [@@SWAP@@\n    ],')
       .replace(notBody[0], `\n    not_match = [${matchBody[1]}\n    ],`)

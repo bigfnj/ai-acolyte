@@ -19,7 +19,12 @@ const object = (value) => value !== null && typeof value === 'object' && !Array.
 const END_MARKER = CODEX_BEGIN_MARKER.replace('BEGIN ', 'END ');
 const markerPattern = (marker) => new RegExp('^' + marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[ \\t]*\\r?$', 'gm');
 
-function createCodexRuleStore({ codexHome, target, workspaceRoot, claimsPath, storePath, backupPath, snapshot, atomicWrite, afterWrite, validate, assertExternalReady = () => {} }) {
+// A trusted project's rule file is shown, never edited: this store's records,
+// backups and recovery are all scoped to one CODEX_HOME (`validPath` below), so a
+// removal staged against a project path would leave an intent it refuses to read.
+const PROJECT_RULE_READ_ONLY = 'Project rule file, loaded by Codex while this project is trusted. Edit it in the project.';
+
+function createCodexRuleStore({ codexHome, home, codexExecutable, target, workspaceRoot, claimsPath, storePath, backupPath, snapshot, atomicWrite, afterWrite, validate, assertExternalReady = () => {} }) {
   const scope = normalized(codexHome);
   const rulesDir = normalized(path.join(codexHome, 'rules'));
   const validPath = (file) => typeof file === 'string' && (normalized(file) === normalized(target) ||
@@ -67,12 +72,16 @@ function createCodexRuleStore({ codexHome, target, workspaceRoot, claimsPath, st
     if (!options.allowMcpPending) assertExternalReady();
     return record;
   }
-  function inventory() {
+  // `projects: false` for backup() and remove(), which never act on a project
+  // file and so skip the trust lookup (an app-server start on a cache miss).
+  function inventory({ projects = true } = {}) {
     const record = read();
-    const set = codexRuleFileSet({ codexHome, target });
+    const set = codexRuleFileSet({ codexHome, target, ...(projects ? { home, workspaceRoot, codexExecutable } : {}) });
+    const projectDirectories = new Set(set.projectDirectories.map(normalized));
     const files = [];
     const rules = [];
     for (const file of set.files) {
+      const project = projectDirectories.has(normalized(path.dirname(file)));
       let before;
       try {
         if (!fs.lstatSync(file).isFile()) throw new Error('Linked or non-regular files are read-only.');
@@ -89,7 +98,8 @@ function createCodexRuleStore({ codexHome, target, workspaceRoot, claimsPath, st
             parsed.rules.some((rule) => [...begins, ...ends].some((marker) =>
               marker.index > rule.start && marker.index < rule.end)));
         files.push({ path: file, fileHash: before.hash, supported: parsed.supported && !ambiguous,
-          reason: ambiguous ? 'Generated block markers are ambiguous; reconcile the file before removing rules.' : parsed.reason });
+          reason: ambiguous ? 'Generated block markers are ambiguous; reconcile the file before removing rules.' : parsed.reason,
+          ...(project ? { scope: 'project' } : {}) });
         if (!parsed.supported || ambiguous) continue;
         for (const rule of parsed.rules) {
           const owned = begin >= 0 && end > begin &&
@@ -97,13 +107,15 @@ function createCodexRuleStore({ codexHome, target, workspaceRoot, claimsPath, st
           const foreignManaged = owned && normalized(file) !== normalized(target);
           rules.push({ ...rule, id: hash(`${normalized(file)}\n${before.hash}\n${rule.start}:${rule.end}`),
             path: file, fileHash: before.hash, owned,
-            removable: rule.decision === 'allow' && !record.pending && !foreignManaged,
-            reason: record.pending ? 'An interrupted Codex policy change needs to finish first.' :
+            removable: !project && rule.decision === 'allow' && !record.pending && !foreignManaged,
+            reason: project ? PROJECT_RULE_READ_ONLY :
+              record.pending ? 'An interrupted Codex policy change needs to finish first.' :
               foreignManaged ? 'Open the Codex rule target that owns this generated block to remove it.' :
               rule.decision === 'allow' ? undefined : 'Only allow rules can be removed here.' });
         }
       } catch (error) {
-        files.push({ path: file, fileHash: before?.hash, supported: false, reason: error.message });
+        files.push({ path: file, fileHash: before?.hash, supported: false, reason: error.message,
+          ...(project ? { scope: 'project' } : {}) });
       }
     }
     for (const failure of set.failures) files.push({ path: failure.path, supported: false, reason: failure.message });
@@ -151,7 +163,7 @@ function createCodexRuleStore({ codexHome, target, workspaceRoot, claimsPath, st
     assertReady(record);
     if (!Array.isArray(request.rules) || request.rules.length !== 1) throw new Error('Select exactly one Codex allow rule to remove.');
     const selected = request.rules[0];
-    const found = inventory().rules.find((rule) => rule.id === selected?.id &&
+    const found = inventory({ projects: false }).rules.find((rule) => rule.id === selected?.id &&
       rule.path === selected.path && rule.fileHash === selected.fileHash);
     if (!found?.removable) throw new Error('Codex rule selection is stale or read-only. Open the inventory again.');
     const before = snapshot(found.path);
@@ -201,7 +213,9 @@ function createCodexRuleStore({ codexHome, target, workspaceRoot, claimsPath, st
     let catalog = readBackup();
     let changed = false;
     let addedCount = 0;
-    const current = inventory();
+    // User scope only: a project file in this catalog could never be restored
+    // (restoreInventory refuses any path outside this CODEX_HOME's rules folder).
+    const current = inventory({ projects: false });
     const issues = current.files.filter((file) => !file.supported).map(({ path, reason }) => ({ path, reason }));
     for (const file of current.files.filter((entry) => entry.supported)) {
       const before = snapshot(file.path);

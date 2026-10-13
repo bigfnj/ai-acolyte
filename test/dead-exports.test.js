@@ -76,12 +76,14 @@ const HELD = {
 // This list is DEBT, not an allowlist. It is separate from HELD so that it reads as one, and
 // so that emptying it is a visible event. A name here that gains a consumer must leave it:
 // the per-module assertion below compares the whole set, in both directions.
-const PENDING_REMOVAL = {
-  'src/codex-policy.js': {
-    CODEX_BUNDLE_CACHE: 'src/codex-policy.js:71 — used only as the default argument of '
-      + 'readEnterpriseBundle at :12.',
-  },
-};
+//
+// EMPTIED 2026-10-13. The last entry was CODEX_BUNDLE_CACHE in src/codex-policy.js, cited
+// at :71 and :12 when the constant sat at :11 and its one use, the default argument of
+// readEnterpriseBundle, at :13. Mutation first, per the rule above: renaming the cache
+// file in the constant failed "the active profile supplies the managed cache and manager
+// default history and policy paths" in test/codex-home-routing.test.js, which reaches it
+// through that default. So the export was the only surplus; it went, the constant stayed.
+const PENDING_REMOVAL = {};
 
 // WHAT HAPPENED TO THE OTHER THIRTEEN, 2026-09-25. They were not swept. Each one was
 // mutated in place and the whole suite run against it, because "no importer" and "no
@@ -117,7 +119,7 @@ const TEST_ONLY = {
   'src/codex-stop-hook.js': ['runCodexStopHook'],
   // Production wraps this read-only primitive in the reviewed proposal API.
   'src/codex-mcp-config.js': ['inspectCodexMcpTool'],
-  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'classifyInvocation', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
+  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'BASH_RESERVED', 'POWERSHELL_RESERVED', 'classifyInvocation', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
   // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
   // consumer when the managed-requirements parser was rewritten on 2026-09-24:
   // production now asks enterprisePolicyAssessment, which answers with the degraded

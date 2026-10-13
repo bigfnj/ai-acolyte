@@ -71,3 +71,22 @@ test('package.mjs inspects the built VSIX after vsce writes it', () => {
   assert.ok(packageAt >= 0, 'the supported package command must invoke vsce');
   assert.ok(gateAt > packageAt, 'the content gate must inspect the artifact vsce actually wrote');
 });
+
+test('package.mjs quarantines a VSIX the content gate rejects', () => {
+  // Calling the gate as a bare statement is the shape that left a refused VSIX, and the
+  // stamp vouching for it, in the repo root for check-version-sync.mjs to pass. The
+  // quarantine's behaviour is driven on junk files in test/release-version.test.js; this
+  // pins that package.mjs actually routes the gate through it, with the stamp path
+  // writeBuildStamp writes (join(root, BUILD_STAMP)).
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '..', 'scripts', 'package.mjs'), 'utf8',
+  );
+  assert.doesNotMatch(source, /^\s*assertRetiredMaxAbsent\(out\)\s*;/m,
+    'the gate is called bare again, so a rejection leaves the artefact and stamp behind');
+  assert.match(source,
+    /gateOrQuarantine\(\s*out,\s*join\(root, BUILD_STAMP\),\s*\(\)\s*=>\s*assertRetiredMaxAbsent\(out\)\s*\)/,
+    'the gate must run inside gateOrQuarantine, over `out`, with the stamp this build wrote');
+  assert.ok(
+    source.indexOf('gateOrQuarantine(out') > source.indexOf('execSync(`npx --yes @vscode/vsce package'),
+    'and after vsce, like the gate itself');
+});

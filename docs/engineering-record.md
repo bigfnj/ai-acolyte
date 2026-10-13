@@ -33,6 +33,171 @@ is unmeasurable at the process level.
 
 ---
 
+## The 1.6.2 backlog clearance (2026-10-13)
+
+Prompted by two dashboard rows that were both false: Auto Learn read **"scan degraded —
+Codex history store has moved"** and Codex memory read **"1 issues"**. The maintainer then
+asked for `BACKLOG.md` to be cleared outright. Every open entry was re-verified against the
+tree first, because the file's own preamble says entries rot, and two of them had: five of the
+"seven surviving mutants" had been killed by `590df24` on 2026-09-24, three days before the
+tracker was restored claiming no test would notice, and `managedPolicyPath` had gained three
+script suppliers. What follows is each disposition and its evidence. Nothing here was closed
+by re-reading its own prose.
+
+### The archived-thread false alarm — FIXED, `9abc330`
+
+**Cause.** Archiving a thread in the Codex app MOVES its rollout from
+`sessions/YYYY/MM/DD/` to a flat `archived_sessions/`. The store check walked `sessions/`
+only, so every archived thread still named by `thread_history_1.sqlite` or
+`session_index.jsonl` read as an orphan, and `stale: true` persisted until the thread was
+unarchived. On the development box: four archived threads, the oldest 170 MB, all four
+marked `archived = 1` with an `archived_sessions\` `rollout_path` in Codex's own
+`state_5.sqlite` `threads` table. It was a detector that fired on an ordinary user action,
+which is the failure this check's own test file names: "a detector that fires on everything
+is not a detector."
+
+**The real migration signal was looking in the wrong place too.** The check treated any
+entry in a `rollout-migrations/` directory as a reason. No such directory has ever existed
+here. Codex records migrations in `state_5.sqlite` `rollout_migration_state`, which held one
+row, `legacy_to_paginated_v1`, and that migration is benign: the projection cursor
+(`thread_history_projection_state.next_rollout_byte_offset`) equalled the rollout's size for
+13 of 13 threads, so the store is still a projection of the files. A migration having run is
+now a note; only proven divergence makes `stale`.
+
+**What the check does now.** It accounts for `sessions/` and `archived_sessions/` in ONE
+comparison per Codex home (a naive second root would have made each root report the other's
+threads as orphans), re-walks once before calling anything an orphan, and uses the state
+database to *classify* a missing thread — relocated (a reason: Codex writes where we do not
+read), archived then deleted (a note), or orphaned (a reason) — never to add ids. A projection
+cursor strictly past its file's end is a new reason. Reasons and notes name directories, never
+paths. The dashboard says what diverged ("4 Codex threads with no transcript") instead of the
+fixed sentence, and logs reasons to the output channel when they change.
+
+**Two defects found inside the fix and shipped with it.**
+
+- **A fork head-seed double count.** Three of the archived rollouts are forks with two head
+  `session_meta` lines (the fork's id, then the parent's). The full parse applies both;
+  `codexHeadSeed` applied only the first, so a call first read in an append slice was filed
+  under the fork and counted again under the parent on the next full read — which archiving
+  forces, because cursor keys are path hashes. The seed now applies every consecutive head
+  record. Identity was deliberately NOT re-keyed to the thread id: that would recount every
+  observation already stored. **ACCEPTED-RECORDED:** calls in those three forks that were
+  first counted from an append slice before this fix are counted once more on the first full
+  read of `archived_sessions/`. Bounded and one-time.
+- **A pending-file leak.** `codexEvidencePendingFiles` ids are path hashes; a transcript
+  archived during a Codex evidence rebuild left an id nothing could read again, held
+  `codexEvidenceRebuildPending` true forever and blocked auto-safe apply. A clean walk now
+  drops pending ids it no longer enumerates; a walk that failed on a root keeps them (the
+  half of the old witness that still holds). A moved file that is still being caught up is
+  re-added under its new id, so the rebuild stays open until it is read.
+
+**`partial` was never an error.** It is set in one place and means "deferred by the per-file
+per-scan ingest budget; the cursor advanced to a newline and the next scan continues". It was
+rendered as trouble, which would have shown "scan degraded" for the three scans the 170 MB
+archive needs. It now reads "catching up on N large transcript(s) (X MB left)". The genuinely
+partial read, `mode: 'unreadable'` (a skipped stretch), was counted nowhere; it is now
+`unreadable` and is trouble.
+
+**Acceptance on a copy of the real Codex home.** Exact, not stale, 13 rollouts (4 archived),
+zero findings, one migration note. Catch-up took three scans (partial 2 → 1 → 0) with no
+degraded trigger on any of them. Archiving the largest live rollout (100 MB) afterwards added
+**zero** observations, success counts 77 → 77, cursors 13 → 13. 34 mutants, all killed.
+
+**Measured facts, Codex 0.161.0 on Windows, 2026-10-13.** `threads.has_user_event` is 0 for
+all 13 rows, including threads with transcripts, so it cannot classify anything.
+`rollout_path` mixes `\\?\`-prefixed and plain spellings. Every observation Codex writes has
+a `call_id`; an observation without one would put its file path into its identity and would
+recount on a move, which is theoretical today. `node:sqlite` DOES load in the VS Code 1.141.1
+extension host (Electron 43.7.7, Node 24.21.0): the comments that said no shipping VS Code
+carries it were out of date, and the `unavailable` tier stays only because the engine floor is
+`^1.80`.
+
+### The Codex memory false positive — FIXED, `b158f3d` and `f9f0e24`
+
+`lintFile` matched any forward-slash path merely ENDING in `skills/<x>/SKILL.md` and checked
+it against `memories/skills/`. Rollout summaries are session narrative and cite the session
+project's own `skills/` paths; the flagged one existed in its project. Backslash spellings of
+the same reference never matched, so the verdict depended on slash direction. Codex
+regenerated the store mid-fix and `MEMORY.md` gained two bare project-skill citations of its
+own, so the rule had to be sharper than "registry files only". Evidence for the final rule, from
+the installed Codex 0.161.0 consolidation template: "If you reference skills, do it in body
+bullets only (for example: `- Related skill: skills/<skill-name>/SKILL.md`)", and its read
+path opens `skills/` only "if MEMORY.md directly points to" them. So a `skills/` reference is
+linted only on a `Related skill(s):` line of `MEMORY.md` or `memory_summary.md`;
+`rollout_summaries/` references are linted everywhere, as whole tokens. Diagnostics carry a
+0-based line. The live store went from 3 diagnostics to 0, and the row says "1 issue", not
+"1 issues".
+
+### The live hook ran a checkout 142 commits old — FIXED
+
+Found while diagnosing the above: the box's PostToolUse hook pointed at the pre-rename
+checkout directory at v1.4.13 — before the MAX retirement — while the maintained checkout
+lived under the new name. No fix since 1.4.13 had reached a real tool call, and nothing could
+have noticed: smoke drives `$REPO/bin/wildcard-perms` directly and `verify-release.ps1` only
+checks that SOME PostToolUse hook exists. The hook was repointed by hand through
+`writeTransform` with a backup. The trap itself was in the installers: both deduplicated by
+exact command string, so installing from a moved, renamed or re-cloned checkout ADDED a second
+hook beside the stale one and both fired. `1aa811a` makes both installers recognise this tool
+from any checkout and repoint it in place (matcher, position and fields kept, deduplicated per
+matcher, old → new printed); the uninstallers also remove a registration whose target file is
+gone and name, but leave, a live other checkout's. Four pre-existing installer defects found
+alongside, all FIXED: `verify-installers.ps1` leaked 22 sandboxes per run under an 8.3 `%TEMP%`
+because `Remove-Item` fails on short names (`97de88f`); `install.sh`'s starter-pack count threw
+`MODULE_NOT_FOUND` under Git Bash (`263ae96`); `install.sh` under Git Bash registered a bare
+Windows path, which pops "How do you want to open this file?" on every hook fire (`6f8925c`,
+now byte-identical to `install.ps1`'s `node "<path>"`); and an 8.3 spelling of the same
+checkout read as another checkout (`4908466`). ACCEPTED-RECORDED from that last one: the
+`.ps1` pair expands 8.3 names but not junctions or symlinks, so a linked spelling is still
+repointed — harmlessly, with a wrongly worded notice.
+
+### Shell grammar minted into broad grants — FIXED, `a910daf`; exporter gap — FIXED, `64b4eaa`
+
+`generalizePermission` keyed on any first token, so `Bash(for f in a b)` became
+`Bash(for *)`, `Bash(if …)` became `Bash(if *)` and `Bash($EDITOR x)` became
+`Bash($EDITOR *)`, contradicting the module's own comment. Measured with
+`src/permission-match.js`: `Bash(for *)` covers `Bash(for f in *; do rm -rf "$f"; done)`, and
+`processAllowList` then pruned every other exact loop as covered. Bash entries that open with a
+reserved word, an expansion, a subshell or group, a glob in the command name, an
+assignment-only line, or an expansion inside an env prefix now stay verbatim
+(`FOO=$(rm -rf ~) git status` used to become `Bash(-rf *)`). The keyword sets are copies of the
+classifier's, not imports, because `src/fixed-point-cache.js` stamps only `permissions.js` and
+`permission-match.js`; an import would let a classifier edit change the pass's output while
+the cache kept answering "already a fixed point". A drift test holds the copies in step.
+Live-list impact on this box: none — old and new output byte-identical.
+
+The Codex export refusal table missed 27 of the learner's 43 wrapper roots, so a reviewed bare
+`["node"]` or `["xargs"]` rendered (99 spellings with `.exe`/`.cmd`). It is now the union of
+its own list and the learner's. A union is right for refusal specifically: refusing more is the
+safe direction, and the import can never shrink the exporter's own extras. Side effect,
+intended: reviewed multi-token runner rules on the Claude side (`Bash(node --version *)`) are
+now refused at any depth, as `Bash(just --version *)` already was.
+
+### Every other open entry
+
+| Entry | Disposition | Evidence |
+|---|---|---|
+| Tracker 1, seven surviving mutants | **REFUTED for five, FIXED for two, plus an eighth found and FIXED** | Five were killed by `590df24` (2026-09-24). `COVER_KEY_CACHE_LIMIT` and the non-string passthrough are now pinned (`cb8dc6d`; the passthrough comment's "stale memo" rationale was also wrong — `ruleMatches` refuses every non-string). The third `lockedRetries` reset, after the lock, was a survivor nobody listed (`b9c5a40`). |
+| Tracker 2, option keys with zero suppliers | **`managedPolicyPath` CLOSED-VERIFIED**: three runtime-script suppliers since `63cb99e` | The other four keys were still open when this table was written. |
+| `precedence` returned, never read | **FIXED**, `da9b08a` | A keys test pins the verdict shape. |
+| `CODEX_BUNDLE_CACHE` export and its stale citation | **FIXED**, `acc9f79` | Export removed with its `PENDING_REMOVAL` entry; the constant and its default-argument use stay. |
+| Case-mismatched rule target on Windows | **FIXED**, `dfc04a2` | Wider than recorded: reachable from shipped code, because `readdir` returns the on-disk name and the target basename is hard-coded lowercase. One win32 `key()` now drives the target check, dedupe and substitution. |
+| Packaging gate reports but does not quarantine | **FIXED**, `c22ff68` | `gateOrQuarantine` removes the rejected VSIX and its stamp and rethrows the gate's own error. |
+| `warnedOnce` survives a same-realm re-activate | **FIXED**, `4eb25fe` | Cleared in `activate()`; the module-state inventory below was re-counted the same day. |
+| Cosmetic: `swapped` in the contract test | **FIXED**, `5d67373` | |
+| `explicit: true` legacy cleanup has no UI entry | **ACCEPTED-RECORDED** | By design: `test/dashboard-view.test.js` pins that the retired ids regain no dashboard route, and an existing user keybinding still reaches them. |
+| Project-local card reports on a path it did not watch | **FIXED**, `770c62c` | One shared `localRoots()`; an untrusted window lists its files but shows no dry run; the payload names every path. |
+| …recursive discovery of nested `settings.local.json` | **DECLINED** | It would promote approvals granted inside nested clones into user scope from a parent window — the trust concern the drain gate exists for — and the CLI hook already drains each session's own cwd. |
+| `liveChildren` and `liveTransfers` are parallel sets | **ACCEPTED-RECORDED** | Kept separate because the kill verbs differ. Revisit trigger: a third kind of in-flight job. |
+| Three roots that fit neither table | **FIXED**, `edb59ed` | `just`, `make`, `hyperfine` and `duckdb` are shell wrappers in the learner, each with a dated citation of the tool's own docs, and refused as bare Codex prefixes. |
+| `1..6` emits a live `PowerShell(1..6 *)` | **FIXED**, `3ebbf04` | A leading `<int>..` in PowerShell is `missing-command-root` + `script-syntax`; `7z` and Bash are unaffected. |
+| 14% of stored approvals can never be wildcarded | **FIXED**, `0ecd9b0` | Read-only `deadShellApprovals` plus a Saved-permissions line and a filtered picker; nothing is removed automatically. `shell-structure` alone is excluded: it fires for path executables, which do match again (69 false positives measured). This box: 68 of 137 exact shell approvals (12.1% of 562). |
+| The returned-object dead-code rule | **DECLINED-MEASURED** | Re-measured 2026-09-27 at one finding, with five false-positive classes and a real-AST requirement that would cost the repo its first dependency. |
+| Cancelling the model download mid-redirect | **REFUTED** (2026-09-27, unchanged) | |
+| npm CLI publishing | **Owner decision 2026-10-13**, see "Deferred by the maintainer" | |
+| Stale screenshots | **Owner decision re-affirmed 2026-10-13**, see "Deferred by the maintainer" | |
+
+---
+
 ## Further Codex outcome closures (2026-09-28, unreleased)
 
 The final combined Stage C has 52 verified files, aggregate
@@ -372,24 +537,78 @@ process-group kill (`taskkill /T` on Windows) is what would make this certain.
 
 ### Module state that still survives deactivate
 
-Re-measured 2026-09-10: 28 module-level mutables, **9 reset** by `deactivate()`,
-19 surviving. The five that held real memory are now dropped — `dashboard` and
-`memoryLint` each retained the whole `ExtensionContext`, and
-`autoLearnManager`/`autoLearnManagerKey`/`autoLearnCardCache` held parsed history
-state, the largest thing this extension builds.
+**Re-counted 2026-10-13. The 2026-09-10 count below it is kept for the record and
+is superseded.** Method, so the next count can be compared like for like: every
+column-0 `let` in `vscode-extension/extension.js`, plus every module-scope `const`
+holding a `Set` or `Map`; then, for each name, every assignment, increment,
+`.clear()`, `clearTimeout`/`clearInterval`, or call to a helper that clears it,
+inside the bodies of `activate()` and `deactivate()`. A module-scope `const`
+holding a stateless object (`settingsWriter`) is not counted.
 
-What remains is inert by inspection: eleven timer handles (`debounceTimer`,
-`recallSyncTimer`, `memBounce`, `gatesBounce`, `autoLearnBounce`, `autoLearnTimer`,
-`policyBounce`, `localDrainBounce`, `dashboardBounce`) which are all cleared above
-— holding a dead handle costs nothing — plus scalars (`lockedRetries`,
-`localDrainRetries`, `localDrainAt`, `recallRebuildAt`, `lastRun`,
-`autoLearnLastError`, `autoLearnFailureCount`, `autoLearnNextRetryAt`) and two
-disposed objects (`statusBar`, `policyLock`).
+**38 module-level mutables**: 33 `let` bindings (`let debounceTimer` through
+`let activationGeneration`, plus `let extensionVersionMemo` further down) and 5
+containers (`liveChildren`, `warnedOnce`, `liveTransfers`, and the two watcher
+Maps `memoryCardWatchers` and `gatesCorpusWatchers`). Against `deactivate()`:
 
-Two of the scalars have a real if minor effect across a same-realm re-activate:
-`autoLearnNextRetryAt` carries a backoff over, and `autoLearnFailureCount` carries
-the count that computes it. Not worth a change on its own; worth doing next time
-this file is open.
+- **13 `let` bindings assigned**: `outputChannel` (disposed first), `dashboard`,
+  `memoryLint`, `autoLearnManager`, `autoLearnManagerKey`, `autoLearnCardCache`,
+  `codexFeatureUi`, `codexMemoryLint`, `codexMemoryGatesUi`, `codexMemoryReport`,
+  `deactivated` (set to `true`), and, only when no re-activate happened during the
+  awaited drain, `autoLearnWorkerRunner` and `autoLearnBusy`.
+- **2 containers emptied** by helpers it calls, after killing or destroying what
+  they held: `liveChildren` by `killLiveChildren()`, `liveTransfers` by
+  `abortLiveTransfers()`.
+- **9 timer handles cleared, not nulled**: `debounceTimer`, `recallSyncTimer`,
+  `memBounce`, `gatesBounce`, `autoLearnBounce`, `autoLearnTimer` (an interval),
+  `policyBounce`, `localDrainBounce`, `dashboardBounce`. Holding a dead handle costs
+  nothing. The 2026-09-10 text said "eleven timer handles" and listed these nine;
+  nine is the count.
+- **2 watcher Maps emptied by the host, not by `deactivate()`**: `activate()`
+  registers `disposeMemoryWatchers()` as a context subscription, so they empty when
+  VS Code disposes the subscriptions after `deactivate()` resolves.
+- **12 untouched**: `policyLock`, `lockedRetries`, `lastRun`, `recallRebuildAt`,
+  `autoLearnLastError`, `autoLearnFailureCount`, `autoLearnNextRetryAt`,
+  `localDrainRetries`, `localDrainAt`, `activationGeneration`,
+  `extensionVersionMemo`, `warnedOnce`.
+
+`activate()` resets five: `deactivated = false`, `activationGeneration += 1`,
+`autoLearnBusy = false`, `autoLearnWorkerRunner = null` and, since 2026-10-13,
+`warnedOnce.clear()`. It also repopulates `dashboard`, `memoryLint`,
+`codexFeatureUi`, `codexMemoryGatesUi`, `codexMemoryLint` and `codexMemoryReport`,
+and re-arms `recallSyncTimer`.
+
+(`activationGeneration` is bumped, never reset, by design: it is the counter
+`deactivate()` compares against after its drain.) That leaves **10 names that cross
+a same-realm re-activate with neither function touching them**, each inert or
+minor. `extensionVersionMemo` memoizes this module's own `package.json`, which
+cannot change under it. `policyLock` holds a lock path and closures and no OS
+handle between calls; the 2026-09-10 text called it a "disposed object", but
+nothing disposes it and nothing needs to. `statusBar`, the other "disposed object"
+named then, is no longer a module binding. The other eight are scalars: the retry
+budgets `lockedRetries` and `localDrainRetries`, the timestamps `lastRun`,
+`localDrainAt` and `recallRebuildAt`, and the Auto Learn failure fields
+`autoLearnLastError`, `autoLearnFailureCount` and `autoLearnNextRetryAt`.
+
+`warnedOnce` is the one with a visible effect, and it is not in the 2026-09-10 list
+because it did not exist until 2026-09-24. warnOnce's comment promises "once per
+distinct message, per activation", and nothing cleared the Set, so after a
+re-activate (an extension disable/enable, or an upgrade) a warning the previous
+activation had given was never repeated. Cleared with the other resets at the top
+of `activate()` 2026-10-13, and pinned by "a same-realm re-activate repeats a
+once-per-activation warning" in test/extension-lifecycle-async.test.js, which fails
+with the clear removed (1 warning across two activations, not 2).
+
+Still true 2026-10-13: two of the scalars have a real if minor effect across a
+same-realm re-activate. `autoLearnNextRetryAt` carries a backoff over, and
+`autoLearnFailureCount` carries the count that computes it. Not worth a change on
+its own; worth doing next time this file is open.
+
+Superseded 2026-09-10 count, as written then: 28 module-level mutables, **9 reset**
+by `deactivate()`, 19 surviving. The five that held real memory were dropped then
+and still are: `dashboard` and `memoryLint` each retained the whole
+`ExtensionContext`, and `autoLearnManager`/`autoLearnManagerKey`/
+`autoLearnCardCache` held parsed history state, the largest thing this extension
+builds.
 
 ### Non-interactive runs refuse every output redirection
 
@@ -577,6 +796,31 @@ the generated mirror `vscode-extension/src/`, not the root path the version
 segment stats.
 
 ## Deferred by the maintainer
+
+### The CLI ships inside the extension only — decided 2026-10-13
+
+The npm name is reserved (`ai-acolyte@0.0.1`, a placeholder, 2026-09-25) and the backlog
+held the packaging work behind one unmade decision: does `wildcard-perms` ship standalone? **No,
+for now: the CLI ships only inside the extension and the repository checkout.** The root
+manifest stays `private: true` (pinned by `test/installers.test.js`) and keeps the name
+`permission-wildcarding`, no `bin`, no `files` list and no publish workflow. What a reversal
+would need is recorded where it was worked out and stays true: `docs/acolyte-rename-migration.md`
+"Phase 3, the CLI name" (an `acolyte` name with `wildcard-perms` kept as a forwarding shim,
+because every installed hook records the old command string), the decision that a published
+build disables the CLI drain entirely (strangers clone untrusted code), Trusted Publishing over
+OIDC rather than a token (the account's 2FA is a security key, so CI has no OTP), and a separate
+publish job on Node ≥ 22.14 because the test and release jobs pin Node 20 on purpose. Publishing
+itself cannot run from an agent tool call (`EOTP`, no TTY for the browser approval).
+
+### The README screenshots stay as they are until a re-capture — re-affirmed 2026-10-13
+
+Unchanged from 2026-09-27: `img/01-wildcarding.png` shows a `v1.4.13` badge, every count dates
+from 2026-09-16, and three images carry legible local paths. Re-capture is mechanically possible
+now — `scripts/vscode-acceptance/renderer.js` already calls `Page.captureScreenshot`, and its
+`inspectDashboardDocument` computes the element rectangles a per-card `clip` would need — but
+it needs a showcase fixture (the acceptance fixtures are test states, e.g. an empty allow list),
+a neutral `TEMP`/`TMP` (this box's temp path carries the username), and a capture after the
+version bump. The privacy gate is text-only and will never check a PNG.
 
 ### The 13 blanket wrapper grants in the starter pack
 
@@ -948,7 +1192,7 @@ Unrebased whole-object writers still outstanding:
 | `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
 | `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1933-1935`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
 | `change.before.content` at `src/auto-learn-manager.js:1877` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1873`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2013` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2853` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:266` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:205` read → `:266` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`

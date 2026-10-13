@@ -761,8 +761,11 @@ function codexTool(options, shell) {
     // inherit the host's PowerShell/Bash parser merely because they ran there.
     return null;
   }
+  // `tool` is the only override; test/codex-history-shell.test.js pins Bash on
+  // win32 through it. A `defaultTool` leg used to follow, fed by two
+  // scanHistoryFiles forwards that nothing upstream ever set -- no manager, CLI,
+  // script or test supplier (tree-wide grep, 2026-10-13) -- so all three went.
   if (SHELL_TOOLS.has(options.tool)) return options.tool;
-  if (SHELL_TOOLS.has(options.defaultTool)) return options.defaultTool;
   return (options.platform || process.platform) === 'win32' ? 'PowerShell' : 'Bash';
 }
 
@@ -1316,26 +1319,71 @@ function continuedFingerprint(prior, size) {
 // look exactly like a transcript with no session_meta. FINGERPRINT_BYTES is
 // 4096, so the head read `safeContinuation` already did cannot be reused
 // either. Capped, and a cap miss simply yields no seed.
+//
+// EVERY CONSECUTIVE HEAD `session_meta`, NOT JUST THE FIRST. MEASURED
+// 2026-10-13: a FORKED rollout opens with two of them -- line 1 is the fork
+// (`id` = the fork, `forked_from_id` = the parent), line 2 is the parent's own
+// record -- and three of the four archived rollouts on the development box have
+// that shape, a 46 KB head against 22 KB for an ordinary one. The in-order
+// parse applies both, so every call after the head is filed under the PARENT;
+// a first-line-only seed filed an append slice's calls under the FORK. A call
+// first seen in an append slice therefore got a second identity the next time
+// the file was read whole -- which archiving forces, because a moved file has a
+// new path and so no cursor -- and the second identity was counted again
+// toward the `counts.success` that gates auto-safe apply.
+//
+// So the seed is the in-order state AFTER the head: records are applied in
+// order up to the first record that is not `session_meta`, and blank or
+// unparseable lines are skipped exactly as `parseJsonlRecords` skips them.
+// Identity is deliberately NOT re-keyed to the thread id instead: that would
+// move every observation hash already recorded and re-count the whole corpus.
 const SEED_CHUNK_BYTES = 64 * 1024;
 const SEED_MAX_BYTES = 1024 * 1024;
 
+// 'skip' for a line the in-order parse would never hand to its callback, the
+// record itself for a head `session_meta`, and null for the first record past
+// the head.
+function headRecord(line) {
+  const text = line.toString('utf8').replace(/\r$/, '');
+  if (!text.trim()) return 'skip';
+  let record;
+  try { record = JSON.parse(text); } catch { return 'skip'; }
+  if (!isObject(record)) return 'skip';
+  return record.type === 'session_meta' ? record : null;
+}
+
 function codexHeadSeed(file) {
   try {
-    const chunks = [];
+    const seed = {};
+    let applied = 0;
+    let carry = Buffer.alloc(0);
     let total = 0;
-    let newline = -1;
-    while (newline === -1 && total < SEED_MAX_BYTES) {
+    let ended = false;
+    let eof = false;
+    while (!ended && total < SEED_MAX_BYTES) {
       const chunk = readRange(file, total, Math.min(SEED_CHUNK_BYTES, SEED_MAX_BYTES - total));
-      if (!chunk.length) break;
-      newline = chunk.indexOf(10);
-      chunks.push(newline === -1 ? chunk : chunk.subarray(0, newline));
+      if (!chunk.length) { eof = true; break; }
       total += chunk.length;
+      carry = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      let start = 0;
+      for (let newline = carry.indexOf(10); newline !== -1; newline = carry.indexOf(10, start)) {
+        const verdict = headRecord(carry.subarray(start, newline));
+        start = newline + 1;
+        if (verdict === 'skip') continue;
+        if (verdict === null) { ended = true; break; }
+        applyCodexSessionState(verdict, seed);
+        applied += 1;
+      }
+      carry = ended ? Buffer.alloc(0) : carry.subarray(start);
     }
-    if (newline === -1) return null;
-    const line = Buffer.concat(chunks).toString('utf8').replace(/\r$/, '');
-    const record = JSON.parse(line);
-    if (!isObject(record)) return null;
-    const seed = applyCodexSessionState(record, {});
+    // A last line with no newline is still a record to the in-order parse, but
+    // only at end of file. At the cap it is a record cut in half, and a cut
+    // record is not parsed by anyone.
+    if (!ended && eof && carry.length) {
+      const verdict = headRecord(carry);
+      if (verdict && verdict !== 'skip') { applyCodexSessionState(verdict, seed); applied += 1; }
+    }
+    if (!applied) return null;
     return seed.session === undefined && seed.cwd === undefined ? null : seed;
   } catch { return null; }
 }
@@ -1475,7 +1523,10 @@ function appendedResultIds(source, buffer) {
 // Safe appends read a bounded overlap plus new bytes. Stable observation ids let
 // callers upsert a call when its result arrives on the other side of a cursor.
 function scanHistoryFiles(options = {}) {
-  const priorCursors = options.cursors || options.priorCursors || {};
+  // One spelling. `|| options.priorCursors` was removed 2026-10-13: nothing ever
+  // supplied it, and the manager always passes `cursors` (`{}` is truthy). The
+  // `{}` stays for the scripts and tests that call this with no cursors at all.
+  const priorCursors = options.cursors || {};
   const overlapBytes = Number.isFinite(options.overlapBytes)
     ? Math.max(0, Math.floor(options.overlapBytes))
     : DEFAULT_OVERLAP_BYTES;
@@ -1671,7 +1722,7 @@ function scanHistoryFiles(options = {}) {
         const seed = entry.source === 'codex' && start > 0
           ? codexHeadSeed(file) : null;
         let parsed = parseHistorySlice(entry.source, buffer, {
-          file, baseOffset: start, platform: options.platform, defaultTool: options.defaultTool,
+          file, baseOffset: start, platform: options.platform,
           probeMatcher: options.probeMatcher,
           session: seed && seed.session, cwd: seed && seed.cwd,
         });
@@ -1713,7 +1764,7 @@ function scanHistoryFiles(options = {}) {
                 // identity, because session is part of identityParts.
                 parsed = parseHistorySlice(entry.source, buffer, {
                   file, baseOffset: start, platform: options.platform,
-                  defaultTool: options.defaultTool, probeMatcher: options.probeMatcher,
+                  probeMatcher: options.probeMatcher,
                   ...(start > 0 ? { session: seed && seed.session, cwd: seed && seed.cwd } : {}),
                 });
                 parsedCalls = new Set(parsed.map((observation) => observation.callId).filter(Boolean));
@@ -1793,51 +1844,145 @@ function scanHistoryFiles(options = {}) {
 // auto-learn-manager.js, and it is here for the same reason: the numbers a
 // healthy scan reports and the numbers a blind one reports are identical.
 //
-// TWO TIERS, AND THE RESULT SAYS WHICH ONE RAN.
+// THREE TIERS, AND THE RESULT SAYS WHICH ONE RAN.
 //
-//   exact   — `node:sqlite` opened the store read-only and listed the thread ids
-//             it knows about. A thread id in the store with no rollout file on
-//             disk is proof the store outran the directory.
-//   partial — the store could not be opened (no `node:sqlite` before Node 22,
-//             a locked or corrupt database, a permission error). Falls back to
-//             `session_index.jsonl`, which names thread ids in plain JSONL, and
-//             to the presence of applied entries in `rollout-migrations/`.
+//   exact        `node:sqlite` opened every thread-history store read-only and
+//                listed the thread ids it knows about. A thread id in the store
+//                with no rollout file on disk is proof the store outran the
+//                directories.
+//   unavailable  the runtime cannot host the sqlite probe at all. MEASURED
+//                2026-10-13: VS Code 1.141.1 (Node 24.21.0) loads it; hosts
+//                within the ^1.80 engine floor may not, so the `unavailable`
+//                tier stays. `session_index.jsonl`, which names thread ids in
+//                plain JSONL, is still compared, so `stale` stays authoritative.
+//   partial      the store could not be read for a reason of the DATA: a locked
+//                or corrupt database, a permission error, a table this reader
+//                does not know. Falls back to the session index the same way.
 //
 // A partial inspection that finds nothing says `inspected: 'partial'` and names
 // why. It never reports `healthy`, because it cannot: the evidence it needs was
 // unavailable, and a control that can run degraded has to say so on every run.
+//
+// WHERE THE TRANSCRIPTS ACTUALLY LIVE. MEASURED 2026-10-13 on the development
+// box: archiving a thread in Codex MOVES its rollout from
+// `sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` to a flat
+// `archived_sessions/rollout-<ts>-<uuid>.jsonl`, and both the history store and
+// the session index go on naming it. A walk of `sessions/` alone therefore read
+// four archived threads as orphans, and the dashboard said "scan degraded --
+// Codex history store has moved" on every scan for good, over a store that had
+// moved nothing. So the walk covers every configured root plus
+// `archived_sessions/`, and `state_<n>.sqlite` -- Codex's own thread table,
+// `threads(id, rollout_path, archived, ...)`, which marked exactly those four
+// `archived = 1` with a `rollout_path` in the archive -- CLASSIFIES a thread
+// that is still missing after the walk. It never ADDS one: a row can exist
+// before its transcript does, so a thread only that table knows proves nothing.
+//
+// WHAT IS DIVERGENCE (a reason, so `stale`) AND WHAT IS ONLY CONTEXT (a note).
+//
+//   orphans          a known thread with no transcript anywhere the walk looked
+//                    and no state row explaining where it went.
+//   relocated        a known thread whose state row names a transcript that
+//                    exists OUTSIDE the scanned folders: Codex writes where the
+//                    reader does not read.
+//   projectionAhead  the store's cursor into a transcript is past that file's
+//                    end, so the store has read bytes the transcript no longer
+//                    holds. For 13 of 13 threads on the box the cursor equalled
+//                    the file size exactly (2026-10-13).
+//   emptyRollouts    no transcripts anywhere beside a store that knows threads.
+//
+// Notes, never reasons: entries in `rollout-migrations/` (a directory no Codex
+// build measured here has ever created) and rows in `rollout_migration_state`
+// (the box carries one, `legacy_to_paginated_v1`, over a store whose cursors
+// all match their files). A RECORDED migration is not divergence -- the four
+// checks above are what decide whether one moved anything. Also notes: archived
+// transcripts in a folder that is not a configured root, an archived thread
+// whose transcript was deleted, and a state database that would not read.
 
 const CODEX_THREAD_STORE = /^thread_history[^/\\]*\.sqlite$/i;
+const CODEX_STATE_STORE = /^state_(\d+)\.sqlite$/i;
 const THREAD_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const MIGRATION_ID = /^[\w.-]{1,96}$/;
 
-function rolloutThreadIds(sessionsDir) {
-  const ids = new Set();
-  let files = 0;
-  const pending = [sessionsDir];
-  const seen = new Set();
-  while (pending.length) {
-    const dir = pending.pop();
-    let real;
-    try { real = fs.realpathSync(dir); } catch { continue; }
-    if (seen.has(real)) continue;
-    seen.add(real);
-    let entries = [];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) { pending.push(full); continue; }
-      if (!entry.name.toLowerCase().endsWith('.jsonl')) continue;
-      files += 1;
-      const match = THREAD_ID.exec(entry.name);
-      if (match) ids.add(match[1].toLowerCase());
-    }
-  }
-  return { ids, files };
+// Spelling-insensitive on Windows, where `C:\Users\X\.codex` and
+// `c:\users\x\.codex\` are one folder and counting it twice is how a root gets
+// walked twice.
+function dirKey(dir) {
+  const resolved = path.resolve(String(dir));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-// Read-only, best effort, and never allowed to throw into a scan. `node:sqlite`
-// is unavailable on Node 20 and flagged on Node 22, so the require itself is the
-// first thing that can fail.
+// `.native` first, for the reason `findJsonlFiles` gives: it expands an 8.3
+// short component the JS implementation keeps, and the same folder reached two
+// ways must get one key. The JS fallback is there because a folder this cannot
+// canonicalise is skipped, and a skipped folder is a false orphan for every
+// thread in it.
+function canonicalDir(dir) {
+  let real;
+  try { real = fs.realpathSync.native(dir); }
+  catch {
+    try { real = fs.realpathSync(dir); } catch { return null; }
+  }
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
+// Every rollout in `dirs`, walked IN ORDER -- `sessions/` before the archive --
+// with ONE realpath set shared across all of them, so a folder reached twice (a
+// junction, a root nested inside another) is counted once. `byId` keeps every
+// path a thread id was found at, because the projection check needs the file's
+// size and a thread mid-move can briefly be seen in both places.
+function rolloutIndex(dirs) {
+  const ids = new Set();
+  const byId = new Map();
+  const perDir = [];
+  let files = 0;
+  const seen = new Set();
+  for (const root of dirs) {
+    let count = 0;
+    const pending = [root];
+    while (pending.length) {
+      const dir = pending.pop();
+      const real = canonicalDir(dir);
+      if (!real || seen.has(real)) continue;
+      seen.add(real);
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { pending.push(full); continue; }
+        if (!entry.name.toLowerCase().endsWith('.jsonl')) continue;
+        files += 1;
+        count += 1;
+        const match = THREAD_ID.exec(entry.name);
+        if (!match) continue;
+        const id = match[1].toLowerCase();
+        ids.add(id);
+        if (!byId.has(id)) byId.set(id, []);
+        byId.get(id).push(full);
+      }
+    }
+    perDir.push({ dir: root, files: count });
+  }
+  return { ids, files, byId, perDir };
+}
+
+// The union of two walks of the same folders. Used only for the re-walk below,
+// so a file seen in either place is seen, and a count is the larger of the two.
+function mergeRolloutIndex(first, second) {
+  const byId = new Map(first.byId);
+  for (const [id, paths] of second.byId) byId.set(id, [...new Set([...(byId.get(id) || []), ...paths])]);
+  return {
+    ids: new Set([...first.ids, ...second.ids]),
+    files: Math.max(first.files, second.files),
+    byId,
+    perDir: second.perDir.map((entry, index) => ({
+      dir: entry.dir, files: Math.max(entry.files, first.perDir[index]?.files || 0),
+    })),
+  };
+}
+
+// The require, the open, the read-only flag and the close, shared by the two
+// readers below so they cannot drift apart. Read-only, best effort, and never
+// allowed to throw into a scan.
 //
 // TWO FAILURE CLASSES, AND THEY ARE NOT THE SAME FINDING. `unavailable: true`
 // means the RUNTIME cannot host this probe at all — the module is absent, or it
@@ -1847,13 +1992,22 @@ function rolloutThreadIds(sessionsDir) {
 // knows, a query threw — is a property of the DATA, it can change between scans,
 // and it is worth a degraded verdict.
 //
-// The distinction is load-bearing rather than cosmetic: no shipping VS Code
-// carries `node:sqlite`, so collapsing the two made the extension host report a
-// degraded scan on 100% of real installs, permanently, with nothing the reader
-// could do about it. A signal that is always on carries no information and it
-// crowded out the one the row exists to show. See `codexHistoryStoreState`
-// below for what each class does to `inspected`.
-function readThreadStoreIds(storePath) {
+// The distinction is load-bearing rather than cosmetic. When it was drawn, the
+// extension hosts in use did not carry `node:sqlite`, and collapsing the two made
+// every one of them report a degraded scan permanently, with nothing the reader
+// could do about it. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within the
+// ^1.80 engine floor may not, so the `unavailable` tier stays (measured
+// 2026-10-13).
+//
+// `timeout` is SQLite's busy timeout. Codex writes these databases while it
+// runs, and a read that meets a write lock with no timeout fails at once with
+// SQLITE_BUSY and degrades the verdict for nothing. Node added the option in
+// v24.0.0 / v22.16.0 (the node:sqlite docs' history table) and validates it
+// there: on 24.19.0 a string throws ERR_INVALID_ARG_TYPE and 250 reads back from
+// `PRAGMA busy_timeout`. The constructor reads its options by name and ignores a
+// key it does not know (also measured on 24.19.0), so an older host simply runs
+// without one.
+function withReadOnlyDatabase(file, read) {
   let sqlite;
   try { sqlite = require('node:sqlite'); }
   catch {
@@ -1864,11 +2018,27 @@ function readThreadStoreIds(storePath) {
   }
   let db = null;
   try {
-    db = new sqlite.DatabaseSync(storePath, { readOnly: true });
-    const ids = new Set();
+    db = new sqlite.DatabaseSync(file, { readOnly: true, timeout: 250 });
     const tables = new Set(db.prepare(
       "select name from sqlite_master where type='table'",
     ).all().map((row) => String(row.name)));
+    const columns = (table) => new Set(db.prepare(`pragma table_info("${table}")`).all()
+      .map((row) => String(row.name)));
+    return read(db, tables, columns);
+  } catch (error) {
+    return { ok: false, reason: `${path.basename(file)}: ${String(error?.message || error)}` };
+  } finally {
+    try { db?.close(); } catch { /* a close failure cannot change the verdict */ }
+  }
+}
+
+// `offsets` is the projection's cursor into each rollout. Read only where the
+// column exists, because a store this reader does not fully know must still
+// supply its thread ids rather than fail the whole comparison on a column.
+function readThreadStoreIds(storePath) {
+  return withReadOnlyDatabase(storePath, (db, tables, columns) => {
+    const ids = new Set();
+    const offsets = new Map();
     let read = 0;
     for (const [table, column] of [
       ['thread_history_projection_state', 'thread_id'],
@@ -1882,12 +2052,87 @@ function readThreadStoreIds(storePath) {
       read += 1;
     }
     if (!read) return { ok: false, reason: `${path.basename(storePath)} holds no known thread-history table` };
-    return { ok: true, ids };
-  } catch (error) {
-    return { ok: false, reason: `${path.basename(storePath)}: ${String(error?.message || error)}` };
-  } finally {
-    try { db?.close(); } catch { /* a close failure cannot change the verdict */ }
-  }
+    if (tables.has('thread_history_projection_state')
+        && columns('thread_history_projection_state').has('next_rollout_byte_offset')) {
+      for (const row of db.prepare(
+        'select thread_id as id, next_rollout_byte_offset as offset from thread_history_projection_state',
+      ).all()) {
+        const offset = Number(row.offset);
+        if (row.id && Number.isFinite(offset)) offsets.set(String(row.id).toLowerCase(), offset);
+      }
+    }
+    return { ok: true, ids, offsets };
+  });
+}
+
+// Codex's own thread table, from the HIGHEST-numbered `state_<n>.sqlite` (the
+// number is a schema generation; the box has `state_5`). Columns are checked
+// rather than assumed, because a missing optional column must cost its one
+// classification and not the read.
+//
+// `has_user_event` is deliberately NOT read. It looked like the way to tell a
+// thread that has no transcript YET from one that lost it, and MEASURED
+// 2026-10-13 it is 0 on all 13 rows on the box, including every thread that has
+// a transcript full of user turns. Classifying by it would turn every real
+// orphan into a note.
+//
+// `rollout_migration_state.migration_id` is a Codex-chosen name that ends up in
+// a persisted note, so it is held to a plain identifier and capped.
+function readCodexThreadState(statePath) {
+  return withReadOnlyDatabase(statePath, (db, tables, columns) => {
+    const threads = new Map();
+    const migrations = [];
+    let read = 0;
+    if (tables.has('threads')) {
+      const have = columns('threads');
+      if (have.has('id') && have.has('rollout_path')) {
+        const archived = have.has('archived');
+        for (const row of db.prepare(
+          `select id, rollout_path${archived ? ', archived' : ''} from threads`,
+        ).all()) {
+          if (!row.id) continue;
+          threads.set(String(row.id).toLowerCase(), {
+            rolloutPath: typeof row.rollout_path === 'string' && row.rollout_path ? row.rollout_path : null,
+            archived: archived ? Number(row.archived) === 1 : null,
+          });
+        }
+        read += 1;
+      }
+    }
+    if (tables.has('rollout_migration_state') && columns('rollout_migration_state').has('migration_id')) {
+      for (const row of db.prepare('select migration_id as id from rollout_migration_state').all()) {
+        const id = typeof row.id === 'string' ? row.id : '';
+        if (MIGRATION_ID.test(id) && !migrations.includes(id) && migrations.length < 8) migrations.push(id);
+      }
+      read += 1;
+    }
+    if (!read) return { ok: false, reason: `${path.basename(statePath)} holds no threads table this reader knows` };
+    return { ok: true, threads, migrations };
+  });
+}
+
+// `rollout_path` is written by Codex as an absolute path, and on Windows some
+// rows carry the `\\?\` extended-length prefix and some do not (both seen in one
+// table on 2026-10-13). `fs` accepts either; a containment check does not, so
+// the prefix is dropped before one.
+function plainPath(value) {
+  const text = String(value);
+  if (process.platform !== 'win32') return text;
+  if (/^\\\\\?\\UNC\\/i.test(text)) return `\\\\${text.slice(8)}`;
+  return /^\\\\\?\\/.test(text) ? text.slice(4) : text;
+}
+
+function insideAny(file, dirs) {
+  const key = dirKey(file);
+  return dirs.some((dir) => {
+    const relative = path.relative(dirKey(dir), key);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative);
+  });
+}
+
+function isFile(file) {
+  try { return fs.statSync(file).isFile(); } catch { return false; }
 }
 
 // `malformed` used to be counted here and returned, and no caller in the repo
@@ -1897,8 +2142,10 @@ function readThreadStoreIds(storePath) {
 // every ordinary session index that carries a non-thread record.
 function sessionIndexIds(indexPath) {
   let text;
+  // The CODE, not the message: an fs message carries the full path, and this
+  // reason is persisted in a note, where only directory and file NAMES may go.
   try { text = fs.readFileSync(indexPath, 'utf8'); }
-  catch (error) { return error?.code === 'ENOENT' ? { ok: true, ids: new Set() } : { ok: false, reason: String(error?.message || error) }; }
+  catch (error) { return error?.code === 'ENOENT' ? { ok: true, ids: new Set() } : { ok: false, reason: String(error?.code || 'error') }; }
   const ids = new Set();
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -1911,30 +2158,63 @@ function sessionIndexIds(indexPath) {
   return { ok: true, ids };
 }
 
-// `storeFiles` (the array of paths) and `migrations` (the count) used to be
-// returned too. Both are read INSIDE this function and by nobody outside it, in
-// production or in the tests, so they are gone from the shape. `rolloutFiles`,
-// `rolloutThreads` and `storeThreads` are asserted by test/codex-history-store
-// and stay -- and the three early returns below now carry the same keys as the
-// main one, which they did not: a caller that destructured `storeThreads` got a
-// number on the normal path and `undefined` on every short-circuit, and nothing
-// anywhere noticed because nothing read it on either path.
-const EMPTY_STORE_STATE = { rolloutFiles: 0, rolloutThreads: 0, storeThreads: 0, orphans: [] };
+// Every key the main return carries, built fresh on every call. This used to be
+// one shared constant spread into each early return, and a spread copies the
+// REFERENCE to an array: a caller that pushed onto one result's `orphans` pushed
+// onto every later short-circuit's. `rolloutFiles`, `rolloutThreads` and
+// `storeThreads` are asserted by test/codex-history-store; the rest is the shape
+// the manager sums and the dashboard draws.
+function emptyStoreState() {
+  return {
+    rolloutFiles: 0, rolloutThreads: 0, storeThreads: 0, archivedFiles: 0,
+    orphans: [], orphanCount: 0, relocated: [], projectionAhead: [], migrations: [],
+    findings: { orphans: 0, relocated: 0, projectionAhead: 0, emptyRollouts: 0 },
+  };
+}
+
+// Directory NAMES, never paths. Every reason and note this function writes is
+// persisted in the Auto Learn state file and drawn in the panel, and a full path
+// is a user path.
+function dirNames(dirs) {
+  return [...new Set(dirs.map((dir) => `${path.basename(path.resolve(dir))}/`))].join(', ');
+}
+
 function codexHistoryStoreState(options = {}) {
   const home = options.home ? String(options.home) : null;
   const codexHome = options.codexHome ? String(options.codexHome)
     : home ? path.join(home, '.codex') : null;
-  const sessionsDir = options.sessionsDir ? String(options.sessionsDir)
-    : codexHome ? path.join(codexHome, 'sessions') : null;
+  // `sessionsDirs` is what the manager passes -- every configured root under one
+  // Codex home -- and `sessionsDir` is the one-root spelling older callers use.
+  // With neither, the default is the pair Codex itself writes to.
+  const listed = Array.isArray(options.sessionsDirs)
+    ? options.sessionsDirs.filter((dir) => typeof dir === 'string' && dir) : [];
+  const scannedDirs = listed.length ? listed
+    : options.sessionsDir ? [String(options.sessionsDir)]
+      : codexHome ? [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')] : [];
   const reasons = [];
   const notes = [];
-  if (!codexHome || !sessionsDir) {
+  if (!codexHome || !scannedDirs.length) {
     return {
       present: false, stale: false, inspected: 'skipped', reasons: [],
       notes: ['No Codex home was supplied, so no history-store check ran.'],
-      ...EMPTY_STORE_STATE,
+      ...emptyStoreState(),
     };
   }
+  // The archive is always ACCOUNTED FOR, scanned or not: a thread whose
+  // transcript sits there is not an orphan even when nothing reads it, and a
+  // note says so. `sessions/` is deliberately NOT added the same way. A caller
+  // that names its roots has said which ones are live, and quietly walking a
+  // folder it left out would vouch for transcripts the reader never sees.
+  const archiveDir = path.join(codexHome, 'archived_sessions');
+  const accountedDirs = [];
+  const accountedKeys = new Set();
+  for (const dir of [...scannedDirs, archiveDir]) {
+    const key = dirKey(dir);
+    if (accountedKeys.has(key)) continue;
+    accountedKeys.add(key);
+    accountedDirs.push(dir);
+  }
+  const archiveScanned = scannedDirs.some((dir) => dirKey(dir) === dirKey(archiveDir));
 
   let entries = [];
   try { entries = fs.readdirSync(codexHome, { withFileTypes: true }); }
@@ -1943,14 +2223,14 @@ function codexHistoryStoreState(options = {}) {
       return {
         present: false, stale: false, inspected: 'exact', reasons: [],
         notes: ['No ~/.codex directory, so Codex history is not in use on this machine.'],
-        ...EMPTY_STORE_STATE,
+        ...emptyStoreState(),
       };
     }
     return {
       present: false, stale: false, inspected: 'partial',
       reasons: [],
       notes: [`The Codex home could not be listed (${error?.code || 'error'}), so staleness is unknown.`],
-      ...EMPTY_STORE_STATE,
+      ...emptyStoreState(),
     };
   }
 
@@ -1958,13 +2238,22 @@ function codexHistoryStoreState(options = {}) {
     .filter((entry) => entry.isFile() && CODEX_THREAD_STORE.test(entry.name))
     .map((entry) => path.join(codexHome, entry.name))
     .sort();
-  let migrations = 0;
+  const stateFile = entries
+    .filter((entry) => entry.isFile() && CODEX_STATE_STORE.test(entry.name))
+    .map((entry) => ({ name: entry.name, generation: Number(CODEX_STATE_STORE.exec(entry.name)[1]) }))
+    .sort((a, b) => b.generation - a.generation)
+    .map((entry) => path.join(codexHome, entry.name))[0] || null;
+  let migrationEntries = 0;
   try {
-    migrations = fs.readdirSync(path.join(codexHome, 'rollout-migrations')).length;
-  } catch { migrations = 0; }
+    migrationEntries = fs.readdirSync(path.join(codexHome, 'rollout-migrations')).length;
+  } catch { migrationEntries = 0; }
 
-  const rollouts = rolloutThreadIds(sessionsDir);
+  let rollouts = rolloutIndex(accountedDirs);
   const known = new Set();
+  // The projection's cursor into each rollout, the LARGEST any store records,
+  // because a second store file that lags the first is not evidence of a
+  // transcript losing bytes.
+  const offsets = new Map();
   // Starts exact and is DOWNGRADED by anything that could not be read. With no
   // store file present there is nothing to diverge from, and that is a real
   // exact answer rather than an absent one.
@@ -1977,15 +2266,20 @@ function codexHistoryStoreState(options = {}) {
   //                never ran and never will on this interpreter. Not a fault,
   //                not actionable, and NOT trouble -- see `scanTrouble` in
   //                vscode-extension/extension.js. The session-index half still
-  //                ran, so orphans, migrations and an emptied rollout directory
-  //                are all still detected and `stale` is still authoritative.
+  //                ran, so orphans and an emptied rollout directory are still
+  //                detected and `stale` is still authoritative.
   //   partial      it tried and failed on the DATA: the file would not open, it
   //                holds no table this reader knows, or a query threw. That can
   //                change between scans and is worth a degraded verdict.
   //
   // Collapsing `unavailable` into `partial` is the defect this ordering exists
-  // to stop: no shipping VS Code carries `node:sqlite`, so it made every real
-  // extension host report a permanently degraded scan.
+  // to stop: it made every extension host without `node:sqlite` report a
+  // permanently degraded scan. VS Code 1.141.1 (Node 24.21.0) loads it; hosts
+  // within the ^1.80 engine floor may not, so the `unavailable` tier stays
+  // (measured 2026-10-13).
+  //
+  // The thread-STATE database below never moves this. It only classifies, so
+  // failing to read it costs a classification, not the comparison.
   let inspected = 'exact';
   const downgrade = (next) => {
     const RANK = { exact: 0, unavailable: 1, partial: 2 };
@@ -2000,6 +2294,9 @@ function codexHistoryStoreState(options = {}) {
       continue;
     }
     for (const id of result.ids) known.add(id);
+    for (const [id, offset] of result.offsets) {
+      offsets.set(id, Math.max(offset, offsets.has(id) ? offsets.get(id) : offset));
+    }
   }
 
   const index = sessionIndexIds(path.join(codexHome, 'session_index.jsonl'));
@@ -2010,19 +2307,105 @@ function codexHistoryStoreState(options = {}) {
     for (const id of index.ids) known.add(id);
   }
 
-  const orphans = [...known].filter((id) => !rollouts.ids.has(id)).sort();
-  if (orphans.length) {
-    reasons.push(`${orphans.length} Codex thread(s) exist in the history store or session index ` +
-      `with no rollout file under ${sessionsDir}. The reader consumes rollout files only, so ` +
+  // A thread can move between the walk and the reads above -- archived, or
+  // unarchived back into `sessions/` -- or be created after the walk and named
+  // by a store before the reads. Each shape is an orphan for exactly one scan,
+  // and one scan is all it takes to put "scan degraded" on the row. One re-walk
+  // closes the window: anything it finds was never missing.
+  if ([...known].some((id) => !rollouts.ids.has(id))) {
+    rollouts = mergeRolloutIndex(rollouts, rolloutIndex(accountedDirs));
+  }
+
+  let threadState = null;
+  if (stateFile) {
+    const state = readCodexThreadState(stateFile);
+    if (state.ok) threadState = state;
+    else {
+      notes.push(`Codex's thread-state database could not be read (${state.reason}), so a missing ` +
+        'transcript could not be told apart from a moved or archived one.');
+    }
+  }
+
+  // CLASSIFY, NEVER ADD. Only a thread the history store or session index
+  // already knows, and the walk did not find, is looked up here.
+  const orphanIds = [];
+  const relocatedIds = [];
+  const archivedGone = [];
+  for (const id of [...known].sort()) {
+    if (rollouts.ids.has(id)) continue;
+    const row = threadState ? threadState.threads.get(id) : null;
+    const recorded = row && row.rolloutPath ? path.resolve(codexHome, plainPath(row.rolloutPath)) : null;
+    if (recorded && isFile(recorded)) {
+      // Inside a folder the walk covered, it IS accounted for -- the walk just
+      // could not recognise it by name. Outside, Codex is writing where the
+      // reader does not read, which is the whole failure this detector names.
+      if (!insideAny(recorded, accountedDirs)) relocatedIds.push(id);
+    } else if (row && row.archived === true) {
+      archivedGone.push(id);
+    } else {
+      orphanIds.push(id);
+    }
+  }
+
+  // Sizes are taken AFTER the store was read, on purpose. A transcript only
+  // grows while Codex writes it, so a cursor read earlier can only be at or
+  // behind a size read later; strictly past it means bytes the store consumed
+  // are gone from the file. A stat that fails is skipped rather than guessed.
+  const aheadIds = [];
+  for (const [id, offset] of offsets) {
+    const files = rollouts.byId.get(id);
+    if (!files) continue;
+    let size = -1;
+    for (const file of files) {
+      try { size = Math.max(size, fs.statSync(file).size); } catch { /* moved or gone since the walk */ }
+    }
+    if (size >= 0 && offset > size) aheadIds.push(id);
+  }
+  aheadIds.sort();
+
+  const archivedFiles = rollouts.perDir
+    .filter((entry) => dirKey(entry.dir) === dirKey(archiveDir))
+    .reduce((total, entry) => total + entry.files, 0);
+  const looked = dirNames(accountedDirs);
+  if (orphanIds.length) {
+    reasons.push(`${orphanIds.length} Codex thread(s) exist in the history store or session index ` +
+      `with no rollout file in ${looked}. The reader consumes rollout files only, so ` +
       'those threads are invisible to it.');
   }
-  if (migrations > 0) {
-    reasons.push(`${migrations} entr${migrations === 1 ? 'y' : 'ies'} in ${path.join(codexHome, 'rollout-migrations')}: ` +
-      'Codex has run a rollout migration, which is the mechanism that would move the source of truth.');
+  if (relocatedIds.length) {
+    reasons.push(`${relocatedIds.length} Codex thread(s) have a transcript where Codex's thread-state ` +
+      `database says it lives, outside the folders this reader scans (${dirNames(scannedDirs)}). ` +
+      'Codex is writing where the reader does not read.');
   }
-  if (storeFiles.length && rollouts.files === 0 && known.size > 0) {
-    reasons.push(`The rollout directory holds no transcripts while the history store knows of ` +
+  if (aheadIds.length) {
+    reasons.push(`${aheadIds.length} Codex thread(s) have a history-store cursor ahead of the end of ` +
+      'their rollout file: the store has read bytes the transcript no longer holds.');
+  }
+  const emptyRollouts = storeFiles.length > 0 && rollouts.files === 0 && known.size > 0;
+  if (emptyRollouts) {
+    reasons.push(`The rollout folders (${looked}) hold no transcripts while the history store knows of ` +
       `${known.size} thread(s). The reader would report a clean scan of an empty directory.`);
+  }
+
+  if (archivedGone.length) {
+    notes.push(`${archivedGone.length} archived Codex thread(s) have no transcript left on disk. Codex's ` +
+      'thread-state database marks them archived, so this reads as a deleted archive, not divergence.');
+  }
+  if (!archiveScanned && archivedFiles > 0) {
+    notes.push(`${archivedFiles} archived transcript(s) are not read because archived_sessions is not ` +
+      'a configured history root.');
+  }
+  // Was a REASON until 2026-10-13, on the theory that a migration is the
+  // mechanism that would move the source of truth. Recording one is not moving
+  // anything: the four checks above are what see a move, and they run whether
+  // or not one was recorded.
+  if (migrationEntries > 0) {
+    notes.push(`${migrationEntries} entr${migrationEntries === 1 ? 'y' : 'ies'} in rollout-migrations/: ` +
+      'Codex has recorded a rollout migration. That alone is not divergence; the transcript checks decide.');
+  }
+  if (threadState && threadState.migrations.length) {
+    notes.push(`Codex has recorded rollout migration(s) (${threadState.migrations.join(', ')}); ` +
+      'that alone is not divergence.');
   }
 
   if (inspected === 'partial' && !reasons.length) {
@@ -2045,7 +2428,16 @@ function codexHistoryStoreState(options = {}) {
     rolloutFiles: rollouts.files,
     rolloutThreads: rollouts.ids.size,
     storeThreads: known.size,
-    orphans: orphans.slice(0, 20),
+    archivedFiles,
+    orphans: orphanIds.slice(0, 20),
+    orphanCount: orphanIds.length,
+    relocated: relocatedIds.slice(0, 20),
+    projectionAhead: aheadIds.slice(0, 20),
+    migrations: threadState ? threadState.migrations.slice() : [],
+    findings: {
+      orphans: orphanIds.length, relocated: relocatedIds.length,
+      projectionAhead: aheadIds.length, emptyRollouts: emptyRollouts ? 1 : 0,
+    },
   };
 }
 

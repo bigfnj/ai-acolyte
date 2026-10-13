@@ -7,18 +7,62 @@ SETTINGS="$HOME/.claude/settings.json"
 
 chmod +x "$HOOK_CMD"
 
+# ── Windows under Git Bash, MSYS2 or Cygwin ───────────────────────────────────
+#
+# The node this script runs there is the native Windows build, and it cannot
+# open a POSIX spelling such as /c/repo, or /tmp/x (Git Bash mounts %TEMP% at
+# /tmp). Git Bash quietly converts a path passed as a WHOLE argument or
+# environment variable, which is why HOOK_CMD below reached node intact, but
+# not one embedded inside code. Found 2026-10-13: the starter-pack count ran
+# `require('/c/.../starter-pack.json')`, threw "Cannot find module" with a full
+# stack, and printed "Merges  curated permissions" with no number. The install
+# went on, because a failing $(...) inside an echo does not trip `set -e`.
+# Cygwin leaves arguments alone even when they are whole paths.
+#
+# So the spelling node is given is computed once, here, with cygpath, which
+# Git for Windows, MSYS2 and Cygwin all ship: -m for C:/forward/slashes, -l for
+# the long form of any 8.3 component. Without cygpath, or anywhere else, it
+# stays the POSIX path, which is what Linux and macOS need.
+#
+# The hook command changes there too. On Linux and macOS it is the bare path:
+# the shebang plus the chmod above make the file executable. Windows has no
+# shebang support, and an extensionless file has no association, so a bare
+# path makes Windows ask "How do you want to open this file?" on every hook
+# fire. That is why install.ps1 registers `node "<C:/forward/slash path>"`.
+# Found 2026-10-13: this script, run from Git Bash, registered the bare
+# C:/.../bin/wildcard-perms instead, because Git Bash had converted HOOK_CMD on
+# its way into node. HOOK_VIA_NODE=1 makes the module register `node "$HOOK_CMD"`,
+# built from the same C:/ path it compares with, so on Windows both installers
+# write the same command. A bare registration of THIS checkout is rewritten
+# into that form, not left as "already registered".
+NODE_DIR="$SCRIPT_DIR"
+HOOK_VIA_NODE=0
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      NODE_DIR="$(cygpath -m -l "$SCRIPT_DIR")" || NODE_DIR="$SCRIPT_DIR"
+    fi
+    HOOK_CMD="$NODE_DIR/bin/wildcard-perms"
+    HOOK_VIA_NODE=1
+    ;;
+esac
+
 # install.ps1 creates this; install.sh did not, so a fresh POSIX machine failed
 # with ENOENT on the write below and `set -e` aborted before the starter-pack
 # prompt. The Windows half has carried the mkdir since it was fixed there.
 mkdir -p "$(dirname "$SETTINGS")"
 
 # ── 1. Register PostToolUse hook ──────────────────────────────────────────────
-HOOK_CMD="$HOOK_CMD" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+HOOK_CMD="$HOOK_CMD" HOOK_VIA_NODE="$HOOK_VIA_NODE" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
+import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
 import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
 const hookCmd      = process.env.HOOK_CMD;
+// The command written into settings.json: the bare path, or on Windows (see the
+// uname block at the top) `node "<path>"`, exactly install.ps1's spelling.
+const viaNode      = process.env.HOOK_VIA_NODE === '1';
+const hookCommand  = viaNode ? `node "${hookCmd}"` : hookCmd;
 
 // `catch {}` here meant that ANY read failure fell through to `cfg = {}` and
 // the write below replaced the user's whole settings.json with just this hook.
@@ -76,6 +120,13 @@ cfg.hooks.PostToolUse ??= [];
 // "Bash" + "PowerShell" split is a real shape and collapsing it would blind the
 // hook to one tool. Whether the old path still exists does not block anything:
 // running this installer is the statement of which checkout is the hook.
+//
+// One more, on Windows only (viaNode): this checkout registered as a BARE path
+// is rewritten in place to `node "<path>"`, with its own notice. That bare
+// spelling is exactly what this script used to write from Git Bash, and it
+// makes Windows ask how to open the file on every hook fire, so "already
+// registered" would leave the defect standing. A `node ...` spelling of this
+// checkout, in any casing or slash direction, is left exactly as it is.
 const onWindows = process.platform === 'win32';
 
 // The path a hook command runs, if and only if it runs THIS tool: `node <path>`
@@ -100,16 +151,30 @@ const toolTarget = (command) => {
   return tail.test(text) ? text : null;
 };
 
-// On Windows one path has several spellings: `\` or `/`, /d/repo (Git Bash,
-// which is what this script writes there) or D:/repo (install.ps1), any casing.
+// On Windows one path has several spellings: `\` or `/`, /d/repo (Git Bash's
+// own) or D:/repo (install.ps1, and this script, whose HOOK_CMD reaches node in
+// that form there), any casing.
 const nativePath = (p) => {
   if (!onWindows) return p;
   const text = p.replace(/\\/g, '/');
   const drive = /^\/([A-Za-z])\//.exec(text);
   return drive ? `${drive[1]}:/${text.slice(3)}` : text;
 };
+// One file can have more than one spelling even after that folding, found
+// 2026-10-13: an 8.3 short path (C:/Users/SHORTN~1.EXT/...) and its long form
+// name the same checkout, and so do a symlinked or junctioned directory and its
+// target. Compared as text they differ, so this checkout registered under the
+// other spelling was "repointed from another checkout", which it is not. (Git
+// Bash produces the short form by itself whenever a checkout sits under /tmp.)
+// realpath gives a file that exists its one canonical spelling, on Windows the
+// long form; a relative path, or one that does not exist, is compared as written,
+// so a stale checkout still reads as stale.
+const canonical = (p) => {
+  if (!isAbsolute(p)) return p;
+  try { return realpathSync.native(p); } catch { return p; }
+};
 const comparable = (p) => {
-  const text = nativePath(p).replace(/\/+$/, '');
+  const text = nativePath(canonical(nativePath(p))).replace(/\/+$/, '');
   return onWindows ? text.toLowerCase() : text;
 };
 
@@ -124,6 +189,7 @@ for (const entry of cfg.hooks.PostToolUse) {
       hook,
       target,
       current: comparable(target) === current,
+      bare: !/^node\s/i.test(hook.command.trim()),
       matcher: typeof entry.matcher === 'string' ? entry.matcher : '',
     });
   }
@@ -143,10 +209,16 @@ for (const f of found) {
     notices.push(`✓ removed a duplicate wildcard-perms hook (matcher ${JSON.stringify(f.matcher)}): ${f.target}`);
   } else if (!f.current) {
     // In place: the hook keeps its key order and any field beside `command`.
-    f.hook.command = hookCmd;
+    f.hook.command = hookCommand;
     const old = nativePath(f.target);
     const gone = isAbsolute(old) && !existsSync(old) ? ' (the old path no longer exists)' : '';
     notices.push(`✓ wildcard-perms hook repointed from another checkout: ${f.target} -> ${hookCmd}${gone}`);
+  } else if (viaNode && f.bare) {
+    // This checkout, but bare on Windows: in place too, and not called another
+    // checkout, because it is not one.
+    const old = f.hook.command;
+    f.hook.command = hookCommand;
+    notices.push(`✓ wildcard-perms hook now runs through node, because Windows cannot run the bare path: ${old} -> ${hookCommand}`);
   }
 }
 
@@ -164,7 +236,7 @@ if (!found.length || notices.length) {
   if (!found.length) {
     cfg.hooks.PostToolUse.push({
       matcher: 'Bash|PowerShell',
-      hooks: [{ type: 'command', command: hookCmd }],
+      hooks: [{ type: 'command', command: hookCommand }],
     });
   }
   // The bytes as FOUND, not the object we are about to write — by now `cfg`
@@ -191,7 +263,9 @@ EOF
 # ── 2. Optional: seed allow list from starter pack ────────────────────────────
 echo ""
 echo "Starter pack: $SCRIPT_DIR/patterns/starter-pack.md"
-echo "Merges $(node -e "console.log(require('$SCRIPT_DIR/patterns/starter-pack.json').length)") curated permissions into your allow list."
+# The path goes to node as an ARGUMENT, never spliced into the code, so no
+# quoting or path spelling can change what the code says. NODE_DIR: see above.
+echo "Merges $(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).length)' "$NODE_DIR/patterns/starter-pack.json") curated permissions into your allow list."
 echo ""
 read -r -p "Seed your allow list from the starter pack? [y/N] " answer
 

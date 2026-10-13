@@ -24,7 +24,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 
@@ -98,13 +98,13 @@ function catchBlockContaining(code, needle) {
 }
 
 // Returns { code, stdout, stderr, after } — `after` being the bytes on disk.
-function runInstaller(settingsPath, source, hookCmd = HOOK_CMD) {
+function runInstaller(settingsPath, source, hookCmd = HOOK_CMD, extraEnv = {}) {
   let code = 0;
   let stdout = '';
   let stderr = '';
   try {
     stdout = execFileSync(process.execPath, ['--input-type=module', '-e', source], {
-      env: { ...process.env, SETTINGS: settingsPath, HOOK_CMD: hookCmd },
+      env: { ...process.env, SETTINGS: settingsPath, HOOK_CMD: hookCmd, HOOK_VIA_NODE: '', ...extraEnv },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -231,7 +231,7 @@ test('install.sh registers the hook command bare, with no shell wrapper', (t) =>
   //           +17.6 ms, `powershell.exe -Command node ...` +1059 ms, which is 18x
   //           the whole hook.
   //   undo  — both uninstallers recover the hook path by unwrapping
-  //           `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:37) and otherwise
+  //           `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:49) and otherwise
   //           compare the command verbatim against the bare path. A wrapped
   //           registration matches NEITHER branch, so it is never recognised as
   //           ours: the hook becomes UN-UNINSTALLABLE, `./uninstall.sh` reports
@@ -351,7 +351,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   // Banned: `cmd /c node ...` (+17.6 ms per tool call) and
   // `powershell.exe -Command node ...` (+1059 ms, 18x the whole hook). The
   // stronger reason is undo, not speed: both uninstallers recover the hook path
-  // with `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:37), a wrapped command
+  // with `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:49), a wrapped command
   // matches neither that nor the bare-path comparison, and the hook would become
   // UN-UNINSTALLABLE while still firing on every tool call.
   //
@@ -415,7 +415,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   //
   // Case-insensitive, deliberately, and this is where the two halves of the guard
   // used to disagree with each other and with the contract they cite. The
-  // uninstallers are the contract: uninstall.sh:37 matches `/^node\s+(.+)$/i` and
+  // uninstallers are the contract: uninstall.sh:49 matches `/^node\s+(.+)$/i` and
   // uninstall.ps1:28 uses `-match`, which is case-insensitive in PowerShell. Both
   // recover the hook path from `NODE "…"` perfectly well. The twin case in
   // scripts/verify-installers.ps1 has always matched case-insensitively for that
@@ -707,7 +707,7 @@ test('install: a command that only mentions the tool is not a registration of it
 
 test('install: this checkout already registered leaves the file byte-identical', (t) => {
   // Both installers' spellings of THIS checkout: install.sh's bare path and
-  // install.ps1's `node "<path>"`. Neither may be rewritten into the other.
+  // install.ps1's `node "<path>"`. Without HOOK_VIA_NODE neither is rewritten.
   for (const spelling of [HOOK_CMD, `node "${HOOK_CMD}"`]) {
     const settingsPath = sandbox(t);
     const before = settingsWith([
@@ -865,4 +865,320 @@ test('uninstall: a live checkout elsewhere is left registered, and named', (t) =
   assert.deepEqual(JSON.parse(again.after).hooks.PostToolUse,
     [{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${live}"`)] }]);
   assert.ok(again.stdout.includes(`left ${live} registered`), again.stdout);
+});
+
+// ── install.sh end to end, through a real bash ───────────────────────────────
+//
+// Everything above feeds install.sh's embedded module to node directly, which
+// cannot see the shell half: how SCRIPT_DIR is spelled, what reaches node, the
+// starter-pack line. Defects lived there (found 2026-10-13), visible only when
+// the script runs under Git Bash on Windows, so these cases run a COPY of the
+// real script from a fake checkout under a temp dir, with HOME pointed at a
+// sandbox beside it -- the real ~/.claude is never involved -- and answer "n" to
+// the seed prompt.
+//
+// Which bash: on Windows, Git for Windows' own, found from `git --exec-path`,
+// never whatever `bash` comes first on PATH, which can be WSL's System32 shim
+// and would run a Linux node against a Linux home. Skipped when there is none.
+// HOME is handed over with forward slashes: Git Bash converts C:/x to /c/x but
+// drops the backslashes of C:\x.
+//
+// The platform seam is a `uname` shim, put first on PATH from INSIDE bash
+// (runSh's launcher), because Git for Windows' bin/bash.exe puts its own
+// /usr/bin ahead of anything inherited, and converted with `cygpath -u` there,
+// because a C:/ entry splits PATH at its colon. install.sh asks `uname -s` and
+// the shim answers, so no variable in the shipped script exists only for tests.
+
+const fwd = (p) => p.split(path.sep).join('/');
+
+function findBash() {
+  if (process.platform !== 'win32') {
+    return spawnSync('bash', ['-c', 'true']).status === 0 ? 'bash' : null;
+  }
+  const exec = spawnSync('git', ['--exec-path'], { encoding: 'utf8' });
+  if (exec.status !== 0) return null;
+  // <git root>/mingw64/libexec/git-core -> <git root>/bin/bash.exe
+  const bash = path.join(path.resolve(exec.stdout.trim(), '..', '..', '..'), 'bin', 'bash.exe');
+  return fs.existsSync(bash) ? bash : null;
+}
+const BASH = findBash();
+const NO_BASH = BASH ? false
+  : (process.platform === 'win32' ? 'no Git for Windows bash.exe found via git --exec-path' : 'no bash on PATH');
+
+// A fake checkout with copies of both scripts, the real starter pack and a stub
+// bin/wildcard-perms (install.sh only chmods it, because "n" declines the seed),
+// plus an empty home, so install.sh's own mkdir of ~/.claude runs too.
+function shCheckout(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-installer-sh-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const checkout = path.join(root, 'checkout');
+  fs.mkdirSync(path.join(checkout, 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(checkout, 'patterns'));
+  for (const name of ['install.sh', 'uninstall.sh']) {
+    fs.copyFileSync(path.join(repoRoot, name), path.join(checkout, name));
+  }
+  fs.copyFileSync(path.join(repoRoot, 'patterns', 'starter-pack.json'),
+    path.join(checkout, 'patterns', 'starter-pack.json'));
+  fs.writeFileSync(path.join(checkout, 'bin', 'wildcard-perms'), '#!/usr/bin/env node\n');
+  const home = path.join(root, 'home');
+  fs.mkdirSync(home);
+  return { root, checkout, home, settings: path.join(home, '.claude', 'settings.json') };
+}
+
+function runSh(box, script, shimDir = null) {
+  const launcher = 'if [ -n "$1" ]; then p="$1"; '
+    + 'if command -v cygpath >/dev/null 2>&1; then p="$(cygpath -u "$p")"; fi; '
+    + 'export PATH="$p:$PATH"; fi; exec bash "$2"';
+  const run = spawnSync(BASH, ['-c', launcher, 'installers-test',
+    shimDir ? fwd(shimDir) : '', fwd(path.join(box.checkout, script))], {
+    input: 'n\n',
+    env: { ...process.env, HOME: fwd(box.home) },
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+  const after = fs.existsSync(box.settings) ? fs.readFileSync(box.settings, 'utf8') : null;
+  return { code: run.status, stdout: run.stdout ?? '', stderr: run.stderr ?? '', after, error: run.error };
+}
+
+test('install.sh end to end: the starter-pack line prints its count, and nothing reaches stderr',
+  { skip: NO_BASH }, (t) => {
+    // Found 2026-10-13 under Git Bash: the count was `node -e "...require('$SCRIPT_DIR/...')"`,
+    // a POSIX path spliced INTO the code, which the Windows node cannot open. It printed
+    // a MODULE_NOT_FOUND stack and "Merges  curated permissions" with no number, and the
+    // install carried on. The same line works on Linux, so only this leg can see it.
+    const box = shCheckout(t);
+    const run = runSh(box, 'install.sh');
+    assert.equal(run.error, undefined, String(run.error));
+    assert.equal(run.code, 0, run.stderr);
+    const count = JSON.parse(fs.readFileSync(path.join(repoRoot, 'patterns', 'starter-pack.json'), 'utf8')).length;
+    assert.ok(count > 0, 'an empty pack would make "Merges 0" indistinguishable from a broken count');
+    assert.match(run.stdout, new RegExp(`^Merges ${count} curated permissions into your allow list\\.$`, 'm'),
+      run.stdout);
+    assert.equal(run.stderr, '', 'nothing on stderr: the old line put a whole MODULE_NOT_FOUND stack there');
+    assert.equal(JSON.parse(run.after).hooks.PostToolUse.length, 1, 'and the hook was registered');
+  });
+
+// ── Windows: install.sh registers `node "<C:/path>"`, as install.ps1 does ────
+//
+// Found 2026-10-13: under Git Bash install.sh registered the BARE
+// C:/.../bin/wildcard-perms (Git Bash had converted HOOK_CMD on its way into
+// node). Windows has no shebang support and an extensionless file has no
+// association, so that pops "How do you want to open this file?" on every hook
+// fire, the dialog install.ps1's `node "<path>"` exists to avoid. install.sh's
+// uname block now hands the module HOOK_VIA_NODE=1 there. The module cases
+// below set it directly, with the C:/ path cygpath gives, on every platform:
+// each spelling is cased and slashed the same way, so no Windows-only folding is
+// involved. The end-to-end cases after them run the uname block itself.
+
+const WIN_HOOK = 'C:/repo/bin/wildcard-perms';
+const WIN_COMMAND = `node "${WIN_HOOK}"`;
+const VIA_NODE = { HOOK_VIA_NODE: '1' };
+
+test('install, Windows: registers node "<C:/path>", and install.ps1\'s registration is already current', (t) => {
+  const fresh = sandbox(t);
+  fs.writeFileSync(fresh, HEALTHY);
+  const run = runInstaller(fresh, embeddedModule(), WIN_HOOK, VIA_NODE);
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.after).hooks.PostToolUse,
+    [{ matcher: 'Bash|PowerShell', hooks: [hook(WIN_COMMAND)] }],
+    "the command install.ps1 writes, so the two installers agree on Windows");
+
+  // install.ps1's own registration of this checkout: no write at all.
+  const ps1 = sandbox(t);
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(WIN_COMMAND), hook('neighbour-tool')] }]);
+  fs.writeFileSync(ps1, before);
+  const again = runInstaller(ps1, embeddedModule(), WIN_HOOK, VIA_NODE);
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(again.after, before, 'byte-identical');
+  assert.match(again.stdout, /already registered/);
+});
+
+test('install, Windows: the bare path an older install.sh left is rewritten in place to run through node', (t) => {
+  // Exactly what the pre-fix script registered from Git Bash, with a field beside
+  // `command` and a neighbour in the same entry: rewritten where it stands, and
+  // reported as what it is, this checkout, never "another checkout".
+  const settingsPath = sandbox(t);
+  fs.writeFileSync(settingsPath, settingsWith([
+    { matcher: 'Bash', hooks: [hook('first-neighbour')] },
+    { matcher: 'Bash|PowerShell', hooks: [hook(WIN_HOOK, { timeout: 30 }), hook('neighbour-tool')] },
+  ]));
+
+  const run = runInstaller(settingsPath, embeddedModule(), WIN_HOOK, VIA_NODE);
+  assert.equal(run.code, 0, run.stderr);
+  const after = JSON.parse(run.after);
+  assert.deepEqual(after.hooks.PostToolUse, [
+    { matcher: 'Bash', hooks: [hook('first-neighbour')] },
+    { matcher: 'Bash|PowerShell', hooks: [hook(WIN_COMMAND, { timeout: 30 }), hook('neighbour-tool')] },
+  ]);
+  assertNeighboursKept(after);
+  assert.ok(run.stdout.includes(`${WIN_HOOK} -> ${WIN_COMMAND}`), run.stdout);
+  assert.match(run.stdout, /runs through node/);
+  assert.doesNotMatch(run.stdout, /another checkout/, 'it is this checkout, and the notice must not say otherwise');
+
+  // Another checkout is repointed to the node form too, not to the bare path.
+  const other = sandbox(t);
+  fs.writeFileSync(other, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook('node "C:/old/checkout/bin/wildcard-perms"')] },
+  ]));
+  const moved = runInstaller(other, embeddedModule(), WIN_HOOK, VIA_NODE);
+  assert.equal(moved.code, 0, moved.stderr);
+  assert.deepEqual(JSON.parse(moved.after).hooks.PostToolUse,
+    [{ matcher: 'Bash|PowerShell', hooks: [hook(WIN_COMMAND)] }]);
+  assert.match(moved.stdout, /repointed from another checkout/);
+});
+
+// Shim commands for runSh's seam: each file is a /bin/sh script running `body`.
+// `uname` is what install.sh and uninstall.sh consult; on Linux a `cygpath`
+// stands in for Git Bash's.
+function shims(box, commands) {
+  const dir = path.join(box.root, 'shim');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [name, body] of Object.entries(commands)) {
+    fs.writeFileSync(path.join(dir, name), `#!/bin/sh\n${body}\n`);
+    fs.chmodSync(path.join(dir, name), 0o755);
+  }
+  return dir;
+}
+
+const commandsIn = (raw) => JSON.parse(raw).hooks.PostToolUse.flatMap((entry) => entry.hooks.map((h) => h.command));
+
+test('install.sh end to end: under Git Bash, MSYS2 or Cygwin it registers node "<C:/path>", and uninstall.sh removes it',
+  { skip: NO_BASH }, (t) => {
+    const box = shCheckout(t);
+    let shimDir = null;
+    let expected;
+    if (process.platform === 'win32') {
+      // The real thing: Git Bash's own uname (MINGW64_NT-...) and cygpath, so the
+      // expectation is install.ps1's spelling of this checkout, the long path with
+      // forward slashes, even though os.tmpdir() may be an 8.3 path.
+      expected = `node "${fwd(fs.realpathSync.native(box.checkout))}/bin/wildcard-perms"`;
+    } else {
+      // Linux standing in: uname says MINGW64, and a cygpath that answers only
+      // `-m -l <path>` prefixes C:, so the result shows which path was used.
+      shimDir = shims(box, {
+        uname: "echo 'MINGW64_NT-10.0-26200'",
+        cygpath: '[ "$1" = -m ] && [ "$2" = -l ] && printf \'C:%s\\n\' "$3"',
+      });
+      expected = `node "C:${box.checkout}/bin/wildcard-perms"`;
+    }
+
+    const run = runSh(box, 'install.sh', shimDir);
+    assert.equal(run.error, undefined, String(run.error));
+    assert.equal(run.code, 0, run.stderr);
+    assert.deepEqual(commandsIn(run.after), [expected]);
+
+    const again = runSh(box, 'install.sh', shimDir);
+    assert.equal(again.code, 0, again.stderr);
+    assert.match(again.stdout, /already registered/);
+
+    // uninstall.sh must recognise it: under Git Bash its HOOK_CMD would otherwise
+    // reach node in Git Bash's spelling, which keeps 8.3 components and /tmp's.
+    const un = runSh(box, 'uninstall.sh', shimDir);
+    assert.equal(un.code, 0, un.stderr);
+    assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+    assert.deepEqual(JSON.parse(un.after), {}, 'nothing of ours left, and nothing else was there');
+  });
+
+test('install.sh end to end: on Linux and macOS it registers the bare path, and uninstall.sh removes it',
+  { skip: NO_BASH }, (t) => {
+    const box = shCheckout(t);
+    // On Windows, Git Bash told it is Linux runs the POSIX branch for real.
+    const shimDir = process.platform === 'win32' ? shims(box, { uname: "echo 'Linux'" }) : null;
+
+    const run = runSh(box, 'install.sh', shimDir);
+    assert.equal(run.error, undefined, String(run.error));
+    assert.equal(run.code, 0, run.stderr);
+    const registered = commandsIn(run.after);
+    assert.equal(registered.length, 1, JSON.stringify(registered));
+    assert.doesNotMatch(registered[0], /^node\s/i, 'bare: the shebang plus the chmod carry it');
+    if (process.platform === 'win32') {
+      // Git Bash converted HOOK_CMD on its way into node, keeping any 8.3
+      // component, so compare the file it names rather than the spelling.
+      assert.equal(fs.realpathSync.native(registered[0]),
+        fs.realpathSync.native(path.join(box.checkout, 'bin', 'wildcard-perms')));
+    } else {
+      assert.equal(registered[0], `${box.checkout}/bin/wildcard-perms`);
+    }
+
+    const un = runSh(box, 'uninstall.sh', shimDir);
+    assert.equal(un.code, 0, un.stderr);
+    assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  });
+
+// ── One checkout, two spellings: 8.3 short paths and directory links ─────────
+//
+// Found 2026-10-13: the same checkout registered under an 8.3 short path
+// (C:/Users/SHORTN~1.EXT/...) was "repointed from another checkout" by both
+// installers, and both uninstallers left it in place and named it "another
+// checkout", because the comparison was on the text. Git Bash writes that short
+// form by itself for a checkout under /tmp. Both .sh scripts now compare
+// realpath's spelling, which is the long form on Windows and also resolves
+// directory links. A link is the case that runs everywhere (a symlink on POSIX,
+// a junction on Windows, neither needs privilege); the 8.3 case runs where
+// os.tmpdir() has a short component, which includes GitHub's Windows runners.
+// The .ps1 twins, 8.3 only, are verify-installers.ps1's "8.3 spelling" cases.
+
+// A sandbox holding a real bin/wildcard-perms, because realpath needs a file.
+function realCheckout(t) {
+  const settingsPath = sandbox(t);
+  const dir = path.dirname(path.dirname(settingsPath));
+  const file = path.join(dir, 'checkout', 'bin', 'wildcard-perms');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '#!/usr/bin/env node\n');
+  // How the installer itself would spell it: canonical, forward slashes.
+  return { settingsPath, dir, file, hookCmd: fwd(fs.realpathSync.native(file)) };
+}
+
+function linkedSpelling(box) {
+  const link = path.join(box.dir, 'linked-checkout');
+  fs.symlinkSync(path.join(box.dir, 'checkout'), link, process.platform === 'win32' ? 'junction' : 'dir');
+  return fwd(path.join(link, 'bin', 'wildcard-perms'));
+}
+
+test('install: this checkout through a linked directory is this checkout, not another one', (t) => {
+  const box = realCheckout(t);
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${linkedSpelling(box)}"`)] }]);
+  fs.writeFileSync(box.settingsPath, before);
+
+  const run = runInstaller(box.settingsPath, embeddedModule(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, 'one file, so nothing to repoint and nothing written');
+  assert.match(run.stdout, /already registered/);
+  assert.doesNotMatch(run.stdout, /another checkout/);
+});
+
+test("uninstall: this checkout's registration through a linked directory is removed as this checkout", (t) => {
+  const box = realCheckout(t);
+  fs.writeFileSync(box.settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook(`node "${linkedSpelling(box)}"`)] },
+  ]));
+
+  const run = runInstaller(box.settingsPath, embeddedUninstaller(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  assert.doesNotMatch(run.stdout, /another checkout/, 'its own hook, so not named as somebody else\'s');
+  assert.equal(JSON.parse(run.after).hooks.PostToolUse, undefined);
+});
+
+test('install and uninstall: this checkout under its 8.3 short path is this checkout', (t) => {
+  if (process.platform !== 'win32') return t.skip('8.3 short names are a Windows thing');
+  const box = realCheckout(t);
+  // box.file is spelled through os.tmpdir(), %TEMP%, which keeps its 8.3 form.
+  const short = fwd(box.file);
+  if (short.toLowerCase() === box.hookCmd.toLowerCase()) {
+    return t.skip(`os.tmpdir() has no 8.3 component here (${os.tmpdir()})`);
+  }
+  assert.match(short, /~/, 'the fixture must really be a short spelling for this to mean anything');
+
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${short}"`)] }]);
+  fs.writeFileSync(box.settingsPath, before);
+  const run = runInstaller(box.settingsPath, embeddedModule(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, 'one checkout, two spellings: no write');
+  assert.doesNotMatch(run.stdout, /another checkout/);
+
+  const un = runInstaller(box.settingsPath, embeddedUninstaller(), box.hookCmd);
+  assert.equal(un.code, 0, un.stderr);
+  assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  assert.doesNotMatch(un.stdout, /another checkout/);
 });

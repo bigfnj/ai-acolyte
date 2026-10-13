@@ -898,6 +898,40 @@ session; disagreeing wait definitions accepted; join results not handed to the s
 a wait for an unseen cell not reported; a bound result with no call in the slice not
 reported).
 
+## Codex 0.161.0 follow-up, October 13, 2026: acceptance-suite MCP shapes, session-scoped call groups, code-mode continuity
+
+Added after the section above; it amends that section where it says so and replaces none
+of it. Same machine, `codex-cli` 0.161.0, Windows, isolated temp homes, scripted loopback
+responder, no credentials.
+
+**The VS Code MCP acceptance suite reads both rollout shapes.** This closes the "Not
+changed and not run" line above. `scripts/vscode-acceptance/mcp.js` checked each real MCP
+outcome by filtering for the 0.145.0 `mcp_tool_call_end` record alone, which 0.161.0 never
+writes, so every case would have failed before any product behaviour was checked. The
+Codex-side check is now one function, `assertMcpRolloutOutcome` in
+`scripts/check-codex-mcp-runtime.js`, called by the harness's own `main()` and by the
+suite: each shape present must name the expected server and tool, an executed call must
+carry its result with the expected `isError` (and, in the new shape, the item's own
+`status`), and a declined call must carry an error and no result. It deliberately does not
+read the rollout through the product parser, whose verdict `main()` checks separately. The
+suite also opts into the instruction-isolation canary when its workspace's parent is
+inside the temp tree, which is where `drive-vscode.js` puts it, by the same test
+`isolateWorkspaceInstructions` applies (`workspaceUnderTempTree`), and then requires every
+provider request to have been checked. The driver itself was not run (VS Code has a
+pending update that blocks new instances). `test/vscode-acceptance-mcp.test.js` proves the
+assertion on the five real 0.161.0 rollouts
+(`test/fixtures/codex-mcp-item-completed-sanitized.jsonl`), on the same outcomes rewritten
+into the 0.145.0 record, and on both together; shows the suite's former check rejects all
+five real rollouts; and pins the suite's source. MCP harness on 0.161.0 through the shared
+assertion: passed, 5/5, shape `item_completed/McpToolCall`, no parser misses
+(`acolyte-codex-mcp-runtime-k0COwe`). Mutation: fifteen mutants were each killed (either
+shape unread; `isError` uncompared in either shape; a declined item allowed a result;
+`status` uncompared; any record type counted; duplicates accepted; result content ignored;
+the temp predicate accepting the temp root, or paths outside the temp tree; `main()` off
+the shared assertion; the suite not asking for the canary check, not requiring every
+request checked, or not isolating its workspace), and the suite as it stood before this
+change fails the source test.
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,

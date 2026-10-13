@@ -116,17 +116,30 @@ exports.run = async function run() {
       manager = createAutoLearnManager(managerOptions);
       originalClaude = fs.readFileSync(manager.paths.claudeSettings, 'utf8');
       originalRules = fs.readFileSync(manager.paths.codexRules, 'utf8');
-      const { createMcpRuntimeContext, writeMcpFixture, mcpRuntimeCase } = require('../check-codex-mcp-runtime.js');
+      const { createMcpRuntimeContext, writeMcpFixture, mcpRuntimeCase, assertMcpRolloutOutcome, workspaceUnderTempTree } = require('../check-codex-mcp-runtime.js');
       const context = createMcpRuntimeContext({ extensionDir, home, codexHome, workspace, serverName,
         fixtureServerPath: path.join(root, `mcp-server-${suffix}.cjs`), logPath: path.join(root, `mcp-calls-${suffix}.jsonl`) });
+      // THE SAME INSTRUCTION ISOLATION AS THE HARNESS'S OWN CASES (2026-10-13).
+      // Codex loads every AGENTS.md from the nearest project-root marker above
+      // the cwd, and on the development box the home has one, so an unisolated
+      // session here carries the developer's own instructions. The shared case
+      // leaves the canary check to its caller because this suite hands it the
+      // driver's workspace; drive-vscode.js puts that under a fresh temp tree,
+      // so it is isolated exactly where isolateWorkspaceInstructions would plant
+      // (scripts/check-codex-runtime.js), and every provider request is checked.
+      mcp.instructionIsolation = workspaceUnderTempTree(workspace);
+      if (mcp.instructionIsolation) require('../check-codex-runtime.js').isolateWorkspaceInstructions(workspace);
       assert.equal(fs.existsSync(configPath), false, 'MCP fixture must never overwrite existing configuration');
       writeMcpFixture(context);
       fs.writeFileSync(configPath, '# User-owned MCP fixture note must survive reviewed writes.\n' + fs.readFileSync(configPath, 'utf8'));
       runRuntime = async (name, selectedTool, args, decision, expected) => {
         const before = fs.readFileSync(configPath);
-        const observed = await mcpRuntimeCase(context, name, { tool: selectedTool, arguments: args, approvalDecision: decision });
+        const observed = await mcpRuntimeCase(context, name, { tool: selectedTool, arguments: args, approvalDecision: decision,
+          foreignInstructionCheck: mcp.instructionIsolation });
         mcp.cases.push(observed);
         assert.equal(observed.error, undefined, `${name}: actual MCP runtime failed`);
+        if (mcp.instructionIsolation) assert.equal(observed.canaryFreeRequests, observed.providerRequests,
+          `${name}: every provider request was checked for foreign instructions`);
         assert.equal(observed.serverRequests.length, expected.approvals, `${name}: exact actual approval count`);
         for (const request of observed.serverRequests) {
           assert.equal(request.method, 'mcpServer/elicitation/request');
@@ -136,11 +149,13 @@ exports.run = async function run() {
         const calls = observed.mcpCalls.filter((item) => item.method === 'tools/call');
         assert.equal(calls.length, expected.executed, `${name}: witnessed local tool execution count`);
         if (calls.length) { assert.equal(calls[0].params.name, selectedTool); assert.deepEqual(calls[0].params.arguments, args); }
-        const ends = observed.records.filter((item) => item.type === 'event_msg' && item.payload.type === 'mcp_tool_call_end');
-        assert.equal(ends.length, 1); assert.equal(ends[0].payload.invocation.server, serverName); assert.equal(ends[0].payload.invocation.tool, selectedTool);
-        if (expected.executed) {
-          assert.ok(ends[0].payload.result.Ok); assert.equal(ends[0].payload.result.Ok.isError, args.shouldFail);
-        } else assert.ok(Object.hasOwn(ends[0].payload.result, 'Err'));
+        // Either rollout shape -- 0.145.0's mcp_tool_call_end or 0.161.0's
+        // McpToolCall item -- by the assertion check-codex-mcp-runtime.js uses
+        // itself. This line asserted the 0.145.0 record alone and would have
+        // failed every case on 0.161.0, which writes none (2026-10-13).
+        observed.recordShape = assertMcpRolloutOutcome(observed.records, { server: serverName, tool: selectedTool,
+          executed: expected.executed > 0, isError: args.shouldFail, status: expected.status,
+          witness: `acolyte-mcp-${selectedTool}-witness` }, name);
         const items = observed.events.filter((item) => item.method === 'item/completed' && item.params.item.type === 'mcpToolCall');
         assert.equal(items.length, 1); assert.equal(items[0].params.item.status, expected.status);
         assert.deepEqual(fs.readFileSync(configPath), before, 'runtime helper must consume current config without rewriting it');

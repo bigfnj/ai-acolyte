@@ -173,6 +173,80 @@ async function mcpRuntimeCase(context, name, options = {}) {
     return observed;
   }
 }
+
+// ONE MCP OUTCOME AS THE ROLLOUT RECORDS IT, IN EITHER SHAPE (2026-10-13).
+// Codex 0.145.0 wrote an event_msg/mcp_tool_call_end with {invocation, result:
+// {Ok|Err}}. Codex 0.161.0 writes none: the outcome is an event_msg/item_completed
+// whose item is {type: "McpToolCall", server, tool, status, result: {content,
+// isError}}, or {status: "failed", error: {message}} and no result when declined
+// (measured by main() below; the sanitized rollouts are
+// test/fixtures/codex-mcp-item-completed-sanitized.jsonl). This is the Codex-side
+// fact that main() AND scripts/vscode-acceptance/mcp.js assert, so it is defined
+// once: the acceptance suite asserted only the 0.145.0 record and would have
+// failed every case on 0.161.0 (the gap 6eb35c1 recorded). It deliberately does
+// not borrow the product parser's reading (codexMcpCompletion in
+// src/history-adapters.js): main() checks the parser's verdict separately, and a
+// harness that read the rollout through the parser could not catch the parser
+// misreading it.
+//
+// `executed`: the tool ran, so Ok / a result whose `isError` must match;
+// otherwise the call was declined, so Err / an error with no result. `status` is
+// the McpToolCall item's own status (the old record has none); `witness`, when
+// given, must appear in the recorded result content. Each shape present must
+// agree. A rollout carrying both -- no measured version writes both -- passes
+// only if both agree, the same call the parser merges into one observation.
+// Returns the shape or shapes found, `+`-joined, for the evidence record.
+function assertMcpRolloutOutcome(records, expected, label = 'MCP outcome') {
+  const { server, tool, executed, isError, status, witness } = expected;
+  const direct = (Array.isArray(records) ? records : []).filter((record) =>
+    record && record.type === 'event_msg' && record.payload && typeof record.payload === 'object');
+  const ends = direct.filter((record) => record.payload.type === 'mcp_tool_call_end');
+  const items = direct.filter((record) => record.payload.type === 'item_completed' && record.payload.item?.type === 'McpToolCall');
+  const shapes = [...(ends.length ? ['mcp_tool_call_end'] : []), ...(items.length ? ['item_completed/McpToolCall'] : [])];
+  assert.ok(shapes.length, `${label}: the rollout records the MCP outcome in one of the two known shapes`);
+  assert.ok(ends.length <= 1 && items.length <= 1,
+    `${label}: one call is recorded at most once per shape (${ends.length} mcp_tool_call_end, ${items.length} McpToolCall)`);
+  const carries = (content) => witness === undefined || JSON.stringify(content ?? null).includes(witness);
+  if (ends.length) {
+    const { invocation, result } = ends[0].payload;
+    assert.equal(invocation?.server, server, `${label}: mcp_tool_call_end server`);
+    assert.equal(invocation?.tool, tool, `${label}: mcp_tool_call_end tool`);
+    if (executed) {
+      assert.ok(result && Object.hasOwn(result, 'Ok'), `${label}: an executed call is recorded Ok`);
+      assert.equal(result.Ok?.isError, isError, `${label}: mcp_tool_call_end isError`);
+      assert.ok(carries(result.Ok.content), `${label}: mcp_tool_call_end carries the tool's own result`);
+    } else assert.ok(result && Object.hasOwn(result, 'Err'), `${label}: a declined call is recorded Err`);
+  }
+  if (items.length) {
+    const { item } = items[0].payload;
+    assert.equal(item.server, server, `${label}: McpToolCall server`);
+    assert.equal(item.tool, tool, `${label}: McpToolCall tool`);
+    if (status !== undefined) assert.equal(item.status, status, `${label}: McpToolCall status`);
+    if (executed) {
+      assert.ok(item.result && typeof item.result === 'object', `${label}: an executed call carries its result`);
+      assert.equal(item.result.isError, isError, `${label}: McpToolCall isError`);
+      assert.ok(carries(item.result.content), `${label}: McpToolCall carries the tool's own result`);
+    } else {
+      assert.equal(item.result ?? null, null, `${label}: a declined call ran nothing`);
+      assert.ok(item.error?.message, `${label}: a declined call records why`);
+    }
+  }
+  return shapes.join('+');
+}
+
+// Whether isolateWorkspaceInstructions (check-codex-runtime.js) would plant for
+// this workspace: its PARENT strictly inside the temp tree, not the temp root.
+// The same test it applies, so a caller can opt in exactly where it would not
+// refuse; test/vscode-acceptance-mcp.test.js pins that the two agree. The
+// VS Code driver's workspace is <tmp>/acolyte-vscode-drive-*/workspace, so it
+// qualifies; a workspace handed in from anywhere else does not.
+function workspaceUnderTempTree(workspace) {
+  let parent;
+  try { parent = fs.realpathSync.native(path.dirname(path.resolve(workspace))); } catch { return false; }
+  const relative = path.relative(fs.realpathSync.native(require('node:os').tmpdir()), parent);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
 // SYNTHETIC VALUES IN THE REAL STRUCTURE (2026-10-13), the convention of
 // check-codex-code-mode-runtime.js. Kept: the record kinds the history parser
 // reads, in real order -- the namespaced function_call and its output, every
@@ -272,32 +346,11 @@ async function main() {
     if(executed)assert.equal(calls[0].params.name,tool);
     const items=observed.events.filter(x=>x.method==='item/completed'&&x.params.item.type==='mcpToolCall');
     assert.equal(items.length,1);assert.equal(items[0].params.item.status,status,name+' actual completion status');
-    // TWO ROLLOUT SHAPES FOR ONE OUTCOME (2026-10-13). Codex 0.145.0 wrote an
-    // event_msg/mcp_tool_call_end with {invocation, result: {Ok|Err}}. Codex
-    // 0.161.0 writes none: the outcome is an event_msg/item_completed whose item
-    // is {type: "McpToolCall", server, tool, status, result: {content, isError}}
-    // or, when declined, {status: "failed", error: {message}}. The harness checks
-    // whichever shape the binary wrote and records which one it was.
-    const ends=observed.records.filter(x=>x.type==='event_msg'&&x.payload.type==='mcp_tool_call_end');
-    const completions=observed.records.filter(x=>x.type==='event_msg'&&x.payload.type==='item_completed'&&x.payload.item?.type==='McpToolCall');
-    if(ends.length) {
-      results.at(-1).recordShape='mcp_tool_call_end';
-      assert.equal(ends.length,1);assert.equal(ends[0].payload.invocation.server,'fixture');
-      assert.equal(ends[0].payload.invocation.tool,tool);assert.ok(Object.hasOwn(ends[0].payload.result,resultKind));
-      if(resultKind==='Ok') {
-        assert.equal(ends[0].payload.result.Ok.isError,tool==='fail');
-        assert.ok(JSON.stringify(ends[0].payload.result.Ok.content).includes('acolyte-mcp-'+tool+'-witness'));
-      }
-    } else {
-      results.at(-1).recordShape='item_completed/McpToolCall';
-      assert.equal(completions.length,1,name+' the rollout records the MCP outcome in one of the two known shapes');
-      const item=completions[0].payload.item;
-      assert.equal(item.server,'fixture');assert.equal(item.tool,tool);assert.equal(item.status,status,name+' rollout completion status');
-      if(resultKind==='Ok') {
-        assert.equal(item.result?.isError,tool==='fail');
-        assert.ok(JSON.stringify(item.result?.content).includes('acolyte-mcp-'+tool+'-witness'));
-      } else assert.ok(item.error?.message,name+' a declined call records why');
-    }
+    // TWO ROLLOUT SHAPES FOR ONE OUTCOME (2026-10-13): whichever the binary
+    // wrote, checked by the assertion scripts/vscode-acceptance/mcp.js shares,
+    // and recorded.
+    results.at(-1).recordShape=assertMcpRolloutOutcome(observed.records,{server:'fixture',tool,executed:resultKind==='Ok',
+      isError:tool==='fail',status,witness:'acolyte-mcp-'+tool+'-witness'},name);
     // What the product's history parser makes of the same rollout. Recorded per
     // case and asserted after the loop, so one run reports every case.
     const parsed=parseCodexJsonl(fs.readFileSync(observed.rollout,'utf8'),{file:observed.rollout}).filter(x=>x.kind==='codex-mcp');
@@ -323,5 +376,5 @@ async function main() {
   console.log(JSON.stringify({status,codexVersion,shapes:[...new Set(results.map(r=>r.recordShape))],parserMisses:parserMisses.map(r=>`${r.name}: expected ${r.parser.expected}, parser saw ${r.parser.observations.length} MCP observations`),report}));
   assert.deepEqual(parserMisses.map(r=>r.name),[],`the history parser missed ${parserMisses.length} of ${results.length} actual MCP outcomes on ${codexVersion}`);
 }
-module.exports={createMcpRuntimeContext,writeMcpFixture,mcpRuntimeCase};
+module.exports={createMcpRuntimeContext,writeMcpFixture,mcpRuntimeCase,assertMcpRolloutOutcome,workspaceUnderTempTree};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

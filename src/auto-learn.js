@@ -495,9 +495,32 @@ function hasWriteRedirection(command, shell) {
   return false;
 }
 
+// A PowerShell statement that OPENS with a numeric range literal (`1..6`, `-1..5`,
+// `1..$n`) is an expression, not a command: the parser reads a leading number in
+// expression mode and `..` as the range operator, so `1..6 | ForEach-Object {...}`
+// enumerates six integers and runs nothing called `1..6`. Before 2026-10-13 the
+// tokenizer handed `1..6` over as an ordinary root and the learner emitted a live
+// `PowerShell(1..6 *)` with only `unknown-command` and `complex: false`; the BACKLOG
+// entry on stored approvals that can never be wildcarded measured it on a real list.
+// Now it is `script-syntax` here plus `missing-command-root` (deriveBaseInvocation).
+//
+// Deliberately narrow. It needs digits, then `..`, at the very start of the statement,
+// so a command whose name merely begins with a digit is untouched (`7z a x.zip` is a
+// real root and stays one), and no other number-shaped opener is claimed: a bare `42`
+// or `1.5` is also expression mode, but nothing observed needs it, and widening this
+// later is cheaper than explaining a reclassified command. Bash is excluded on purpose:
+// it has no range operator (its form is the brace expansion `{1..6}`, already caught
+// by the `{` opener), so in Bash `1..6` really is an attempt to run a program.
+const POWERSHELL_RANGE_LITERAL = /^-?\d+\.\./;
+function startsWithRangeLiteral(text, shell) {
+  return normalizeShell(shell) === 'powershell' &&
+    POWERSHELL_RANGE_LITERAL.test(String(text || '').trimStart());
+}
+
 function containsScriptSyntax(command, shell) {
   const text = String(command || '');
   if (/\$\(|`[^`]+`|<\(|>\(/.test(text)) return true;
+  if (startsWithRangeLiteral(text, shell)) return true;
   return normalizeShell(shell) === 'powershell' && /(?:^|\s)(?:@?\{|@\(|\$\(|\.\s+[^.])/.test(text);
 }
 
@@ -566,7 +589,14 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   const executableValue = executable ? executable.value : '';
   const pathExecutable = Boolean(executable && isPathExecutable(executableValue));
   const dynamicExecutable = Boolean(executableValue && /^(?:\$|[(@{\[])/.test(executableValue));
-  const root = executableValue && !dynamicExecutable ? basenamePortable(executableValue) : null;
+  // A range literal is not a command root, so it gets none: root null is what makes
+  // classifyInvocation report `missing-command-root` (not the `shell-structure` alias)
+  // and what leaves permissionFor with no prefix to wildcard. The `script-syntax`
+  // reason comes from containsScriptSyntax below, off the same predicate.
+  const rangeLiteral = Boolean(executable && !executable.quoted &&
+    startsWithRangeLiteral(executableValue, shell));
+  const root = executableValue && !dynamicExecutable && !rangeLiteral
+    ? basenamePortable(executableValue) : null;
   const argv = executable ? details.slice(index).map((token) => token.value) : [];
   const normalized = normalizeRoot(root);
   const reserved = shell === 'powershell' ? POWERSHELL_RESERVED.has(normalized) : BASH_RESERVED.has(normalized);

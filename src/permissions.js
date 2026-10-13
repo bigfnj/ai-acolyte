@@ -202,22 +202,27 @@ function splitEnvPrefix(cmd) {
 // and `builtin`, and zsh's `noglob`." Not stripped: the query form `command -v`, and
 // zsh's `nocorrect`. "Bare `xargs` is also stripped ... only when `xargs` has no
 // flags." The list "is built in and is not configurable". The shapes accepted below
-// are the ones the wrapper routine in the shipped CLI accepts (read out of Claude Code
-// 2.1.296's binary the same day): a `timeout` duration `^\d+(\.\d+)?[smhd]?$` after
-// its documented options, `nice -n N` or `nice -N`, `stdbuf` with at least one
-// `-i`/`-o`/`-e` mode, `command` with `-p` only. A shape outside those is one that
-// routine reports it "can't be checked before it runs", so it is not stripped here
-// either and the entry stays verbatim.
+// are the ones Claude Code 2.1.296's binary strips (read the same day). It has TWO
+// wrapper routines, and they differ: a safety walker over the parsed argv (what reports
+// "can't be checked before it runs") and the text stripper the ALLOW matcher runs before
+// it compares a rule. The second decides whether a rule matches, so it is the one
+// modelled here, as a subset: a `timeout` duration `^\d+(\.\d+)?[smhd]?$` after its
+// documented options, `nice -n N` or `nice -N`, `stdbuf` with one or more fused modes
+// `-[ioe][LN0-9]+` (`-oL`, `-o0`; corrected 2026-10-13, see wrapperLength), `command`
+// with `-p` only. A shape outside those is not stripped here either and the entry stays
+// verbatim. Bare `xargs` is not stripped by that routine at all: the matcher instead
+// also tries each rule with `xargs ` in front of it, once, against the text the routine
+// leaves, so `nohup xargs grep x` matches `Bash(grep *)` and `xargs nohup grep x` does
+// not. claudeWrapperPrefix therefore takes xargs only as the innermost layer.
 //
 // Until 2026-10-13 this pass keyed on the wrapper itself: `timeout 5 rg x` became
 // `Bash(timeout *)` and `nohup make` became `Bash(nohup *)`, while the classifier
 // (src/auto-learn.js deriveBaseInvocation) already stripped `timeout`, `command` and
-// `builtin`. Keying on the inner command is right under either reading of the
-// matcher. The docs say the inner rule matches the wrapped run, so `Bash(rg *)`
-// covers `timeout 5 rg x`. And `Bash(timeout *)` is aimed at text Claude Code has
-// already removed: dead weight if only the stripped command is checked, or, if the
-// raw text were checked as well, a grant for every command `timeout` can run, the
-// rule the classifier refuses to propose for exactly that reason.
+// `builtin`. The binary settles which reading of the matcher holds: it tries each allow
+// rule against the command as written AND against the stripped text. So `Bash(rg *)`
+// covers `timeout 5 rg x`, and `Bash(timeout *)` is no dead weight: it matches the text as
+// written and is a grant for every command `timeout` can run, the rule the classifier
+// refuses to propose for exactly that reason.
 //
 // `env` is NOT stripped, deliberately: the documented list does not name it (only "a
 // leading assignment of certain known-safe environment variables" is stripped), so
@@ -253,15 +258,15 @@ function wrapperLength(tokens) {
       }
       return TIMEOUT_DURATION.test(at(k) || '') ? k + 1 : -1;
     }
+    // The allow-path stripper takes only fused modes with a `[LN0-9]+` value
+    // (`/^stdbuf(?:[ \t]+-[ioe][LN0-9]+)+[ \t]+/` in 2.1.296). Until 2026-10-13 this also
+    // took `-o L`, `--output=L` and `-o1M`, which only the safety walker accepts, so
+    // `stdbuf -o L rg x` became `Bash(rg *)`, a rule the matcher never reaches past
+    // that stdbuf: a prompt loop, not a widening.
     case 'stdbuf': {
       let k = 1;
-      for (let g = at(k); g !== undefined; g = at(k)) {
-        if (/^-[ioe]$/.test(g) && at(k + 1) !== undefined) k += 2;
-        else if (/^-[ioe]./.test(g) || /^--(?:input|output|error)=/.test(g)) k += 1;
-        else if (g.startsWith('-')) return -1;
-        else break;
-      }
-      return k > 1 ? k : -1;
+      while (/^-[ioe][LN0-9]+$/.test(at(k) || '')) k += 1;
+      return k === 1 ? -1 : k;
     }
     case 'command': {
       let k = 1;
@@ -277,21 +282,44 @@ function wrapperLength(tokens) {
   }
 }
 
+// The leading wrappers Claude Code strips from a line's words, as `{ length, refused }`:
+// `length` tokens come off (every stripped wrapper with its own options), and `refused`
+// says the next token is still a wrapper in a shape that is not stripped, or there is no
+// command after them, or that command starts with `-` (what the CLI calls "an
+// incomplete fragment": `time -p make`, `nice --adjustment=5 make`). Bare `xargs` is
+// taken only as the innermost layer; a wrapper after it is refused.
+//
+// ONE routine for two callers since 2026-10-13: stripBashWrappers below, and the
+// learner's deriveBaseInvocation (src/auto-learn.js), which until then kept its own
+// subset (`timeout`, `command`, `builtin`) and so proposed `Bash(nohup *)`, `Bash(nice
+// *)`, `Bash(stdbuf *)`, `Bash(noglob *)` and `Bash(xargs *)`, and stripped `command -v`,
+// which Claude Code keeps. It is shared by the learner importing it from here, the
+// direction src/fixed-point-cache.js allows: this file is stamped, the learner is not,
+// so no learner edit can change what processAllowList emits. `tokens` are the words as
+// written; names are compared exactly, as the CLI compares them (`Time` and
+// `/usr/bin/timeout` are not stripped).
+function claudeWrapperPrefix(tokens) {
+  let k = 0;
+  for (let guard = 0; guard < 8; guard += 1) {
+    const consumed = wrapperLength(tokens.slice(k));
+    if (consumed === 0) return { length: k, refused: false };
+    const inner = tokens[k + consumed];
+    if (consumed < 0 || inner === undefined || String(inner).startsWith('-')) return { length: k, refused: true };
+    const xargs = tokens[k] === 'xargs';
+    k += consumed;
+    if (xargs) return { length: k, refused: wrapperLength(tokens.slice(k)) !== 0 };
+  }
+  return { length: k, refused: true };
+}
+
 // The command a Bash line runs once every leading wrapper is removed, as a SUFFIX of
 // `text` (bashOpensScript measures the stripped prefix by length, so it must be one),
-// or null when a wrapper is present in a shape that is not stripped, or wraps nothing.
-// An inner token that starts with `-` is what the CLI calls "an incomplete fragment"
-// (`time -p make`, `nice --adjustment=5 make`), and is refused the same way.
+// or null when claudeWrapperPrefix refuses the line.
 function stripBashWrappers(text) {
-  let rest = text;
-  for (let guard = 0; guard < 8; guard += 1) {
-    const tokens = [...rest.matchAll(/\S+/g)];
-    const consumed = tokens.length ? wrapperLength(tokens.map((m) => m[0])) : 0;
-    if (consumed === 0) return rest;
-    if (consumed < 0 || consumed >= tokens.length || tokens[consumed][0].startsWith('-')) return null;
-    rest = rest.slice(tokens[consumed].index);
-  }
-  return null;
+  const tokens = [...text.matchAll(/\S+/g)];
+  const { length, refused } = claudeWrapperPrefix(tokens.map((m) => m[0]));
+  if (refused) return null;
+  return length ? text.slice(tokens[length].index) : text;
 }
 
 // Characters that make a Bash first token something other than a literal command
@@ -862,12 +890,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :792.
+// prunePermissions, whose only caller is processAllowList at :820.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :858 and nowhere else in the
+// reached it, in any of the three: it is called at :886 and nowhere else in the
 // repository. The claim then argued AGAINST its own test — "applyBypass's own
 // round trip does not already pin" was false, because no test ever turned bypass
 // OFF. Mutating this function to `return {}` left all 696 tests green. It is
@@ -878,13 +906,14 @@ function applyBypass(settings, on) {
 // promotion test asks the same "a command name, not a number or a range" question of a
 // digit-leading root.
 //
-// claudeStripsAssignment is exported (2026-10-13) for src/auto-learn.js, so the
-// learner and this pass share ONE copy of Claude Code's known-safe environment list.
-// The direction is the safe one for the fixed-point cache: the learner imports from
-// this stamped file, never the reverse, so nothing outside the stamp can change what
-// processAllowList emits.
+// claudeStripsAssignment and claudeWrapperPrefix are exported (2026-10-13) for
+// src/auto-learn.js, so the learner and this pass share ONE copy of Claude Code's
+// known-safe environment list and of its wrapper stripping. The direction is the safe
+// one for the fixed-point cache: the learner imports from this stamped file, never the
+// reverse, so nothing outside the stamp can change what processAllowList emits.
 module.exports = {
   generalizePermission, BASH_SCRIPT_KEYWORDS, isPowerShellCommandName, claudeStripsAssignment,
+  claudeWrapperPrefix,
   isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   currentMode, isBypassOn, applyBypass, readBypassState,

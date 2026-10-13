@@ -37,8 +37,10 @@ const STRIPPED = [
   ['Bash(nice rg x)', 'Bash(rg *)', 'Bash(rg x)'],
   ['Bash(nohup node server.js)', 'Bash(node *)', 'Bash(node server.js)'],
   ['Bash(stdbuf -oL rg x)', 'Bash(rg *)', 'Bash(rg x)'],
-  ['Bash(stdbuf -o 0 -e 0 rg x)', 'Bash(rg *)', 'Bash(rg x)'],
-  ['Bash(stdbuf --output=L rg x)', 'Bash(rg *)', 'Bash(rg x)'],
+  // Until 2026-10-13 `stdbuf -o 0 -e 0` and `stdbuf --output=L` were rows here. Only the
+  // binary's safety walker accepts those; the allow-path stripper takes fused modes only,
+  // so they are verbatim now (below) and the fused form is the row.
+  ['Bash(stdbuf -o0 -eL rg x)', 'Bash(rg *)', 'Bash(rg x)'],
   ['Bash(command npm test)', 'Bash(npm test *)', 'Bash(npm test)'],
   ['Bash(command -p git log)', 'Bash(git log *)', 'Bash(git log)'],
   ['Bash(builtin cd x)', 'Bash(cd *)', 'Bash(cd x)'],
@@ -49,6 +51,8 @@ const STRIPPED = [
   // 2026-10-13 this row was `FOO=1 timeout 5 git status`; FOO is not on Claude Code's
   // known-safe list, so that line now stays verbatim, below.)
   ['Bash(nohup timeout 5 nice -n 1 rg x)', 'Bash(rg *)', 'Bash(rg x)'],
+  // xargs is matched as a prefix on the rule, after the stripper has run: innermost only.
+  ['Bash(nohup xargs grep x)', 'Bash(grep *)', 'Bash(grep x)'],
   ['Bash(NODE_ENV=test timeout 5 git status)', 'Bash(git status *)', 'Bash(git status)'],
   // The inner command is generalized by the ordinary rules, runners included.
   ['Bash(nohup bash -c "make")', 'Bash(bash *)', 'Bash(bash -c "make")'],
@@ -91,6 +95,14 @@ test('a wrapper in a shape Claude Code does not strip, or wrapping nothing, stay
     'Bash(nohup)',
     'Bash(stdbuf rg x)',                 // stdbuf with no mode is not stripped
     'Bash(stdbuf -o$(id) rg)',           // a substitution inside the stripped prefix
+    // Only fused `-[ioe][LN0-9]+` modes are stripped on the allow path (2.1.296).
+    // MUTATION: restore the old separate-value and long-option arms in wrapperLength's
+    // stdbuf case. `Bash(stdbuf -o 0 -e 0 rg x)` becomes `Bash(rg *)`. Confirmed 2026-10-13.
+    'Bash(stdbuf -o 0 -e 0 rg x)', 'Bash(stdbuf --output=L rg x)', 'Bash(stdbuf -o1M rg x)',
+    // Nothing after xargs is stripped: the rule-side `xargs ` prefix is tried once.
+    // MUTATION: drop the xargs-innermost return in claudeWrapperPrefix. `Bash(xargs nohup
+    // grep x)` becomes `Bash(grep *)`, which `xargs grep *` never matches. Confirmed 2026-10-13.
+    'Bash(xargs nohup grep x)', 'Bash(xargs xargs grep x)', 'Bash(xargs timeout 5 grep x)',
     'Bash(command -x rg)',
     'Bash(command)',
     // What the wrapper runs is not a literal command root, so the ordinary guards apply.
@@ -126,6 +138,30 @@ test('forms Claude Code matches as themselves keep the design every runner root 
   assert.equal(generalizePermission('Bash(command -p -v rg)'), 'Bash(command -p -v *)');
   // Case matters to the CLI's routine (it compares exact names), so `Time` is not taken.
   assert.equal(generalizePermission('Bash(Time make)'), 'Bash(Time make)');
+});
+
+test('the learner and the wildcarding pass strip the same wrappers, through one routine', () => {
+  // Shared since 2026-10-13: src/auto-learn.js imports claudeWrapperPrefix from
+  // src/permissions.js rather than keeping its own subset. This holds the two callers to
+  // the same answer on every stripped row above: the learner's root is the root of the
+  // rule the pass writes.
+  const { extractInvocations } = require('../src/auto-learn');
+  const { claudeWrapperPrefix } = require('../src/permissions');
+  for (const [entry, expected] of STRIPPED) {
+    const command = /^Bash\((.*)\)$/.exec(entry)[1];
+    const [learned] = extractInvocations('Bash', command, {});
+    const root = /^Bash\(([^\s*]+)/.exec(expected)[1];
+    // MUTATION: give the learner back its own subset (strip only timeout, command and
+    // builtin). The `time make` row disagrees first. Confirmed 2026-10-13.
+    assert.equal(learned.root, root, `${entry}: learner roots on ${learned.root}, the pass on ${root}`);
+  }
+  // The routine itself, on the shapes that differ between the binary's two routines.
+  assert.deepEqual(claudeWrapperPrefix(['stdbuf', '-oL', 'rg']), { length: 2, refused: false });
+  assert.deepEqual(claudeWrapperPrefix(['stdbuf', '-o', 'L', 'rg']), { length: 0, refused: true });
+  assert.deepEqual(claudeWrapperPrefix(['nohup', 'xargs', 'grep']), { length: 2, refused: false });
+  assert.deepEqual(claudeWrapperPrefix(['xargs', 'nohup', 'grep']), { length: 1, refused: true });
+  assert.deepEqual(claudeWrapperPrefix(['command', '-v', 'rg']), { length: 0, refused: false });
+  assert.deepEqual(claudeWrapperPrefix(['rg', 'x']), { length: 0, refused: false });
 });
 
 test('PowerShell is untouched: there, timeout is timeout.exe', () => {

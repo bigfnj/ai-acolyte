@@ -160,9 +160,12 @@ test('reviewed Codex export refuses every learner runner as a bare prefix, in ev
 
 test('the refusal reaches a bare prefix the learner itself builds', () => {
   const { classifyInvocation } = require('../src/auto-learn');
+  // `xargs rm` was the xargs row until 2026-10-13, when the learner began stripping a
+  // bare, flagless `xargs` the way Claude Code's matcher does (it keys on `rm` now). A
+  // flagged xargs is matched as xargs, so `xargs -0 rm` is the row that hands over the root.
   for (const [root, command] of [
     ['node', 'node build.js'], ['npx', 'npx tsc --noEmit'], ['uvx', 'uvx ruff check .'],
-    ['xargs', 'xargs rm'], ['parallel', 'parallel gzip ::: a b'], ['env', 'env FOO=1 make'],
+    ['xargs', 'xargs -0 rm'], ['parallel', 'parallel gzip ::: a b'], ['env', 'env FOO=1 make'],
   ]) {
     const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
     assert.deepEqual(learned.prefix, [root], `precondition: ${command} hands over the bare root`);

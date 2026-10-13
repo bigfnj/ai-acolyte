@@ -599,6 +599,49 @@ test('documented stripped wrappers resolve to the inner command', () => {
   assert.deepEqual(rootOf('timeout 30'), ['timeout']);
 });
 
+// Since 2026-10-13 the learner strips exactly what the wildcarding pass strips, through
+// the same routine (claudeWrapperPrefix in src/permissions.js). Before, it knew only
+// `timeout`, `command` and `builtin`, so the families below were the wrappers themselves,
+// and it stripped `command -v`, which Claude Code matches as itself.
+test('the learner strips the whole documented wrapper set, and nothing Claude Code keeps', () => {
+  const rootOf = (command) => extractInvocations('Bash', command, { outcome: 'success' })
+    .map((item) => item.root);
+  for (const [command, root] of [
+    ['nohup node server.js', 'node'], ['nice -n 10 rg x', 'rg'], ['nice -5 rg x', 'rg'], ['time make', 'make'],
+    ['stdbuf -oL rg x', 'rg'], ['noglob git status', 'git'], ['builtin -- cd x', 'cd'], ['command -p git log', 'git'],
+    ['xargs grep x', 'grep'], ['nohup xargs grep x', 'grep'], ['nohup timeout 5 nice -n 1 rg x', 'rg'],
+    ['timeout --signal=TERM --preserve-status 1.5m make', 'make'],
+  ]) {
+    // MUTATION: make the wrapper step `break` without calling claudeWrapperPrefix (the
+    // learner strips nothing). Every row here keeps the wrapper and this fails on the
+    // first. Confirmed 2026-10-13.
+    assert.deepEqual(rootOf(command), [root], command);
+  }
+  for (const [command, root] of [
+    // Claude Code matches these as themselves, so the learner roots on them too.
+    ['command -v rg', 'command'], ['xargs -0 grep x', 'xargs'], ['Time make', 'Time'],
+    // Shapes the allow-path stripper refuses: unknown option, separate stdbuf value,
+    // a fragment after the wrapper, an option where the command should be.
+    ['timeout --bogus 5 rg', 'timeout'], ['stdbuf -o L rg x', 'stdbuf'], ['time -p make', 'time'],
+    ['nice --adjustment=5 rg', 'nice'],
+    // Stripping stops at the first wrapper it refuses, as the matcher's does.
+    ['nohup timeout npm test', 'timeout'],
+    // Nothing after xargs is stripped: Claude Code tries `xargs <rule>` once.
+    // MUTATION: drop `if (refused) break;` in deriveBaseInvocation. The loop strips nohup
+    // on its next pass and roots `xargs nohup grep x` on grep. Confirmed 2026-10-13.
+    ['xargs nohup grep x', 'nohup'],
+  ]) {
+    assert.deepEqual(rootOf(command), [root], command);
+  }
+  // A wrapper that stays the root is a shell-risk runner, never automatic, and its rule
+  // is refused by the exporter at any depth.
+  // MUTATION: drop the new row from SHELL_WRAPPERS in src/auto-learn.js. `nohup` alone is
+  // risk `unknown` and this fails. Confirmed 2026-10-13.
+  const [bare] = extractInvocations('Bash', 'nohup', { outcome: 'success' });
+  assert.equal(bare.risk, 'shell');
+  assert.deepEqual(renderClaudePermissions([bare], { includeReviewed: true }), []);
+});
+
 // Until 2026-10-13 this said an env prefix is stripped by the matcher, so `Bash(cat *)`
 // covers `LD_PRELOAD=x cat f` and refusing to propose it denied the grant without
 // denying the injection. Claude Code strips only a known-safe list (docs, and the list

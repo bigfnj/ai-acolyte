@@ -276,6 +276,13 @@
           "default": "codex",
           "markdownDescription": "Command name or absolute path used for `codex execpolicy check`. Auto Learn never writes a Codex rule unless this validation succeeds."
         },
+        "permissionWildcarding.autoLearn.workerTimeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "scope": "machine",
+          "markdownDescription": "How long one Auto Learn worker operation (a scan, apply or undo) may run before the extension stops waiting for it, in seconds. `0` disables the deadline, which attaching a debugger to the worker needs. The default clears Auto Learn's own 180-second child-process timeouts by a minute: it is a backstop for a worker stuck in a synchronous filesystem call, such as a dead network mount, not a budget. Raise it only if a legitimately slow scan is being cut off. A change applies to the next operation without a reload. Machine-scoped, so a repository's `.vscode/settings.json` cannot switch it off. While unset, `PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` in the environment still applies."
+        },
         "permissionWildcarding.localDrain.enabled": {
           "type": "boolean",
           "default": true,

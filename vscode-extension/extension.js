@@ -1156,11 +1156,36 @@ function autoLearnWorkerPath() {
   return fs.existsSync(repository) ? repository : packaged;
 }
 
+// The worker deadline from `autoLearn.workerTimeoutSeconds`, in ms, or undefined.
+// Before 2026-10-13 only PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS could set it.
+//
+// UNDEFINED UNLESS THE USER SET IT, which is why this reads inspect() and not
+// get(): get() returns the manifest default (300) whether or not anyone chose
+// it, and a number here outranks the env var in the runner, so an untouched
+// setting would silently cancel an env override that already works.
+//
+// globalValue ONLY. The key is machine-scoped so that a cloned repository's
+// .vscode/settings.json cannot set it to 0 and leave a wedged worker holding
+// teardown open; VS Code ignores a machine setting at workspace scope, and
+// reading only the user tier here keeps that true even if an inspect() result
+// carried one. Anything that is not a finite number >= 0 counts as unset: an
+// invalid value keeps the deadline rather than switching it off.
+function autoLearnWorkerTimeoutMs() {
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  if (typeof config.inspect !== 'function') return undefined;
+  const seconds = config.inspect('autoLearn.workerTimeoutSeconds')?.globalValue;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.round(seconds * 1000);
+}
+
 function getAutoLearnWorkerRunner() {
   if (!autoLearnWorkerRunner) {
     autoLearnWorkerRunner = createAutoLearnWorkerRunner({
       workerPath: autoLearnWorkerPath(),
       optionsProvider: () => autoLearnManagerOptions(),
+      // The function itself, re-read by the runner on every operation: the
+      // runner outlives every configuration change, so a number would be frozen.
+      timeoutMs: autoLearnWorkerTimeoutMs,
       onMutation: () => invalidateAutoLearnManager(),
     });
   }

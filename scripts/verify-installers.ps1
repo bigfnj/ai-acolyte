@@ -49,6 +49,53 @@ if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {
 
 $HOME_NEEDLE = '$userProfile = [System.Environment]::GetFolderPath("UserProfile")'
 
+# -- Where the sandboxes live, and how they go away -------------------------------
+#
+# Found 2026-10-13: every run of this file left all of its sandboxes behind in
+# %TEMP% -- 88 pw-inst-* folders on the development box -- and said nothing. There
+# %TEMP% is an 8.3 short path (C:\Users\<SHORTN~1.EXT>\AppData\Local\Temp), and
+# `Remove-Item -Recurse -Force` on a folder spelled through it fails with "An
+# object at the specified path C:\Users\<SHORTN~1.EXT> does not exist", under
+# 5.1.26100.9444 and 7.6.6 alike, with -Path and with -LiteralPath. The folder
+# stays. The error went to the console between cases, the case had already been
+# recorded, and $ErrorActionPreference = 'Continue' (deliberate, see above) let
+# the run reach "23 pass, 0 fail" and exit 0. [System.IO.Directory]::Delete removes
+# the same folder through the same spelling, and Get-Item's FullName expands the
+# short component (measured on both hosts; [IO.Path]::GetFullPath does too).
+#
+# So both, because neither alone is a guarantee on a machine nobody measured:
+#   - the sandbox root is %TEMP% resolved to its long form, so the boxes are
+#     spelled the way the installers spell their own location (see
+#     Get-RealHookCommand for why that differs from %TEMP% on CI);
+#   - Remove-Box deletes with [System.IO.Directory]::Delete and then LOOKS, and a
+#     box still on disk afterwards is a failing case below rather than a line of
+#     red text nobody reads. A leak is not cosmetic: the sandbox holds a
+#     settings.json and a copy of the installer, and a folder that grows by two
+#     dozen entries per run is how %TEMP% ends up with hundreds.
+$script:SandboxRoot = $env:TEMP
+try {
+    $script:SandboxRoot = (Get-Item -LiteralPath $env:TEMP -ErrorAction Stop).FullName
+} catch {
+    Write-Host "WARN  could not resolve %TEMP% to its long form; sandboxes go under $env:TEMP"
+}
+$script:boxesMade = New-Object System.Collections.ArrayList
+$script:boxesLeaked = New-Object System.Collections.ArrayList
+
+function Remove-Box {
+    param($Box)
+    $dir = "$($Box.dir)"
+    if ([string]::IsNullOrEmpty($dir)) { return }
+    try {
+        if ([System.IO.Directory]::Exists($dir)) { [System.IO.Directory]::Delete($dir, $true) }
+    } catch {
+        Write-Host "WARN  could not remove sandbox $dir -- $($_.Exception.Message)"
+    }
+    if ([System.IO.Directory]::Exists($dir)) {
+        if (-not $script:boxesLeaked.Contains($dir)) { $null = $script:boxesLeaked.Add($dir) }
+        Write-Host "WARN  sandbox still on disk after cleanup: $dir"
+    }
+}
+
 function Get-Installer {
     param([string]$Name)
     $path = Join-Path $repo $Name
@@ -65,7 +112,8 @@ function New-Box {
         that path from its OWN location -- a fixture naming the repo's path would
         never match, which cost one debugging round the first time. #>
     param([string]$Source, [scriptblock]$Content, [switch]$NoFile, [string]$ScriptName = 'under-test.ps1')
-    $box = Join-Path $env:TEMP ('pw-inst-' + [guid]::NewGuid().ToString('N'))
+    $box = Join-Path $script:SandboxRoot ('pw-inst-' + [guid]::NewGuid().ToString('N'))
+    $null = $script:boxesMade.Add($box)
     $null = New-Item -Path (Join-Path $box '.claude') -ItemType Directory -Force
     $hookPath = (Join-Path $box 'bin\wildcard-perms') -replace '\\', '/'
     if (-not $NoFile) {
@@ -111,9 +159,13 @@ function Get-RealHookCommand {
     $cfg = Get-Content $written -Raw | ConvertFrom-Json
     $cmd = @($cfg.hooks.PostToolUse)[0].hooks[0].command
     # Leave the sandbox as the caller found it: no settings.json, no probe.
-    Remove-Item $written -Force -ErrorAction SilentlyContinue
-    Remove-Item ($written + '.pre-install-backup') -Force -ErrorAction SilentlyContinue
-    Remove-Item $probe -Force -ErrorAction SilentlyContinue
+    # [System.IO.File], not Remove-Item: under an 8.3 %TEMP% a non-recursive
+    # Remove-Item fails the same way the recursive one does (see Remove-Box), and
+    # -ErrorAction SilentlyContinue hid it. Harmless only because every caller
+    # overwrites settings.json next; the comment above was not true.
+    foreach ($leftover in @($written, ($written + '.pre-install-backup'), $probe)) {
+        if ([System.IO.File]::Exists($leftover)) { [System.IO.File]::Delete($leftover) }
+    }
     return $cmd
 }
 
@@ -153,7 +205,7 @@ if (-not $install) {
     ($r.code -eq 0 -and $kept.Count -eq 4 -and $allow -eq 3 -and $deny -eq 1 `
             -and ($hookNames -contains 'SessionStart') -and ($hookNames -contains 'PostToolUse')) `
         "kept=$($kept.Count)/4 allow=$allow deny=$deny hooks=$($hookNames -join '+')"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 2. Unparseable: refuse, change nothing, exit non-zero.
     $broken = { param($hook) '{ "model": "x", "permissions": { "allow": [ ' }
@@ -163,7 +215,7 @@ if (-not $install) {
     ($r.code -ne 0 -and (Get-Content $box.settings -Raw) -eq (& $broken $box.hook) `
             -and $r.output -match 'could not be parsed') `
         "exit=$($r.code)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 3. Zero bytes is somebody else's mid-write window, not "no config yet".
     $box = New-Box -Source $install -Content { param($hook) '' }
@@ -171,7 +223,7 @@ if (-not $install) {
     Add-Result 'install: refuses a zero-byte settings.json' `
     ($r.code -ne 0 -and (Get-Item $box.settings).Length -eq 0 -and $r.output -match 'present but empty') `
         "exit=$($r.code)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 4. Absent is the legitimate first run and must still work.
     $box = New-Box -Source $install -NoFile
@@ -180,7 +232,7 @@ if (-not $install) {
     Add-Result 'install: creates an absent settings.json' `
     ($r.code -eq 0 -and $null -ne $fresh -and @($fresh.hooks.PostToolUse).Count -eq 1) `
         "exit=$($r.code) created=$(Test-Path $box.settings)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 5. Idempotent.
     $box = New-Box -Source $install -Content $HEALTHY
@@ -190,7 +242,7 @@ if (-not $install) {
     Add-Result 'install: run twice does not double-register' `
     (@($after.hooks.PostToolUse).Count -eq 1 -and $r.output -match 'already registered') `
         "PostToolUse=$(@($after.hooks.PostToolUse).Count)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 6. Key order preserved, so the write is not a gratuitous diff in a file the
     #    user reads. This is what the ordered-dictionary conversion buys.
@@ -199,7 +251,7 @@ if (-not $install) {
     $order = ((Get-Content $box.settings -Raw | ConvertFrom-Json).PSObject.Properties.Name) -join ','
     Add-Result 'install: preserves key order' `
     ($order -eq 'model,effortLevel,env,permissions,hooks') "order=$order"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 7. The backup holds the bytes as FOUND, not the object being written -- the
     #    easy mistake is to serialise $cfg, which by then already has the new hook.
@@ -210,7 +262,7 @@ if (-not $install) {
     ((Test-Path $bk) -and (Get-Content $bk -Raw) -notmatch 'PostToolUse' `
             -and (Get-Content $bk -Raw) -match 'SessionStart') `
         "exists=$(Test-Path $bk)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 8-12. A registration from ANOTHER checkout of this tool. Found live
     #    2026-10-13: the development box's hook still pointed at an old checkout
@@ -277,7 +329,7 @@ if (-not $install) {
                 -and $null -ne $after.hooks.SessionStart -and $after.model -eq 'claude-opus-5' `
                 -and $r.output.Contains($box.stale) -and $r.output -match 'repointed' -and $r.output -match 'no longer exists') `
             "PostToolUse=$($ptu.Count) toolHooks=$($tool.Count) middle=$($ptu[1].hooks[0].command) matcher=$($ptu[1].matcher)"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 9. Control: commands that only MENTION the tool are somebody else's. None is
@@ -308,7 +360,7 @@ if (-not $install) {
         ($r.code -eq 0 -and $same -and $ptu.Count -eq 2 -and $ptu[1].hooks[0].command -eq $box.real `
                 -and $r.output -notmatch 'repointed' -and $r.output -notmatch 'duplicate') `
             "PostToolUse=$($ptu.Count) untouched=$same"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 10. Already this checkout: no write at all, so no backup and the same bytes.
@@ -329,7 +381,7 @@ if (-not $install) {
         ($r.code -eq 0 -and $identical -and -not (Test-Path ($box.settings + '.pre-install-backup')) `
                 -and $r.output -match 'already registered') `
             "identical=$identical backup=$(Test-Path ($box.settings + '.pre-install-backup'))"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 11. Two stale registrations under ONE matcher, the second sharing its entry
@@ -357,7 +409,7 @@ if (-not $install) {
                 -and $r.output -match 'repointed' -and $r.output -match 'removed a duplicate' `
                 -and $r.output -match 'older-checkout') `
             "toolHooks=$($tool.Count) PostToolUse=$($ptu.Count) second=$(@($ptu[1].hooks).Count)"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 12. Stale AND current under one matcher -- the exact state the old installer
@@ -381,7 +433,7 @@ if (-not $install) {
         ($r.code -eq 0 -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 1 -and $ptu[0].hooks[0].command -eq $box.real `
                 -and $r.output -match 'removed a duplicate' -and $r.output.Contains($box.stale) -and $r.output -notmatch 'repointed') `
             "PostToolUse=$($ptu.Count) kept=$($ptu[0].hooks[0].command)"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 }
 
@@ -472,7 +524,7 @@ if (-not $uninstall) {
                 -and $null -ne $after.hooks.SessionStart -and $after.model -eq 'claude-opus-5' `
                 -and @($after.permissions.allow).Count -eq 1) `
             "PostToolUse=$($ptu.Count) survivor=$($ptu[0].hooks[0].command)"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 2. The bare-path spelling install.sh writes, not install.ps1's `node "..."`.
@@ -490,7 +542,7 @@ if (-not $uninstall) {
         Add-Result 'uninstall: matches the bare-path spelling too' `
         ($r.code -eq 0 -and -not ($after.PSObject.Properties.Name -contains 'hooks')) `
             "keys=$($after.PSObject.Properties.Name -join ',')"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 3. A third-party hook sharing OUR entry's hooks array. Removing the whole
@@ -511,7 +563,7 @@ if (-not $uninstall) {
         ($r.code -eq 0 -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 1 `
                 -and $ptu[0].hooks[0].command -eq 'neighbour-tool' -and $ptu[0].matcher -eq 'Bash') `
             "hooks=$(@($ptu[0].hooks).Count) survivor=$($ptu[0].hooks[0].command) matcher=$($ptu[0].matcher)"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 4. Nothing of ours registered: say so, change nothing, exit 0.
@@ -522,7 +574,7 @@ if (-not $uninstall) {
     ($r.code -eq 0 -and (Get-Content $box.settings -Raw) -eq (& $none $box.hook) `
             -and $r.output -match 'nothing removed') `
         "exit=$($r.code)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 5. Unparseable: refuse. Fails closed, so nothing was ever lost here -- but it
     #    used to report "could not be parsed" for a HEALTHY file under 5.1.
@@ -533,21 +585,21 @@ if (-not $uninstall) {
     ($r.code -ne 0 -and (Get-Content $box.settings -Raw) -eq (& $brokenU $box.hook) `
             -and $r.output -match 'left untouched') `
         "exit=$($r.code)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 6. Zero bytes: refuse, and say which it was.
     $box = New-Box -Source $uninstall -Content { param($hook) '' }
     $r = Invoke-Box $box
     Add-Result 'uninstall: refuses a zero-byte settings.json' `
     ($r.code -ne 0 -and $r.output -match 'present but empty') "exit=$($r.code)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 7. No file at all is not a failure.
     $box = New-Box -Source $uninstall -NoFile
     $r = Invoke-Box $box
     Add-Result 'uninstall: an absent settings.json is not a failure' `
     ($r.code -eq 0 -and $r.output -match 'no hook to remove') "exit=$($r.code)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     # 8. A copy exists after a real removal. An uninstall is exactly when a user
     #    wants a way back.
@@ -560,7 +612,7 @@ if (-not $uninstall) {
         Add-Result 'uninstall: takes a pre-write backup' `
         ((Test-Path $bk) -and (Get-Content $bk -Raw) -match 'someone-elses-hook') `
             "exists=$(Test-Path $bk) removalExit=$($r.code)"
-        Remove-Item -Recurse -Force $box.dir
+        Remove-Box $box
     }
 
     # 9-10. Another checkout's registration (found live 2026-10-13, see install
@@ -585,7 +637,7 @@ if (-not $uninstall) {
     ($r.code -eq 0 -and $ptu.Count -eq 1 -and $ptu[0].hooks[0].command -eq 'someone-elses-hook' `
             -and $r.output.Contains($gone) -and $r.output -match 'no longer exists') `
         "PostToolUse=$($ptu.Count) survivor=$($ptu[0].hooks[0].command)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 
     $box = New-Box -Source $uninstall -NoFile
     $live = Join-Path $box.dir 'other-checkout\bin\wildcard-perms'
@@ -599,8 +651,31 @@ if (-not $uninstall) {
     ($r.code -eq 0 -and (Get-Content $box.settings -Raw) -eq $before -and $r.output -match 'nothing removed' `
             -and $r.output.Contains($liveSpelled) -and $r.output -match 'another checkout') `
         "exit=$($r.code) unchanged=$((Get-Content $box.settings -Raw) -eq $before)"
-    Remove-Item -Recurse -Force $box.dir
+    Remove-Box $box
 }
+
+# -- cleanup ----------------------------------------------------------------------
+#
+# A case of its own, so a leaked sandbox FAILS the run instead of scrolling past
+# as red text between cases (see Remove-Box for the 88 folders that did). Two
+# conditions: no case's Remove-Box left its box behind, and nothing this run
+# created is still on disk after a final sweep. The sweep deletes directly rather
+# than through Remove-Box, so it also catches a box a case never handed back, and
+# so a run where Remove-Box is broken still leaves %TEMP% as it found it.
+$swept = 0
+$remaining = @()
+foreach ($dir in @($script:boxesMade)) {
+    if (-not [System.IO.Directory]::Exists($dir)) { continue }
+    $swept++
+    try { [System.IO.Directory]::Delete($dir, $true) } catch { }
+    if ([System.IO.Directory]::Exists($dir)) {
+        $remaining += $dir
+        Write-Host "WARN  sandbox left on disk: $dir"
+    }
+}
+Add-Result 'harness: removes every sandbox it creates' `
+($script:boxesLeaked.Count -eq 0 -and $remaining.Count -eq 0) `
+    "created=$($script:boxesMade.Count) cleanupFailed=$($script:boxesLeaked.Count) swept=$swept remaining=$($remaining.Count)"
 
 # ── report ────────────────────────────────────────────────────────────────────
 
@@ -615,8 +690,9 @@ Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
 # A floor, because without one this harness passes by doing nothing. An empty
 # results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
 # this would go green having verified nothing at all -- which is the failure
-# this whole script exists to prevent, turned on itself. It records 23 cases
-# today (16 until the other-checkout cases landed 2026-10-13); the floor sits
+# this whole script exists to prevent, turned on itself. It records 24 cases
+# today (16 until the other-checkout cases landed 2026-10-13, 23 until the
+# sandbox-cleanup case joined them the same day); the floor sits
 # below that so adding or reordering a case does not break it, but no
 # plausible breakage leaves more than a handful behind.
 $MinimumCases = 18

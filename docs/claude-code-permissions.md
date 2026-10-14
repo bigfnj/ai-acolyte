@@ -219,10 +219,32 @@ What the code does, since 2026-10-13:
 
 **Not** stripped: `bash -c`, `python -c`, `npx`, `docker exec`, `devbox run`,
 `direnv exec`, `mise exec`. To approve work inside a runner you must name both,
-as in `Bash(devbox run npm test)` **[docs]**.
+as in `Bash(devbox run npm test)` **[docs]**. The exporter holds the same line since
+2026-10-13 (`RUNNER_GRAMMAR` in `src/policy-exporters.js`): a reviewed Codex prefix
+that reaches a runner-exec form is refused until it names a concrete command and is
+then judged by that command, and a reviewed Claude rule that reaches one is refused at
+any depth. `devbox run` is broad even with a command named, because devbox hands an
+ad-hoc command to `eval` with each argument in double quotes, which a shell still
+expands **[measured against the source: jetify-com/devbox `internal/devbox/devbox.go`,
+RunScript, read 2026-10-13]**; the docs' own `Bash(devbox run npm test)` is safe as the
+exact rule it is written as.
 
-`watch`, `setsid`, `ionice` and `flock` with `-exec` or `-delete` always prompt
-and need exact-match rules **[docs]**.
+A prefix rule cannot auto-approve two further kinds of command, which the page lists as
+two separate bullets **[docs: permissions, "Exec wrappers and `find` actions", read
+2026-10-13]**, so in Manual mode they prompt:
+
+- **exec wrappers**, such as `watch`, `setsid`, `ionice` and `flock`;
+- **`find`** with an action that runs commands, deletes files or writes files, such as
+  `-exec`, `-delete` or `-fprint`, or with `-files0-from`, which takes the paths to
+  search from a file.
+
+A specific invocation with no `*` in it can be approved by an exact-match rule for the
+full command string, such as `Bash(find build -type f -delete)`. A command that itself
+holds a `*`, as in `find . -name '*.tmp' -delete`, is read as a wildcard pattern rather
+than an exact match, so it prompts every time unless a PreToolUse hook allows it. Until
+2026-10-13 this section merged the two bullets into one sentence, "`watch`, `setsid`,
+`ionice` and `flock` with `-exec` or `-delete` always prompt": `-exec` and `-delete` are
+`find`'s actions, and the page lists the exec wrappers with no action or flag attached.
 
 ### Why the blanket wrapper grants in the starter pack matter
 

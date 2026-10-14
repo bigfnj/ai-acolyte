@@ -495,9 +495,23 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
 //     parallel(1), "--shell"), so `["parallel", "gzip"]` admits `parallel gzip ';' rm -rf
 //     x ::: a`. Unlike xargs, naming the command narrows nothing. Until then it had only
 //     the generic rule, so every two-token parallel prefix rendered.
+//   * iex and invoke-expression (2026-10-14): PowerShell's Invoke-Expression and its one
+//     alias. Its argument is a whole script, not a command name: `iex 'Get-Date | Out-Null;
+//     Set-Content iex1.txt X'` ran both statements (MEASURED in a private temp directory,
+//     PowerShell 7.6.6, as did `IEX`, `Invoke-Expression -Command` and the module-qualified
+//     `Microsoft.PowerShell.Utility\Invoke-Expression`, which canonicalRoot reduces to the
+//     cmdlet name), so whatever a reviewed prefix names after it is code text, and one that
+//     ends at an option admits any script. A second positional argument is rejected ("A
+//     positional parameter cannot be found", measured), so an exact `["iex", "Get-Date"]`
+//     admits little beyond itself; it is refused anyway, the safe failure: the learner keys an
+//     `iex` run on the bare root, so only a hand-built candidate carries a longer prefix, and a
+//     reviewer who wants one script can grant its file. Both were learner SHELL_WRAPPERS (so
+//     refused bare, and at any depth on the Claude half) and had only the generic rule here,
+//     so `["iex", "Get-Date"]` and `["invoke-expression", "x"]` rendered (measured against
+//     0ecf75b: 9 of the 13 prefixes test/policy-exporters.test.js lists).
 const ALWAYS_BROAD_WRAPPERS = new Set([
-  'doas', 'eval', 'firejail', 'gdb', 'parallel', 'pkexec', 'runas', 'runuser', 'script', 'su', 'sudo',
-  'systemd-run', 'watch',
+  'doas', 'eval', 'firejail', 'gdb', 'iex', 'invoke-expression', 'parallel', 'pkexec', 'runas', 'runuser',
+  'script', 'su', 'sudo', 'systemd-run', 'watch',
 ]);
 
 // The wrappers whose exact `--version` or `--help` prefix is narrow on the Codex half

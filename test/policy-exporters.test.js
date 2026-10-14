@@ -1343,3 +1343,33 @@ test('on the Codex half an env assignment that names or loads a program is refus
     assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
   }
 });
+
+// Invoke-Expression's argument is a whole script (measured; src/policy-exporters.js
+// ALWAYS_BROAD_WRAPPERS). Each row's verdict at 0ecf75b is in the commit that added this test.
+const IEX_PREFIXES = [['iex', 'Get-Date'], ['IEX', 'Get-Date'], ['iex', '$x'], ['iex', '-Command'],
+  ['invoke-expression', 'x'], ['Invoke-Expression', 'Get-ChildItem'], ['Invoke-Expression', '-Command', 'x'],
+  ['Microsoft.PowerShell.Utility\\Invoke-Expression', 'x'], ['iex.exe', 'x'], ['iex'], ['Invoke-Expression'],
+  ['timeout', '5', 'iex', 'x'], ['xargs', 'invoke-expression']];
+
+test('Invoke-Expression and iex are broad at any depth, in every spelling', () => {
+  for (const prefix of IEX_PREFIXES) {
+    // MUTATION: drop 'iex' from ALWAYS_BROAD_WRAPPERS. `["iex", "Get-Date"]` falls to the
+    // generic rule and renders. Confirmed 2026-10-14. Dropping 'invoke-expression' fails its
+    // rows the same way. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} evaluates code`);
+  }
+  // The Claude half refused them at any depth already, by membership: pins.
+  for (const permission of ['PowerShell(iex *)', 'PowerShell(Invoke-Expression Get-Date *)', 'PowerShell(IEX x *)',
+    'Bash(iex x *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  // The learner's verdict agrees: a shell-wrapper risk whatever the case, keyed on the bare root.
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const command of ["iex 'Get-Date'", "Invoke-Expression 'Get-Date'", "IEX 'x'"]) {
+    const learned = classifyInvocation({ tool: 'PowerShell', command, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${command}: ${JSON.stringify(learned.reasons)}`);
+    assert.equal(learned.prefix.length, 1, command);
+  }
+  // Control: a cmdlet whose name merely contains the word is judged as before.
+  assert.equal(codexRuleCount(['Invoke-ExpressionLint', 'x']), 1);
+});

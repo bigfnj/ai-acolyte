@@ -188,8 +188,8 @@ test('a lock that cannot be created for a sharing reason is busy, and says which
   failures = 1;
   assert.throws(() => createPolicyLock({ lockPath }).locked(() => {}), (error) => error.code === 'ENOSPC');
 
-  // MUTATION: remove 'EPERM' from CONTENDED_CODES in src/policy-lock.js and the first
-  // assert.throws sees EPERM itself rather than AUTO_LEARN_LOCKED.
+  // MUTATION: make isContended in src/policy-lock.js answer EEXIST alone (the pre-port rule)
+  // and the first assert.throws sees EPERM itself rather than AUTO_LEARN_LOCKED.
 });
 
 test('an ownerless lock is only reclaimed once it is stale', (t) => {

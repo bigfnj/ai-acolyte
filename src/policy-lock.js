@@ -26,7 +26,14 @@ const POLICY_LOCK_BUSY_MESSAGE =
 // trace (7139659). EACCES and EBUSY are the same sharing family. All of them are a busy lock,
 // and the message names any code other than EEXIST, so a lock that can never be created (a
 // read-only directory gives EACCES too) does not read as an ordinary busy file.
-const CONTENDED_CODES = new Set(['EEXIST', 'EPERM', 'EACCES', 'EBUSY']);
+//
+// The sharing family is src/permissions.js RETRYABLE_RENAME_CODES, the one set of "another
+// process holds it" codes every atomic writer here retries on (test/rename-retry-policy.test.js
+// forbids a second spelling), so ETXTBSY counts too. Required on the failure path only, so
+// taking a free lock loads nothing it did not load before.
+function isContended(code) {
+  return code === 'EEXIST' || require('./permissions').RETRYABLE_RENAME_CODES.has(code);
+}
 
 // How old a lock file is, never negative. `stat.mtimeMs` carries sub-millisecond
 // precision while `Date.now()` is whole milliseconds, so a file written moments
@@ -168,7 +175,7 @@ function createPolicyLock(options = {}) {
       // Only CREATING the lock can be contended. Once this process has created it, an
       // EACCES writing into it is this process's own I/O failure, and calling it
       // "another process" would hide it.
-      const contended = !created && CONTENDED_CODES.has(failure.code);
+      const contended = !created && isContended(failure.code);
       if (contended && attempt === 0 && recoverLock()) continue;
       if (contended) {
         const conflict = new Error(busy(lockPath)

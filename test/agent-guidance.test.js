@@ -541,8 +541,8 @@ test('a lock that cannot be created for a sharing reason is a busy row, not a cr
   assert.equal(fs.readFileSync(box.file, 'utf8'), USER_TEXT);
   assert.equal(fs.existsSync(box.backupDir), false);
 
-  // MUTATION: remove 'EPERM' from CONTENDED_CODES in src/policy-lock.js and setGuidance
-  // throws the EPERM instead of returning this row.
+  // MUTATION: make isContended in src/policy-lock.js answer EEXIST alone (the pre-port rule)
+  // and setGuidance throws the EPERM instead of returning this row.
 });
 
 test('a file that is not UTF-8 text is refused byte for byte, and nothing is backed up', () => {

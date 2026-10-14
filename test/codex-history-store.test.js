@@ -942,8 +942,13 @@ test('the manager probes each Codex home once, with every root under it', (t) =>
   // Exactly these keys. `sessionsDir: sessionsDirs[0]` was passed beside the list
   // until 2026-10-14 and asserted here, though the probe reads it only when the
   // list is empty, which the manager's never is: an argument nothing consumed.
-  assert.deepEqual(Object.keys(calls[0]).sort(), ['codexHome', 'home', 'sessionsDirs'],
+  // `scan` is the result of the scan that just ran, whose listing the probe takes
+  // as its first walk; it names the one root listed whole (`archived_sessions/`
+  // does not exist in this fixture).
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['codexHome', 'home', 'scan', 'sessionsDirs'],
     'witness:probe-arguments -- the manager passes the probe an argument it never reads');
+  assert.deepEqual(calls[0].scan.walkedRoots, [{ path: sessions, source: 'codex' }],
+    'witness:probe-scan -- the probe was not handed the scan that just listed its folders');
   assert.equal(calls[0].codexHome, path.join(home, '.codex'));
   assert.deepEqual(one.codexHistoryFindings, { orphans: 1, relocated: 0, projectionAhead: 2, emptyRollouts: 0 });
 
@@ -956,6 +961,113 @@ test('the manager probes each Codex home once, with every root under it', (t) =>
   }).scan();
   assert.deepEqual(calls.map((call) => call.sessionsDirs), [[sessions, archived], [secondSessions]]);
   assert.deepEqual(two.codexHistoryFindings, { orphans: 2, relocated: 0, projectionAhead: 4, emptyRollouts: 0 });
+});
+
+// THE PROBE'S FIRST WALK IS THE SCAN'S OWN LISTING (2026-10-14). The manager
+// probes right after scanHistoryFiles listed the same folders; walking them again
+// was ~65 ms of a 2,000-rollout probe, and stat'ing every transcript after the
+// store read ~110 ms more. What is handed over is only what the scanner says it
+// listed completely (`walkedRoots`).
+const { scanHistoryFiles } = require('../src/history-adapters');
+// The parts of a scanHistoryFiles result the probe reads.
+function scanResult(roots, files, { walked = true } = {}) {
+  return { observations: [], cursors: {},
+    ...(walked ? { walkedRoots: roots.map((root) => ({ path: root, source: 'codex' })) } : {}),
+    files: files.map((file) => ({ source: 'codex', mode: 'unchanged', ...file })) };
+}
+
+test('the scanner names the roots it listed completely, and only those', (t) => {
+  const home = codexHome(t, 'walked-roots');
+  const sessions = path.join(home, '.codex', 'sessions');
+  const missing = path.join(home, '.codex', 'archived_sessions');
+  // A root with one subfolder the walk cannot read (EACCES, as antivirus does).
+  const broken = path.join(home, 'other-history');
+  const locked = path.join(broken, 'locked');
+  fs.mkdirSync(locked, { recursive: true });
+  const realReaddir = fs.readdirSync;
+  t.after(() => { fs.readdirSync = realReaddir; });
+  fs.readdirSync = (target, ...rest) => {
+    if (path.resolve(String(target)) === locked) {
+      const error = new Error(`EACCES: permission denied, scandir '${target}'`);
+      error.code = 'EACCES';
+      throw error;
+    }
+    return realReaddir(target, ...rest);
+  };
+  const result = scanHistoryFiles({ codexRoots: [sessions, missing, broken], platform: 'win32' });
+  fs.readdirSync = realReaddir;
+  assert.ok(result.files.some((entry) => entry.scope === 'root' && entry.path === locked), 'precondition: a subfolder the walk failed on');
+  assert.deepEqual(result.walkedRoots, [{ path: sessions, source: 'codex' }],
+    'witness:walked-roots -- a missing root or one the walk failed under was handed over as listed');
+});
+
+test('a listed root is not read again, and anything the listing lacks is still found on disk', (t) => {
+  const home = codexHome(t, 'prewalked');
+  const sessions = path.join(home, '.codex', 'sessions');
+  const archived = path.join(home, '.codex', 'archived_sessions');
+  const live = rollout(home, THREADS[0]);
+  sessionIndex(home, [THREADS[0], THREADS[1]]);
+  const probe = (scan) => codexHistoryStoreState({ home, sessionsDirs: [sessions, archived], scan });
+  assert.deepEqual(probe(undefined).orphans, [THREADS[1]], 'precondition: on disk, THREADS[1] has no transcript');
+
+  // The witness: a listing that names THREADS[1] is believed, so the folder it
+  // covers was not walked. (The scanner only ever lists what is on disk.)
+  const named = path.join(path.dirname(live), `rollout-2026-09-24T10-00-00-${THREADS[1]}.jsonl`);
+  const listed = [{ path: live, size: 10 }, { path: named, size: 10 }];
+  const believed = probe(scanResult([sessions], listed));
+  assert.deepEqual(believed.orphans, [],
+    'witness:prewalked -- the probe walked a folder the scan had already listed');
+  assert.equal(believed.rolloutFiles, 2);
+  // The trust gate: the same files from a result that does not say which roots
+  // it listed (an injected scanner's) are not a walk, and the disk decides.
+  assert.deepEqual(probe(scanResult([sessions], listed, { walked: false })).orphans, [THREADS[1]],
+    'witness:listing-trust -- files the scanner never said it listed were taken as a walk');
+
+  // Controls. An older listing that misses a transcript the store names sends the
+  // probe to the re-walk, which reads the disk; a root the listing does not cover
+  // (the archive) is walked as before.
+  const stale = probe(scanResult([sessions], []));
+  assert.deepEqual(stale.orphans, [THREADS[1]], 'the re-walk found THREADS[0] on disk; THREADS[1] is really missing');
+  archivedRollout(home, THREADS[1]);
+  const archive = probe(scanResult([sessions], [{ path: live, size: 10 }]));
+  assert.deepEqual(archive.orphans, [], 'a root outside the listing is still walked');
+  assert.equal(archive.archivedFiles, 1);
+});
+
+// The sizes the listing carries were taken BEFORE the store was read, so they are
+// a floor and never the answer: a transcript can only have grown since.
+test('a listed size is a floor under a transcript\'s size, never its size', { skip: !exactTier }, (t) => {
+  const home = codexHome(t, 'size-floor');
+  const sessions = path.join(home, '.codex', 'sessions');
+  const file = rollout(home, THREADS[0]);
+  const size = fs.statSync(file).size;
+  const probe = (offset, listedSize) => {
+    threadStore(home, [THREADS[0]], { offsets: { [THREADS[0]]: offset } });
+    return codexHistoryStoreState({ home, sessionsDirs: [sessions],
+      scan: scanResult([sessions], [{ path: file, size: listedSize }]) }).projectionAhead;
+  };
+  // Grown since the listing: the cursor is past the listed size and not past the
+  // file. Reading the listed size AS the size would call that ahead.
+  assert.deepEqual(probe(size, size - 3), [], 'witness:size-floor -- a transcript that grew since the scan read as ahead');
+  // Really ahead, past both: the stat after the read still says so.
+  assert.deepEqual(probe(size + 5, size), [THREADS[0]], 'a cursor past the file is still found');
+  // At or under the floor, no stat is taken. Shown by a floor the file has since
+  // fallen under: the one case the floor gives up, for one scan (the next scan's
+  // own size is the smaller one).
+  assert.deepEqual(probe(size + 5, size + 10), [],
+    'witness:size-floor-used -- the transcript was stat\'ed although the listed size already covered the cursor');
+});
+
+// End to end through the manager: an injected scanner's made-up file naming a
+// thread the index knows does not stand in for the walk.
+test('an injected scanner\'s files are not taken as the probe\'s walk', (t) => {
+  const home = codexHome(t, 'injected-listing');
+  sessionIndex(home, [THREADS[1]]);
+  const madeUp = path.join(home, '.codex', 'sessions', '2026', '09', '24', `rollout-2026-09-24T10-00-00-${THREADS[1]}.jsonl`);
+  const scan = createAutoLearnManager({ home, claudeRoots: [], historyScanner: () => ({ observations: [], cursors: {},
+    files: [{ source: 'codex', mode: 'full', path: madeUp, size: 1 }] }) }).scan();
+  assert.equal(scan.codexHistoryFindings.orphans, 1,
+    'witness:listing-trust -- an injected scanner\'s files hid a thread with no transcript');
 });
 
 test('codexHistoryFindings survives a reload, and a probe that throws records none', (t) => {

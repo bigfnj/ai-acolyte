@@ -981,7 +981,7 @@ function changeOutcome(item, before, after, source) {
 // deduped by `observationHashes`, so it cannot inflate a count", and for the
 // files it evicts that was false. A cursor-less file takes `mode: 'full'`
 // (`safeContinuation` returns false with no prior), a full read emits every
-// observation in the file wholesale (`src/history-adapters.js:2262#selected`), and each
+// observation in the file wholesale (`src/history-adapters.js:2273#selected`), and each
 // one whose hash is gone is counted again -- into `counts.success`, which is
 // what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
 // on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with
@@ -1425,17 +1425,17 @@ function createAutoLearnManager(options = {}) {
   // into one either. `skipped` stays the worst, because "no input at all" is
   // less of an answer than "one half of the comparison could not run".
   const RANK = { exact: 0, unavailable: 1, partial: 2, skipped: 3 };
-  // Takes no arguments, and used to be CALLED with `{ home, codexRoots }`. Both
-  // are closed over from the enclosing manager, so the object was built and
-  // silently discarded on every scan -- and had the parameter ever been added,
-  // the two would have disagreed about which roots to probe.
+  // Roots and home are closed over, never passed: this was once CALLED with `{ home, codexRoots }`, an
+  // object built and discarded on every scan. Its one argument (2026-10-14) is the SCAN RESULT, handed on
+  // as `scan` because it holds what nothing else here does: that scan's own listing of these folders, the
+  // probe's first walk (codexHistoryStoreState, prewalkedRollouts in history-adapters.js).
   //
   // ONE PROBE PER CODEX HOME, NOT PER ROOT. The roots are grouped by the folder
   // that holds them, and each group is probed once with all of its roots. Per
   // root was right while there was one root per home; with `sessions/` and
   // `archived_sessions/` side by side, a probe of either alone reads the other's
   // threads as orphans, and the corpus is stale by construction.
-  function codexHistoryStore() {
+  function codexHistoryStore(scan) {
     const roots = codexRoots.length ? codexRoots
       : [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')];
     const groups = new Map();
@@ -1452,7 +1452,7 @@ function createAutoLearnManager(options = {}) {
     for (const group of groups.values()) {
       // No `sessionsDir: group.dirs[0]` (dropped 2026-10-14): the probe reads it only when `sessionsDirs`
       // is empty, which `group.dirs` never is, so it was ignored on every call. Direct callers still may.
-      const state = historyStoreProbe({ home, codexHome: group.codexHome, sessionsDirs: group.dirs }) || {};
+      const state = historyStoreProbe({ home, codexHome: group.codexHome, sessionsDirs: group.dirs, scan }) || {};
       if (state.stale) stale = true;
       // Worst wins. One root inspected exactly does not redeem another that
       // could not be read: the answer for the corpus is only as good as its
@@ -2744,7 +2744,7 @@ function createAutoLearnManager(options = {}) {
       // otherwise healthy-looking result; taking the result down with it would
       // be a worse outcome than the blindness it reports.
       let codexHistory = { stale: false, inspected: 'skipped', reasons: [], notes: [], findings: null };
-      try { codexHistory = codexHistoryStore(); }
+      try { codexHistory = codexHistoryStore(result); }
       catch (error) {
         // `findings: null`, not zeros: a check that threw found nothing because
         // it did not look, and a zero would say it looked.

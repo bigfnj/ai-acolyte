@@ -2033,8 +2033,19 @@ function scanHistoryFiles(options = {}) {
   // Configured roots that do not exist (`findJsonlFiles` says why they are not
   // walk failures). Returned beside `files`, never inside it.
   const missingRoots = [];
+  // Configured roots this walk listed COMPLETELY: present, and not one failure
+  // anywhere under them. `files` then holds every transcript in them, so the
+  // Codex history-store probe can take its first walk from this scan instead of
+  // listing the same folders again (prewalkedRollouts, `options.scan`). A root
+  // that failed or was missing is left out, and the probe walks it itself.
+  const walkedRoots = [];
   for (const root of normalizeRootEntries(options)) {
+    const failed = walkFailures.length;
+    const absent = missingRoots.length;
     findJsonlFiles(root.path, root.source, found, walkFailures, missingRoots);
+    if (walkFailures.length === failed && missingRoots.length === absent) {
+      walkedRoots.push({ path: path.resolve(root.path), source: root.source });
+    }
   }
   const unique = new Map();
   for (const entry of found) {
@@ -2299,7 +2310,7 @@ function scanHistoryFiles(options = {}) {
       });
     }
   }
-  return { observations, cursors, files, missingRoots };
+  return { observations, cursors, files, missingRoots, walkedRoots };
 }
 
 // ── Codex history-store staleness ─────────────────────────────────────────────
@@ -2410,14 +2421,45 @@ function canonicalDir(dir) {
 // junction, a root nested inside another) is counted once. `byId` keeps every
 // path a thread id was found at, because the projection check needs the file's
 // size and a thread mid-move can briefly be seen in both places.
-function rolloutIndex(dirs) {
+//
+// `prewalked` (prewalkedRollouts below) is a root the CALLER has already listed:
+// its files are taken from that list and the folder is not read again. `counted`
+// is per FILE, so a listed root and a walked one nested in it cannot count one
+// transcript twice; for walked roots alone it changes nothing, because the
+// realpath set already visits each folder once.
+function rolloutIndex(dirs, prewalked = null) {
   const ids = new Set();
   const byId = new Map();
   const perDir = [];
   let files = 0;
   const seen = new Set();
+  const counted = new Set();
+  const add = (full, name) => {
+    if (prewalked) {
+      const key = dirKey(full);
+      if (counted.has(key)) return false;
+      counted.add(key);
+    }
+    files += 1;
+    const match = THREAD_ID.exec(name);
+    if (!match) return true;
+    const id = match[1].toLowerCase();
+    ids.add(id);
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push(full);
+    return true;
+  };
   for (const root of dirs) {
     let count = 0;
+    const rootKey = dirKey(root);
+    if (prewalked && prewalked.roots.has(rootKey)) {
+      const prefix = rootKey.endsWith(path.sep) ? rootKey : rootKey + path.sep;
+      for (const file of prewalked.files) {
+        if (file.key.startsWith(prefix) && add(file.path, path.basename(file.path))) count += 1;
+      }
+      perDir.push({ dir: root, files: count });
+      continue;
+    }
     const pending = [root];
     while (pending.length) {
       const dir = pending.pop();
@@ -2430,19 +2472,39 @@ function rolloutIndex(dirs) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) { pending.push(full); continue; }
         if (!entry.name.toLowerCase().endsWith('.jsonl')) continue;
-        files += 1;
-        count += 1;
-        const match = THREAD_ID.exec(entry.name);
-        if (!match) continue;
-        const id = match[1].toLowerCase();
-        ids.add(id);
-        if (!byId.has(id)) byId.set(id, []);
-        byId.get(id).push(full);
+        if (add(full, entry.name)) count += 1;
       }
     }
     perDir.push({ dir: root, files: count });
   }
   return { ids, files, byId, perDir };
+}
+
+// The listing a scan just made, taken from its result (`options.scan`, what
+// scanHistoryFiles returned): the Codex roots it names in `walkedRoots`, which it
+// listed completely, that are also among `dirs`, and every Codex transcript in
+// its `files` with the size its stat took then. ONLY `walkedRoots` makes a root
+// usable. A result without it -- an injected scanner's, whose `files` are
+// whatever its test made up -- hands over nothing, and neither does a root that
+// failed or was missing in that walk. Null when nothing is usable, and the probe
+// walks as it always did.
+function prewalkedRollouts(scan, dirs) {
+  if (!isObject(scan) || !Array.isArray(scan.walkedRoots) || !Array.isArray(scan.files)) return null;
+  const wanted = new Set(dirs.map(dirKey));
+  const roots = new Set(scan.walkedRoots
+    .filter((entry) => isObject(entry) && entry.source === 'codex' && typeof entry.path === 'string' && entry.path)
+    .map((entry) => dirKey(entry.path)).filter((key) => wanted.has(key)));
+  if (!roots.size) return null;
+  const files = [];
+  const sizes = new Map();
+  for (const entry of scan.files) {
+    if (!isObject(entry) || entry.source !== 'codex' || entry.scope === 'root') continue;
+    if (typeof entry.path !== 'string' || !entry.path) continue;
+    const key = dirKey(entry.path);
+    files.push({ path: entry.path, key });
+    if (Number.isFinite(entry.size) && entry.size >= 0) sizes.set(key, Math.max(entry.size, sizes.get(key) ?? 0));
+  }
+  return { roots, files, sizes };
 }
 
 // The union of two walks of the same folders. Used only for the re-walk below,
@@ -2754,7 +2816,8 @@ function codexHistoryStoreState(options = {}) {
     : home ? path.join(home, '.codex') : null;
   // `sessionsDirs` is what the manager passes -- every configured root under one
   // Codex home -- and `sessionsDir` is the one-root spelling older callers use.
-  // With neither, the default is the pair Codex itself writes to.
+  // With neither, the default is the pair Codex itself writes to. `scan`, also
+  // from the manager, is the result of the scan it just ran (prewalkedRollouts).
   const listed = Array.isArray(options.sessionsDirs)
     ? options.sessionsDirs.filter((dir) => typeof dir === 'string' && dir) : [];
   const scannedDirs = listed.length ? listed
@@ -2817,7 +2880,19 @@ function codexHistoryStoreState(options = {}) {
     migrationEntries = fs.readdirSync(path.join(codexHome, 'rollout-migrations')).length;
   } catch { migrationEntries = 0; }
 
-  let rollouts = rolloutIndex(accountedDirs);
+  // THE FIRST WALK MAY BE THE CALLER'S (2026-10-14). The manager probes right
+  // after its own scan listed the same folders, and `options.scan` hands that
+  // listing over (scanHistoryFiles `walkedRoots` + `files`): a root in it is not
+  // read again, and a root not in it (the archive when it is not configured, a
+  // root the scan failed on) is walked here as before. MEASURED on the synthetic
+  // 2,000-rollout home in readThreadStoreIds's note: this walk was ~65 ms of the
+  // probe. The listing is OLDER than a walk here would be, and that is safe: a
+  // thread the store names and the listing lacks sends the probe to the re-walk
+  // below, which always reads the disk. The listing also counts what the reader
+  // actually reads (it follows a junction this walk does not), which is the set
+  // "no rollout file the reader consumes" is about.
+  const prewalked = prewalkedRollouts(options.scan, accountedDirs);
+  let rollouts = rolloutIndex(accountedDirs, prewalked);
   const known = new Set();
   // The projection's cursor into each rollout, the LARGEST any store records,
   // because a second store file that lags the first is not evidence of a
@@ -2920,10 +2995,22 @@ function codexHistoryStoreState(options = {}) {
   // grows while Codex writes it, so a cursor read earlier can only be at or
   // behind a size read later; strictly past it means bytes the store consumed
   // are gone from the file. A stat that fails is skipped rather than guessed.
+  //
+  // A SIZE THE CALLER TOOK BEFORE IS A FLOOR, NOT AN ANSWER (2026-10-14). Used AS
+  // the size it would break the rule above: a transcript that grew between the
+  // caller's stat and the store read would put the cursor past the old size, a
+  // false "ahead". As a floor it is sound: the size now is at least that, so a
+  // cursor at or below it cannot be ahead, and only a cursor past it is stat'ed
+  // here, after the read, as before. On the measured box every cursor equals its
+  // file's size, so no transcript is stat'ed twice; these stats were ~110 ms of
+  // the synthetic 2,000-rollout probe. The one thing the floor can miss is a
+  // transcript that SHRANK in the moment between the two, and the next scan,
+  // whose own stat sees the smaller size, reports it.
   const aheadIds = [];
   for (const [id, offset] of offsets) {
     const files = rollouts.byId.get(id);
     if (!files) continue;
+    if (prewalked && files.some((file) => (prewalked.sizes.get(dirKey(file)) ?? -1) >= offset)) continue;
     let size = -1;
     for (const file of files) {
       try { size = Math.max(size, fs.statSync(file).size); } catch { /* moved or gone since the walk */ }

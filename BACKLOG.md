@@ -24,55 +24,21 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Post-release audit of v1.6.2 (2026-10-14), being fixed
+### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
 
-Four read-only audits ran over v1.6.2 (regressions, dead code, lifecycle, performance). The
-live hook path and every standing decision were intact; these were found and are in flight:
-
-- **The dashboard push blocks the extension host** on a synchronous Codex `config/read` spawn
-  (about 1 s per cache miss, about 31 s when Codex hangs) whenever the workspace has a
-  `.codex` folder. Introduced by the trusted-project discovery. `autoLearn.codexExecutable` is
-  also window-scoped, so a workspace setting chooses the executable the push now runs.
-- **A rebuild can finish while a Codex root is missing**, because a vanished root reads as a
-  clean walk; auto-safe can then grant against a known failure in that root.
-- **Reviewed Claude rules for informational forms** (`cargo --version`, `df -h`) are no longer
-  produced, and an upgrade revokes ones already applied.
-- **Exporter gaps**: versioned interpreter names (`python3.12 -c`, `nodejs -e`, `pypy3`) bypass
-  the interpreter rules; `hyperfine`, `duckdb` and `wsl` are narrowable though each can run a
-  shell; informational forms are refused inconsistently; `.cmd`/`.bat` spellings escape the
-  wrapper rows; `env NAME=VALUE cmd` skips the program-naming check on the Codex side.
-- **The starter pack seeds `Bash(export *)`**, which the new over-broad diagnostic flags, and the
-  diagnostic also counts the maintainer-kept `PowerShell(& *)`.
-- **The Codex memory lint misses dangling references** after `**`, `:`, `|`, `./` and `=`.
-- **Lifecycle and cost**: the Codex version line walks PATH×PATHEXT on every push (434 stats,
-  about 12 ms); its cache is never evicted; a probe killed by deactivate is remembered as
-  "timed out"; the project-trust cache keeps raw `config.toml` text (secrets included) per
-  edit; download retry timers lack an activation-generation check; the scan-trouble log
-  signature includes counts; a per-scan `select distinct` over Codex's item table costs
-  129 ms at 1M rows where a loose-index scan costs 20 ms.
-- **Dead code and duplication**: a dashboard field nothing renders still costs a full
-  `processAllowList` pass per push, plus other unread payload fields and an unused message
-  route; option keys and arguments nothing supplies; dead exports in `scripts/`; an unused
-  import that hides a test-only export from the census; four drifted copies of the
-  rename-retry codes; twelve copies of the harness credential scrub list; `RISK_RANK` in two
-  places; `CODEX_TESTED_VERSIONS` and the compatibility doc already disagree on a date; no test
-  pins `permissions.js`'s require closure.
-- **Installers**: an unquoted hook path with a space is not recognised; `uninstall.sh`
-  lowercases paths on every platform, not only Windows.
-- **CI**: the release job runs an unpinned `vsce` on an end-of-life Node 20 (vsce 4.0.0 wants
-  Node ≥ 22), and nothing tests Node 24, the extension host's runtime.
-- **The PostToolUse hook blocks every Bash/PowerShell call** for the cost of a Node spawn
-  (about 0.35–0.57 s on this box under endpoint security). Claude Code 2.1.296's hook schema
-  has `async: true`; whether older clients tolerate the key is being established first.
-
-### For the maintainer to decide (from the same audit)
+The audit's findings are fixed and recorded in `docs/engineering-record.md` under "The v1.6.2
+post-release audit (2026-10-14)". Two need the maintainer, because each changes the live
+environment rather than the code:
 
 - **The live hook runs the development checkout.** Any edit, branch checkout or mutation run in
   the maintained checkout changes the code the next real tool call runs against the real
   `settings.json` (the fixed-point stamp invalidates, so the edited generalizer runs at once).
   The backup mirror makes that recoverable. Pointing the hook at a stable copy (a worktree
   pinned to the latest tag, or the installed VSIX's bundled CLI) would separate the two.
-- **Applying `async: true` to the live hook registration** once the installers support it.
+- **Applying `"async": true` to the live hook registration.** The installers now write it (it
+  takes a Node spawn, about 0.35–0.57 s on this box, off every Bash/PowerShell call). Re-running
+  the installer from the checkout the hook should use applies it. The recorded cost is that
+  `claude -p` kills a still-running async hook at teardown.
 
 ### VS Code acceptance has not run against the 1.6.2 tree
 

@@ -33,6 +33,42 @@ is unmeasurable at the process level.
 
 ---
 
+## The v1.6.2 post-release audit (2026-10-14)
+
+Four read-only audits ran over the released v1.6.2: regressions, dead code and dead ends,
+lifecycle and leaks, and performance. The live hook path and every standing decision were
+intact; a differential over the new matcher axes (wrappers, safe and kept environment variables,
+xargs, star-free rules) found 0 disagreements between the coverage index and a full scan in
+18,000 cases, and every generalizer difference against v1.6.1 over 140,000 entries was a stated
+narrowing or the documented wrapper re-key. Everything below was found by those audits and fixed
+or recorded the same day.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| The dashboard push blocked the extension host on a synchronous Codex `config/read` | **FIXED**, `c85c10d` | Introduced by the trusted-project discovery. The push now reads the trust verdict from cache, a miss refreshes in the background (tracked, 10 s bound, tree-killed on deactivate), and only `.codex` folders with `rules/` are asked about. Cold push 1,106 → 106 ms, push after a `config.toml` edit 980 → 9 ms, a Codex that never answers 31,331 ms → under 120 ms. |
+| `autoLearn.codexExecutable` was window-scoped | **FIXED**, `b7c9a8d` | A workspace setting chose the executable the push now runs. Machine scope, read from the user tier only. (VS Code already disables the extension in Restricted Mode, because it declares no `untrustedWorkspaces`.) |
+| A rebuild could finish while a Codex root was missing | **FIXED**, `7ce6217` | A vanished root read as a clean walk, so pending ids were dropped and auto-safe could grant against a failure in that root (reproduced: granted on scan 2, revoked on scan 3). A missing configured root now holds the rebuild open; an `archived_sessions/` that never existed is benign, a dangling link there is not. |
+| Reviewed Claude rules for informational forms disappeared, and an upgrade revoked them | **FIXED**, `3417398`, `bee0f82` | The exporter honoured an explicit null rule on the false premise that every withholding reason was also a complexity reason. The learner now writes the informational word, and only an env-kept assignment withholds a rule. Families stored with a null rule are revived on their next run (`b4643ed`), so the managed-inert and user-deny checks see the rule before a write. |
+| Codex export bypasses and gaps | **FIXED**, `4a02252`, `09df009`, `bee0f82`, `e6d227c`, `f23e978`, `08978d9`, `c16728e`, `1d66310`, `b11038d`, `453c980` | Versioned and aliased interpreter names and `.cmd`/`.bat` spellings normalize to their base for every refusal table. hyperfine and wsl render only measured informational forms; duckdb runs an init file's `.shell` even under `--version` (measured) and is broad at any depth. iex, Invoke-Expression, Invoke-Command and icm are broad. bunx, pnpx, `deno x` and `dx` are judged as their long forms. A runner `-e` value that loads or names a program, any `--env-file`/dotenv option, a make or just override that chooses the recipe shell, and node's `--openssl-config` / `--experimental-config-file` make a prefix broad. The exporter header now states the governing principle (narrow only when the program is pinned and every option is modelled inert) so a later residual is judged by it rather than by a new audit. **ACCEPTED-RECORDED:** tokens after a fixed subcommand or task target stay unread (make excepted), so `npm test --node-options=…` is admitted; refusing it would refuse `npm test`, which already runs whatever the package script says (measured with npm 11.17.0). |
+| `bash -C <script>` widened unrecorded | **CORRECTION** | `668a685`'s "none went the other way" held for its 132-prefix probe, not the whole space: `["bash","-C","x.sh"]` was refused before only because the old check lowercased `-C` (noclobber) to `-c`. Benign — noclobber runs nothing and the prefix pins the script. |
+| The starter pack tripped its own diagnostic | **FIXED**, `0b063ed` | `Bash(export *)` (in the pack since v1.0.0, not one of the 13 maintainer-kept grants) is removed; the 13 are exempt from the over-broad count by one shared list with a drift test. |
+| The Codex memory lint missed dangling references in common Markdown spellings | **FIXED**, `9d5f622` | The token boundary aimed at a `skills/` false positive also silenced `**rollout_summaries/x.md**`, `./…`, `|…|`, `label:…`. |
+| A dead branch with a false mutation claim | **FIXED**, `ddbb329` | Reachable after all (a stripped wrapper followed only by assignments); now pinned by a test. |
+| Lifecycle and cost | **FIXED**, `c85c10d`, `d27ac77`, `dde59b0`, `1828046`, `e8c74e6`, `a16e586`, and the atomicWrite commit after them | The version probe's resolved path is cached (597 → 5 stats per push); one cache slot per executable; a deactivate kill is never cached as a timeout; tracked children are ended as process trees (an npm `.cmd` shim left its grandchildren running); the project-trust cache holds parsed trust only, never `config.toml` text; download retries carry the activation generation; the scan-trouble log keys on kinds of trouble. The history-store probe reads thread ids from the projection table alone and reuses the scan's own listing: 247.9 → 23.3 ms on a 1M-item synthetic home, verdicts identical. One rename-retry policy (codes, ten attempts, 0.9 s) is shared by every writer. |
+| Dead code and duplication | **FIXED**, `1e70869`, `3579e52`, `5e51476`, `9166322`, `d9c6103`, `309e00d`, `7a8d968`, `63bc23c`, `2e727e0`, `10398ba`, `cd839bc` | A full `processAllowList` pass per push fed a field nothing rendered; it and other unread payload fields, a dead message route, unsupplied option keys and dead `scripts/` exports are gone. The census counts an import only when its name is used, audits `scripts/` and reads git's tree; new tests assert every payload field has a reader and every message route a sender. `RISK_RANK`, the rename-retry set and the harness credential list each have one copy; the Codex version record and `permissions.js`'s require closure are pinned by tests. |
+| Installers | **FIXED**, `d7e936e`, `592bf06` | Spaced and `/cygdrive/` spellings are recognised and spaced registrations quoted; `uninstall.sh` folds case only on Windows. |
+| CI exposure | **FIXED**, `0c0f549` | `vsce` pinned to 4.0.0 and packaged on Node 22 (it declares Node ≥ 22; Node 20 is end-of-life); a Node 24 leg matches the extension host's runtime. |
+| The hook blocked every Bash/PowerShell call | **FIXED in the installers**, `c56ebdb`; live registration a maintainer decision | The installers write `"async": true`: documented on code.claude.com/docs/en/hooks (read 2026-10-14), first in Claude Code 2.1.15, and every client from 1.0.82 to 2.1.14 parses hooks with a non-strict schema that strips the key, so the hook simply stays synchronous there. Concurrent runs are covered by the policy lock and the idempotent pass. Recorded cost: under `claude -p` a still-running async hook is killed at teardown, so a rare in-place settings write could be cut short — the reason applying it to an existing registration is the maintainer's call. |
+| A lost failure across a session switch | **ACCEPTED-RECORDED**, `4eb4177` | No real rollout writes a `session_meta` mid-file (13 rollouts, 704 calls surveyed); the verdict is pinned by a test. |
+
+**MEASUREMENT HAZARD, 2026-10-14.** This box no longer matches the protocol's baseline: a bare
+`node -e 0` costs about 330 ms (Git Bash plus node about 550 ms) under endpoint security, against
+the ~50 ms the noise floor at the top of this file assumes, and process-level deltas swung by up
+to 15 ms between runs. A process-level A/B here needs in-process timing or a much larger n. The
+same day, under four concurrent worktrees driving Codex, one `codex execpolicy check` contract
+run took 547 s of repeated 60 s timeouts and passed in 20 s alone — the timeouts held, and the
+product's validator (30 s, in the Auto Learn worker) is off the extension-host thread.
+
 ## The 1.6.2 backlog clearance (2026-10-13)
 
 Prompted by two dashboard rows that were both false: Auto Learn read **"scan degraded —

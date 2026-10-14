@@ -283,6 +283,12 @@ function peekCodexVersionStatus(options = {}) {
 // was cached as a failure for FAILURE_TTL_MS. The reason "timed out" now means
 // this timer fired; and a probe that settles after abandonCodexVersionProbes()
 // remembers nothing at all, however it ended.
+//
+// AND ON A THREAD for the extension host (`offThread: true`, 2026-10-14). The spawn
+// itself held the host thread for the length of CreateProcess, 428-465 ms (p50) for
+// the real winget codex.exe on the development box (src/spawn-thread.js). The
+// child the timer ends and `track` receives is then a ThreadChild, which
+// endProcessTree ends on its thread; the timer, the cache and the epoch stay here.
 function probeCodexVersionStatus(options = {}) {
   const executable = String(options.executable || 'codex');
   const now = typeof options.now === 'function' ? options.now : Date.now;
@@ -298,7 +304,8 @@ function probeCodexVersionStatus(options = {}) {
   const promise = new Promise((resolve) => {
     try {
       const launch = commandLaunch(executable, ['--version']);
-      const run = typeof options.execFile === 'function' ? options.execFile : execFile;
+      const run = typeof options.execFile === 'function' ? options.execFile
+        : options.offThread === true ? require('./spawn-thread').execFileOffThread : execFile;
       const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
       let timedOut = false;
       let timer = null;

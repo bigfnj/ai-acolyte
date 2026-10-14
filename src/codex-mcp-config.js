@@ -288,11 +288,15 @@ function readCodexConfigLayers(options = {}) {
 
 // The same read without blocking the caller (nativeRpcAsync above). An injected
 // `rpc` may return its results or a promise of them; a test uses the promise to
-// hold the answer back.
+// hold the answer back. `offThread: true` (the extension host's ask) runs the
+// same nativeRpcAsync on a worker thread, because even its spawn held the host
+// for about 200 ms on the development box (src/spawn-thread.js).
 async function readCodexConfigLayersAsync(options = {}) {
   const context = paths(options);
   const requests = [{ method: 'config/read', params: { cwd: options.workspaceRoot || null, includeLayers: true } }];
-  const [response] = await (options.rpc ? options.rpc(requests, options, context) : nativeRpcAsync(requests, options, context));
+  const [response] = await (options.rpc ? options.rpc(requests, options, context)
+    : options.offThread === true ? require('./spawn-thread').configRpcOffThread(requests, options, context)
+      : nativeRpcAsync(requests, options, context));
   if (!object(response) || !Array.isArray(response.layers)) throw new Error('Codex config/read did not return layers');
   return response;
 }
@@ -495,9 +499,10 @@ function finishPending(request, options = {}) {
   return { ...finishRecord(state, record, inspected, context), recovered: true };
 }
 
+// nativeRpcAsync is exported for src/spawn-thread.js, which runs it on a thread.
 module.exports = { inspectCodexMcpTool, planCodexMcpApproval, applyCodexMcpApproval,
   restoreCodexMcpApproval, listCodexMcpApprovals, inspectPending, assertReady, finishPending,
-  readCodexConfigLayers, readCodexConfigLayersAsync };
+  readCodexConfigLayers, readCodexConfigLayersAsync, nativeRpcAsync };
 
 if (require.main === module && process.argv[2] === '--rpc-worker') {
   const readline = require('node:readline');

@@ -173,9 +173,18 @@ function taskkillPath() {
 // someone else's. Suspected and not verified: taskkill /T finds the tree by
 // ParentProcessId, which Windows does not clear when a parent dies, so a reused
 // PID would also take every process that still names it as a parent.
+//
+// A CHILD STARTED ON A WORKER THREAD (src/spawn-thread.js) is ended BY that thread,
+// against the ChildProcess it holds, so every rule above (the tree kill, the group
+// signal, the freed-PID guard) is applied to the real handle, by this function.
+// What the host holds is a ThreadChild, which answers END_TREE.
+const END_TREE = Symbol.for('ai-acolyte.endProcessTree');
 function endProcessTree(child) {
   const fallback = () => { try { child.kill(); } catch { /* already gone */ } };
   if (!child) return Promise.resolve();
+  if (typeof child[END_TREE] === 'function') {
+    try { return Promise.resolve(child[END_TREE]()).then(() => {}, () => {}); } catch { return Promise.resolve(); }
+  }
   // Required here, not at the top: the CLI hook loads this module on every call,
   // and only a caller that is ending children needs a spawner.
   const childProcess = require('child_process');
@@ -240,4 +249,5 @@ function endTreeAfter(child, ms) {
 // less than the tests that already exist.
 module.exports = {
   resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
+  END_TREE,
 };

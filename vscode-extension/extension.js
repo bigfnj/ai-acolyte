@@ -1860,7 +1860,7 @@ function codexRuleSetOptions(cfg) {
 // says the project folders are still being checked rather than guessing them.
 async function codexRuleFileSetFor(cfg) {
   const options = codexRuleSetOptions(cfg);
-  await refreshProjectTrust({ ...options, track: trackChild });
+  await refreshProjectTrust({ ...options, track: trackChild, offThread: true });
   return codexRuleFileSet({ ...options, projectTrust: 'cached' });
 }
 
@@ -1879,7 +1879,7 @@ function refreshProjectTrustForDashboard(cfg) {
   if (projectTrustRefreshing || deactivated) return;
   projectTrustRefreshing = true;
   const generation = activationGeneration;
-  refreshProjectTrust({ ...codexRuleSetOptions(cfg), track: trackChild }).then((landed) => {
+  refreshProjectTrust({ ...codexRuleSetOptions(cfg), track: trackChild, offThread: true }).then((landed) => {
     if (generation !== activationGeneration) return;
     projectTrustRefreshing = false;
     if (landed) dashboard?.refresh();
@@ -4282,7 +4282,7 @@ class WildcardingViewProvider {
         // something unrelated refreshes it. Generation-checked, like every late
         // continuation here, so a predecessor's probe cannot push to a successor.
         cli: fs.existsSync(CODEX_HOME_DIR) ? dashboardCodexVersion({ executable: codexSummaryConfig.codexExecutable,
-          track: trackChild, onSettled: settledFor(activationGeneration) }) : null,
+          track: trackChild, offThread: true, onSettled: settledFor(activationGeneration) }) : null,
       },
       local: localCardData(),
       guidance: guidanceCardData(),

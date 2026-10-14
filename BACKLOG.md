@@ -44,12 +44,6 @@ the cached trust timeout are fixed and recorded under "The v1.6.3 release commit
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
 and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It found:
 
-- **The recorded push figures are wrong.** On this box, `execFile()` blocks the calling thread
-  inside CreateProcess before returning. The real 332 MB winget `codex.exe` takes 428 ms (p50),
-  node 203 ms. So "106 ms cold" holds only with a `.cmd` stand-in. With the real Codex, a cold
-  push blocks the host for about 690 ms (the version probe plus the trust-worker spawn), and a
-  push after a `config.toml` edit for about 211 ms, not 9 ms. The fix is to make those spawns
-  from a worker thread; the record must be corrected either way.
 - **On Windows, an npm `.cmd` codex can outlive an extension host that dies outright.**
   MEASURED 2026-10-14 with a stand-in that never reads stdin. A Node host killed outright (not
   deactivated) takes the trust worker with it through libuv's kill-on-close job, and the

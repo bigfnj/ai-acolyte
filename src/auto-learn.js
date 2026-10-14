@@ -88,10 +88,10 @@ const CREDENTIAL_ROOTS = new Set([
 // file will ever hold. They are deliberately NOT given FAMILY tables: recipe names are
 // per-project, so there is no fixed subcommand set to narrow to.
 const SHELL_WRAPPERS = new Set([
-  '.', 'bash', 'bun', 'cmd', 'cmd.exe', 'command', 'dash', 'deno', 'duckdb',
+  '.', 'bash', 'bun', 'bunx', 'cmd', 'cmd.exe', 'command', 'dash', 'deno', 'duckdb',
   'env', 'eval', 'exec', 'fish', 'hyperfine', 'iex', 'invoke-expression',
   'java', 'just', 'ksh', 'make', 'mshta', 'node', 'npm', 'npx', 'parallel',
-  'perl', 'php', 'pnpm', 'powershell', 'powershell.exe', 'pwsh', 'py', 'python',
+  'perl', 'php', 'pnpm', 'pnpx', 'powershell', 'powershell.exe', 'pwsh', 'py', 'python',
   'python3', 'ruby', 'rundll32', 'sh', 'source', 'uvx', 'wsl', 'xargs', 'yarn',
   'zsh',
   // Claude Code's stripped process wrappers, 2026-10-13 (see the claudeWrapperPrefix import below).
@@ -1169,6 +1169,13 @@ function aggregateObservations(observations, options = {}) {
 // of the `Bash(uname *)` that path already grants.
 const INFO_PREFIX_FLAGS = new Set(['--help', '--version', '-h', '-V']);
 
+// `bunx` and `pnpx` joined SHELL_WRAPPERS above on 2026-10-14, edited in place so no cited line
+// moves. They are `bun x` and `pnpm dlx` under another name: each fetches or locates a package
+// by name and runs its binary, the `npx` and `uvx` shape, which this table has always held.
+// Until then `bunx tsc` and `pnpx create-vite` classified as `unknown-command` while `bun x
+// tsc` was `shell-wrapper`. The exporter refuses them on both halves the way it refuses their
+// long forms (src/policy-exporters.js RUNNER_ALIASES).
+//
 // The interpreter a versioned or distribution name runs, for the SHELL_WRAPPERS lookup in
 // classifyInvocation (2026-10-14). That lookup compared the normalized root by exact name, so
 // `python3.12 x.py`, `nodejs x.js`, `ruby3.2 x.rb`, `perl5.36 x.pl`, `php8.2 x.php` and

@@ -484,11 +484,21 @@ module.exports = { inspectCodexMcpTool, planCodexMcpApproval, applyCodexMcpAppro
 
 if (require.main === module && process.argv[2] === '--rpc-worker') {
   const readline = require('node:readline');
+  // A HOST THAT IS GONE CANNOT READ THE ANSWER, AND MUST NOT TAKE THE KILL WITH IT
+  // (2026-10-14). Writing the answer to a host that has died is EPIPE, and an
+  // unhandled 'error' on process.stdout is an uncaught exception: the worker died
+  // on its own catch-block write, after the finally below had armed its kill and
+  // before that fired, so a codex that never answers was left running with nothing
+  // left to end it. Measured on Linux (node:22-alpine), host SIGKILLed: the worker
+  // ran to its 25 s deadline and died there, and the hung stand-in codex was still
+  // running 30 s after the host. With this listener the worker ends it and exits.
+  for (const stream of [process.stdout, process.stderr]) stream.on('error', () => {});
+  const running = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
   let input = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => { input += chunk; if (input.length > 1024 * 1024) process.exit(1); });
   process.stdin.on('end', async () => {
-    let child, reader, timeout, closed, closing = false, nextId = 0;
+    let child, reader, timeout, hostWatch, closed, closing = false, nextId = 0;
     // A read-only request with its own deadline also gets a short grace before
     // its app-server is tree-killed: there is no write to let finish, and the
     // caller's budget is counted in seconds. Every other request keeps 5 s.
@@ -549,6 +559,22 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       // trust ask does (nativeRpcAsync), so its whole budget, kill included, fits
       // inside its own backstop. Clamped, so no request can lengthen the write path.
       timeout = setTimeout(() => fail(new Error('Codex config operation timed out')), deadlineMs);
+      // NOR WAIT OUT THAT DEADLINE FOR A HOST THAT IS GONE (2026-10-14). On POSIX
+      // nothing ends a child when its parent dies, and nativeRpcAsync's worker
+      // leads a process group and session of its own, so not even a signal to the
+      // host's group reaches it. A dead parent shows here as a changed ppid (an
+      // orphan is re-parented at once) or, where nothing re-parents, as a parent
+      // that no longer runs. Either fails the call in flight, which ends the
+      // app-server through the finally below the way the deadline would, within
+      // half a second of the host's death instead of up to 25 s after it. On
+      // Windows a Node host's libuv job object ends this worker with it, before
+      // this can run; the residual that leaves is in test/codex-mcp-config.test.js.
+      const parent = process.ppid;
+      hostWatch = setInterval(() => {
+        if (process.ppid === parent && running(parent)) return;
+        fail(new Error('the process that started this worker is gone'));
+      }, 500);
+      hostWatch.unref();
       await call('initialize', { clientInfo: { name: 'acolyte_mcp_config', version: '1' }, capabilities: { experimentalApi: true } });
       send({ method: 'initialized', params: {} });
       const results = [];
@@ -558,7 +584,7 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       process.stdout.write(JSON.stringify({ error: String(error.message).slice(0, 600) }));
       process.exitCode = 1;
     } finally {
-      closing = true; clearTimeout(timeout);
+      closing = true; clearTimeout(timeout); clearInterval(hostWatch);
       if (child) {
         child.stdin.end();
         const kill = setTimeout(() => {

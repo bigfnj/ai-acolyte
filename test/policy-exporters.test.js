@@ -824,7 +824,9 @@ test('an exec wrapper is exactly as narrow as the command it names', () => {
     ['nice', '-n', '10', 'rg'], ['nohup', 'rg'], ['stdbuf', '-oL', 'grep'], ['time', '-p', 'rg'],
     ['setsid', 'rg'], ['ionice', '-c', '3', 'rg'], ['flock', '/tmp/l', 'rg'], ['busybox', 'ls'],
     ['nsenter', '-t', '1', '-m', 'ls'], ['strace', '-f', 'ls'], ['ltrace', '-c', 'ls'],
-    ['chroot', '/srv/x', 'ls'], ['unshare', '-r', 'ls'], ['taskset', '0x1', 'ls'],
+    // `['unshare', '-r', 'ls']` left this list for the M3 broad set (-r maps to root); `-f` is fork,
+    // not an identity option, so it still renders.
+    ['chroot', '/srv/x', 'ls'], ['unshare', '-f', 'ls'], ['taskset', '0x1', 'ls'],
     ['chrt', '-f', '10', 'ls'], ['valgrind', '--tool=memcheck', 'ls'], ['builtin', 'cd'],
     ['noglob', 'ls'], ['nocorrect', 'ls'], ['command', 'rg'], ['exec', 'rg'],
     ['command', '-v'], ['command', '-v', 'rg'],
@@ -836,6 +838,46 @@ test('an exec wrapper is exactly as narrow as the command it names', () => {
     // narrow anyway. The explicit return is kept so that reads as intended.)
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
   }
+});
+
+// M3: an option that changes who the command runs as makes a modelled wrapper's prefix broad
+// (src/policy-exporters.js, each wrapper's entry). Verified against each tool's man page. Against the
+// M2 commit every M3_IDENTITY_BROAD row rendered.
+const M3_IDENTITY_BROAD = [
+  ['strace', '-u', 'root', 'cat'], ['strace', '-uroot', 'cat'], ['strace', '--user=root', 'cat'],
+  ['strace', '--user', 'root', 'cat'], ['strace', '--us=root', 'cat'], ['strace', '--u=root', 'cat'],
+  ['ltrace', '-u', 'root', 'ls'], ['ltrace', '-uroot', 'ls'],
+  ['chroot', '--userspec=0:0', '/srv', 'rm'], ['chroot', '--userspec', '0:0', '/srv', 'ls'],
+  ['chroot', '--groups=wheel', '/srv', 'ls'],
+  ['nsenter', '-t', '1', '-S', '0', 'cat'], ['nsenter', '-t', '1', '--setuid=0', 'cat'],
+  ['nsenter', '-t', '1', '-G', '0', 'ls'], ['nsenter', '-t', '1', '--setgid', '0', 'ls'],
+  // inner command is NARROW (ls/rg), so only the identity option makes the prefix broad: without M3
+  // each of these renders.
+  ['unshare', '-r', 'ls'], ['unshare', '--map-root-user', 'ls'], ['unshare', '-c', 'ls'],
+  ['unshare', '--map-current-user', 'ls'], ['unshare', '--map-user', '0', 'ls'],
+  ['unshare', '--map-users=0:0:1', 'ls'], ['unshare', '--setuid', '0', 'rg'],
+  ['unshare', '--setgid=0', 'ls'], ['unshare', '-fr', 'ls'],
+  ['timeout', '5', 'chroot', '--userspec=0:0', '/srv', 'ls'],
+];
+const M3_IDENTITY_NARROW = [
+  // the same wrappers without an identity option still name their command and render
+  ['strace', '-f', 'ls'], ['strace', '-U', 'name', 'ls'], ['ltrace', '-c', 'ls'],
+  ['chroot', '/srv', 'ls'], ['chroot', '--skip-chdir', '/srv', 'ls'],
+  ['nsenter', '-t', '1', '-m', 'ls'], ['unshare', '-f', 'ls'], ['unshare', '-m', 'ls'],
+  ['unshare', '-C', 'ls'],   // -C is cgroup (upper case), not -c map-current-user
+];
+
+test('M3: an identity option makes a modelled wrapper broad, fused, separated or abbreviated', () => {
+  for (const prefix of M3_IDENTITY_BROAD) {
+    // MUTATION: remove the identity check in execWrapperInner — every row renders.
+    // MUTATION: drop `identity`/`identityFused` from one wrapper's entry — that wrapper's rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs the command under another identity`);
+  }
+  for (const prefix of M3_IDENTITY_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command with no identity change`);
+  }
+  // Claude half: these are all wrapper roots, refused at any depth already.
+  assert.deepEqual(renderClaudePermissions(['Bash(chroot --userspec=0:0 /srv rm *)'], { includeReviewed: true }), []);
 });
 
 test('identity-changing and shell-text wrappers are broad at any depth', () => {
@@ -859,6 +901,80 @@ test('the Claude side refuses the same wrappers at any depth, by membership', ()
   // a rule like these only reaches the exporter from a shape Claude Code does not strip.
   for (const permission of ['Bash(timeout *)', 'Bash(nohup rg *)', 'Bash(sudo ls *)', 'Bash(watch *)',
     'Bash(nice -n *)', 'PowerShell(sudo *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
+});
+
+// M1 census (2026-10-14): more programs whose whole job is to run another, placed like their
+// closest modelled sibling (src/policy-exporters.js, the M1 comments). Each root is a LITERAL here,
+// so a drop from its table fails by name (the header's "names every newly covered root" rule). Each
+// rendered as a reviewed prefix_rule against the base source (M1_ALWAYS_BROAD bare and named,
+// M1_EXEC_WRAPPERS bare).
+const M1_ALWAYS_BROAD = ['bwrap', 'setpriv', 'sg', 'systemd-nspawn', 'proot'];
+const M1_EXEC_WRAPPERS = ['numactl', 'prlimit', 'cgexec', 'unbuffer', 'xvfb-run', 'caffeinate', 'sandbox-exec'];
+
+test('M1: a newly covered exec wrapper or identity changer is refused bare, in both spellings', () => {
+  for (const root of [...M1_ALWAYS_BROAD, ...M1_EXEC_WRAPPERS]) {
+    for (const spelling of [root, `${root}.exe`]) {
+      // MUTATION: drop the root from OWN_SHELL_WRAPPERS. The guard in wrapperIsBroad returns
+      // false (not a wrapper), the reviewed branch keeps the prefix, and a one-token rule renders.
+      assert.equal(codexRuleCount([spelling]), 0, `${JSON.stringify([spelling])} runs whatever follows it`);
+    }
+  }
+});
+
+test('M1: an identity changer or sandbox is broad at any depth, like sudo', () => {
+  for (const prefix of [
+    ['bwrap', '--bind', '/', '/', 'sh', '-c', 'x'], ['bwrap', '--setenv', 'LD_PRELOAD', './x.so', 'cat'],
+    ['bwrap', '--bind', '/', '/', 'ls'], ['setpriv', '--reuid=0', 'ls'], ['setpriv', 'ls'],
+    ['sg', 'grp', 'ls'], ['sg', 'grp', '-c', 'cmd'], ['systemd-nspawn', '-D', '/srv', 'ls'],
+    ['systemd-nspawn', 'ls'], ['proot', '-0', 'ls'], ['proot', '-r', '/srv', 'bash'],
+  ]) {
+    // MUTATION: drop the root from ALWAYS_BROAD_WRAPPERS. The named-command rows fall to the
+    // generic/exec rule and render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} is broad at any depth`);
+  }
+});
+
+test('M1: a pure exec wrapper is exactly as narrow as the command it names', () => {
+  for (const prefix of [   // option-only, or names a broad command: broad
+    ['numactl', '-i', 'all'], ['numactl', '-i', 'all', 'sh'], ['prlimit', '--nofile=1024'],
+    ['prlimit', '--nofile=1024', 'sh'], ['cgexec', '-g', 'cpu:/x'], ['cgexec', '-g', 'cpu:/x', 'env', 'FOO=1'],
+    ['unbuffer', '-p'], ['unbuffer', 'sh'], ['xvfb-run', '-a'], ['xvfb-run', '-s', '-screen 0', 'sh'],
+    ['caffeinate', '-i'], ['caffeinate', 'bash', '-c'], ['sandbox-exec', '-f', 'p.sb'], ['sandbox-exec', '-f', 'p.sb', 'sh'],
+  ]) {
+    // MUTATION: drop the root's EXEC_WRAPPER_GRAMMAR entry. Each falls to "two tokens, narrower"
+    // or lets a value option swallow the command, and renders.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names no command, or a broad one`);
+  }
+  for (const prefix of [   // names a concrete narrow command: renders
+    ['numactl', '-N', '0', 'ls'], ['numactl', 'ls'], ['prlimit', '--nofile=1024', 'ls'], ['prlimit', 'ls'],
+    ['cgexec', '-g', 'cpu:/x', 'ls'], ['unbuffer', '-p', 'grep'], ['unbuffer', 'rg'],
+    ['xvfb-run', '-a', 'rg'], ['caffeinate', '-i', 'ls'], ['caffeinate', '-t', '10', 'rg'],
+    ['sandbox-exec', '-f', 'p.sb', 'ls'], ['sandbox-exec', '-D', 'k=v', 'rg'],
+  ]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
+  }
+});
+
+test('M1: flatpak run is broad at any depth, flatpak list and a version are narrow', () => {
+  for (const prefix of [['flatpak', 'run', 'org.x.App'], ['flatpak', 'run', 'org.x.App', 'sh'], ['flatpak']]) {
+    // MUTATION: drop the flatpak RUNNER_GRAMMAR entry. `["flatpak", "run", "org.x.App"]` is a
+    // wrapperless root and renders.
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  for (const prefix of [['flatpak', 'list'], ['flatpak', '--version']]) {
+    assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
+  }
+  // Claude half: `flatpak run` refused at any depth, `flatpak list` not.
+  assert.deepEqual(renderClaudePermissions(['Bash(flatpak run org.x.App *)'], { includeReviewed: true }), []);
+  assert.deepEqual(renderClaudePermissions(['Bash(flatpak list *)'], { includeReviewed: true }), ['Bash(flatpak list *)']);
+});
+
+test('M1: the Claude side refuses the new wrappers at any depth, by membership', () => {
+  for (const permission of ['Bash(bwrap ls *)', 'Bash(numactl ls *)', 'Bash(proot -0 ls *)',
+    'Bash(sandbox-exec -f p.sb ls *)', 'Bash(setpriv ls *)', 'Bash(caffeinate -i ls *)']) {
     assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
   }
   assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
@@ -1985,6 +2101,69 @@ test('L3: strace -E/--env VAR=VAL is judged as an environment assignment, and a 
   }
   // Claude half: strace is a wrapper root there, refused at any depth already.
   assert.deepEqual(renderClaudePermissions(['Bash(strace -E LD_PRELOAD=x cat *)'], { includeReviewed: true }), []);
+});
+
+// M2: strace `-o |cmd` / `-o !cmd` pipes strace's output to a command (strace(1); src/strace.c), so it
+// is broad, separated or fused, abbreviation included. A plain file path stays narrow, and ltrace's
+// `-o`, which fopen()s the name with no pipe rule (ltrace options.c), is a plain value option. Against
+// the M1 commit every STRACE_OUT_BROAD row rendered.
+const STRACE_OUT_BROAD = [
+  ['strace', '-o', '|./x', 'cat'], ['strace', '-o', '!./x', 'cat'], ['strace', '-o|./x', 'cat'],
+  ['strace', '-o!./x', 'cat'], ['strace', '--output=|./x', 'cat'], ['strace', '--output', '|./x', 'cat'],
+  ['strace', '--out=|./x', 'cat'], ['strace', '--ou=|./x', 'cat'], ['strace', '--o=|./x', 'cat'],
+  ['strace', '-f', '-o', '|./x', 'ls'], ['timeout', '5', 'strace', '-o', '|./x', 'cat'],
+];
+const STRACE_OUT_NARROW = [
+  ['strace', '-o', 'out.txt', 'cat'], ['strace', '-oout.txt', 'cat'], ['strace', '--output=out.txt', 'cat'],
+  ['strace', '--output', 'out.txt', 'ls'], ['strace', 'cat'],
+  // ltrace -o is a plain file (fopen), not a pipe: it stays narrow.
+  ['ltrace', '-o', '|./x', 'ls'], ['ltrace', '-o|./x', 'ls'], ['ltrace', '--output=|./x', 'ls'],
+];
+
+test('M6: strace --expr is not a real long option, so it is broad; --trace, the real filter, renders', () => {
+  // MUTATION: restore `--expr` to strace's `values`. The first row reads `trace=open` as the option's
+  // value, names `ls`, and renders.
+  assert.equal(codexRuleCount(['strace', '--expr', 'trace=open', 'ls']), 0);
+  assert.equal(codexRuleCount(['strace', '--expr=trace=open', 'ls']), 1); // the fused `--[a-z-]+=` form is still inert
+  // Control: the real filter option, -e / --trace, still renders.
+  assert.equal(codexRuleCount(['strace', '--trace', 'open', 'ls']), 1);
+  assert.equal(codexRuleCount(['strace', '-e', 'trace=open', 'ls']), 1);
+});
+
+test('M4: valgrind --tool must be a plain tool name, a path-like value is broad; other long options stay open', () => {
+  for (const prefix of [
+    ['valgrind', '--tool=../../x', 'prog'], ['valgrind', '--tool=../../x', 'ls'],
+    ['valgrind', '--tool=mem/check', 'ls'], ['valgrind', '--tool=/abs/x', 'ls'],
+    ['valgrind', '--tool=memcheck', 'sh'],   // a valid tool name but the command is itself broad
+  ]) {
+    // MUTATION: restore the open `--[a-z0-9-]+(?:=.*)?` form (drop the `--tool=` guard). The
+    // path-like rows match the generic fused form and render. Confirmed by reverting to the pre-M4
+    // valgrind entry.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} escapes valgrind's lib dir`);
+  }
+  for (const prefix of [
+    ['valgrind', '--tool=memcheck', 'ls'], ['valgrind', 'ls'],
+    // the kept open form: any other long option, with any value, is accepted as inert
+    ['valgrind', '--leak-check=full', 'ls'], ['valgrind', '--log-file=out.txt', 'rg'],
+    ['valgrind', '-v', 'ls'],
+  ]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names a plain tool or inert option and renders`);
+  }
+  // Claude half: valgrind is a wrapper root, refused at any depth.
+  assert.deepEqual(renderClaudePermissions(['Bash(valgrind --tool=memcheck ls *)'], { includeReviewed: true }), []);
+});
+
+test('M2: strace -o |cmd or !cmd pipes its output to a command, so it is broad; ltrace -o does not', () => {
+  for (const prefix of STRACE_OUT_BROAD) {
+    // MUTATION: drop `outSep` from strace's entry — the separated `-o`/`--output` rows render.
+    // MUTATION: drop `outFused` — the fused `-o...` and `--output=`/`--out=` rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} pipes strace output to a program`);
+  }
+  for (const prefix of STRACE_OUT_NARROW) {
+    // MUTATION: make outputPipesToCommand always return true — the plain-path strace rows are
+    // refused and this fails.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} writes a file (or is ltrace) and renders`);
+  }
 });
 
 // node options that name a file deciding what loads (src/policy-exporters.js, node's `broad`).

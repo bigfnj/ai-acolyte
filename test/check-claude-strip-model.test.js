@@ -15,7 +15,7 @@ const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'check-claude-strip-model.js');
 const { check, defaultBinary, main } = require(SCRIPT);
-const { CLAUDE_SAFE_ENV_VARS } = require('../src/permission-match');
+const { CLAUDE_SAFE_ENV_VARS, claudeStripsAssignment } = require('../src/permission-match');
 
 const KNOWN = [...CLAUDE_SAFE_ENV_VARS];
 const literal = (names) => `IG=new Set([${names.map((name) => `"${name}"`).join(',')}]);`;
@@ -120,4 +120,27 @@ test('the command line runs it and reports by exit code', (t) => {
   const run = spawnSync(process.execPath, [SCRIPT, '--binary', file, '--json'], { encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(JSON.parse(run.stdout).status, 'same');
+});
+
+// M5 (2026-10-14): pin the strip model's case behaviour. wave-f13 read the installed 2.1.296 binary
+// and found the membership test case-exact (`IG.has(V)`, no conversion), which is what makes `LANG=C`
+// strip and `lang=C` keep its assignment. Nothing pinned that; these do.
+test('M5: claudeStripsAssignment is case-exact — LANG=C strips, lang=C does not', () => {
+  // MUTATION: make claudeStripsAssignment upper-case the name before the `.has` lookup
+  // (src/permission-match.js). The lower- and mixed-case lines fail.
+  assert.equal(claudeStripsAssignment('LANG', 'C'), true);
+  assert.equal(claudeStripsAssignment('lang', 'C'), false);
+  assert.equal(claudeStripsAssignment('Lang', 'C'), false);
+});
+
+test('M5: the script reports whether the membership lookup converts case, when it can read it', (t) => {
+  // A Set followed by a case-exact `IG.has(e)` reads as 'exact'; one that upper-cases first reads as
+  // 'folded'; a binary with no `.has` call near the list says nothing (null), not a guess.
+  const exact = check(binary(t, DECOYS[0], literal(KNOWN), 'function u(e){return IG.has(e)}', DECOYS[3]));
+  assert.equal(exact.lookupCase, 'exact');
+  // MUTATION: drop the `.to(Upper|Lower)Case` branch in detectLookupCaseConversion — this reads 'exact'.
+  const folded = check(binary(t, literal(KNOWN), 'function u(e){return IG.has(e.toUpperCase())}'));
+  assert.equal(folded.lookupCase, 'folded');
+  const silent = check(binary(t, DECOYS[0], literal(KNOWN), DECOYS[3]));
+  assert.equal(silent.lookupCase, null);
 });

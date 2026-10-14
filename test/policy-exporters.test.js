@@ -1373,3 +1373,42 @@ test('Invoke-Expression and iex are broad at any depth, in every spelling', () =
   // Control: a cmdlet whose name merely contains the word is judged as before.
   assert.equal(codexRuleCount(['Invoke-ExpressionLint', 'x']), 1);
 });
+
+// bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each
+// row's verdict at e6d227c is in the commit that added this test.
+const ALIAS_BROAD = [['bunx'], ['bunx', 'sh'], ['bunx', 'node'], ['bunx', '--bun', 'vite'], ['bunx.exe', 'sh'],
+  ['bun', 'x', 'sh'], ['bun', 'x', 'node', '-e', 'x'], ['bun', 'x', 'python', '-c', 'x'], ['pnpx'], ['pnpx', 'sh'],
+  ['pnpx', 'node'], ['pnpx.cmd', 'sh'], ['xargs', 'bunx'], ['timeout', '5', 'pnpx', 'sh']];
+const ALIAS_NARROW = [['bunx', 'tsc'], ['bunx', 'cowsay', 'hi'], ['bun', 'x', 'tsc'], ['pnpx', 'create-vite'],
+  ['pnpx', 'tsc', '--noEmit'], ['timeout', '5', 'bunx', 'tsc']];
+
+test('bunx and pnpx are judged as bun x and pnpm dlx: broad until they name a narrow command', () => {
+  for (const prefix of ALIAS_BROAD) {
+    // MUTATION: delete the RUNNER_ALIASES lookup in wrapperIsBroad. `["bunx"]` is then a
+    // wrapper with no grammar of its own and only `["bunx"]` itself is refused; `["bunx",
+    // "sh"]` renders and this fails. Confirmed 2026-10-14.
+    // MUTATION: drop `exec: ['x']` from bun's subcommands. Any named target pins `bun x` again,
+    // so `["bunx", "sh"]` and `["bun", "x", "sh"]` render. Confirmed 2026-10-14.
+    // MUTATION: drop 'bunx' and 'pnpx' from OWN_SHELL_WRAPPERS and from the learner's
+    // SHELL_WRAPPERS. candidateEligibleForCodex never asks wrapperIsBroad and `["bunx"]`
+    // renders. Confirmed 2026-10-14. Dropping them from OWN_SHELL_WRAPPERS alone survives, by
+    // design (the learner union still lists them; measured); from the learner alone, the
+    // learner assertion below fails.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs any package bin or a broad command`);
+  }
+  for (const prefix of ALIAS_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names a narrow command and still renders`);
+  }
+  // The Claude half refuses them at any depth by membership, as it refuses bun and pnpm.
+  for (const permission of ['Bash(bunx tsc *)', 'Bash(pnpx create-vite *)', 'PowerShell(bunx *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  // The learner calls them runners, as it calls `bun x` and `npx` (src/auto-learn.js SHELL_WRAPPERS).
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const command of ['bunx tsc', 'pnpx create-vite']) {
+    const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${command}: ${JSON.stringify(learned.reasons)}`);
+    assert.equal((renderCodexRules([learned], { includeReviewed: true }).match(/prefix_rule\(/g) || []).length, 0,
+      `${command}: the learner's bare-root prefix is refused`);
+  }
+});

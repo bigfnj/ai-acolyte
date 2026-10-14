@@ -82,6 +82,9 @@ const OWN_SHELL_WRAPPERS = [
   'just', 'just.exe', 'ksh', 'ksh.exe', 'make', 'make.exe', 'powershell',
   'powershell.exe', 'pwsh', 'pwsh.exe', 'sh', 'sh.exe', 'wsl', 'wsl.exe',
   'zsh', 'zsh.exe',
+  // bunx and pnpx, the short names of `bun x` and `pnpm dlx` (2026-10-14, RUNNER_ALIASES). The
+  // learner lists them too; they are spelled here as well so the refusal does not hang on it.
+  'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe',
   ...['busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice',
     'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser',
     'script', 'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time',
@@ -613,6 +616,13 @@ function execWrapperInner(grammar, prefix) {
 // a file or a fixed-purpose subcommand such as `test`, pins. Their top-level options are
 // not modelled (the two entries list none), so any of them is an unknown option and
 // broad, the safe failure.
+//
+// bun's `x` is the exception among the targets (2026-10-14): it is `bunx`, bun's npx, which
+// fetches or locates a package by name and runs its binary, so like `npx` and `pnpm dlx` it is
+// judged by the command it names (`exec` below): `["bun", "x", "tsc"]` renders and `["bun",
+// "x", "sh"]` does not. Until then any named target pinned it, so `["bun", "x", "sh"]` and
+// `["bun", "x", "python", "-c", "x"]` rendered while `["npx", "sh"]` was refused (measured
+// against e6d227c). deno's `x` is left a target: not measured, recorded.
 const DEFAULT_INFO = new Set(['--version', '-V', '--help', '-h']);
 const SHELL_INFO = new Set(['--version', '--help']);
 const POSIX_SHELL_GRAMMAR = {
@@ -676,7 +686,7 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     values: ['-d', '--debug', '-o', '--debug-output', '-f', '--features', '-p', '--profile'],
     fused: /^--(?:debug|debug-output|features|profile)=/,
   },
-  bun: { info: DEFAULT_INFO, subcommands: { target: ['run', 'x', 'create'], broad: ['exec', 'repl'] } },
+  bun: { info: DEFAULT_INFO, subcommands: { target: ['run', 'x', 'create'], exec: ['x'], broad: ['exec', 'repl'] } },
   deno: { info: DEFAULT_INFO, subcommands: { target: ['run', 'serve', 'compile', 'x'], broad: ['repl', 'eval'] } },
 }));
 
@@ -709,7 +719,8 @@ function interpreterIsBroad(base, prefix) {
   if (grammar.subcommands.broad.includes(word)) return true;
   if (!grammar.subcommands.target.includes(word)) return false;
   const target = rest[k + 1];
-  return target === undefined || target.startsWith('-');
+  if (target === undefined || target.startsWith('-')) return true;
+  return Boolean(grammar.subcommands.exec?.includes(word)) && wrapperIsBroad(rest.slice(k + 1));
 }
 
 // Development-environment runners, package runners and task runners (decided 2026-10-13).
@@ -1164,6 +1175,17 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
   hyperfine: infoOnly(DEFAULT_INFO), duckdb: RUNS_ANY_COMMAND, wsl: infoOnly(LONG_INFO),
 }));
 
+// Short names that ARE a longer command line, judged as that command line (2026-10-14).
+// `bunx` is `bun x` (bun's npx; INTERPRETER_GRAMMAR's bun entry judges it by the command it
+// names) and `pnpx` is `pnpm dlx` (pnpm 7 and later; pnpm 6's pnpx was npx-like, the same
+// runner-exec shape). Neither was on any table, so a reviewed bare `["bunx"]` or `["pnpx"]` and
+// `["bunx", "sh"]`, `["pnpx", "sh"]` rendered (measured against e6d227c), each a grant to run
+// any package bin or any program. Now `["bunx"]` is `["bun", "x"]`, broad until a command is
+// named, and `["pnpx", "create-vite"]` is `["pnpm", "dlx", "create-vite"]`, narrow. Both are
+// OWN_SHELL_WRAPPERS too, so the Claude half refuses them at any depth as it refuses bun and
+// pnpm, and the learner lists them as wrappers.
+const RUNNER_ALIASES = new Map([['bunx', ['bun', 'x']], ['pnpx', ['pnpm', 'dlx']]]);
+
 // The index of the first token at or after `k` that is not one of `grammar`'s options, or
 // -1 at an option it does not list. `grammar` may be undefined: nothing is modelled, so
 // any option is unknown.
@@ -1267,6 +1289,9 @@ function wrapperIsBroad(prefix) {
   // recursion, so `["xargs", "git"]` and `["timeout", "5", "git", "-c", "x=y", "status"]` are
   // as broad as the git prefix they name.
   if (base === 'git') return runnerIsBroad(GIT, prefix.slice(1).map(String));
+  // A short name is judged as the long form it stands for (RUNNER_ALIASES).
+  const alias = RUNNER_ALIASES.get(base);
+  if (alias) return wrapperIsBroad([...alias, ...prefix.slice(1).map(String)]);
   if (!SHELL_WRAPPERS.has(root) && !SHELL_WRAPPERS.has(base) && !runner) return false;
   if (prefix.length === 1) return true;
   if (INLINE_CODE_FLAGS.has(base) && prefix.slice(1).some((token) => INLINE_CODE_FLAGS.get(base)(String(token)))) {

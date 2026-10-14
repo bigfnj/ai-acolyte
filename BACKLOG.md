@@ -24,20 +24,6 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### In flight on 2026-10-13
-
-- **"A value is a command" Codex prefixes.** `git -c core.sshCommand=…`, `rsync -e`, and the
-  `docker-compose` (v1) and `nerdctl` spellings of the docker grammar still render as narrow
-  reviewed prefixes.
-- **Program-choosing environment variables** (`PAGER`, `EDITOR`, `GIT_SSH_COMMAND`, …) render in
-  env-led reviewed rules with their value pinned; only code-loading variables are refused.
-- **`FOO=1 cat` and `FOO=1 cat.exe` learn as two families**, because env-led keys skip the
-  `.exe` unification plain keys get.
-- **A recall download killed with its host leaves its partial file**, and an older build's
-  fixed-name temp file is never cleaned.
-- **Already-scanned Codex history keeps its old verdicts.** None of the 2026-10-13 parser fixes
-  raised `CODEX_EVIDENCE_REVISION`, so rollouts scanned before them are not re-read.
-
 ### VS Code acceptance has not run against the 1.6.2 tree
 
 `scripts/drive-vscode.js` launches an isolated VS Code instance, and on 2026-10-13 every launch
@@ -61,6 +47,14 @@ rather than trusting a number written here**; on branch wave-e1 (88a4c1d plus th
 whose anchor moved to exactly one other line. See the engineering record, "`file:line` rot".
 Converting the existing corpus waits until code stops moving. The `.py`/`.yml`/`.yaml` blind
 spot is closed, and the `memory/recall.py` citation it hid is corrected and anchored.
+
+### `check-line-refs.js` triples every citation while a merge is unresolved
+
+Found 2026-10-13 merging wave-a12: during an unfinished merge `git ls-files` lists a conflicted
+file once per index stage, so the checker collected each citation in it three times, and
+`--fix-anchored` planned the same edit three times and (correctly) refused to write when the
+second application no longer matched. Staging the resolved files cleared it. The file list
+should be de-duplicated so the counts and the fixer are right mid-merge too.
 
 ### A worker-runner timing test was cancelled once under heavy load
 

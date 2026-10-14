@@ -8,7 +8,9 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.6.3 fixes what a post-release audit of 1.6.2 found**: the dashboard never blocks
+**Version 1.6.4 makes Review answer every click**: the Auto Learn card counts only what Review
+can act on, and Review shows progress, waits for a scan already running and says plainly when
+nothing needs review. Version 1.6.3 fixed what a post-release audit of 1.6.2 found: the dashboard never blocks
 the extension host, a missing Codex root holds an Auto Learn rebuild open, informational rules
 are proposed again, the Codex exporter refuses every prefix that can run an unpinned program,
 and the hook registers asynchronously. Version 1.6.2 stopped two false dashboard warnings and
@@ -46,7 +48,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v163.vsix
+code --install-extension ai-acolyte-v164.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

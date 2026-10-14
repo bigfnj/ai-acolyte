@@ -1737,6 +1737,57 @@ test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led b
   }
 });
 
+// L2 (2026-10-14, the lead's decision): the Claude half folds case in a leading assignment, as K1
+// folded the Codex export's, for the sets it already refused and no others
+// (src/policy-exporters.js assignmentIsUnsafe). Against the base source (the L1 commit) every rule
+// in L2_FOLDED_REFUSED rendered.
+const L2_FOLDED_REFUSED = [
+  // CODE_LOADING_ENV
+  'Bash(node_options=x cat *)', 'Bash(Node_Options=x cat *)', 'Bash(path=. cat *)', 'Bash(Path=. cat *)',
+  'Bash(bash_env=x cat *)', 'Bash(env=x cat *)', 'Bash(pythonpath=. cat *)', 'Bash(perl5opt=x cat *)',
+  'Bash(java_tool_options=x cat *)',
+  // PROGRAM_NAMING_ENV
+  'Bash(git_pager=x git log *)', 'Bash(Git_Pager=x git log *)', 'Bash(git_ssh_command=x git log *)',
+  'Bash(editor=x git log *)', 'Bash(pager=x git log *)', 'Bash(lessopen=x cat *)', 'Bash(sudo_askpass=x cat *)',
+  'Bash(cc=x cargo build *)', 'Bash(Cxx=x cargo build *)', 'Bash(make=x cargo build *)',
+  // the loader prefixes
+  'Bash(ld_preload=./x.so cat *)', 'Bash(Ld_Preload=./x.so cat *)', 'Bash(ld_library_path=. cat *)',
+  'Bash(dyld_insert_libraries=x ls *)',
+  // after a data assignment
+  'Bash(FOO=1 ld_preload=x cat *)',
+];
+// Refused before L2 and after it.
+const L2_UPPER_REFUSED = ['Bash(LD_PRELOAD=./x.so cat *)', 'Bash(GIT_PAGER=x git log *)', 'Bash(NODE_OPTIONS=x cat *)',
+  'Bash(PATH=. cat *)', 'Bash(CC=x cargo build *)'];
+// G4(b)'s acceptance, in any case: the names the Claude half never refused stay rendering.
+const L2_G4B_RENDER = ['Bash(AR=x cargo build *)', 'Bash(ar=x cargo build *)', 'Bash(LD=./ld cargo build *)',
+  'Bash(ld=./ld cargo build *)', 'Bash(RUSTC=x cargo build *)', 'Bash(rustc=x cargo build *)', 'Bash(Ranlib=x cargo build *)',
+  'Bash(makeflags=-j4 cargo build *)', 'Bash(cargo_home=x cargo build *)', 'Bash(CARGO_HOME=x cargo build *)'];
+// Data, in any case.
+const L2_DATA_RENDER = ['Bash(lang=C git log *)', 'Bash(LANG=C git log *)', 'Bash(foo=1 cat *)', 'Bash(ci=1 cat *)',
+  'Bash(rust_log=debug cargo test *)', 'Bash(cflags=-O2 cargo build *)', 'Bash(ldflags=-s cargo build *)',
+  'Bash(Pathname=x cat *)', 'Bash(editors=x git log *)'];
+
+test('L2: the Claude half judges a leading assignment case-insensitively, for the sets it already refused', () => {
+  for (const permission of ['Bash(cat *)', 'Bash(git log *)', 'Bash(cargo build *)', 'Bash(cargo test *)', 'Bash(ls *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], `precondition: ${permission}`);
+  }
+  for (const permission of L2_FOLDED_REFUSED) {
+    // MUTATION: drop the upper-case lookup from assignmentIsUnsafe (L2 reverted). Every rule here
+    // renders.
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], `${permission} names the variable on Windows`);
+  }
+  for (const permission of L2_UPPER_REFUSED) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  for (const permission of [...L2_G4B_RENDER, ...L2_DATA_RENDER]) {
+    // MUTATION: judge assignmentIsUnsafe by codexFoldedEnvNameIsUnsafe (the Codex export's wider
+    // set). The G4(b) rules are refused and this fails.
+    // MUTATION: make assignmentIsUnsafe refuse every name. Every rule here fails.
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], permission);
+  }
+});
+
 test('J1: the Codex validator judges a pattern that opens with assignments by the command after them', () => {
   // MUTATION: delete the `lead` lines in patternSafetyErrors. `["FOO=1", "curl"]` and the two
   // assignment-only patterns validate, and this fails. Confirmed 2026-10-14.

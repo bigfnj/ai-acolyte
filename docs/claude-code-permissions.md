@@ -213,6 +213,10 @@ What the code does, since 2026-10-13:
   an assignment that makes the program load code named by its value (`LD_*`, `DYLD_*`,
   `PATH`, `BASH_ENV`, `ENV`, and the interpreters' start-up options and module paths),
   so `Bash(LD_PRELOAD=x cat *)` is proposed by the learner and still never rendered.
+  Since 2026-10-14 that name check folds case, because a native Windows program reads
+  its environment case-insensitively, so `Bash(ld_preload=x cat *)` is refused as well.
+  Claude Code's own strip does not fold **[measured against the binary, 2026-10-14]**:
+  `lang=C git log` keeps its assignment, as above.
   Since 2026-10-13 it also refuses an assignment whose value *names a program a tool
   then runs* (`PROGRAM_NAMING_ENV`): `PAGER`, `GIT_PAGER`, `MANPAGER`, `EDITOR`,
   `VISUAL`, `GIT_EDITOR`, `BROWSER`, `PROMPT_COMMAND`, `LESSOPEN`/`LESSCLOSE`, git's

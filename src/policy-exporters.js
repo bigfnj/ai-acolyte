@@ -2014,8 +2014,24 @@ const PROGRAM_NAMING_ENV = new Set([
 function envNameIsUnsafe(name) {
   return CODE_LOADING_ENV.has(name) || PROGRAM_NAMING_ENV.has(name) || /^(?:LD|DYLD)_/.test(name);
 }
+// The Claude half's judgment of a leading assignment (claudePermissionIsSafe). FOLDED SINCE L2
+// (2026-10-14, the lead's decision, as K1 folded the Codex export's): a native Windows program
+// reads its environment case-insensitively, so `ld_preload=./x.so cat` or `node_options=... cat`
+// is the variable itself there (K1 MEASURED the bash spelling `node_options=--require=./y.js node
+// -e ...` running y.js). Only envNameIsUnsafe's own sets are folded, the ones this half already
+// refused: CODE_LOADING_ENV, PROGRAM_NAMING_ENV and the loader prefixes `LD_` and `DYLD_`. None is
+// added: J1's build programs, F6's make sets, cargo's names and K3's directories stay Codex export
+// only, so G4(b)'s acceptance of `Bash(AR=x cargo build *)` stands, in any case (`Bash(ar=x cargo
+// build *)` renders too). Claude Code's own strip is case-exact and unaffected: its allow path
+// strips a leading `NAME=VALUE` only when its Set of 39 upper-case names `.has` the captured NAME
+// as written (CLAUDE_SAFE_ENV_VARS, src/permission-match.js; re-read 2026-10-14 in the 2.1.296
+// binary at the offset scripts/check-claude-strip-model.js reports: `let V=G[1] ... if(IG.has(V))`,
+// no case conversion), so `lang=C git log` keeps its assignment and needs a rule that carries it.
+// And no one of those 39 names is in a folded set, so the fold cannot refuse a rule for an
+// assignment Claude Code strips.
 function assignmentIsUnsafe(token) {
-  return envNameIsUnsafe(ASSIGNMENT_WORD.exec(token)[1]);
+  const name = ASSIGNMENT_WORD.exec(token)[1];
+  return envNameIsUnsafe(name) || envNameIsUnsafe(name.toUpperCase());
 }
 // The value of a container's `-e`/`--env` (execWrapperInner, 2026-10-14): `NAME=VALUE`, or a
 // bare `NAME`, which docker and podman fill from the caller's own environment, so a value the
@@ -2039,7 +2055,8 @@ function envAssignmentIsUnsafe(value) {
 // case through codexFoldedEnvNameIsUnsafe, and since L1 the make and just overrides do too.
 //
 // THE CLAUDE HALF IS NOT CHANGED. claudePermissionIsSafe judges a leading assignment by
-// envNameIsUnsafe, as before, so `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
+// envNameIsUnsafe, as before (folded since L2, assignmentIsUnsafe above, its own sets only), so
+// `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
 // still render at review: G4(b)'s acceptance stands there, because that rule keeps the literal
 // value the user ran and matches no other (ruleMatches), and Claude Code strips neither name.
 // Adding these names to PROGRAM_NAMING_ENV itself would have refused that rule too, which is
@@ -2164,6 +2181,7 @@ function claudePermissionIsSafe(parsed, options) {
     if (command < 0 || !reviewed || parsed.tool !== 'Bash') return false;
     // envNameIsUnsafe, NOT the Codex export's codexEnvNameIsUnsafe: J1's build programs are
     // Codex export only, and G4(b)'s acceptance of `Bash(AR=x cargo build *)` stands here.
+    // Folded since L2, so `Bash(ld_preload=./x.so cat *)` is refused (assignmentIsUnsafe).
     if (parsed.tokens.slice(0, command).some(assignmentIsUnsafe)) return false;
     return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
   }

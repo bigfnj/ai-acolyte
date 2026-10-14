@@ -449,7 +449,7 @@ function prefixFor(root, args) {
   if (normalized === 'rg' && SAFE_RG_MODES.has(first)) return [root, first];
   const knownFamily = FAMILY_SUBCOMMANDS.get(normalized);
   if (knownFamily?.has(first.toLowerCase())) return [root, first];
-  if (['--help', '--version', '-h', '-V'].includes(first)) return [root, first];
+  if (INFO_PREFIX_FLAGS.has(first)) return [root, first];
   return [root];
 }
 
@@ -532,7 +532,7 @@ function containsScriptSyntax(command, shell) {
 function permissionFor(shell, prefix, blocked, lead = []) {
   const tool = permissionToolFor(shell);
   const root = normalizeRoot(prefix[0]);
-  const validPart = (part, index) => isBareCommandPart(part) ||
+  const validPart = (part, index) => isBareCommandPart(part) || (index === 1 && INFO_PREFIX_FLAGS.has(String(part))) ||
     (index > 0 && root === 'rg' && SAFE_RG_MODES.has(String(part)));
   if (blocked || !tool || !prefix.length || !prefix.every(validPart)) return null;
   return `${tool}(${[...lead, ...prefix].join(' ')} *)`;
@@ -786,7 +786,7 @@ function classifyInvocation(invocation) {
     risk = maxRisk(risk, 'destructive'); reasons.add('destructive-command');
   } else if (NETWORK_ROOTS.has(normalized) || hasRemoteArgument(raw, argv)) {
     risk = maxRisk(risk, 'network'); reasons.add('network-command');
-  } else if (SHELL_WRAPPERS.has(normalized) || /\.(?:bat|cmd|ps1|sh)$/i.test(String(result.executable || root || ''))) {
+  } else if (SHELL_WRAPPERS.has(interpreterAlias(normalized)) || /\.(?:bat|cmd|ps1|sh)$/i.test(String(result.executable || root || ''))) {
     risk = maxRisk(risk, 'shell'); reasons.add('shell-wrapper');
   } else if (WRITE_ROOTS.has(normalized)) {
     risk = maxRisk(risk, 'write'); reasons.add('write-command');
@@ -1145,6 +1145,57 @@ function aggregateObservations(observations, options = {}) {
   return candidates.sort((a, b) => a.key.localeCompare(b.key));
 }
 
+// The informational second words a family keys on (prefixFor: `cargo --version`, `df -h`,
+// `docker --help`), and since 2026-10-14 the one class of non-bare word permissionFor writes
+// into a rule at index 1. Defined here, below both consumers, so that the line references
+// other files make into the tables and functions above do not move; neither runs while the
+// module loads.
+//
+// Until that date permissionFor refused the word (it is not a bare command part), so such a
+// family carried `claudePermission: null` with `complex: false`. The exporter re-derived
+// `Bash(cargo --version *)` from the prefix through v1.6.1; a9e2adf made it honour an explicit
+// null as "withheld" on the premise that every earlier withholding was also a complexity
+// refusal, which this case disproved, so v1.6.2 stopped producing the rule and revoked the
+// ones already applied (reproduced 2026-10-14 against 9467b09: `cargo --version`, `df -h` and
+// `git status`, three successes each, rendered all three reviewed rules at c09daab and only
+// `Bash(git status *)` at v1.6.2). The learner now writes the rule itself, so an explicit null
+// from it means withheld again (the exporter still checks why: CLAUDE_WITHHOLDING_REASONS).
+//
+// Not every one of these words is informational to every program: `df -h` and `sort -h` are
+// human-readable output and `tar -h` follows symlinks. The rule is still exactly the prefix
+// the evidence keyed on, it reaches policy only through a review unless the root is one the
+// automatic path already trusts with ANY argument (AUTO_SUFFIX_CLOSED_ROOTS above, plus rg's
+// modes, which always took this word), and there `Bash(uname --version *)` is a strict subset
+// of the `Bash(uname *)` that path already grants.
+const INFO_PREFIX_FLAGS = new Set(['--help', '--version', '-h', '-V']);
+
+// The interpreter a versioned or distribution name runs, for the SHELL_WRAPPERS lookup in
+// classifyInvocation (2026-10-14). That lookup compared the normalized root by exact name, so
+// `python3.12 x.py`, `nodejs x.js`, `ruby3.2 x.rb`, `perl5.36 x.pl`, `php8.2 x.php` and
+// `pwsh-preview -File x.ps1` classified as `unknown-command` while `python`, `node`, `ruby`,
+// `perl`, `php` and `pwsh` are `shell-wrapper`. An independent copy of the exporter's
+// COMMAND_ALIASES (src/policy-exporters.js, which has the per-name reasons), kept apart for the
+// same reason as the auto-safe tables: test/policy-exporters.test.js asserts the two agree on
+// every spelling it lists. A name that is none of these comes back unchanged, so the lookup is
+// exactly the old one for it. `.exe` is already gone (normalizeRoot); `.cmd` and `.bat` are
+// stripped here too, though for this lookup the `.bat`/`.cmd` executable test beside it
+// already made such a root `shell-wrapper`. Defined below its consumer for the reason given
+// above INFO_PREFIX_FLAGS.
+const INTERPRETER_ALIASES = [
+  [/^(?:python\d*(?:\.\d+)*[dmtw]*(?:-dbg)?|pypy\d*(?:\.\d+)*|pyw?)$/, 'python'],
+  [/^node(?:js)?\d*(?:\.\d+)*$/, 'node'],
+  [/^ruby\d+(?:\.\d+)*$/, 'ruby'],
+  [/^perl\d+(?:\.\d+)*$/, 'perl'],
+  [/^php\d+(?:\.\d+)*$/, 'php'],
+  [/^pwsh-(?:preview|lts)$/, 'pwsh'],
+  [/^yarnpkg$/, 'yarn'],
+];
+function interpreterAlias(normalized) {
+  const name = String(normalized || '').replace(/\.(?:exe|cmd|bat)$/i, '');
+  const alias = INTERPRETER_ALIASES.find(([pattern]) => pattern.test(name));
+  return alias ? alias[1] : name;
+}
+
 module.exports = {
   isLearnableTool,
   toolInvocation,
@@ -1175,4 +1226,10 @@ module.exports = {
   // Consumed by src/policy-exporters.js, which unions it into its own refusal table.
   // Only ever to refuse more: see the comment above SHELL_WRAPPERS there.
   SHELL_WRAPPERS,
+  // Consumed by src/auto-learn-manager.js since 2026-10-14, which held an identical copy until
+  // then. Its candidate loader resets a risk it does not know to 'unknown' on every reload, so
+  // a class added here and not there would have been silently downgraded in the state file,
+  // from 'credential' or 'admin' to the rank below 'complex'. One table, so the classifier
+  // decides which classes exist; test/auto-learn-risk-rank.test.js adds one and reloads it.
+  RISK_RANK,
 };

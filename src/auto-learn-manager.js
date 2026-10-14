@@ -110,10 +110,10 @@ function migrateState(raw) {
 const MODES = new Set(['observe', 'recommend', 'auto-safe']);
 const CLAUDE_CLAIMS_VERSION = 1;
 const OUTCOMES = new Set(['success', 'failed', 'unknown']);
-const RISK_RANK = new Map([
-  ['read-only', 0], ['unknown', 1], ['complex', 2], ['write', 3],
-  ['shell', 4], ['network', 5], ['credential', 6], ['admin', 7], ['destructive', 8],
-]);
+// The classifier's own table (src/auto-learn.js), not a copy, so a risk class added there is
+// not reset to 'unknown' by candidate() below on reload (2026-10-14). Required here rather than
+// in the block above so that no line after this one moves.
+const { RISK_RANK } = require('./auto-learn');
 // One spelling of the control-character class, so the three sites that reject
 // them cannot drift apart.
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;

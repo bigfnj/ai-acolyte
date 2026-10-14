@@ -25,7 +25,10 @@ const CODEX_END_MARKER = '# END permission-wildcarding generated rules';
 // allowing a reviewed, narrower one (`["just", "build"]`), which is exactly how `sh` and
 // `bash` are already treated. On the Claude side the bare `Bash(<root> *)` was already
 // refused (it is on neither root list); membership also refuses a reviewed multi-token
-// form such as `Bash(just --version *)`, as for every wrapper here.
+// form such as `Bash(just --version *)`, as for every wrapper here. For hyperfine and duckdb
+// the "narrower one" was a mistake, corrected 2026-10-14: naming a command or a database
+// narrows neither (measured; RUNNER_GRAMMAR, at their entries), so they are broad at any
+// depth now, hyperfine bar its informational forms and duckdb with none.
 //
 // The gap that sentence used to record ("NOT the full list of runners the learner
 // knows: node, npx, uvx, xargs and others are absent") is closed as of 2026-10-13.
@@ -205,6 +208,53 @@ function canonicalRoot(token) {
   return (normalized.split('/').pop() || '').toLowerCase();
 }
 
+// The program a command root names, for the lookups that REFUSE (2026-10-14). canonicalRoot
+// keeps the spelling, so each refusal table was keyed by the spellings someone thought to list,
+// and a name nobody listed was an ordinary unknown command: "two tokens, so narrower" on the
+// Codex half, "not on any risky list" on the Claude half. MEASURED that day against 3417398:
+// `["python3.12", "-c", "x"]`, `["nodejs", "-e", "x"]`, `["python.bat", "-c", "x"]`,
+// `["sudo.cmd", "rm"]` and `["pwsh.cmd", "-Command", "x"]` each rendered as a reviewed
+// prefix_rule while `python`, `node`, `sudo` and `pwsh` were refused, and `Bash(python3.12 x.py
+// *)` rendered as a reviewed Claude rule where `Bash(python x.py *)` is refused by membership.
+//
+// Two normalizations, both toward the base the tables already hold:
+//   * the Windows launch suffixes `.exe`, `.cmd` and `.bat`. A bare name resolves through
+//     PATHEXT to any of them, and npm, npx, pnpm and yarn install as `.cmd`, pyenv-win's
+//     shims as `.bat`. `.com` is deliberately not stripped: `command.com` is the DOS shell,
+//     not the `command` exec wrapper, and has its own entry.
+//   * versioned and distribution names of one interpreter, which take its switches: CPython's
+//     `python3.12`, `python2.7`, `python3.13t` (free-threaded), `pythonw`, the `-dbg` builds,
+//     PyPy, and the `py`/`pyw` launchers; Debian's `nodejs` and versioned `node20`; `ruby3.2`;
+//     `perl5.36`; `php8.2` and `php82`; `pwsh-preview` and `pwsh-lts`; Debian's `yarnpkg`. Each
+//     pattern needs the base name followed only by digits, dots or those exact suffixes, so a
+//     tool that merely starts with one (`python3-config`, `nodemon`, `node-gyp`, `perldoc`,
+//     `phpunit`, `pytest`) is untouched.
+//
+// Only refusal lookups use this: the wrapper, interpreter, runner and risk tables, the
+// validator's bare-prefix bans. The allow tables (CLAUDE_SAFE_*, CLAUDE_REVIEWABLE_ROOTS,
+// AUTO_SUFFIX_CLOSED_ROOTS, the git and rg read sets) keep the exact spelling, because `cat.cmd`
+// is a batch file that happens to be called cat, and trusting it as cat would widen a gate.
+// Normalizing toward a base can make a prefix NARROWER than the generic rule judged it (the
+// generic rule calls `["python3.12", "-m", "pytest", "-x"]` broad for ending in an option; the
+// python grammar calls it pinned), and that is the base's own verdict: `["python", "-m",
+// "pytest", "-x"]` already renders. src/auto-learn.js keeps an independent copy for its
+// wrapper lookup (interpreterAlias); test/policy-exporters.test.js holds the two to the same
+// spellings.
+const COMMAND_ALIASES = [
+  [/^(?:python\d*(?:\.\d+)*[dmtw]*(?:-dbg)?|pypy\d*(?:\.\d+)*|pyw?)$/, 'python'],
+  [/^node(?:js)?\d*(?:\.\d+)*$/, 'node'],
+  [/^ruby\d+(?:\.\d+)*$/, 'ruby'],
+  [/^perl\d+(?:\.\d+)*$/, 'perl'],
+  [/^php\d+(?:\.\d+)*$/, 'php'],
+  [/^pwsh-(?:preview|lts)$/, 'pwsh'],
+  [/^yarnpkg$/, 'yarn'],
+];
+function commandBase(token) {
+  const name = canonicalRoot(token).replace(/\.(?:exe|cmd|bat)$/, '');
+  const alias = COMMAND_ALIASES.find(([pattern]) => pattern.test(name));
+  return alias ? alias[1] : name;
+}
+
 function cleanOneLine(value, maxLength = 240) {
   return String(value == null ? '' : value)
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
@@ -311,8 +361,8 @@ const INLINE_CODE_FLAGS = new Map(Object.entries({
   php: (token) => /^-[rRBE]/.test(token) || /^--(?:run|process-(?:code|begin|end))(?:=|$)/.test(token),
   npx: (token) => token === '-c' || token === '--call' || token.startsWith('--call='),
 }));
-INLINE_CODE_FLAGS.set('python3', INLINE_CODE_FLAGS.get('python'));
-INLINE_CODE_FLAGS.set('py', INLINE_CODE_FLAGS.get('python'));
+// `python3` and `py` had their own rows here until 2026-10-14; commandBase now hands every
+// CPython, PyPy and launcher spelling over as `python`, so one row serves them all.
 
 // `env` and `xargs` run whatever command follows their own options, so a prefix is
 // only as narrow as the command it names. Returns that inner prefix (possibly empty),
@@ -450,6 +500,34 @@ const ALWAYS_BROAD_WRAPPERS = new Set([
   'systemd-run', 'watch',
 ]);
 
+// The wrappers whose exact `--version` or `--help` prefix is narrow on the Codex half
+// (2026-10-14). Until then the walk read either word as an unknown option, so `["timeout",
+// "--version"]` and `["xargs", "--help"]` were refused with no reason anywhere. MEASURED that
+// day, each with a payload after the informational word that writes a marker file, and a
+// control run without the word that did write it: `timeout --version 5 sh -c '...'` and
+// `--help`, `nice --version`/`--help`, `nohup --version`/`--help`, `stdbuf --version`/`--help`,
+// `chroot --version / sh -c '...'` and `--help` (GNU coreutils 8.32), `env --version sh -c
+// '...'` and `--help`, `echo g | xargs --version sh -c '...'` and `--help` (GNU findutils
+// 4.10.0). None wrote its marker: each prints and exits inside its option loop, before the
+// command it would run is reached. Only the long forms: none of these tools has a short one.
+//
+// Not opened, and why:
+//   * the other exec wrappers (setsid, ionice, flock, nsenter, unshare, taskset, chrt, strace,
+//     ltrace, valgrind, time, busybox) were not measured: none is on the box, or the one that
+//     is is another program (Git for Windows' `strace` is Cygwin's, `time` is a shell keyword).
+//   * the shell builtins (builtin, noglob, nocorrect, command, exec): their informational
+//     forms are not documented, and `command --version` would look up a command of that name.
+//   * ALWAYS_BROAD_WRAPPERS: the identity changers (sudo, doas, pkexec, su, runuser, runas)
+//     and the shell-text and unbounded runners (watch, script, firejail, systemd-run, gdb,
+//     parallel) stay broad at any depth, the row's own rule. eval is the one that cannot be
+//     opened at all: POSIX eval takes no options and joins its arguments into shell text, so
+//     whether `eval --version '; CMD'` runs CMD depends on the shell (bash 5's builtin
+//     rejects `--version` as an invalid option, measured; a POSIX eval does not parse it).
+// On the Claude half every one of these is a SHELL_WRAPPERS member and refused at any depth,
+// informational forms included, by the membership 64b4eaa pinned: `Bash(timeout --version *)`
+// is a rule for a wrapper Claude Code strips anyway.
+const WRAPPER_INFO_ROOTS = new Set(['env', 'xargs', 'timeout', 'nice', 'nohup', 'stdbuf', 'chroot']);
+
 // The prefix after an exec wrapper's options and operands: possibly empty, `LOOKUP` for
 // `command -v`, or null when an option is unknown or the "command" is an option.
 //
@@ -539,7 +617,7 @@ const PYTHON_GRAMMAR = {
   pin: ['-m'], pinFused: /^-m./,
 };
 const INTERPRETER_GRAMMAR = new Map(Object.entries({
-  python: PYTHON_GRAMMAR, python3: PYTHON_GRAMMAR, py: PYTHON_GRAMMAR,
+  python: PYTHON_GRAMMAR,                             // every CPython/PyPy/py spelling (commandBase)
   node: {
     info: new Set([...DEFAULT_INFO, '-v']),
     flags: ['-i', '--interactive', '-c', '--check', '--inspect', '--inspect-brk', '--inspect-wait', '--no-warnings',
@@ -643,6 +721,9 @@ function interpreterIsBroad(base, prefix) {
 //
 // A node is one of:
 //   * RUNS_ANY_COMMAND: broad at any depth, with the reason beside its use.
+//   * infoOnly(info): broad at any depth too, except for exactly the two-token forms in
+//     `info`, each MEASURED inert with a trailing payload before it is listed (2026-10-14;
+//     hyperfine and wsl, the reasons beside their entries).
 //   * `{ exec }`: a runner-exec form. `exec` is an execWrapperInner grammar (flags, values,
 //     fused, operands, and the two runner keys there); the command after it is judged by
 //     wrapperIsBroad, recursively.
@@ -669,6 +750,10 @@ function interpreterIsBroad(base, prefix) {
 // (internal/devbox/devbox.go, below), uv run and uvx (uv CLI reference), npm exec, npx and
 // npm config (npm docs).
 const RUNS_ANY_COMMAND = 'broad';
+const infoOnly = (info) => ({ info, any: true });
+// The long informational forms alone: the short `-h`/`-V` are other options to too many of
+// the tools this is used for (`tar -h` follows symlinks, `tar -V` is a volume label).
+const LONG_INFO = new Set(['--version', '--help']);
 // pflag clusters for docker: `-it`, `-dit`. `-u`/`--user` and `--privileged` are absent on
 // purpose, so they are unknown and broad: one changes the identity the command runs as in
 // the container, the other hands it the host's devices and capabilities, which is the
@@ -907,7 +992,11 @@ const GIT = {
 const RUNNER_GRAMMAR = new Map(Object.entries({
   // ssh hands its arguments to the remote login shell as one command line, so naming a
   // command narrows nothing, and the remote host is outside anything a prefix can bound.
-  ssh: RUNS_ANY_COMMAND,
+  // `-V` alone is narrow (2026-10-14): OpenSSH prints its version and exits inside its option
+  // loop, so `ssh -V -o ProxyCommand='sh -c "echo X>s1.txt"' example.invalid` wrote nothing
+  // (measured, OpenSSH_10.3p1). `--version` is not an ssh option. On the Claude side ssh stays
+  // refused at any depth as a NETWORK_OR_INSTALL_ROOTS member.
+  ssh: infoOnly(new Set(['-V'])),
   direnv: { info: DEFAULT_INFO, sub: { exec: { exec: { operands: 1 } } } },
   // devbox runs an ad-hoc command through `eval`: internal/devbox/devbox.go RunScript
   // (jetify-com/devbox main, read 2026-10-13) sets `env["DEVBOX_RUN_CMD"] =
@@ -1019,8 +1108,46 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
   // multi-token one but scp's and sftp's rendered as a reviewed Claude rule too (`Bash(tar
   // -xf *)`, `Bash(find . *)`, `Bash(rsync -a *)`), measured against 3a451fd. RUNS_ANY_COMMAND
   // refuses both, and the recursion carries it through every wrapper (`["xargs", "tar"]`).
-  rsync: RUNS_ANY_COMMAND, scp: RUNS_ANY_COMMAND, sftp: RUNS_ANY_COMMAND, tar: RUNS_ANY_COMMAND,
-  find: RUNS_ANY_COMMAND, fd: RUNS_ANY_COMMAND, fdfind: RUNS_ANY_COMMAND,
+  //
+  // Except, since 2026-10-14, the exact long informational forms of tar, find and fd, on both
+  // halves (infoOnly(LONG_INFO)). Each prints and exits before it reads the option that would
+  // run something, MEASURED that day with a marker-file payload whose control run (the same
+  // line without the informational word) did write the marker: `tar --version -cf a.tar g
+  // --checkpoint=1 --checkpoint-action=exec='sh -c "echo X>r1.txt"'` and the `--help` twin
+  // (GNU tar 1.35; neither wrote a.tar either), `find --version . -exec sh -c '...' ';'` and
+  // `--help` (GNU findutils 4.10.0), `fd --version g -x sh -c '...'` (fd 10.4.2). The short
+  // forms are not informational here: `tar -h` dereferences symlinks and `tar -V` names a
+  // volume. Not opened: rsync (not measured, there is none on the box), scp and sftp (they
+  // have no informational option: `scp -V` is "unknown option", measured).
+  rsync: RUNS_ANY_COMMAND, scp: RUNS_ANY_COMMAND, sftp: RUNS_ANY_COMMAND, tar: infoOnly(LONG_INFO),
+  find: infoOnly(LONG_INFO), fd: infoOnly(LONG_INFO), fdfind: infoOnly(LONG_INFO),
+  // Runners whose arguments are commands or code wherever they sit, so naming one narrows
+  // nothing (2026-10-14). Until then all three had only the generic ends-in-an-option rule at
+  // the bottom of wrapperIsBroad, so `["hyperfine", "echo SAFE"]`, `["duckdb", "x.db"]` and
+  // `["wsl", "ls"]` each rendered as a reviewed prefix_rule (measured against 4a02252). Each
+  // was refused BARE since edb59ed and refused at any depth on the Claude side by membership;
+  // only the Codex half narrowed them. MEASURED 2026-10-14 in a private temp directory with
+  // harmless payloads that write a marker file:
+  //   * hyperfine 1.20.0: every positional is a command to benchmark, so `hyperfine --runs 1
+  //     -N 'cmd /c echo SAFE' 'cmd /c echo SECOND>m1.txt'` wrote m1.txt; `--prepare`, `--setup`,
+  //     `--cleanup`, `--conclude` and `-S`/`--shell` are commands too. Its four informational
+  //     forms are exact and inert: `hyperfine --version 'cmd /c echo X>m2.txt'`, `--help`, `-V`
+  //     and `-h`, and `--version --setup '...' '...'`, wrote nothing (clap exits while parsing).
+  //   * duckdb v1.5.5: `duckdb x.db ".shell cmd /c echo PWNED>d1.txt"` wrote d1.txt. And NO form
+  //     of it is inert: `-version`, `--version`, `--help` and `-h` each exit before a trailing
+  //     `.shell` argument runs, but `duckdb -version -init init1.sql`, with `.shell` in the init
+  //     file, ran it before printing the version, as did `--version`, `--help` and `-h` (the
+  //     sqlite3-derived shell reads `-init` in its first argument pass and runs the file before
+  //     the second pass reaches `-version`). So `["duckdb", "--version"]`, which the generic
+  //     rule's info exception rendered, admits a program too, and duckdb has no exception.
+  //   * wsl 2.7.12: a command line after `wsl` runs in the distribution's login shell, `--`
+  //     hands the rest over as-is, `-u`/`--user` picks the identity, and `-e`/`--exec` alone
+  //     skips the shell. The `--exec` form could not be measured (this box has no distribution
+  //     installed), and the learner never hands over a wsl prefix deeper than its informational
+  //     forms, so a bounded exec form would buy no grant: broad. `wsl --version echo SAFE`
+  //     printed the version and ran nothing (with no distribution, an attempt would have
+  //     failed loudly), and `--help` likewise, so those two exact forms stay narrow.
+  hyperfine: infoOnly(DEFAULT_INFO), duckdb: RUNS_ANY_COMMAND, wsl: infoOnly(LONG_INFO),
 }));
 
 // The index of the first token at or after `k` that is not one of `grammar`'s options, or
@@ -1072,6 +1199,7 @@ function targetIsBroad(grammar, rest) {
 function runnerIsBroad(node, rest) {
   if (node === RUNS_ANY_COMMAND) return true;
   if (rest.length === 1 && node.info?.has(rest[0])) return false;
+  if (node.any) return true;                                              // infoOnly: nothing else narrows it
   if (node.exec) {
     const inner = execWrapperInner(node.exec, ['', ...rest]);
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
@@ -1090,8 +1218,20 @@ function runnerIsBroad(node, rest) {
 // decides, as `Bash(npx tsc *)` and `Bash(timeout 5 rg *)` already are. A task runner's
 // rule is refused only while it names no target (`Bash(mise run *)`); a fixed subcommand
 // (`Bash(docker ps *)`, `Bash(uv sync *)`, `Bash(kubectl get *)`) is untouched.
+//
+// An exact informational form (`Bash(docker --version *)`) is narrow here too, as it is in
+// runnerIsBroad (2026-10-14). b0685b2 said "exact informational forms (`["docker",
+// "--version"]`) stay narrow", and on the Codex half they did, but this walk read
+// `--version` as an unknown dispatcher option and refused it, so `Bash(docker --version *)`,
+// `Bash(uv --version *)`, `Bash(poetry --version *)`, `Bash(podman --version *)` and
+// `Bash(kubectl --help *)` were refused while their prefix_rules rendered (measured against
+// 09df009). That refusal also revoked an applied `Bash(docker --version *)` on upgrade (see
+// candidateClaudePermission). A runner that is ALSO a wrapper (npm, npx, make, just, hyperfine,
+// wsl) is still refused at any depth on this half, by the membership 64b4eaa pinned; this
+// line only reaches the runners that are not.
 function reachesRunnerExec(node, rest) {
-  if (node === RUNS_ANY_COMMAND || node.exec) return true;
+  if (rest.length === 1 && node.info?.has(rest[0])) return false;
+  if (node === RUNS_ANY_COMMAND || node.exec || node.any) return true;
   if (!node.sub) return false;
   const at = skipRunnerOptions(node.options, rest, 0);
   if (at < 0 || at >= rest.length) return true;
@@ -1099,7 +1239,7 @@ function reachesRunnerExec(node, rest) {
   return node.fallback === 'exec';
 }
 function claudeRuleRunsAnyCommand(tokens) {
-  const node = RUNNER_GRAMMAR.get(canonicalRoot(tokens[0]).replace(/\.(?:exe|cmd)$/, ''));
+  const node = RUNNER_GRAMMAR.get(commandBase(tokens[0]));
   if (!node) return false;
   const rest = tokens.slice(1).map(String);
   return reachesRunnerExec(node, rest) || runnerIsBroad(node, rest);
@@ -1107,13 +1247,13 @@ function claudeRuleRunsAnyCommand(tokens) {
 
 function wrapperIsBroad(prefix) {
   const root = canonicalRoot(prefix?.[0]);
-  const base = root.replace(/\.(?:exe|cmd)$/, '');
+  const base = commandBase(prefix?.[0]);
   const runner = RUNNER_GRAMMAR.get(base);
   // git's global options (GIT above): reached here directly and through every wrapper's
   // recursion, so `["xargs", "git"]` and `["timeout", "5", "git", "-c", "x=y", "status"]` are
   // as broad as the git prefix they name.
   if (base === 'git') return runnerIsBroad(GIT, prefix.slice(1).map(String));
-  if (!SHELL_WRAPPERS.has(root) && !runner) return false;
+  if (!SHELL_WRAPPERS.has(root) && !SHELL_WRAPPERS.has(base) && !runner) return false;
   if (prefix.length === 1) return true;
   if (INLINE_CODE_FLAGS.has(base) && prefix.slice(1).some((token) => INLINE_CODE_FLAGS.get(base)(String(token)))) {
     return true;
@@ -1122,8 +1262,18 @@ function wrapperIsBroad(prefix) {
   // broader than `["rm"]` with arguments read from stdin, which a reviewer may already
   // approve; `["xargs", "sh"]` is as broad as `["sh"]`. Hence the recursion. A prefix that
   // ends before naming a command (`["xargs", "-0"]`, `["env", "FOO=1"]`) runs anything.
+  if (prefix.length === 2 && WRAPPER_INFO_ROOTS.has(base) && LONG_INFO.has(String(prefix[1]))) return false;
   if (base === 'env' || base === 'xargs') {
     const inner = innerCommandPrefix(base, prefix);
+    // The assignments env makes are judged as the Claude half judges a leading one
+    // (assignmentIsUnsafe, 2026-10-14): `["env", "GIT_PAGER=x", "git", "log"]` is a grant to run
+    // `x`, and `["env", "LD_PRELOAD=./x.so", "cat"]` one to load it, whatever the command after
+    // them is. 520103d said "the Codex exporter is unaffected" because a Codex prefix starts at
+    // the command; that holds for a LEADING assignment, which never reaches a prefix, but env
+    // carries its assignments as arguments, and they were walked over unread (measured against
+    // 09df009: both rows above rendered).
+    if (base === 'env' && inner !== null && prefix.slice(1, prefix.length - inner.length)
+      .some((token) => ASSIGNMENT_WORD.test(String(token)) && assignmentIsUnsafe(String(token)))) return true;
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
   }
   // The process and exec wrappers, by the same rule (EXEC_WRAPPER_GRAMMAR above), and the
@@ -1142,7 +1292,7 @@ function wrapperIsBroad(prefix) {
   // that already holds a fixed command after `/c`, and that was refused before too, so
   // every cmd prefix is broad (2026-10-13).
   if (['cmd', 'command.com'].includes(base)) return true;
-  if (['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(root)) {
+  if (base === 'powershell' || base === 'pwsh') {
     if (['-c', '-command', '-encodedcommand', '-enc'].includes(second)) return true;
     return !['-file', '-f'].includes(second) || prefix.length < 3;
   }
@@ -1153,7 +1303,8 @@ function wrapperIsBroad(prefix) {
   // Development-environment, package and task runners (RUNNER_GRAMMAR above), including
   // npm, npx, uvx, pnpm, yarn, make and just, which until 2026-10-13 had only the rule below.
   if (runner) return runnerIsBroad(runner, prefix.slice(1).map(String));
-  // Every other runner (java, duckdb, hyperfine, ...): a prefix that ends in an option has
+  // Every other runner (java, `.`, `source`, ...; duckdb, hyperfine and wsl left this rule for
+  // RUNNER_GRAMMAR on 2026-10-14): a prefix that ends in an option has
   // not reached anything it could pin, and the next token could be the very switch that
   // hands over code, so it is broad unless it is exactly an informational form. Value
   // options are not modelled for these roots. The note that stood here, "`["make", "-C",
@@ -1167,7 +1318,7 @@ function wrapperIsBroad(prefix) {
 
 function candidateIsWrapper(candidate, prefix) {
   return Boolean(candidate?.wrapper || candidate?.isWrapper || candidate?.is_wrapper ||
-    SHELL_WRAPPERS.has(canonicalRoot(prefix?.[0])));
+    SHELL_WRAPPERS.has(canonicalRoot(prefix?.[0])) || SHELL_WRAPPERS.has(commandBase(prefix?.[0])));
 }
 
 function prefixIsAutoSuffixClosed(prefix) {
@@ -1181,22 +1332,28 @@ function prefixIsAutoSuffixClosed(prefix) {
   return AUTO_SUFFIX_CLOSED_ROOTS.has(root);
 }
 
+// A refusal-table lookup in every spelling (commandBase, 2026-10-14). The tables list the bare
+// name, so the base alone would find most entries; the exact spelling is tried too, so an entry
+// that is itself a suffixed name commandBase keeps (`format.com`) still matches. Until then each
+// of these tables was read by exact spelling, so a reviewed `Bash(git.cmd push *)`, `Bash(rm.cmd
+// -rf *)` or `Bash(curl.bat https://example.invalid *)` rendered: the root was on no list and
+// fell through to "not known risky" (measured against 09df009).
+function refusedRoot(table, token) {
+  return table.has(canonicalRoot(token)) || table.has(commandBase(token));
+}
+
 function prefixIsKnownRisky(prefix) {
   if (!Array.isArray(prefix) || prefix.length === 0) return true;
-  const root = canonicalRoot(prefix[0]);
-  if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
-      STATE_MUTATING_ROOTS.has(root)) return true;
-  if (root === 'git' || root === 'git.exe') {
+  const base = commandBase(prefix[0]);
+  if ([DESTRUCTIVE_OR_ADMIN_ROOTS, NETWORK_OR_INSTALL_ROOTS, STATE_MUTATING_ROOTS]
+    .some((table) => refusedRoot(table, prefix[0]))) return true;
+  if (base === 'git') {
     return prefix.length < 2 || !SAFE_GIT_READ_SUBCOMMANDS.has(String(prefix[1]).toLowerCase());
   }
-  if (root === 'rg' || root === 'rg.exe') {
+  if (base === 'rg') {
     return prefix.length < 2 || !SAFE_RG_PREFIXES.has(String(prefix[1]));
   }
-  if (prefix.length === 1 && [
-    'docker', 'docker.exe', 'node', 'node.exe', 'perl', 'perl.exe', 'py',
-    'py.exe', 'python', 'python.exe', 'python3', 'python3.exe', 'ruby',
-    'ruby.exe',
-  ].includes(root)) return true;
+  if (prefix.length === 1 && ['docker', 'node', 'perl', 'python', 'ruby'].includes(commandBase(prefix[0]))) return true;
   return false;
 }
 
@@ -1208,7 +1365,7 @@ function candidateEligibleForCodex(candidate, options) {
   // A runner root (RUNNER_GRAMMAR) is judged like a wrapper here and only here: it is not a
   // SHELL_WRAPPERS member, because membership there would also refuse `Bash(docker ps *)`
   // on the Claude side, at any depth (claudeRuleRunsAnyCommand draws that line instead).
-  const base = canonicalRoot(prefix[0]).replace(/\.(?:exe|cmd)$/, '');
+  const base = commandBase(prefix[0]);
   if (candidateIsWrapper(candidate, prefix) || RUNNER_GRAMMAR.has(base)) {
     if (!reviewed || wrapperIsBroad(prefix)) return null;
   }
@@ -1461,17 +1618,18 @@ function patternSafetyErrors(pattern, number) {
   }
 
   const root = canonicalRoot(pattern[0]);
+  const base = commandBase(pattern[0]);                // every spelling of the root (2026-10-14)
   const second = pattern.length > 1
     ? (Array.isArray(pattern[1]) ? pattern[1] : [pattern[1]]).map((value) => String(value).toLowerCase())
     : [];
-  if (['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(root) &&
+  if (['powershell', 'pwsh'].includes(base) &&
       (pattern.length === 1 || (pattern.length === 2 && second.some((value) => ['-c', '-command'].includes(value))))) {
     errors.push(`Rule ${number}: broad PowerShell command prefix is forbidden`);
   }
-  if (pattern.length === 1 && ['curl', 'curl.exe', 'py', 'py.exe', 'python', 'python.exe', 'python3', 'python3.exe'].includes(root)) {
+  if (pattern.length === 1 && ['curl', 'python'].includes(base)) {
     errors.push(`Rule ${number}: bare ${root} prefix is too broad`);
   }
-  if ((root === 'git' || root === 'git.exe') && pattern.length === 1) errors.push(`Rule ${number}: bare git prefix is too broad`);
+  if (base === 'git' && pattern.length === 1) errors.push(`Rule ${number}: bare git prefix is too broad`);
   return errors;
 }
 
@@ -1572,7 +1730,10 @@ function parseClaudePermission(permission) {
 //     development box's 581 allow entries is an env-led rule that renders at all).
 // NODE_OPTIONS, PYTHONSTARTUP, PERL5OPT and RUBYOPT are this class too and are already in
 // CODE_LOADING_ENV (the interpreter start-up set), so they are not repeated. The Codex
-// exporter is unaffected: its prefix is the command's, with the assignment stripped.
+// exporter's prefix is the command's, so a LEADING assignment never reaches it; an `env`
+// wrapper's assignments do, and wrapperIsBroad judges them by assignmentIsUnsafe too
+// (2026-10-14; until then "the Codex exporter is unaffected" stood here, which held only for
+// the leading case).
 const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 const CODE_LOADING_ENV = new Set([
   'PATH', 'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'NODE_OPTIONS', 'NODE_PATH',
@@ -1598,8 +1759,8 @@ function claudePermissionIsSafe(parsed, options) {
     return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
   }
   const root = parsed.root.toLowerCase();
-  if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
-      STATE_MUTATING_ROOTS.has(root) || SHELL_WRAPPERS.has(root)) return false;
+  if ([DESTRUCTIVE_OR_ADMIN_ROOTS, NETWORK_OR_INSTALL_ROOTS, STATE_MUTATING_ROOTS, SHELL_WRAPPERS]
+    .some((table) => refusedRoot(table, root))) return false;
   if (claudeRuleRunsAnyCommand(parsed.tokens)) return false;
   if (!reviewed && !prefixIsAutoSuffixClosed(parsed.tokens)) return false;
   if (parsed.tokens.length === 1) {
@@ -1614,6 +1775,18 @@ function claudePermissionIsSafe(parsed, options) {
   return !prefixIsKnownRisky(parsed.tokens);
 }
 
+// The learner's reasons for withholding a Claude rule from a run it does NOT call complex
+// (2026-10-14; candidateClaudePermission below has the history). Only one exists:
+// `environment-not-stripped` on a family whose kept assignment cannot be written into its
+// rule. Every other learner null comes with a complexity reason, which refuses the candidate
+// outright. test/auto-learn-info-flags.test.js holds the learner to that, so a new
+// non-complex withholding has to add its reason here or fail there.
+const CLAUDE_WITHHOLDING_REASONS = new Set(['environment-not-stripped']);
+function candidateWithholdsClaudeRule(candidate) {
+  return (Array.isArray(candidate?.reasons) ? candidate.reasons : [])
+    .some((reason) => CLAUDE_WITHHOLDING_REASONS.has(String(reason)));
+}
+
 function candidateClaudePermission(candidate, options) {
   if (typeof candidate === 'string') return candidate;
   const reviewed = options?.includeReviewed === true;
@@ -1625,16 +1798,33 @@ function candidateClaudePermission(candidate, options) {
   }
   if ((!isAutoSafe(candidate) && !reviewed) || candidateIsComplex(candidate) ||
       (!reviewed && (candidateRiskIsUnsafe(candidate) || candidateHasAutomaticBlock(candidate)))) return null;
-  // An explicit `claudePermission: null` is a rule the learner WITHHELD, not a field it
-  // left out, so it is not re-derived from the prefix below. Added 2026-10-13 with the
-  // learner's `environment-not-stripped` reason, the first withholding reason that is not
-  // also a complexity reason: every earlier one (path, quoted or dynamic executable,
-  // reserved word, call operator, unknown family subcommand, a prefix conflict) makes the
-  // candidate complex, which the line above already refuses. Without this, `LD_PRELOAD=x
-  // cat f` re-acquired the `Bash(cat *)` the learner had just declined to propose. A
-  // candidate built by hand, with no such field, is synthesized exactly as before.
+  // An explicit `claudePermission: null` is a rule the learner WITHHELD only when the
+  // candidate also carries the reason that withheld it (CLAUDE_WITHHOLDING_REASONS); any
+  // other null is re-derived from the prefix below, as every null was through v1.6.1.
+  //
+  // Corrected 2026-10-14. a9e2adf (2026-10-13) honoured EVERY explicit null, on the premise
+  // that `environment-not-stripped` was the first withholding reason that is not also a
+  // complexity reason, every earlier one (path, quoted or dynamic executable, reserved word,
+  // call operator, unknown family subcommand, a prefix conflict) making the candidate complex,
+  // which the line above already refuses. That premise was false: the learner also nulled the
+  // rule for an informational family, `[root, --version|--help|-h|-V]`, with `complex: false`,
+  // because permissionFor would not write a non-bare word (src/auto-learn.js INFO_PREFIX_FLAGS
+  // has the history). Reproduced against 9467b09 (v1.6.2): three successes each of `cargo
+  // --version`, `df -h` and `git status` rendered `Bash(cargo --version *)`, `Bash(df -h *)` and
+  // `Bash(git status *)` under review at c09daab (v1.6.1) and only `Bash(git status *)` at
+  // v1.6.2, while the Codex half rendered all three in both. Worse, the state file already held
+  // those families with the null v1.6.1 wrote, so the first v1.6.2 scan+apply dropped them from
+  // the retained set (auto-learn-manager applyUnlocked asks claudeEligible again) and removed
+  // the applied reviewed `Bash(cargo --version *)`, `Bash(df -h *)` and `Bash(docker --version
+  // *)` from `allow`, in auto-safe mode with no user action. The learner writes those rules
+  // itself now; this gate is what keeps the families already stored with a null rendering.
+  //
+  // What a9e2adf wanted still holds: an env-led run whose kept assignment the rule cannot
+  // carry (`FOO="two words" git status`, redacted, or one ahead of a wrapper) is keyed apart
+  // and carries the reason, so it does not re-acquire the `Bash(git status *)` Claude Code never
+  // matches against it. A candidate built by hand, with no such field, is synthesized as before.
   if (candidate && Object.prototype.hasOwnProperty.call(candidate, 'claudePermission')
-      && candidate.claudePermission === null) return null;
+      && candidate.claudePermission === null && candidateWithholdsClaudeRule(candidate)) return null;
   if (typeof candidate.claudePermission === 'string') return candidate.claudePermission;
   if (typeof candidate.claude_permission === 'string') return candidate.claude_permission;
 

@@ -111,8 +111,35 @@ test('the pack seeds no grant for a wrapper Claude Code strips, except the forms
   assert.ok(pack.includes('Bash(xargs *)'), 'a flagged xargs is matched as xargs');
   assert.equal(ruleMatches('Bash(grep *)', 'Bash(xargs -0 grep x)'), false,
     'precondition: no inner rule covers a flagged xargs, which is why Bash(xargs *) stays');
-  // Control: the maintainer-decided blanket grants are untouched.
-  for (const kept of ['Bash(bash *)', 'Bash(python *)', 'Bash(node *)', 'PowerShell(& *)']) {
-    assert.ok(pack.includes(kept), `${kept} stays on the maintainer's call`);
-  }
+  // Control: the maintainer-decided blanket grants are untouched. Read from the over-broad
+  // diagnostic's own list since 2026-10-14 (the next test), so there is one copy of the 13.
+  const { overBroadShellGrants } = require('../src/permission-summary');
+  const { kept } = overBroadShellGrants(pack);
+  assert.equal(kept.length, 13, `the pack holds every maintainer-kept grant: ${JSON.stringify(kept)}`);
+});
+
+// The pack seeds nothing the dashboard's over-broad-grant count then flags (2026-10-14).
+// `Bash(export *)` had been in the pack since v1.0.0 and that count flagged it
+// (`reserved-keyword`: `export` sets variables, `PATH` and `LD_PRELOAD` among them, for the
+// next command on the line), so a fresh seed reported a problem the seed had created. The 13
+// blanket grants the maintainer kept are not counted (src/permission-summary.js
+// MAINTAINER_KEPT_GRANTS), and this is the drift guard for that list: it must expand to exactly
+// the record's 13 and each must be in the pack.
+test('the pack seeds no grant its own over-broad count flags, and the 13 kept grants are the record\'s', () => {
+  const { overBroadShellGrants } = require('../src/permission-summary');
+  // MUTATION: put "Bash(export *)" back into patterns/starter-pack.json. This fails naming
+  // it. Confirmed 2026-10-14.
+  assert.ok(!pack.includes('Bash(export *)'), 'Bash(export *) is a grant keyed on shell grammar');
+  const report = overBroadShellGrants(pack);
+  assert.deepEqual(report.entries, [], 'the over-broad count flags these seeded entries');
+  // The record's heading, expanded: `Bash(bash|sh *)` is two grants.
+  const record = fs.readFileSync(path.join(__dirname, '..', 'docs', 'engineering-record.md'), 'utf8');
+  const section = /### The 13 blanket wrapper grants[^\r\n]*\r?\n\r?\n([\s\S]*?)\. Each is/.exec(record);
+  assert.ok(section, 'precondition: the record still has its "The 13 blanket wrapper grants" entry');
+  const decided = [...section[1].matchAll(/`(Bash|PowerShell)\(([^`]+) \*\)`/g)]
+    .flatMap(([, tool, heads]) => heads.split('|').map((head) => `${tool}(${head} *)`));
+  // MUTATION: drop 'PowerShell(node *)' from MAINTAINER_KEPT_GRANTS. 12 are kept and this
+  // fails, as does the control in the test above. Confirmed 2026-10-14.
+  assert.equal(decided.length, 13);
+  assert.deepEqual([...report.kept].sort(), decided.sort());
 });

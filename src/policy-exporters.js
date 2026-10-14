@@ -557,6 +557,21 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
     values: ['-a', '-A', '-e', '-l', '-n', '-o', '-p', '-s', '-x', '-D', '-F', '-w', '--align', '--config',
       '--indent', '--library', '--output', '--where'],
     fused: /^(?:-[aAelnopsuxDFw].|--[a-z-]+=)/ },
+  // valgrind's launcher execs `$VALGRIND_LIB/<toolname>-<platform>` with the `--tool=` value spliced
+  // in UNSANITIZED: `sprintf(toolfile, "%s/%s-%s", valgrind_lib, toolname, platform); execve(toolfile,
+  // ...)` (coregrind/launcher-linux.c, read 2026-10-14; no check on `/` or `..`). So `--tool=../../x`
+  // runs an arbitrary binary, and `--tool=` must be a plain tool name `[a-z][a-z0-9-]*` or the prefix
+  // is broad (M4, 2026-10-14). Until this, the generic `--[a-z0-9-]+(?:=.*)?` form accepted
+  // `--tool=../../x` as inert, so `["valgrind", "--tool=../../x", "prog"]` rendered.
+  //
+  // The open form is KEPT and recorded (M4). This entry deliberately accepts any OTHER long option
+  // with any value (`--(?!tool=)[a-z0-9-]+(?:=.*)?`), the one place this module departs from the
+  // header's "an option no table lists is broad": valgrind's core option set is large and, bar
+  // `--tool`, its long options name files, numbers or enums, not programs (the Valgrind manual's
+  // core-options page, read 2026-10-14). The sole program-naming exception, `--db-command=COMMAND` (a
+  // debugger valgrind ran on error), was removed in valgrind 3.9.0 (2013), and no installable build
+  // carries it; listing valgrind's whole inert option set buys nothing against that. ACCEPTED-RECORDED;
+  // revisit if a core option that runs a program returns.
   valgrind: { flagPattern: /^(?:-[vqd]+|--tool=[a-z][a-z0-9-]*|--(?!tool=)[a-z0-9-]+(?:=.*)?)$/ },
   // The M1 pure exec wrappers (2026-10-14), each documented to exec its trailing argv directly, so
   // judged recursively like nice and timeout. Options from each tool's man page (cited beside it); an

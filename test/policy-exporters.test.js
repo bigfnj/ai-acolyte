@@ -2120,6 +2120,29 @@ const STRACE_OUT_NARROW = [
   ['ltrace', '-o', '|./x', 'ls'], ['ltrace', '-o|./x', 'ls'], ['ltrace', '--output=|./x', 'ls'],
 ];
 
+test('M4: valgrind --tool must be a plain tool name, a path-like value is broad; other long options stay open', () => {
+  for (const prefix of [
+    ['valgrind', '--tool=../../x', 'prog'], ['valgrind', '--tool=../../x', 'ls'],
+    ['valgrind', '--tool=mem/check', 'ls'], ['valgrind', '--tool=/abs/x', 'ls'],
+    ['valgrind', '--tool=memcheck', 'sh'],   // a valid tool name but the command is itself broad
+  ]) {
+    // MUTATION: restore the open `--[a-z0-9-]+(?:=.*)?` form (drop the `--tool=` guard). The
+    // path-like rows match the generic fused form and render. Confirmed by reverting to the pre-M4
+    // valgrind entry.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} escapes valgrind's lib dir`);
+  }
+  for (const prefix of [
+    ['valgrind', '--tool=memcheck', 'ls'], ['valgrind', 'ls'],
+    // the kept open form: any other long option, with any value, is accepted as inert
+    ['valgrind', '--leak-check=full', 'ls'], ['valgrind', '--log-file=out.txt', 'rg'],
+    ['valgrind', '-v', 'ls'],
+  ]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names a plain tool or inert option and renders`);
+  }
+  // Claude half: valgrind is a wrapper root, refused at any depth.
+  assert.deepEqual(renderClaudePermissions(['Bash(valgrind --tool=memcheck ls *)'], { includeReviewed: true }), []);
+});
+
 test('M2: strace -o |cmd or !cmd pipes its output to a command, so it is broad; ltrace -o does not', () => {
   for (const prefix of STRACE_OUT_BROAD) {
     // MUTATION: drop `outSep` from strace's entry — the separated `-o`/`--output` rows render.

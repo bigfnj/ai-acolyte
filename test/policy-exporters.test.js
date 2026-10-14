@@ -1654,6 +1654,46 @@ test('K1, the control: make and just overrides keep their exact match', () => {
   assert.equal(codexRuleCount(['just', 'AR=x', 'build']), 0);
 });
 
+// K3 (2026-10-14, the lead's decision): the directories cargo's configuration and rustup's
+// toolchains come from (src/policy-exporters.js CARGO_CONFIG_ENV, which quotes the Cargo Book and
+// rustup's own pages for each). Against the base source (fcbe535) every row of K3_BROAD rendered.
+const K3_NAMES = ['CARGO_HOME', 'RUSTUP_TOOLCHAIN', 'RUSTUP_HOME'];
+const K3_BROAD = [
+  ...K3_NAMES.flatMap((name) => [
+    ['env', `${name}=./h`, 'cargo', 'build'], [`${name}=./h`, 'cargo', 'build'],
+    ['docker', 'exec', '-e', `${name}=./h`, 'ctr', 'cargo', 'build'], ['docker', 'exec', '-e', name, 'ctr', 'cargo', 'build'],
+    ['podman', 'run', `--env=${name}=./h`, 'img', 'cargo', 'test'], ['make', `${name}=./h`, 'all'],
+    ['env', `${name.toLowerCase()}=./h`, 'cargo', 'build'],            // folded, by K1
+  ]),
+  ['env', 'RUSTUP_TOOLCHAIN=stable', 'cargo', 'build'],                 // the value is not read: a name may be a path
+  ['just', 'CARGO_HOME=./h', 'build'], ['timeout', '5', 'env', 'RUSTUP_HOME=./h', 'cargo', 'test'],
+];
+// cargo's and rustup's data variables still render.
+const K3_DATA_NARROW = [
+  ['env', 'CARGO_TARGET_DIR=t', 'cargo', 'build'], ['env', 'CARGO_INCREMENTAL=0', 'cargo', 'build'],
+  ['env', 'CARGO_TERM_COLOR=always', 'cargo', 'build'], ['env', 'RUSTUP_LOG=debug', 'cargo', 'build'],
+  ['env', 'RUSTUP_TERM_COLOR=never', 'cargo', 'build'], ['env', 'RUSTUP_TOOLCHAIN_SOURCE=env', 'cargo', 'build'],
+  ['CARGO_HOME_BACKUP=x', 'cargo', 'build'], ['make', 'CARGO_TARGET_DIR=t', 'all'],
+];
+
+test('K3: CARGO_HOME, RUSTUP_TOOLCHAIN and RUSTUP_HOME make a Codex prefix broad wherever the export reads an assignment', () => {
+  for (const prefix of K3_BROAD) {
+    // MUTATION: drop `CARGO_CONFIG_ENV.has(name)` from codexEnvNameIsUnsafe. Every row renders.
+    // Confirmed 2026-10-14.
+    // MUTATION: drop one name from CARGO_CONFIG_ENV. That name's rows render. Confirmed for each
+    // of the three, 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses where cargo's config or toolchain comes from`);
+  }
+  for (const prefix of K3_DATA_NARROW) {
+    // MUTATION: match CARGO_CONFIG_ENV as a prefix (`/^(?:CARGO_|RUSTUP_)/`). Every row here fails.
+    // Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
+  }
+  // Codex export only: the Claude half keeps G4(b), as for J1's names.
+  assert.deepEqual(renderClaudePermissions(['Bash(CARGO_HOME=x cargo build *)'], { includeReviewed: true }),
+    ['Bash(CARGO_HOME=x cargo build *)']);
+});
+
 test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led build-program rule still renders', () => {
   // A control, passing before and after J1: G4(b) accepts these because the rule keeps the
   // literal value the user ran. MUTATION: judge claudePermissionIsSafe's leading assignments by

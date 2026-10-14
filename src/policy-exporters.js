@@ -2060,16 +2060,30 @@ function envAssignmentIsUnsafe(value) {
 //     CARGO_DOC_BROWSER, doc.browser ("program path with args") by the config page's general
 //     rule that a key `foo.bar` is also `CARGO_FOO_BAR` (the entry itself names no variable).
 //     BROWSER, which doc.browser defaults to, is already in PROGRAM_NAMING_ENV.
+//   * the directories cargo's configuration and rustup's toolchains come from (CARGO_CONFIG_ENV;
+//     K3, 2026-10-14, the lead's decision). J1 left CARGO_HOME out, as the config-file class rather
+//     than a program name, and recorded it for the maintainer; the lead refuses it, as this file
+//     refuses node's config-file options. Each read that day. CARGO_HOME "overrides the location
+//     of this directory" (the Cargo Book's environment-variables.html), the home whose
+//     "config.toml" is "Cargo's global configuration file" (guide/cargo-home.html), probed as
+//     "$CARGO_HOME/config.toml" (config.html, "Hierarchical structure"), where build.rustc,
+//     build.rustc-wrapper and target.<triple>.linker are each "Type: string (program path)".
+//     RUSTUP_TOOLCHAIN "can specify custom toolchains, installable toolchains, or the absolute
+//     path to a toolchain" (rustup's environment-variables.html), so it names the program's
+//     directory outright, not only an installed name. RUSTUP_HOME "Sets the root rustup folder,
+//     used for storing installed toolchains and configuration options" (the same page), so the
+//     toolchain a rustup proxy such as cargo or rustc runs, and the settings that choose it, come
+//     from the directory it names: a path again.
 // Left out, on purpose:
 //   * the flags variables of both tools (CFLAGS, LDFLAGS, ARFLAGS, ..., RUSTFLAGS,
 //     CARGO_ENCODED_RUSTFLAGS, RUSTDOCFLAGS, CARGO_BUILD_RUSTFLAGS,
 //     CARGO_TARGET_<triple>_RUSTFLAGS) and the locations (PREFIX, DESTDIR, CARGO_TARGET_DIR, ...).
 //     They are data by the standing decision G4(a) records for `CFLAGS=-fplugin=./x.so`, even
 //     though `RUSTFLAGS=-Clinker=./x` names a program the same way.
-//   * CARGO_HOME. It names the directory whose config.toml cargo reads, and that file can set
-//     build.rustc, so by the governing principle in this file's header it is the config-file
-//     class, not a program name. The decision J1 carries out is about program names, so it is
-//     recorded for the maintainer rather than added here.
+//   * rustup's download sources, RUSTUP_DIST_SERVER and RUSTUP_UPDATE_ROOT ("Sets the root URL
+//     for downloading ..."), which with RUSTUP_AUTO_INSTALL ("installs the active toolchain when
+//     it is absent") could fetch the toolchain that then runs: not part of K3's decision, and
+//     recorded for the lead (docs/engineering-record.md, K3).
 //   * CARGO_ALIAS_<name>: its value is cargo's own arguments, not a program, the `npm test`
 //     class the header records. CARGO_HOST_LINKER: not on either page. target.<triple>.ar:
 //     "deprecated and unused".
@@ -2083,9 +2097,11 @@ const CARGO_PROGRAM_ENV = new Set([
 ]);
 const CARGO_PROGRAM_ENV_PATTERN =
   /^CARGO_(?:TARGET_[A-Z0-9_]+_(?:LINKER|RUNNER)|REGISTRIES_[A-Z0-9_]+_CREDENTIAL_PROVIDER|CREDENTIAL_ALIAS_[A-Z0-9_]+)$/;
+const CARGO_CONFIG_ENV = new Set(['CARGO_HOME', 'RUSTUP_TOOLCHAIN', 'RUSTUP_HOME']);
 function codexEnvNameIsUnsafe(name) {
   return envNameIsUnsafe(name) || MAKE_SHELL_VARIABLES.has(name) || MAKE_PROGRAM_VARIABLES.has(name) ||
-    MAKE_COMMAND_VARIABLE.test(name) || CARGO_PROGRAM_ENV.has(name) || CARGO_PROGRAM_ENV_PATTERN.test(name);
+    MAKE_COMMAND_VARIABLE.test(name) || CARGO_PROGRAM_ENV.has(name) || CARGO_PROGRAM_ENV_PATTERN.test(name) ||
+    CARGO_CONFIG_ENV.has(name);
 }
 // AN ENVIRONMENT NAME FOLDS CASE ON WINDOWS (K1, 2026-10-14, the lead's decision). A native
 // Windows program looks its environment up case-insensitively, so an assignment to `rustc`,

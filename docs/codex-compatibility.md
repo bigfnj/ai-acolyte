@@ -666,9 +666,16 @@ would be the always-on false alarm this release removes elsewhere.
 
 | Version | Platform | Date | What was exercised |
 |---|---|---|---|
-| 0.145.0 | Windows | 2026-09-27/28 | Fresh-session runtime harnesses (default and custom layouts), real VS Code acceptance groups, execpolicy contract |
+| 0.145.0 | Windows | 2026-09-28 | Fresh-session runtime harnesses (default and custom layouts), real VS Code acceptance groups, execpolicy contract; first exercised 2026-09-27 (the 1.5.7 artifact) |
 | 0.154.0 | Windows | 2026-09-24 | CLI-only execpolicy and local-state audit; no runtime harness |
 | 0.161.0 | Windows | 2026-10-13 | Execpolicy contract and guidance matrix (winget binary and the npm `.cmd` shim), every CLI-only loopback runtime harness below, code-mode history shapes. NOT exercised: the VS Code acceptance groups and real-history corpora |
+
+Date is the most recent run on that version, the `date` of its entry in
+`CODEX_TESTED_VERSIONS`; `test/codex-version-record.test.js` holds this table, and the
+declared window above, to that list. The 0.145.0 row read `2026-09-27/28` until
+2026-10-14 while the list said `2026-09-28` (v1.6.2 audit): both days are in the record
+above (the 1.5.7 artifact on September 27, 1.5.8 to 1.6.0 on September 28), so the list
+was right about the latest run and the first day moved into the description.
 
 The status reaches the user three ways: `codexCli` in `wildcard-perms --learn status`
 (null, with nothing spawned, when there is no Codex home), the dashboard line, and

@@ -169,13 +169,20 @@ function matchCacheStats() {
 // needs them and permissions.js already imports this file (the reverse would be a
 // cycle). src/fixed-point-cache.js stamps both files, so the cache stays sound;
 // permissions.js and, through it, src/auto-learn.js import them.
+//
+// Re-read on each Claude Code release; measured from 2.1.296 on 2026-10-13. The name list
+// below is checked by `node scripts/check-claude-strip-model.js`, which reads the installed
+// CLI binary and exits 1 when its list differs from this one. The value class, the wrapper
+// shapes and the matcher's order are a manual read of the same binary (that script's
+// header says where to look).
 
 // Claude Code 2.1.296's known-safe environment variables, copied verbatim from its
 // allow-path routine, which strips a leading `NAME=VALUE ` only while NAME is one of
 // these and VALUE matches `[A-Za-z0-9_./:-]+`. The docs page says only "certain
 // known-safe environment variables" (read 2026-10-13). The evidence and what the
 // wildcarding pass does with any other assignment are above splitEnvPrefix in
-// src/permissions.js.
+// src/permissions.js. Re-read on each Claude Code release; measured from 2.1.296 on
+// 2026-10-13 (scripts/check-claude-strip-model.js compares it with an installed binary).
 const CLAUDE_SAFE_ENV_VARS = new Set([
   'GOEXPERIMENT', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'GO111MODULE', 'RUST_BACKTRACE', 'RUST_LOG',
   'NODE_ENV', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'PYTEST_DISABLE_PLUGIN_AUTOLOAD',
@@ -350,8 +357,11 @@ function matchesThroughXargs(rule, targets) {
 //
 // The strip helpers are exported for src/permissions.js (the wildcarding pass and its
 // cover index) and, through it, src/auto-learn.js, so all three agree on one routine.
+// CLAUDE_SAFE_ENV_VARS is exported for scripts/check-claude-strip-model.js only, which
+// reads it and never writes it (2026-10-13).
 module.exports = {
   normalizeRule, ruleMatches, sameRule,
   matchCacheStats, MATCH_CACHE_LIMIT,
   claudeStripsAssignment, wrapperLength, claudeWrapperPrefix, claudeAllowCandidates,
+  CLAUDE_SAFE_ENV_VARS,
 };

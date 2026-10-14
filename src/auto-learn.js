@@ -526,13 +526,38 @@ function containsScriptSyntax(command, shell) {
   return normalizeShell(shell) === 'powershell' && /(?:^|\s)(?:@?\{|@\(|\$\(|\.\s+[^.])/.test(text);
 }
 
-function permissionFor(shell, prefix, blocked) {
+// `lead` is the assignments an env-led family's rule opens with (deriveBaseInvocation,
+// 2026-10-13), each already checked to be a plain `NAME=VALUE` it may write; empty for
+// every other family, which is exactly the old rule.
+function permissionFor(shell, prefix, blocked, lead = []) {
   const tool = permissionToolFor(shell);
   const root = normalizeRoot(prefix[0]);
   const validPart = (part, index) => isBareCommandPart(part) ||
     (index > 0 && root === 'rg' && SAFE_RG_MODES.has(String(part)));
   if (blocked || !tool || !prefix.length || !prefix.every(validPart)) return null;
-  return `${tool}(${prefix.join(' ')} *)`;
+  return `${tool}(${[...lead, ...prefix].join(' ')} *)`;
+}
+
+// The words an env-led family's key and rule open with. Claude Code matches a line that
+// opens with an assignment it does not strip only by a rule that keeps that assignment
+// verbatim (src/permissions.js, above CLAUDE_SAFE_ENV_VARS: its own "don't ask again"
+// suggestion is the exact rule, assignment included), so `LD_PRELOAD=x cat f` and `cat f`
+// are two grants, `Bash(LD_PRELOAD=x cat *)` and `Bash(cat *)`, and two families.
+//
+// An assignment is written as itself only when the rule can carry it: unquoted, a value in
+// the plain class Claude Code's own strip uses (`[A-Za-z0-9_./:-]`, here also empty), and
+// nothing credential-shaped in the name or the value. Anything else is written
+// `NAME=<redacted>`: it still separates the family, and no raw value reaches the state
+// file, which holds only prefixes otherwise (sanitizedExample). A wrapper Claude Code
+// strips is written by its first word, so `FOO=1 timeout 5 cat` is not keyed with `FOO=1
+// cat`, which it does not match either.
+const LEAD_REDACTED = '<redacted>';
+function environmentLeadWord(token) {
+  const name = token.value.split('=', 1)[0];
+  const value = token.raw.slice(token.raw.indexOf('=') + 1);
+  const plain = token.raw.startsWith(`${name}=`) && /^[A-Za-z0-9_./:-]*$/.test(value);
+  const secret = SECRET_WORD_RE.test(token.raw) || SECRET_VALUE_RE.test(value) || SECRET_PATH_RE.test(value);
+  return plain && !secret ? `${name}=${value}` : `${name}=${LEAD_REDACTED}`;
 }
 
 // Claude Code's known-safe environment list and its wrapper stripping live in
@@ -573,9 +598,23 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   // `Bash(cat *)`, a rule Claude Code never matches against that command (docs, and the
   // list itself, in src/permissions.js above CLAUDE_SAFE_ENV_VARS). The assignment is
   // still stepped over to find the command, so risk is judged on what runs; only the
-  // Claude permission is withheld, because the one rule that matches such a run keeps
-  // the assignment verbatim, and the learner never writes a value into a rule.
+  // Claude permission changes, because the one rule that matches such a run keeps the
+  // assignment verbatim. That permission was withheld until later the same day, on the
+  // premise that the learner never writes a value into a rule; it now writes a plain,
+  // non-credential one, in the rule and in the family's key (`lead` below), and withholds
+  // every other kind.
   let environmentKept = false;
+  // The family's opening words when an assignment is kept (environmentLeadWord above):
+  // everything from the first kept assignment, or from a stripped wrapper that one
+  // follows, up to the command. Empty otherwise. Added 2026-10-13: until then a family
+  // mixing `LD_PRELOAD=x cat f` with `cat f` keyed both on `bash:cat`, and the withheld
+  // permission of the first nulled the `Bash(cat *)` of the second (aggregateObservations
+  // nulls a family whose runs disagree), so the plain family lost its rule for good.
+  const lead = [];
+  // Whether every word of `lead` is an assignment the rule can carry. A wrapper anywhere in
+  // it means Claude Code compares text the learner's rule would not hold (it strips no
+  // wrapper after a kept assignment, and an assignment after a wrapper is not one to bash).
+  let leadIsRule = true;
   // Claude Code strips a leading env assignment and its fixed set of wrappers before
   // matching (claudeWrapperPrefix), so a rule for the inner command covers the wrapped
   // invocation. Learning the wrapper instead would propose `Bash(timeout *)`, which
@@ -591,12 +630,25 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
         // Sticky: once one is kept, the line no longer opens with an assignment Claude
         // Code strips, so any after it is kept too, and that needs no test of its own.
         if (strippedWrappers.length || !token.raw.startsWith(`${name}=`) || !claudeStripsAssignment(name, rawValue)) {
+          if (!environmentKept && strippedWrappers.length) {
+            lead.push(...strippedWrappers);
+            leadIsRule = false;
+          }
           environmentKept = true;
+        }
+        if (environmentKept) {
+          const word = environmentLeadWord(token);
+          if (word.endsWith(`=${LEAD_REDACTED}`)) leadIsRule = false;
+          lead.push(word);
         }
         environment.push(name); index += 1; continue;
       }
       const { length, refused } = claudeWrapperPrefix(details.slice(index).map((item) => item.raw));
       if (length === 0) break;
+      if (environmentKept) {
+        lead.push(token.raw);
+        leadIsRule = false;
+      }
       strippedWrappers.push(token.raw); index += length;
       if (refused) break;
     }
@@ -643,21 +695,26 @@ function deriveBaseInvocation(tool, command, metadata, totalSegments) {
   // auto-safe (isAutoSafeCandidate and AUTO_UNSAFE_REASONS both list it), so evidence
   // carrying one can only ever reach policy through a review.
   //
-  // An assignment Claude Code KEEPS blocks the permission (2026-10-13). This used to say
-  // that `Bash(cat *)` already covers `LD_PRELOAD=x cat f`; it does not, because
-  // LD_PRELOAD is not on the known-safe list, so Claude Code prompts for that run. A
-  // rule proposed from it would be one for a command nobody ran, the line
-  // aggregateObservations does not cross. A family whose evidence mixes such runs with
-  // plain ones therefore gets no Claude rule, the same as when one spelling is a path
-  // executable; its Codex prefix is unaffected.
+  // An assignment Claude Code KEEPS changes the rule (2026-10-13). This used to say that
+  // `Bash(cat *)` already covers `LD_PRELOAD=x cat f`; it does not, because LD_PRELOAD is
+  // not on the known-safe list, so Claude Code prompts for that run, and `Bash(cat *)`
+  // would be a rule for a command nobody ran, the line aggregateObservations does not
+  // cross. The run is its own family now, keyed and ruled with the assignments it kept
+  // (`lead`, candidateKey): `Bash(LD_PRELOAD=x cat *)`, the rule Claude Code itself matches,
+  // proposed only from runs that had it. When the lead cannot be written into a rule
+  // (redacted, or holding a wrapper), the family is still separate and gets no rule. Either
+  // way the plain `cat f` runs keep `Bash(cat *)`: the a9e2adf version withheld this run's
+  // rule inside the shared `bash:cat` family, which nulled the plain one too. The exporter
+  // judges such a rule by the command after the assignments, and only under review
+  // (src/policy-exporters.js claudePermissionIsSafe). The Codex prefix is unaffected.
   const permissionBlocked = pathExecutable || dynamicExecutable || callOperator || reserved ||
-    unknownFamily || environmentKept || Boolean(executable && executable.quoted);
+    unknownFamily || (environmentKept && !leadIsRule) || Boolean(executable && executable.quoted);
 
   return {
     ...(metadata && typeof metadata === 'object' ? metadata : {}),
     tool: String(tool || permissionToolFor(shell) || ''), shell,
-    command: String(command || '').trim(), argv, root, prefix,
-    claudePermission: permissionFor(shell, prefix, permissionBlocked),
+    command: String(command || '').trim(), argv, root, prefix, environmentLead: lead,
+    claudePermission: permissionFor(shell, prefix, permissionBlocked, lead),
     risk: 'unknown', autoSafe: false, reasons,
     complex: reasons.some((reason) => COMPLEX_REASONS.has(reason)),
     executable: executableValue || null, environment, callOperator,
@@ -791,11 +848,20 @@ function extractInvocations(tool, command, metadata = {}) {
 // does not match the command `git.exe status`, so collapsing them would revoke
 // a grant the evidence earned; `aggregateObservations` keeps every observed
 // spelling instead, and the exporter emits each one.
+//
+// An env-led key (candidateKey, 2026-10-13: one holding a `NAME=VALUE` word, which no
+// prefix part can, isBareCommandPart) is returned as built, for two reasons. Its first
+// word is the assignment, so the old rewrite would strip `.exe` from a VALUE (`FOO=x.exe`
+// becoming `FOO=x`, another family). And its root keeps the spelling it ran with, so
+// `FOO=1 cat f` and `FOO=1 cat.exe f` stay two families with one rule each: both copies of
+// normalizePermissionSpelling read only a rule's first word, which here is the
+// assignment, so one family holding both rules would call them a conflict and propose
+// neither.
 const SHELL_FAMILY_KEY = /^([^\s:]+):([^\s]+)([\s\S]*)$/;
 function normalizeCandidateKey(key) {
   const text = String(key == null ? '' : key);
   const match = SHELL_FAMILY_KEY.exec(text);
-  if (!match) return text;
+  if (!match || `${match[2]}${match[3]}`.includes('=')) return text;
   return `${match[1]}:${match[2].replace(/\.exe$/i, '')}${match[3]}`;
 }
 
@@ -858,8 +924,12 @@ function candidateKey(invocation) {
   // A root that cannot be a command name cannot become a permission either, so
   // shell punctuation and split substitutions never earn a family of their own.
   if (!prefix.length || !isBareCommandPart(prefix[0])) return null;
+  // An env-led run keys with the words its rule opens with (deriveBaseInvocation's
+  // `lead`), verbatim, ahead of the prefix: `bash:LD_PRELOAD=x cat`, beside the plain
+  // `bash:cat`. Case is kept, because a variable's name and value are case-sensitive.
+  const lead = Array.isArray(invocation.environmentLead) ? invocation.environmentLead.map(String) : [];
   return normalizeCandidateKey(
-    `${shell}:${prefix.map((part) => String(part).trim().toLowerCase()).join(' ')}`,
+    `${shell}:${[...lead, ...prefix.map((part) => String(part).trim().toLowerCase())].join(' ')}`,
   );
 }
 
@@ -905,7 +975,10 @@ function sanitizedExample(invocation) {
   const suffix = SECRET_WORD_RE.test(raw) || SECRET_PATH_RE.test(raw) || SECRET_VALUE_RE.test(raw)
     ? ' <redacted>'
     : ((invocation.argv || []).length > prefix.length ? ' <args>' : '');
-  return `${prefix.join(' ')}${suffix}`.slice(0, 160);
+  // An env-led family's lead is part of what it is, and holds no value it was not allowed
+  // to (environmentLeadWord writes a credential-shaped or non-plain one as `<redacted>`).
+  const lead = Array.isArray(invocation.environmentLead) ? invocation.environmentLead.map(String) : [];
+  return `${[...lead, ...prefix].join(' ')}${suffix}`.slice(0, 160);
 }
 function maxRisk(left, right) {
   return (RISK_RANK.get(right) ?? 1) > (RISK_RANK.get(left) ?? 1) ? right : left;

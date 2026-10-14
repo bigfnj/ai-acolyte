@@ -649,19 +649,23 @@ test('the learner strips the whole documented wrapper set, and nothing Claude Co
 // LD_PRELOAD is not on it, so Claude Code prompts for this run and `Bash(cat *)` was a
 // rule for a command nobody ran. It is withheld now, at review as well; a known-safe
 // variable keeps the family's rule reviewable and still never automatic.
+//
+// Updated the same day, as a decision: the run is its own env-led family and proposes the
+// rule Claude Code does match, `Bash(LD_PRELOAD=/tmp/evil.so cat *)` (the next tests). It
+// is still withheld at review, now by the exporter, because LD_PRELOAD loads code named by
+// its value (src/policy-exporters.js assignmentLoadsCode).
 test('an env-prefixed observation is never automatic, and is reviewable only past a variable Claude Code strips', () => {
   const [item] = extractInvocations('Bash', 'LD_PRELOAD=/tmp/evil.so cat README.md', {});
   assert.deepEqual(item.environment, ['LD_PRELOAD']);
   assert.ok(item.reasons.includes('environment-prefix'));
   assert.ok(item.reasons.includes('environment-not-stripped'));
 
-  // MUTATION: drop `environmentKept` from permissionBlocked in deriveBaseInvocation
-  // (src/auto-learn.js). `Bash(cat *)` is proposed again and the review assertion fails.
-  // Confirmed 2026-10-13.
-  // MUTATION: drop the explicit-null check in candidateClaudePermission
-  // (src/policy-exporters.js). The exporter re-derives `Bash(cat *)` from the prefix and
-  // the same assertion fails. Confirmed 2026-10-13.
-  assert.equal(item.claudePermission, null);
+  // MUTATION: propose the plain rule again (permissionFor without `lead`). `Bash(cat *)` is
+  // proposed for this run and the first assertion fails. Confirmed 2026-10-13.
+  // MUTATION: drop `assignmentLoadsCode` from claudePermissionIsSafe
+  // (src/policy-exporters.js). The LD_PRELOAD rule renders at review and the third
+  // assertion fails. Confirmed 2026-10-13.
+  assert.equal(item.claudePermission, 'Bash(LD_PRELOAD=/tmp/evil.so cat *)');
   assert.deepEqual(renderClaudePermissions([item], {}), []);
   assert.deepEqual(renderClaudePermissions([item], { includeReviewed: true }), []);
 
@@ -677,7 +681,9 @@ test('an env-prefixed observation is never automatic, and is reviewable only pas
   }], { threshold: 1 });
   assert.equal(candidate.autoSafe, false);
   assert.ok(candidate.reasons.includes('environment-prefix'));
-  assert.equal(candidate.claudePermission, null);
+  assert.equal(candidate.key, 'bash:LD_PRELOAD=/tmp/evil.so cat');
+  assert.equal(candidate.claudePermission, 'Bash(LD_PRELOAD=/tmp/evil.so cat *)');
+  assert.deepEqual(renderClaudePermissions([candidate], { includeReviewed: true }), []);
 });
 
 test('which leading assignments the learner treats as stripped follows Claude Code exactly', () => {

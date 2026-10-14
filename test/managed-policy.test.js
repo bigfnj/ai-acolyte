@@ -79,10 +79,14 @@ test('an inert family is withheld from Claude but still offered to Codex', (t) =
     reasons: ['known-read-only-command'], sources: ['claude'],
     counts: { success: 5, failed: 0, unknown: 0, total: 5 },
   });
+  // `docker ps`, not `docker exec`, since 2026-10-13: the exporter now refuses a reviewed
+  // `["docker", "exec"]` for Codex and `Bash(docker exec *)` for Claude on their own (it
+  // names no command, so it runs any command in any container), and this test is about a
+  // family that only the managed rule withholds. `Bash(docker:*)` covers both shapes.
   fs.writeFileSync(statePath, `${JSON.stringify({
     version: 1, mode: 'recommend', threshold: 3,
     candidates: {
-      'bash:docker exec': family('bash:docker exec', ['docker', 'exec'], 'Bash(docker exec *)'),
+      'bash:docker ps': family('bash:docker ps', ['docker', 'ps'], 'Bash(docker ps *)'),
       'bash:head': family('bash:head', ['head'], 'Bash(head *)'),
     },
     observationHashes: {}, cursors: {},
@@ -95,7 +99,7 @@ test('an inert family is withheld from Claude but still offered to Codex', (t) =
     codexRulesPath: path.join(home, '.codex', 'rules', 'permission-wildcarding.rules'),
   });
   const listed = manager.listCandidates();
-  const docker = listed.find((c) => c.key === 'bash:docker exec');
+  const docker = listed.find((c) => c.key === 'bash:docker ps');
   const head = listed.find((c) => c.key === 'bash:head');
 
   assert.equal(docker.policy, 'inert');

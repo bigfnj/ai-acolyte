@@ -70,7 +70,7 @@ function applicationSummary(...results) {
   // then applies again produces two prunes and one toast. A `.bak` that could not be
   // deleted is the one outcome of backup pruning worth a word — the manager counts
   // it rather than throwing, because by then the policy is already written and a
-  // locked file is not worth failing an apply over (src/auto-learn-manager.js:1850).
+  // locked file is not worth failing an apply over (src/auto-learn-manager.js:2007).
   // It had no reader until 2026-09-25, so "counted rather than thrown" meant
   // "swallowed".
   let backupsUnremovable = 0;
@@ -116,7 +116,7 @@ function policyTargetLabel(value) {
 // A `.bak` the pruner could not delete is counted rather than thrown, deliberately:
 // by the time pruneBackups runs the policy file is already written, and failing an
 // apply over a locked backup would be the worse outcome
-// (src/auto-learn-manager.js:1850, which says the count exists "so a degraded run says
+// (src/auto-learn-manager.js:2007, which says the count exists "so a degraded run says
 // so instead of reporting a clean prune"). Counting it and then telling nobody is a
 // third, separate thing, and it is what the code did until 2026-09-25: returned on
 // every apply, read by nothing outside the tests.

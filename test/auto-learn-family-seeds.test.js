@@ -19,7 +19,7 @@
 // A sixth assertion was WRITTEN AND THEN DELETED: "none of these roots became
 // auto-applicable". It passes, and it survived every single-edit mutation tried, including
 // adding the root to AUTO_SUFFIX_CLOSED_ROOTS and to READ_ONLY_ROOTS. `autoSafe` is
-// over-determined here (src/auto-learn.js:758#structuralBlock needs read-only risk AND knownReadOnly AND
+// over-determined here (src/auto-learn.js:815#structuralBlock needs read-only risk AND knownReadOnly AND
 // no structural block, and the family reasons gate it again downstream), so no one edit
 // flips it. A test nothing can break reads as coverage without being coverage, which is
 // worse than its absence.

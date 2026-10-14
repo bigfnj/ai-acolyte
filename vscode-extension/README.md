@@ -266,12 +266,13 @@ The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU
 packaging copies it into `extMemory` (`scripts/package.mjs:38`), and `recallScriptPath`
 (`extension.js:619`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
-Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing `<name>.tmp`
-and renaming on success. **Cancel** or any failure unlinks that partial inside `close()`'s
-callback — `fs.unlinkSync(tmp)` (`extension.js:834`) — and resolves only after it, so a
-cancelled download leaves nothing behind. Unlinking *beside* the close raced the still-open
-write handle and lost on Windows, which orphaned every cancelled transfer. See the Memory
-card section below.
+Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
+`<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
+share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:851`) —
+and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
+the close raced the still-open write handle and lost on Windows, which orphaned every
+cancelled transfer. See the Memory card section below.
 
 ## Memory card (dashboard)
 

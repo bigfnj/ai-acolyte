@@ -74,11 +74,13 @@ function fixture(t, { projectRules = true, codexConfigOnly = false } = {}) {
 // A stand-in codex, reachable by path, run by node. `mode`:
 //   answer -- --version, execpolicy check and app-server config/read all answer
 //   hang   -- app-server writes its pid to `pidFile` and never answers anything
-function fakeCodex(dir, mode, pidFile) {
+// `markFile`, when given, gets one line per invocation: proof it was run at all.
+function fakeCodex(dir, mode, pidFile, markFile) {
   fs.mkdirSync(dir, { recursive: true });
   const script = path.join(dir, 'fake-codex.js');
   fs.writeFileSync(script, `
 const args = process.argv.slice(2);
+if (${JSON.stringify(markFile || '')}) require('fs').appendFileSync(${JSON.stringify(markFile || '')}, args.join(' ') + '\\n');
 if (args[0] === '--version') { process.stdout.write('codex-cli 0.161.0\\n'); process.exit(0); }
 if (args[0] === 'execpolicy') { process.stdout.write(JSON.stringify({ decision: 'allow', matchedRules: [] }) + '\\n'); process.exit(0); }
 if (${JSON.stringify(mode)} === 'hang') {
@@ -133,6 +135,10 @@ function harness(box, opts = {}) {
   const spawnSyncCalls = [];
   let provider = null;
   const codexExecutable = opts.codexExecutable || path.join(box.base, 'no-such-codex', 'codex');
+  // What VS Code would hold for the key, tier by tier. Default: the user tier only.
+  // `get` answers the way VS Code merges a window-scoped key, workspace first, which
+  // is exactly the value a machine-scoped read must refuse to use.
+  const tiers = opts.executableTiers || { globalValue: codexExecutable };
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     RelativePattern: class RelativePattern { constructor(b, p) { this.base = b; this.pattern = p; } },
@@ -166,9 +172,10 @@ function harness(box, opts = {}) {
         return {
           // The executable answers on both doors, so the test reads the same
           // value whichever one the extension uses for it.
-          get: (key, fallback) => (key === 'autoLearn.codexExecutable' ? codexExecutable
+          get: (key, fallback) => (key === 'autoLearn.codexExecutable'
+            ? tiers.workspaceFolderValue ?? tiers.workspaceValue ?? tiers.globalValue ?? fallback
             : key === 'autoLearn.enabled' ? false : fallback),
-          inspect: (key) => (key === 'autoLearn.codexExecutable' ? { globalValue: codexExecutable } : {}),
+          inspect: (key) => (key === 'autoLearn.codexExecutable' ? { defaultValue: 'codex', ...tiers } : {}),
           update: async () => {},
         };
       },
@@ -449,5 +456,56 @@ test('the Codex version probe a push started pushes once when it lands, and then
     assert.equal(app.posted.length, after, 'one push for one probe: the cached answer starts nothing');
   } finally {
     await app.dispose();
+  }
+});
+
+// FINDING 2 (2026-10-14): `autoLearn.codexExecutable` names a program the extension
+// runs unprompted (this file's pushes run its --version and its app-server). It was
+// window-scoped, so a repository's .vscode/settings.json could aim it at a binary
+// the repository ships. The extension is disabled in Restricted Mode (no
+// untrustedWorkspaces capability is declared, which VS Code treats as "not
+// supporting Workspace Trust"), but a trusted folder is not a vetted binary.
+test('the manifest declares the Codex executable machine-scoped', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vscode-extension', 'package.json'), 'utf8'));
+  const setting = manifest.contributes?.configuration?.properties?.['permissionWildcarding.autoLearn.codexExecutable'];
+  assert.ok(setting, 'precondition: the key is declared');
+  // MUTATION: drop `"scope": "machine"`. This fails. Confirmed 2026-10-14.
+  assert.equal(setting.scope, 'machine', 'any wider scope lets a workspace settings file choose the binary');
+  assert.equal(manifest.capabilities?.untrustedWorkspaces, undefined,
+    'precondition for the README\'s Restricted Mode claim: no capability is declared, so VS Code disables the extension there');
+});
+
+test('a workspace-level Codex executable is never run, and a user-level one is', async (t) => {
+  // The hostile shape: a binary inside the repository, named by the repository's
+  // own settings file. The dashboard push would run its --version unprompted.
+  const hostile = fixture(t, { projectRules: false });
+  const marks = path.join(hostile.base, 'ran.log');
+  const repoBinary = fakeCodex(path.join(hostile.workspace, 'tools'), 'answer', null, marks);
+  const app = harness(hostile, { executableTiers: { workspaceValue: repoBinary } });
+  try {
+    app.open();
+    await settle();
+    await tick(1500);
+    // MUTATION: read the key with cfg.get() again. The push probes the repository's
+    // binary and the mark file appears. Confirmed 2026-10-14.
+    assert.equal(fs.existsSync(marks), false, 'the repository-named binary was run');
+    const cli = app.posted.at(-1).codexMemory.cli;
+    assert.ok(cli === null || cli.executable === 'codex',
+      `the push asked about ${cli && cli.executable}, not the default`);
+  } finally {
+    await app.dispose();
+  }
+
+  // The control: the same binary set in USER settings is honoured.
+  const trusted = fixture(t, { projectRules: false });
+  const userMarks = path.join(trusted.base, 'ran.log');
+  const userBinary = fakeCodex(path.join(trusted.base, 'bin'), 'answer', null, userMarks);
+  const control = harness(trusted, { executableTiers: { globalValue: userBinary } });
+  try {
+    control.open();
+    await until(() => fs.existsSync(userMarks), 10000, 'the user-level binary to be probed');
+    assert.match(fs.readFileSync(userMarks, 'utf8'), /--version/);
+  } finally {
+    await control.dispose();
   }
 });

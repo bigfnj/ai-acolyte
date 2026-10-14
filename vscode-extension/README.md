@@ -148,7 +148,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:3991#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4017#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -211,10 +211,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:3940#showWarningMessage`).
+`vscode-extension/extension.js:3966#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:3760#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:3786#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -233,11 +233,19 @@ and fresh-runtime evidence in the compatibility document.
 The other Auto Learn settings are `permissionWildcarding.autoLearn.enabled` (default
 **true**), `permissionWildcarding.autoLearn.intervalMinutes` (default **5**),
 `permissionWildcarding.autoLearn.debounceSeconds` (default **20** — the quiet window a
-watcher-driven scan waits out, so a burst of transcript writes coalesces into one scan), and
+watcher-driven scan waits out, so a burst of transcript writes coalesces into one scan),
 `permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
 `permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
 how long one worker operation may run before the extension stops waiting). The full list of
 all 18 settings is at the end of this file.
+
+`autoLearn.codexExecutable` is **machine-scoped**: set it in user settings. The extension
+runs that program without asking (`--version` for the dashboard's version line, `app-server`
+to ask which project rule folders Codex trusts, `execpolicy check` for Auto Learn), so a
+value in a repository's `.vscode/settings.json` is ignored rather than run. The extension is
+also disabled in Restricted Mode: it declares no `untrustedWorkspaces` capability, which
+VS Code treats as not supporting Workspace Trust. Trusting a folder still does not let the
+folder choose the binary.
 
 ### Future local CPU assistance
 
@@ -481,7 +489,7 @@ set, the setting wins. An edit applies to the next scan, with no reload.
 | `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |
 | `autoLearn.debounceSeconds` | `20` | Quiet window a watcher-driven scan waits out |
 | `autoLearn.codexScope` | `"user"` | `user` / `off` — where generated Codex rules land. `workspace` was withdrawn |
-| `autoLearn.codexExecutable` | `"codex"` | Binary used for `codex execpolicy check` |
+| `autoLearn.codexExecutable` | `"codex"` | Codex CLI the extension runs (`execpolicy check`, `--version`, `app-server`). Machine-scoped: a workspace value is ignored |
 | `autoLearn.workerTimeoutSeconds` | `300` | Seconds one worker operation may run before the extension stops waiting; `0` disables. Machine-scoped: a workspace value is ignored |
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation |

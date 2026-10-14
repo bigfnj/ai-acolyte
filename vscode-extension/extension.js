@@ -1071,7 +1071,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2601#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2627#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1160,6 +1160,32 @@ function memoryCardData(precomputed = null) {
   return out;
 }
 
+// `autoLearn.codexExecutable`, from the USER tier only (2026-10-14).
+//
+// This value is a program the extension RUNS, with no prompt: `--version` on a
+// dashboard push (src/codex-version.js), `app-server` for the project-trust ask,
+// `execpolicy check` for Auto Learn and "Why did this prompt?". Window-scoped, as
+// it was, a repository's .vscode/settings.json could point it at a binary inside
+// the repository, and opening the folder ran it. VS Code's own gate does not cover
+// that: the manifest declares no `untrustedWorkspaces` capability, and the Workspace
+// Trust guide says an extension that declares nothing "will be treated as not
+// supporting Workspace Trust", so this extension is disabled in Restricted Mode and
+// never runs in an untrusted folder at all (checked against
+// code.visualstudio.com/api/extension-guides/workspace-trust, 2026-10-14). But
+// trusting a folder is routinely done to read it, and trust is a statement about
+// the editor, not about every binary path the folder names.
+//
+// So the key is `"scope": "machine"` in the manifest, which the contribution-points
+// reference defines as settable "only in user settings or only in remote
+// settings", and it is read here from inspect().globalValue, so a workspace or
+// folder value is ignored even if one reaches inspect(): the same rule
+// autoLearnWorkerTimeoutMs applies to the worker deadline, for the same reason.
+// The CLI keeps its explicit --codex-executable flag.
+function codexExecutableSetting(cfg) {
+  const value = typeof cfg.inspect === 'function' ? cfg.inspect('autoLearn.codexExecutable')?.globalValue : undefined;
+  return typeof value === 'string' && value ? value : 'codex';
+}
+
 // ── activation ────────────────────────────────────────────────────────────────
 // Cross-agent Auto Learn keeps transcript text in memory only. Persistent state
 // contains normalized prefixes, counters, reason labels, hashes, and cursors.
@@ -1194,7 +1220,7 @@ function autoLearnConfig() {
     debounceSeconds: Math.max(1, Number(cfg.get('autoLearn.debounceSeconds', 20)) || 20),
     codexScope,
     codexRulesPath,
-    codexExecutable: cfg.get('autoLearn.codexExecutable', 'codex') || 'codex',
+    codexExecutable: codexExecutableSetting(cfg),
     scopeWarning,
     // Evidence/state is still partitioned and cwd-filtered by the open
     // workspace. That is independent of scope: it decides which observations
@@ -1325,7 +1351,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5294#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5320#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1550,12 +1576,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5324#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5350#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2389#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2415#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.

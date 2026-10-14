@@ -84,6 +84,68 @@ test('a deny that does not cover the family does not withhold it', (t) => {
   assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)']);
 });
 
+// J2 (2026-10-14): the LISTING judges the user's deny too, by the same refusal() the write uses.
+// The extension's Review picker and dashboard counts read the listing's targets through
+// vscode-extension/autoLearnUi.js, so that module answers what the user is shown.
+const { reviewableCandidates, isCandidateComplete } = require('../vscode-extension/autoLearnUi');
+
+test('J2: a family the user has denied is withheld by the listing too, so Review and the counts do not offer it', (t) => {
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], deny: ['Bash(git status:*)'] } });
+  const learn = manager(home, THREE_GIT_STATUS);
+  learn.scan();
+
+  // MUTATION: restore 7d08ced's clone (the managed verdict alone). The family lists
+  // `eligibleTargets: ['claude']` and `pendingTargets: ['claude']`, Review offers it and the
+  // count holds it, while the apply below withholds it: every assertion before the apply fails.
+  // Confirmed 2026-10-14.
+  const [family] = learn.listCandidates();
+  assert.equal(family.key, 'bash:git status');
+  assert.equal(family.policy, 'unknown', 'no managed policy: `policy` is still the managed verdict alone');
+  assert.deepEqual(family.eligibleTargets, [], 'the deny withholds the Claude target in the listing');
+  assert.deepEqual(family.pendingTargets, []);
+  assert.deepEqual(learn.listCandidates({ pending: true }), []);
+  const settings = readSettings(home);
+  assert.equal(isCandidateComplete(family, {}, ['claude']), true, 'nothing is left owing to Claude');
+  assert.deepEqual(reviewableCandidates([family], {}, ['claude'], settings).candidates, [],
+    'Review offers no family whose write would be withheld');
+
+  // The listing and the write agree.
+  const result = learn.applyClaude({
+    keys: [family.key], includeReviewed: true, expectedFingerprints: { [family.key]: family.fingerprint },
+  });
+  assert.equal(result.appliedCount, 0);
+  assert.deepEqual(result.withheldByPolicy.map(({ key, source }) => [key, source]), [['bash:git status', 'user-deny']]);
+});
+
+test('J2, the control: a deny that does not cover the rule leaves the family listed and pending', (t) => {
+  // Passes with and without J2. It is what fails if the listing withholds too much: MUTATION:
+  // make clone treat every family as refused. This fails. Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], deny: ['Bash(git push:*)'] } });
+  const learn = manager(home, THREE_GIT_STATUS);
+  learn.scan();
+  const [family] = learn.listCandidates();
+  assert.deepEqual(family.eligibleTargets, ['claude']);
+  assert.deepEqual(family.pendingTargets, ['claude']);
+  assert.equal(reviewableCandidates([family], {}, ['claude'], readSettings(home)).candidates.length, 1);
+  assert.deepEqual(learn.apply().appliedKeys, ['bash:git status'], 'and the write agrees: it is applied');
+});
+
+test('J2: a Claude deny withholds only the Claude target; the family stays offered for Codex', (t) => {
+  // MUTATION: restore 7d08ced's clone. `eligibleTargets` is ['claude', 'codex'] and this fails.
+  // MUTATION: drop the Codex target too when the Claude rule is refused. `eligibleTargets` is
+  // [] and this fails. Both confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], deny: ['Bash(git status:*)'] } });
+  const rules = path.join(home, '.codex', 'rules', 'permission-wildcarding.rules');
+  const learn = manager(home, THREE_GIT_STATUS, { codexRulesPath: rules });
+  learn.scan();
+  const [family] = learn.listCandidates();
+  assert.deepEqual(family.eligibleTargets, ['codex']);
+  assert.deepEqual(family.pendingTargets, ['codex']);
+});
+
 // ── claims against entries the file no longer holds ───────────────────────────
 
 test('an entry a live wildcard covers is claimed with the parent named, not written again', (t) => {

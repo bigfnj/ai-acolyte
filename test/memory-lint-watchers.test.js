@@ -62,9 +62,12 @@ function harness(tempHome, overrides = {}) {
       showErrorMessage: (message) => { errors.push(message); return Promise.resolve(); },
     },
     workspace: {
+      // The overrides are the USER's settings, so inspect() reports them there: memory.dir is
+      // machine-scoped and read from globalValue alone (S2 of the final pre-tag audit).
       getConfiguration: () => ({
         get: (key, fallback) => (Object.prototype.hasOwnProperty.call(overrides, key)
           ? overrides[key] : fallback),
+        inspect: (key) => (Object.prototype.hasOwnProperty.call(overrides, key) ? { globalValue: overrides[key] } : {}),
       }),
       createFileSystemWatcher(pattern) {
         const watcher = {
@@ -1003,7 +1006,7 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
 // this repo, from the pinned-`memory.dir` bug, and is why
-// `memoryStoreDirs` (extension.js:2737-2738#memoryStoreDirs) overrides `dir` before calling this.
+// `memoryStoreDirs` (extension.js:2745-2746#memoryStoreDirs) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

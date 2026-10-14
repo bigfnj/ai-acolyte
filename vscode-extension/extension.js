@@ -1083,7 +1083,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2673#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2681#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1128,14 +1128,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:352-360#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:362-370#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:651-655#conf.enabled), and test/memory-lint-watchers.test.js:422#lintMemory
+    // (memoryLint.js:661-665#conf.enabled), and test/memory-lint-watchers.test.js:425#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:580#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:590#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1196,6 +1196,14 @@ function memoryCardData(precomputed = null) {
 function codexExecutableSetting(cfg) {
   const value = typeof cfg.inspect === 'function' ? cfg.inspect('autoLearn.codexExecutable')?.globalValue : undefined;
   return typeof value === 'string' && value ? value : 'codex';
+}
+
+// The same rule for a machine-scoped switch: the user tier's value, or `fallback` when the user
+// never set one (or set one of the wrong type). Never the merged get(), which a workspace wins.
+function userSetting(key, fallback) {
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  const value = typeof config.inspect === 'function' ? config.inspect(key)?.globalValue : undefined;
+  return typeof value === typeof fallback ? value : fallback;
 }
 
 // ── activation ────────────────────────────────────────────────────────────────
@@ -1363,7 +1371,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5366#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5380#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1596,12 +1604,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5396#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5410#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2461#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2469#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -3368,8 +3376,10 @@ function localCardData() {
 // it itself, because editing its own permission surface is what a classifier
 // stops. So the extension writes it, into ~/.claude/CLAUDE.md.
 
+// USER settings only (machine-scoped, S2 of the final pre-tag audit): this decides whether the
+// user's global CLAUDE.md and AGENTS.md carry the block, so a workspace can neither add nor strip it.
 function guidanceEnabled() {
-  return vscode.workspace.getConfiguration('permissionWildcarding').get('guidance.enabled', true);
+  return userSetting('guidance.enabled', true);
 }
 
 // Keep CLAUDE.md in step with the setting on activation, and refresh a block
@@ -3499,8 +3509,12 @@ function guidanceCardData() {
 // Installing is a file read, so it runs on activation. COMPILING spawns python, so it stays
 // an explicit action the card offers when there is nothing compiled yet.
 
+// USER settings only (machine-scoped, S2 of the final pre-tag audit). It decides whether the user's
+// global CLAUDE.md and AGENTS.md carry the block, and it gates the unattended recompile: read with
+// get(), a workspace could install a compiled block the user had turned off, or strip one the user
+// relies on. The corpus it compiles is memory.dir, user-scoped for the same reason (memoryLint.js cfg).
 function gatesEnabled() {
-  return vscode.workspace.getConfiguration('permissionWildcarding').get('gates.enabled', true);
+  return userSetting('gates.enabled', true);
 }
 
 // How many gates the compiled file holds. Counts the bullets the compiler emits rather than

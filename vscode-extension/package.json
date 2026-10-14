@@ -293,12 +293,14 @@
         "permissionWildcarding.guidance.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Maintain a managed shell-style block in each installed agent's user instruction file (`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`). Simple commands make Claude approval patterns and Codex argv-prefix rules easier to reuse. Codex may split simple shell chains; expansions, redirections, and other complex syntax can instead require a rule for the complete wrapper. Script files need their own approval. Turning this off removes the managed block and preserves your text."
+          "scope": "machine",
+          "markdownDescription": "Maintain a managed shell-style block in each installed agent's user instruction file (`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`). Simple commands make Claude approval patterns and Codex argv-prefix rules easier to reuse. Codex may split simple shell chains; expansions, redirections, and other complex syntax can instead require a rule for the complete wrapper. Script files need their own approval. Turning this off removes the managed block and preserves your text. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither add the block nor strip it; set it in user settings."
         },
         "permissionWildcarding.gates.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Maintain a second managed block holding your own **standing orders**, compiled out of your Claude Code file-memory. `recall.py --gates-compile` lifts the `<!-- gate -->` section from every memory marked `scope: global` into `~/.claude/gates.generated.md`, and this installs it into each agent's instruction file. Why it needs to be resident: the memory index is a list of one-line hooks, so the enforceable half of a rule sits in a file that only loads if a recall surfaces it — which never happens for a rule you are already breaking, because nothing triggers the lookup. Reference material is fine on demand; policy is not. Installing is a file read and runs on activation; compiling spawns python and stays an explicit action. Marker-fenced separately from the shell-style block, so turning either off leaves the other byte-identical."
+          "scope": "machine",
+          "markdownDescription": "Maintain a second managed block holding your own **standing orders**, compiled out of your Claude Code file-memory. `recall.py --gates-compile` lifts the `<!-- gate -->` section from every memory marked `scope: global` into `~/.claude/gates.generated.md`, and this installs it into each agent's instruction file. Why it needs to be resident: the memory index is a list of one-line hooks, so the enforceable half of a rule sits in a file that only loads if a recall surfaces it — which never happens for a rule you are already breaking, because nothing triggers the lookup. Reference material is fine on demand; policy is not. Installing is a file read and runs on activation; compiling spawns python, an explicit action until the block is installed and then again after each memory edit. Marker-fenced separately from the shell-style block, so turning either off leaves the other byte-identical. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
         },
         "permissionWildcarding.memory.enabled": {
           "type": "boolean",
@@ -308,7 +310,8 @@
         "permissionWildcarding.memory.dir": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to a specific memory dir to lint (the folder containing `MEMORY.md`). Leave empty to auto-discover every `~/.claude/projects/*/memory/MEMORY.md`."
+          "scope": "machine",
+          "markdownDescription": "Absolute path to a specific memory dir to lint (the folder containing `MEMORY.md`). Leave empty to auto-discover every `~/.claude/projects/*/memory/MEMORY.md`. It is also the corpus the recall index is built from and the one `--gates-compile` lifts into your global instruction files, so it is machine-scoped: a repository's `.vscode/settings.json` cannot point it at memories of its own; set it in user settings."
         },
         "permissionWildcarding.memory.lineBudget": {
           "type": "number",

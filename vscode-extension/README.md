@@ -148,7 +148,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4063#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4077#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -211,10 +211,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4012#showWarningMessage`).
+`vscode-extension/extension.js:4026#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:3832#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:3846#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -319,6 +319,10 @@ A 15-minute cooldown prevents back-to-back runs; a status-bar message confirms e
 and a failure is logged to the extension host console without a notification.
 Separately, the gate compiler spawns
 `recall.py --gates-compile`, but only once the memory-gates block is installed.
+`memory.dir`, `gates.enabled` and `guidance.enabled` are **machine-scoped** for the same reason
+as the script path below: the first names the corpus whose `scope: global` gate blocks become
+your standing orders in every project, and the other two decide what your global `CLAUDE.md`
+and `AGENTS.md` carry, so all three are read from user settings only.
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
@@ -498,10 +502,10 @@ set, the setting wins. An edit applies to the next scan, with no reload.
 | `autoLearn.codexExecutable` | `"codex"` | Codex CLI the extension runs (`execpolicy check`, `--version`, `app-server`). Machine-scoped: a workspace value is ignored |
 | `autoLearn.workerTimeoutSeconds` | `300` | Seconds one worker operation may run before the extension stops waiting; `0` disables. Machine-scoped: a workspace value is ignored |
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
-| `guidance.enabled` | `true` | Keep the shell-style block installed on activation |
-| `gates.enabled` | `true` | Keep the memory-gates block installed on activation |
+| `guidance.enabled` | `true` | Keep the shell-style block installed on activation. Machine-scoped: a workspace value is ignored |
+| `gates.enabled` | `true` | Keep the memory-gates block installed on activation. Machine-scoped: a workspace value is ignored |
 | `memory.enabled` | `true` | Claude index lint/gauge and native Codex diagnostics; native gate refresh has a separate installed-marker opt-in |
-| `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home |
+| `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home. Machine-scoped: a workspace value is ignored |
 | `memory.lineBudget` | `300` | Characters one index hook line may use |
 | `memory.maxLines` | `200` | Lines Claude Code actually loads from `MEMORY.md` |
 | `memory.totalBudget` | `12000` | Byte budget for the whole always-loaded index |

@@ -58,11 +58,21 @@ function frontmatter(text, key) {
 // watcher-plus-periodic-reconcile shape Auto Learn uses, for the same reason.
 const RECONCILE_MS = 5 * 60 * 1000;
 
+// `memory.dir` is read from USER settings only (machine-scoped, 2026-10-14, S2 of the final
+// pre-tag audit). It is not only the store this lint reads: memoryReport() hands it to the
+// recall rebuild and sync, and to `recall.py --gates-compile` as RECALL_MEMORY_DIR, whose
+// output extension.js installs into the user's global CLAUDE.md and AGENTS.md. Read with get(),
+// a repository's .vscode/settings.json chose that corpus, and one edit of any memory file then
+// recompiled and installed its `scope: global` gate blocks as the user's standing orders in
+// every project (reproduced in a sandbox). globalValue, as extension.js's
+// codexExecutableSetting reads its key, so a workspace or folder value that reaches inspect() is
+// still ignored. The budgets and `enabled` stay window-scoped: they shape what the lint shows.
 function cfg() {
   const c = vscode.workspace.getConfiguration('permissionWildcarding');
+  const pinned = typeof c.inspect === 'function' ? c.inspect('memory.dir')?.globalValue : undefined;
   return {
     enabled: c.get('memory.enabled') !== false,
-    dir: (c.get('memory.dir') || '').trim(),
+    dir: (typeof pinned === 'string' ? pinned : '').trim(),
     lineBudget: Number(c.get('memory.lineBudget')) || 300,
     totalBudget: Number(c.get('memory.totalBudget')) || 12000,
     // Not a budget we chose: Claude Code loads the first 200 lines of MEMORY.md and
@@ -83,7 +93,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:2737-2738#memoryStoreDirs) overrides `dir` before it calls this.
+// (extension.js:2745-2746#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive

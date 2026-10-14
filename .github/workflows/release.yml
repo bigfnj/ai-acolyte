@@ -18,12 +18,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The suite runs on Node 20, the floor README.md promises and test.yml's matrix keeps.
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
 
       - name: Test
         run: npm test
+
+      # Packaging alone moves to Node 22, since 2026-10-14: scripts/package.mjs pins
+      # @vscode/vsce@4.0.0, which declares engines.node ">= 22". On Node 20 npx only warned
+      # (EBADENGINE) and ran it anyway, which is how the v1.6.2 release was built on an
+      # unsupported pair. test/release-pins.test.js holds this step to vsce's floor.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
 
       - name: Package VSIX
         run: node scripts/package.mjs "${{ github.event.release.tag_name || github.event.inputs.version }}"

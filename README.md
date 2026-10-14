@@ -428,7 +428,8 @@ given a method it never had.
 ### Build, test, release
 
 Both halves need Node 20 or newer, the floor CI tests: `.github/workflows/test.yml` runs the suite
-on every push and pull request across Node 20 and 22 on Linux and Windows, `fail-fast` off so a
+on every push and pull request across Node 20, 22 and 24 (24 is what the VS Code extension host
+runs) on Linux and Windows, `fail-fast` off so a
 platform-specific failure is never hidden. On Linux and macOS `install.sh` registers the hook's
 bare path, quoted if it has a space in it; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
 `node "<path>"`, because a bare extensionless path has no Windows association. Both write

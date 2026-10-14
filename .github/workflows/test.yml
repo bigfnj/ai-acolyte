@@ -30,9 +30,13 @@ jobs:
       # failure is the single most useful signal this matrix produces, and
       # fail-fast would hide whether the other side agreed.
       fail-fast: false
+      # Node 24 since 2026-10-14: it is the runtime the extension actually runs on (the
+      # VS Code extension host is Node 24.21, Electron 43.7.7) and nothing in CI tested it.
+      # It gets no Codex install: the Node 22 legs carry the Codex contract tests, and 24
+      # is here for the runtime, with node:sqlite present as it is in the host.
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: ["20", "22"]
+        node: ["20", "22", "24"]
     env:
       # The Codex CLI the contract tests run against, pinned (2026-10-13).
       # scripts/check-codex-version.js refuses a pin that is not a recorded

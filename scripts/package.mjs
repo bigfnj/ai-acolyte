@@ -54,9 +54,21 @@ const pkg = JSON.parse(readFileSync(join(ext, 'package.json'), 'utf8'));
 // tells scripts/check-version-sync.mjs this build's artefact from the same-version leftover
 // of an earlier one. Written after vsce instead, it would be newer than the artefact it
 // vouches for, and every build -- honest ones included -- would be reported as stale.
+//
+// vsce is PINNED, since 2026-10-14. It was `npx --yes @vscode/vsce`, which resolves to
+// whatever is latest on the day: 4.0.0 since 2026-09-14, which declares engines.node
+// ">= 22", while .github/workflows/release.yml ran this on Node 20 (EOL 2026-04-30). npx
+// only warns on an engine mismatch (measured in node:20-slim: `npm warn EBADENGINE`, then
+// 4.0.0 ran), so the v1.6.2 release packaged on an unsupported pair and nothing said so;
+// the next vsce could just as well have refused. 4.0.0 on Node 22 packages this manifest
+// (node:22-alpine, 2026-10-14), and it also dropped 3.x's native keytar dependency,
+// which matters with ubuntu-latest moving to Ubuntu 26 on 2026-10-19. release.yml runs
+// this step on Node 22 for that reason. Bumping the pin is deliberate:
+// test/release-pins.test.js requires an exact version and a release job on vsce's floor.
+const VSCE = '@vscode/vsce@4.0.0';
 const out = join(root, artefactName(pkg.version));
 writeBuildStamp(root, pkg.version);
-execSync(`npx --yes @vscode/vsce package --no-dependencies -o "${out}"`, {
+execSync(`npx --yes ${VSCE} package --no-dependencies -o "${out}"`, {
   cwd: ext,
   stdio: 'inherit',
 });

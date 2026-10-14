@@ -416,7 +416,7 @@ function derivedStatus(options = {}) {
 //     safety copy into the developer's REAL ~/.claude/backups.
 //
 // The learner's directory wins because the rest of that arrangement is already
-// built around it: `src/auto-learn-manager.js:1155#BACKUP_NAME` anchors the backup pruner on
+// built around it: `src/auto-learn-manager.js:1183#BACKUP_NAME` anchors the backup pruner on
 // the names `backup()` writes precisely so a sweep by age cannot delete the
 // `.pre-derived` copy sitting beside them, and that is this directory.
 function setDerivedGuidance(mitigations, accepted, options = {}) {

@@ -42,9 +42,16 @@ const VERSION = 3;
 // Revise when Codex observations change meaning, independently of file layout.
 // Revision 2 added authoritative MCP outcomes and distinguished namespaced MCP
 // exec_command tools from Codex's built-in shell tools. Revision 3 correlates
-// terminal write_stdin results with pending built-in executions. Re-read old
-// cursors once while preserving grants and their Undo transactions.
-const CODEX_EVIDENCE_REVISION = 3;
+// terminal write_stdin results with pending built-in executions. Revision 4
+// (2026-10-13) re-reads history once with that day's parser corrections, none
+// of which raised it: 0.161.0 MCP outcomes (event_msg/item_completed McpToolCall,
+// 6eb35c1), call groups scoped by session (a672b3a), code-mode cells joined to
+// their wait (d934419) with the runtime's "not found" (53b7212) and a refused
+// nested command (3521c46) withheld, a declined MCP call withheld (3f9a224),
+// and the fork head seed (9abc330). Without it, a transcript already scanned
+// kept the verdicts the older parser gave it. Re-read old cursors once while
+// preserving grants and their Undo transactions.
+const CODEX_EVIDENCE_REVISION = 4;
 // The oldest on-disk version this code can still make sense of. A state written
 // below it is reset rather than read, which is the reset mechanism that did not
 // exist: `VERSION` was write-only, so bumping it did nothing at all and the one
@@ -698,9 +705,27 @@ function migrateCodexEvidence(state) {
     const uncertain = counts(Object.fromEntries([...OUTCOMES].map((outcome) =>
       [outcome, Math.max(0, original.counts[outcome] - knownCounts[outcome])])));
     state.legacyCodexEvidence[item.key] ||= { candidate: original, retainedCounts, quarantinedCounts: uncertain };
-    if (granted.has(item.key)) state.preservedEvidenceGrants[item.key] ||= {
+    // A SECOND REBUILD (revision 4 over a revision-3 state, 2026-10-13) must not
+    // count one historical failure twice. A preserved grant's baseline is the
+    // failures it already lived with: the retained Claude ones, plus each Codex
+    // failure the replay re-reads (scan() adds those one by one). A revision-3
+    // record's baseline already holds ITS replay's Codex failures, and the
+    // Codex counts are reset here, so leaving it as it was let this replay add
+    // the same failures again and absorb a genuinely new one. So:
+    //   - absent: created exactly as revision 3 creates it;
+    //   - still preserving (no failure beyond its baseline): its baseline
+    //     restarts from the retained Claude failures, and its definitions --
+    //     what the grant was made from -- are kept;
+    //   - no longer preserving (a newer failure, not yet reconciled): dropped,
+    //     never refreshed into grandfathering it. The grant then meets the
+    //     normal retention rules, as it already would have at the next apply;
+    //     the migration itself still revokes nothing.
+    const prior = granted.has(item.key) ? state.preservedEvidenceGrants[item.key] : undefined;
+    if (granted.has(item.key) && !prior) state.preservedEvidenceGrants[item.key] = {
       ...original, failureCountAtRebuild: retainedCounts.failed,
     };
+    else if (prior && original.counts.failed <= prior.failureCountAtRebuild) prior.failureCountAtRebuild = retainedCounts.failed;
+    else if (prior) delete state.preservedEvidenceGrants[item.key];
     item.sourceCounts = retained;
     item.counts = retainedCounts;
     item.sources = Object.keys(retained).filter((source) => retained[source].total > 0).sort();
@@ -717,6 +742,9 @@ function migrateCodexEvidence(state) {
   state.codexEvidenceRevision = CODEX_EVIDENCE_REVISION;
   state.codexEvidenceRebuildPending = affected;
   state.codexEvidenceRebuildStartedAt = affected ? new Date().toISOString() : null;
+  // Undated replay failures are disclosed per rebuild, and this replay re-reads
+  // the ones an earlier rebuild already counted, so the tally starts over.
+  if (affected) state.codexEvidenceUntimedFailureRuns = 0;
 }
 
 function refreshEvidenceStatus(state) {

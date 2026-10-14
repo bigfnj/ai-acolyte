@@ -1047,6 +1047,11 @@ const NPX_EXEC = {
 // variable the justfile does not declare is an error (MEASURED, just 1.58.0, 2026-10-14: `just
 // PYTHON=python3 build` and `just CC=evil build` both stop with "overridden on the command line
 // but not present in justfile"), so what a justfile's PYTHON runs is the justfile's own code.
+// J1 (the same day) changes the just half for a different reason: a just override is an
+// ENVIRONMENT carrier under `set export`, judged as such (JUST below), and the Codex export's
+// environment judgment now holds the build programs, so `["just", "AR=x", "build"]`, which F6
+// left rendering, is broad: under `set export` it is `env AR=x` for every recipe, and a recipe
+// that runs make then runs x. `["just", "PYTHON=python3", "test"]` still renders.
 const MAKE_SHELL_VARIABLES = new Set(['SHELL', '.SHELLFLAGS', 'MAKESHELL', 'MAKEFLAGS', 'MFLAGS', 'MAKEFILES']);
 const MAKE_PROGRAM_VARIABLES = new Set([
   'AR', 'AS', 'CC', 'OBJC', 'CXX', 'CO', 'CPP', 'FC', 'F77', 'GET', 'LD', 'LEX', 'LINT', 'M2C', 'PC', 'YACC',
@@ -1059,8 +1064,10 @@ const MAKE = {
   target: {
     // A name holds no whitespace, `:`, `#` or `=`; spaces may surround it (`SHELL := x`).
     assignments: /^\s*([^\s:#=]*?)\s*([:+?!]*)=/,
-    unsafeVariable: (name, operator) => operator.includes('!') || MAKE_SHELL_VARIABLES.has(name) ||
-      MAKE_PROGRAM_VARIABLES.has(name) || MAKE_COMMAND_VARIABLE.test(name) || envNameIsUnsafe(name),
+    // codexEnvNameIsUnsafe is MAKE_SHELL_VARIABLES, MAKE_PROGRAM_VARIABLES, MAKE_COMMAND_VARIABLE
+    // and envNameIsUnsafe, which this line named one by one until J1, plus cargo's program names
+    // (a command-line variable reaches every recipe's environment, see above).
+    unsafeVariable: (name, operator) => operator.includes('!') || codexEnvNameIsUnsafe(name),
     scanAll: true,
     flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
       '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',
@@ -1088,7 +1095,8 @@ const MAKE = {
 // `--shell pwsh --shell-arg ...` ran the recipe under pwsh, and `--dotenv-command "pwsh -File
 // s.ps1"` (1.58's option to load a command's output as the environment) ran s.ps1, which wrote
 // its marker. A variable override, `NAME=VALUE` or `--set NAME VALUE`, is judged by
-// envNameIsUnsafe since the same day: under `set export` it reaches every recipe's environment,
+// envNameIsUnsafe since the same day (codexEnvNameIsUnsafe since J1, which adds the build
+// programs): under `set export` it reaches every recipe's environment,
 // and `just NODE_OPTIONS=--require=./y.js build` (NODE_OPTIONS declared in the justfile) ran y.js,
 // measured. just overrides only variables the justfile declares, and no variable chooses the
 // shell, so a data override stays narrow.
@@ -1096,7 +1104,7 @@ const JUST = {
   info: DEFAULT_INFO,
   target: {
     assignments: /^([A-Za-z_][A-Za-z0-9_-]*)()=/,
-    unsafeVariable: (name) => envNameIsUnsafe(name),
+    unsafeVariable: (name) => codexEnvNameIsUnsafe(name),
     flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
       '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
     flagPattern: /^-v+$/,
@@ -1483,15 +1491,17 @@ function wrapperIsBroad(prefix) {
   if (prefix.length === 2 && WRAPPER_INFO_ROOTS.has(base) && LONG_INFO.has(String(prefix[1]))) return false;
   if (base === 'env' || base === 'xargs') {
     const inner = innerCommandPrefix(base, prefix);
-    // The assignments env makes are judged as the Claude half judges a leading one
-    // (assignmentIsUnsafe, 2026-10-14): `["env", "GIT_PAGER=x", "git", "log"]` is a grant to run
-    // `x`, and `["env", "LD_PRELOAD=./x.so", "cat"]` one to load it, whatever the command after
-    // them is. 520103d said "the Codex exporter is unaffected" because a Codex prefix starts at
-    // the command; that holds for a LEADING assignment, which never reaches a prefix, but env
-    // carries its assignments as arguments, and they were walked over unread (measured against
-    // 09df009: both rows above rendered).
+    // The assignments env makes are judged (2026-10-14): `["env", "GIT_PAGER=x", "git", "log"]`
+    // is a grant to run `x`, and `["env", "LD_PRELOAD=./x.so", "cat"]` one to load it, whatever
+    // the command after them is. 520103d said "the Codex exporter is unaffected" because a Codex
+    // prefix starts at the command, but env carries its assignments as arguments, and they were
+    // walked over unread (measured against 09df009: both rows above rendered). Judged first as
+    // the Claude half judges a leading one (assignmentIsUnsafe), and since J1 by the Codex
+    // export's wider set (codexAssignmentIsUnsafe), which adds the build programs
+    // (`["env", "AR=./x", "make", "all"]`) and reads every word env takes as an assignment,
+    // `COMPILE.c=./x` included, not only a shell identifier's.
     if (base === 'env' && inner !== null && prefix.slice(1, prefix.length - inner.length)
-      .some((token) => ASSIGNMENT_WORD.test(String(token)) && assignmentIsUnsafe(String(token)))) return true;
+      .some(codexAssignmentIsUnsafe)) return true;
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
   }
   // The process and exec wrappers, by the same rule (EXEC_WRAPPER_GRAMMAR above), and the
@@ -1580,6 +1590,20 @@ function candidateEligibleForCodex(candidate, options) {
   if ((!isAutoSafe(candidate) && !reviewed) || candidateIsComplex(candidate)) return null;
   const prefix = normalizePrefix(candidate);
   if (!prefix || candidateContainsSecret(candidate, prefix)) return null;
+  // A prefix that opens with assignments (J1, 2026-10-14). The learner never builds one (its
+  // prefix is the command's), but a reviewed or stored candidate can carry one, and every check
+  // below read the assignment as the root, so `["CC=./x", "make"]`, `["FOO=1", "bash"]` and
+  // `["LD_PRELOAD=./x.so", "cat"]` rendered (measured against 7d08ced). Whether Codex ever matches
+  // such a rule is not known: its checker matches raw argv and does not strip an assignment
+  // (test/codex-guidance-matrix.test.js), and the runtime's handling of `VAR=value cmd` has not
+  // been measured (docs/codex-compatibility.md). So it is judged the way the Claude half judges
+  // an env-led rule: under review only, each assignment by codexAssignmentIsUnsafe, and the
+  // command after them by everything here.
+  const command = prefix.findIndex((token) => !ASSIGNMENT_WORD.test(token));
+  if (command !== 0) {
+    if (command < 0 || !reviewed || prefix.slice(0, command).some(codexAssignmentIsUnsafe)) return null;
+    return candidateEligibleForCodex({ ...candidate, prefix: prefix.slice(command) }, options) ? prefix : null;
+  }
   // A runner root (RUNNER_GRAMMAR) is judged like a wrapper here and only here: it is not a
   // SHELL_WRAPPERS member, because membership there would also refuse `Bash(docker ps *)`
   // on the Claude side, at any depth (claudeRuleRunsAnyCommand draws that line instead).
@@ -1835,6 +1859,11 @@ function patternSafetyErrors(pattern, number) {
     if (tokens.some((token) => token.includes('*'))) errors.push(`Rule ${number}: star tokens are not Codex argv wildcards`);
   }
 
+  // A pattern that opens with assignments is judged by the command after them (J1, 2026-10-14,
+  // beside candidateEligibleForCodex): `["FOO=1", "curl"]` passed here while `["curl"]` did not.
+  const lead = pattern.findIndex((position) => Array.isArray(position) || !ASSIGNMENT_WORD.test(position));
+  if (lead < 0) return [...errors, `Rule ${number}: pattern names no command after its assignments`];
+  if (lead > 0) return errors.length ? errors : patternSafetyErrors(pattern.slice(lead), number);
   const root = canonicalRoot(pattern[0]);
   const base = commandBase(pattern[0]);                // every spelling of the root (2026-10-14)
   const second = pattern.length > 1
@@ -1947,11 +1976,13 @@ function parseClaudePermission(permission) {
 //     refusing more is the safe failure. The decision costs nothing measured here (0 of the
 //     development box's 581 allow entries is an env-led rule that renders at all).
 // NODE_OPTIONS, PYTHONSTARTUP, PERL5OPT and RUBYOPT are this class too and are already in
-// CODE_LOADING_ENV (the interpreter start-up set), so they are not repeated. The Codex
-// exporter's prefix is the command's, so a LEADING assignment never reaches it; an `env`
-// wrapper's assignments do, and wrapperIsBroad judges them by assignmentIsUnsafe too
-// (2026-10-14; until then "the Codex exporter is unaffected" stood here, which held only for
-// the leading case).
+// CODE_LOADING_ENV (the interpreter start-up set), so they are not repeated. The Codex export
+// judges a wider set than this one, codexEnvNameIsUnsafe below (J1), wherever it reads an
+// assignment: an `env` wrapper's, a container's `-e`, a make or just override, and a prefix that
+// opens with one. "The Codex exporter is unaffected" stood here until 2026-10-14, and then "a
+// LEADING assignment never reaches it": the learner never builds such a prefix (its prefix is the
+// command's), but a reviewed or stored candidate can carry one, and until J1 `["CC=./x",
+// "make"]` and even `["LD_PRELOAD=./x.so", "cat"]` rendered, judged by no table.
 const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 const CODE_LOADING_ENV = new Set([
   'PATH', 'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'NODE_OPTIONS', 'NODE_PATH',
@@ -1973,7 +2004,92 @@ function assignmentIsUnsafe(token) {
 // prefix does not even show. Judged by the name alone either way; a missing value (the prefix
 // ends at `-e`) is no assignment, and that prefix names no command anyway.
 function envAssignmentIsUnsafe(value) {
-  return value !== undefined && envNameIsUnsafe(String(value).split('=', 1)[0]);
+  return value !== undefined && codexEnvNameIsUnsafe(String(value).split('=', 1)[0]);
+}
+
+// THE BUILD PROGRAMS, CODEX EXPORT ONLY (J1, 2026-10-14: the lead's answer to the maintainer
+// question G4(b) carried in docs/engineering-record.md). PROGRAM_NAMING_ENV refuses CC, CXX and
+// MAKE on the premise that the value IS the program to run. That premise holds as much for every
+// other variable a build tool reads as the name of a program, refusing more is the safe failure,
+// and F6 (b9854f6) already refused the same names as make overrides. So every place the Codex
+// export reads an assignment judges it by this one predicate: an `env` wrapper's assignments
+// (wrapperIsBroad), a container's `-e`/`--env` (envAssignmentIsUnsafe above), a make or just
+// override (MAKE's and JUST's unsafeVariable), and a prefix that opens with assignments
+// (candidateEligibleForCodex). Matched exactly, as F6's names are: make's variable names are
+// case-sensitive, and so is a POSIX environment.
+//
+// THE CLAUDE HALF IS NOT CHANGED. claudePermissionIsSafe judges a leading assignment by
+// envNameIsUnsafe, as before, so `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
+// still render at review: G4(b)'s acceptance stands there, because that rule keeps the literal
+// value the user ran and matches no other (ruleMatches), and Claude Code strips neither name.
+// Adding these names to PROGRAM_NAMING_ENV itself would have refused that rule too, which is
+// why they live here and not there.
+//
+// The names:
+//   * F6's sets, reused whole, because they fit: GNU make turns every environment variable into a
+//     make variable, and "an explicit assignment in the makefile, or with a command argument,
+//     overrides the environment" (GNU make manual, "Variables from the Environment"), while its
+//     built-in defaults can be redefined "in the environment to alter how the implicit rules
+//     work" ("Variables Used by Implicit Rules"; both read from make.txt on gnu.org 2026-10-14).
+//     So `AR=./x make lib` runs ./x wherever a built-in rule runs $(AR) and the makefile does not
+//     set AR. MAKE_PROGRAM_VARIABLES (make's
+//     built-in program table and the GNU Coding Standards' program variables) and
+//     MAKE_COMMAND_VARIABLE (the built-in rules' whole command lines; `env COMPILE.c=./x` sets
+//     one, since env takes any `NAME=VALUE`) for that reason. MAKE_SHELL_VARIABLES too: make
+//     reads MAKEFLAGS and MAKEFILES from the environment by name (the manual's "Communicating
+//     Options to a Sub-make" and "The Variable MAKEFILES"), and SHELL there on MS-Windows
+//     ("Choosing the Shell"). One difference from an override, and no difference to the
+//     verdict: a makefile's own definition beats an environment value (unless `-e`), so an
+//     env-led AR reaches only the rules the makefile leaves to the defaults.
+//   * cargo's, each read 2026-10-14 from the Cargo Book's "Environment Variables" page
+//     (doc.rust-lang.org/cargo/reference/environment-variables.html, "Environment variables
+//     Cargo reads" and "Configuration environment variables") and its "Configuration" page
+//     (config.html): RUSTC ("Instead of running rustc, Cargo will execute this specified
+//     compiler"), RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER ("Cargo will execute this specified
+//     wrapper"), RUSTDOC, RUSTFMT (`cargo fmt` runs it); their config spellings
+//     CARGO_BUILD_RUSTC, CARGO_BUILD_RUSTC_WRAPPER, CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER and
+//     CARGO_BUILD_RUSTDOC (build.rustc, "Type: string (program path)", and so on);
+//     CARGO_TARGET_<triple>_LINKER ("The linker to use", "The triple must be converted to
+//     uppercase and underscores") and CARGO_TARGET_<triple>_RUNNER ("The executable runner",
+//     which `cargo run`, `cargo test` and `cargo bench` invoke with the built executable); the
+//     credential providers CARGO_REGISTRY_CREDENTIAL_PROVIDER,
+//     CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS, CARGO_REGISTRIES_<name>_CREDENTIAL_PROVIDER and
+//     CARGO_CREDENTIAL_ALIAS_<name> (each a program cargo runs to get a token); and
+//     CARGO_DOC_BROWSER, doc.browser ("program path with args") by the config page's general
+//     rule that a key `foo.bar` is also `CARGO_FOO_BAR` (the entry itself names no variable).
+//     BROWSER, which doc.browser defaults to, is already in PROGRAM_NAMING_ENV.
+// Left out, on purpose:
+//   * the flags variables of both tools (CFLAGS, LDFLAGS, ARFLAGS, ..., RUSTFLAGS,
+//     CARGO_ENCODED_RUSTFLAGS, RUSTDOCFLAGS, CARGO_BUILD_RUSTFLAGS,
+//     CARGO_TARGET_<triple>_RUSTFLAGS) and the locations (PREFIX, DESTDIR, CARGO_TARGET_DIR, ...).
+//     They are data by the standing decision G4(a) records for `CFLAGS=-fplugin=./x.so`, even
+//     though `RUSTFLAGS=-Clinker=./x` names a program the same way.
+//   * CARGO_HOME. It names the directory whose config.toml cargo reads, and that file can set
+//     build.rustc, so by the governing principle in this file's header it is the config-file
+//     class, not a program name. The decision J1 carries out is about program names, so it is
+//     recorded for the maintainer rather than added here.
+//   * CARGO_ALIAS_<name>: its value is cargo's own arguments, not a program, the `npm test`
+//     class the header records. CARGO_HOST_LINKER: not on either page. target.<triple>.ar:
+//     "deprecated and unused".
+//   * the cc crate's CC_<target>, TARGET_CC, AR_<target>, ...: a build-script library's, not
+//     cargo's, and per-target patterns. And the other build tools (CMake's
+//     CMAKE_<LANG>_COMPILER_LAUNCHER, Go's GOTOOLCHAIN, autoconf's ac_cv_*): not surveyed.
+const CARGO_PROGRAM_ENV = new Set([
+  'RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTDOC', 'RUSTFMT',
+  'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTDOC',
+  'CARGO_REGISTRY_CREDENTIAL_PROVIDER', 'CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS', 'CARGO_DOC_BROWSER',
+]);
+const CARGO_PROGRAM_ENV_PATTERN =
+  /^CARGO_(?:TARGET_[A-Z0-9_]+_(?:LINKER|RUNNER)|REGISTRIES_[A-Z0-9_]+_CREDENTIAL_PROVIDER|CREDENTIAL_ALIAS_[A-Z0-9_]+)$/;
+function codexEnvNameIsUnsafe(name) {
+  return envNameIsUnsafe(name) || MAKE_SHELL_VARIABLES.has(name) || MAKE_PROGRAM_VARIABLES.has(name) ||
+    MAKE_COMMAND_VARIABLE.test(name) || CARGO_PROGRAM_ENV.has(name) || CARGO_PROGRAM_ENV_PATTERN.test(name);
+}
+// A word that is an assignment to an unsafe name. env takes any `NAME=VALUE` that is not an
+// option as an assignment (innerCommandPrefix), so the name is everything before the first `=`.
+function codexAssignmentIsUnsafe(token) {
+  const text = String(token);
+  return !text.startsWith('-') && text.includes('=') && codexEnvNameIsUnsafe(text.split('=', 1)[0]);
 }
 
 function claudePermissionIsSafe(parsed, options) {
@@ -1982,6 +2098,8 @@ function claudePermissionIsSafe(parsed, options) {
   const command = parsed.tokens.findIndex((token) => !ASSIGNMENT_WORD.test(token));
   if (command !== 0) {
     if (command < 0 || !reviewed || parsed.tool !== 'Bash') return false;
+    // envNameIsUnsafe, NOT the Codex export's codexEnvNameIsUnsafe: J1's build programs are
+    // Codex export only, and G4(b)'s acceptance of `Bash(AR=x cargo build *)` stands here.
     if (parsed.tokens.slice(0, command).some(assignmentIsUnsafe)) return false;
     return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
   }

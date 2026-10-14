@@ -248,7 +248,7 @@ test('an index inside the line cap says nothing about lines at all', () => {
   }
 });
 
-// memoryLint.js pickPrimaryDir and recall.py:115#_discover_memory_dir answer the same
+// memoryLint.js pickPrimaryDir and recall.py:116#_discover_memory_dir answer the same
 // question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
 // sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.
 // Until these two tests existed, every test that reached pickPrimaryDir had at most one
@@ -644,7 +644,7 @@ test('a gate source is counted only when recall.py would compile it', () => {
   const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
   const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
 
-  // The index itself. recall.py:1143#EXCLUDE skips EXCLUDE before it looks at anything
+  // The index itself. recall.py:1280#EXCLUDE skips EXCLUDE before it looks at anything
   // else, so a MEMORY.md carrying frontmatter and a gate block is still not a gate source.
   fs.writeFileSync(path.join(dir, 'MEMORY.md'),
     fm('global') + '# Memory Index\n\n' + block, 'utf8');
@@ -732,6 +732,36 @@ test('gates in other stores are counted by folder name, never the compile store,
 
   // MUTATION: drop `&& !known.has(hit.body)` in otherStoreGates and side-store counts 2.
   // MUTATION: test GATE_BLOCK alone in gateBody (drop the scope check) and side-store counts 2.
+});
+
+// `agents:` (2026-10-14): a gate memory whose agents: line cannot be read is left out of the
+// compile for every agent (recall.py _gate_agents), so it is no gate source, the report names
+// it for the gates card, and the census does not count it in another store either. A gate
+// that names one agent is still a gate source: it compiles, for that agent.
+test('a gate whose agents: cannot be read is named as left out, and counted nowhere', () => {
+  const f = otherStoresFixture();
+  const withAgents = (text, agents) => `---\nmetadata:\n  scope: global\n  agents: ${agents}\n---\n`
+    + `<!-- gate -->\n- **${text}**\n<!-- /gate -->\n`;
+  fs.writeFileSync(path.join(f.main, 'm5-codex.md'), withAgents('Codex gate.', '[codex]'), 'utf8');
+  fs.writeFileSync(path.join(f.main, 'm6-bad.md'), withAgents('Bad gate.', '[gemini]'), 'utf8');
+  fs.writeFileSync(path.join(f.side, 's4-bad.md'), withAgents('Side bad gate.', '[codex, gemini]'), 'utf8');
+  const h = harness(f.tempHome);
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    assert.equal(dir, f.main);
+    assert.equal(report.gateSources, 2, 'the shared gate and the Codex one; not the one naming gemini');
+    assert.deepEqual(report.gateBodies.sort(), ['- **Codex gate.**', '- **Main gate.**']);
+    assert.deepEqual(report.gateExcluded, [{ file: 'm6-bad.md',
+      problem: '`agents:` names an agent this compiler does not know: gemini' }]);
+    const side = h.loaded.otherStoreGates(dir, report.gateBodies, { maxAgeMs: 0 }).stores.find((s) => s.name === 'side-store');
+    assert.equal(side.count, 1, 'only s1, the gate this store does not install; the unreadable one is no gate');
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+
+  // MUTATION: in memoryLint.js gateBody, return the body whatever `problem` says, and
+  // side-store counts 2; in fullReport, count a gate with a problem and gateSources reads 3.
 });
 
 test('a pinned memory.dir is the compile store, and the census reports the rest around it', () => {

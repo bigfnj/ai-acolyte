@@ -44,7 +44,7 @@ const { createPermissionActions } = require('./permissionActions');
 const { readCodexPermissionSummary, deadShellApprovals, overBroadShellGrants } = require('./src/permission-summary');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
-const { gatesStatusAll, setGatesAll, readCompiled, compiledPath } = require('./src/agent-gates');
+const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const {
   applicationSummary, backupPruneSuffix, candidatePendingTargets, claudeDecisionExplanation,
   claudePermissionDecision, codexCheckVariants, codexExecpolicyArgs, codexRestartSuffix,
@@ -1133,14 +1133,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:461-469#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:565-573#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:760-764#conf.enabled), and test/memory-lint-watchers.test.js:429#lintMemory
+    // (memoryLint.js:864-868#conf.enabled), and test/memory-lint-watchers.test.js:429#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:689#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:793#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1376,7 +1376,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5539#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5570#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1631,7 +1631,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5569#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5600#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -3638,30 +3638,15 @@ function extensionVersion() {
   return extensionVersionMemo;
 }
 
-// Read the count out of the header recall.py already writes, not out of the prose.
+// The card's gate count is read out of the header recall.py already writes, not out of the
+// prose. It was `text.match(/^- \*\*/gm)`, which assumes every gate opens with a bold
+// lead-in. That was true of the pre-2026-09-09 corpus and of nothing since, so with five
+// gates installed the card read "0 active" — a number that flatly contradicted the ON state
+// beside it. Same defect, same day, in scripts/verify-release.ps1, fixed there first.
 //
-// This was `text.match(/^- \*\*/gm)`, which assumes every gate opens with a bold
-// lead-in. That was true of the pre-2026-09-09 corpus and of nothing since, so
-// with five gates installed the card read "0 active" — a number that flatly
-// contradicted the ON state beside it. recall.py's _compile_gates_text emits
-// "## Standing gates (N memories, managed)", which is the authoritative count and
-// is independent of how any gate happens to be worded.
-//
-// Same defect, same day, in scripts/verify-release.ps1, which reported
-// "0 gate(s)" for the same file. Fixed there first; this is the product half.
-function compiledGateCount() {
-  try {
-    const text = readCompiled();
-    if (!text) return 0;
-    const header = text.match(/##\s+Standing gates\s+\((\d+)\s+memor/);
-    if (header) return Number(header[1]);
-    // Fall back to counting top-level bullets rather than to zero: an older
-    // compiled file with no header still has gates in it.
-    return (text.match(/^-\s/gm) || []).length;
-  } catch {
-    return 0;
-  }
-}
+// Since 2026-10-14 the count is per agent, because a gate can name the agents it is for:
+// src/agent-gates.js gateCount reads each agent's header, and every gatesStatusAll row
+// carries it as `gates`. So the card makes no read of the compiled file of its own any more.
 
 // Compiling needs python but NOT the embedding model: --gates-compile only reads frontmatter
 // and lifts marker-fenced text, so the model precondition that gates a recall rebuild does
@@ -3725,8 +3710,11 @@ function ensureGates(announce = false) {
     // Never install without a compile. setGatesAll refuses anyway, and reporting success
     // here would leave the card claiming ON while enforcing nothing.
     if (want && !states.some((state) => state.compiled)) return;
-    if (states.every((state) => state.on === want &&
-        (want ? state.current : !state.shadowedPaths?.length))) return;
+    // Per agent: once a gate names its agents, an agent the compile gives none wants no block
+    // at all, and is settled when none is left in any of its files (src/agent-gates.js).
+    const wants = (state) => want && state.applicable !== false;
+    if (states.every((state) => state.on === wants(state) &&
+        (wants(state) ? state.current : !state.shadowedPaths?.length))) return;
     // Unattended (activation, the compiled-file watcher, the corpus recompile), so no in-place
     // fallback: a held CLAUDE.md or AGENTS.md is left whole rather than truncated and refilled
     // while a session may be loading it, and the next activation or recompile retries.
@@ -3747,9 +3735,15 @@ function ensureGates(announce = false) {
     const changed = results.filter((result) => result.changed);
     if (!changed.length) return;
     if (announce || want) {
+      // By each row's own outcome: with gates on, a gate that moved to the other agent
+      // removes the block it left, and that is not an "added to".
+      const added = changed.filter((result) => want && result.on !== false).map((result) => result.agent);
+      const removed = changed.filter((result) => !(want && result.on !== false)).map((result) => result.agent);
       vscode.window.setStatusBarMessage(
-        `$(law) ai-acolyte: memory gates ${want ? 'added to' : 'removed from'} ` +
-        changed.map((result) => result.agent).join(' + '),
+        `$(law) ai-acolyte: memory gates ` + [
+          added.length ? 'added to ' + added.join(' + ') : '',
+          removed.length ? 'removed from ' + removed.join(' + ') : '',
+        ].filter(Boolean).join(', '),
         6000);
     }
     dashboard?.refresh();
@@ -3762,8 +3756,10 @@ async function toggleGates() {
   const config = vscode.workspace.getConfiguration('permissionWildcarding');
   let states = gatesStatusAll();
   // Same rule as guidance: a stale or half-installed state should refresh or complete
-  // rather than undo, so `off` only happens from a fully installed, current block.
-  const next = !(states.length && states.every((state) => state.on && state.current));
+  // rather than undo, so `off` only happens from a fully installed, current block. An agent
+  // the compile gives no gates (a gate names its agents) is fully installed with no block.
+  const installed = (state) => (state.compiled && !state.applicable ? !state.on : state.on && state.current);
+  const next = !(states.length && states.some((state) => state.on) && states.every(installed));
 
   if (next && !states.some((state) => state.compiled)) {
     const choice = await vscode.window.showWarningMessage(
@@ -3788,7 +3784,7 @@ async function toggleGates() {
   }
 
   if (!next) {
-    const files = states.map((state) => state.path.replace(os.homedir(), '~')).join(', ');
+    const files = states.filter((state) => state.on).map((state) => state.path.replace(os.homedir(), '~')).join(', ');
     const choice = await vscode.window.showWarningMessage(
       'Remove memory gates?',
       {
@@ -3836,13 +3832,26 @@ function gatesCardData(precomputed = null) {
   try {
     const states = gatesStatusAll();
     if (!states.length) return null;
+    // Once a gate names its agents, an agent the compile gives none is not a missing install:
+    // ON and PARTIAL are about the agents that have gates to install.
+    const perAgent = states.some((state) => state.perAgent);
+    const wanted = perAgent ? states.filter((state) => state.applicable) : states;
     return {
-      on: states.every((state) => state.on),
-      partial: states.some((state) => state.on) && !states.every((state) => state.on),
+      on: wanted.length > 0 && wanted.every((state) => state.on),
+      partial: wanted.some((state) => state.on) && !wanted.every((state) => state.on),
       current: states.every((state) => !state.on || state.current),
       readable: states.some((state) => state.readable),
       compiled: states.some((state) => state.compiled),
-      count: compiledGateCount(),
+      count: Math.max(0, ...states.map((state) => state.gates || 0)),
+      // Each agent's count, for a compile that gives the agents different gates. Null when
+      // every agent gets the same, so the card keeps saying "13 gates".
+      counts: perAgent ? states.map((state) => ({ agent: state.agent, count: state.gates || 0 })) : null,
+      // Gate memories the compile leaves out because their `agents:` cannot be read
+      // (memoryLint.js gateOf), by file name, from the same memory report as gateSources.
+      excluded: (() => {
+        try { return ((precomputed || memoryReport()).report?.gateExcluded || []).map((entry) => ({ ...entry })); }
+        catch { return []; }
+      })(),
       // Whether compiling could produce anything at all, so the card can decline
       // to offer an action that cannot succeed. Undefined when the memory report
       // is unavailable, which renderGates treats as "unknown, so still offer it"
@@ -3870,7 +3879,7 @@ function gatesCardData(precomputed = null) {
         } catch { return null; }
       })(),
       agents: states.filter((state) => state.on).map((state) => state.agent),
-      targets: states.map((state) => state.agent),
+      targets: (wanted.length ? wanted : states).map((state) => state.agent),
       errors: states.filter((state) => state.error).map((state) => state.agent + ': ' + state.error),
       path: states.map((state) => state.path.replace(os.homedir(), '~')).join(', '),
     };
@@ -4698,6 +4707,7 @@ class WildcardingViewProvider {
         <div class="status"><span id="mgdot" class="dot idle"></span><span id="mgtext">Memory gates</span></div>
         <div class="muted sub" id="mgsub"></div>
         <div class="muted sub" id="mgother" hidden></div>
+        <div class="muted sub" id="mgexcluded" hidden></div>
         <button class="managed-action" id="gatesBtn">Compile and add</button>
       </div>
     </div>
@@ -4805,6 +4815,14 @@ class WildcardingViewProvider {
     el.className = 'rowstate' + (tone ? ' ' + tone : '');
   }
 
+  // Each agent's gate count, as 'Claude 13 · Codex 14', when a gate names its agents and so
+  // the agents get different gates; '' when every agent gets the same, which reads as a number.
+  function gateCountsText(g) {
+    if (!g || !g.counts || !g.counts.length) return '';
+    return g.counts.map((entry) => entry.agent.charAt(0).toUpperCase() + entry.agent.slice(1)
+      + ' ' + entry.count).join(' · ');
+  }
+
   function renderRowStates(d) {
     const a = d.autoLearn || {};
     const counts = a.counts || {};
@@ -4846,10 +4864,11 @@ class WildcardingViewProvider {
       g.partial || (g.on && !g.current) ? 'warn' : null);
 
     const gt = d.gates || {};
+    const gtCount = gateCountsText(gt) || gt.count;
     setState('stGates', !gt.compiled ? 'nothing compiled'
-      : gt.partial ? gt.count + ' partially installed'
-        : !gt.on ? gt.count + ' waiting'
-          : (gt.current ? gt.count + ' active' : 'stale — refresh'),
+      : gt.partial ? gtCount + ' partially installed'
+        : !gt.on ? gtCount + ' waiting'
+          : (gt.current ? gtCount + ' active' : 'stale — refresh'),
       !gt.compiled ? null : (!gt.on || !gt.current ? 'warn' : null));
 
     const m = d.memory || {};
@@ -5286,14 +5305,26 @@ class WildcardingViewProvider {
     const state = !g.compiled ? 'nothing compiled'
       : g.on ? (g.current ? 'ON' : 'ON (corpus changed)')
         : (g.partial ? 'PARTIAL' : 'OFF');
+    const perAgent = gateCountsText(g);
     $('mgtext').textContent = 'Memory gates: ' + state
-      + (g.on && g.count ? ' — ' + g.count + ' gate' + (g.count === 1 ? '' : 's') : '');
+      + (g.on && g.count ? ' — ' + (perAgent || (g.count + ' gate' + (g.count === 1 ? '' : 's'))) : '');
     $('mgtext').style.fontWeight = '600';
     $('mgsub').textContent = !g.compiled
       ? 'no memory carries a scope:global gate block yet'
       : g.on || g.partial
         ? 'your standing orders, resident every session · ' + g.path
-        : g.count + ' compiled gate' + (g.count === 1 ? '' : 's') + ' waiting to be installed';
+        : perAgent ? 'compiled gates waiting to be installed: ' + perAgent
+          : g.count + ' compiled gate' + (g.count === 1 ? '' : 's') + ' waiting to be installed';
+    // Gate memories the compile leaves out, because their agents: line cannot be read.
+    const excluded = g.excluded || [];
+    const excludedLine = $('mgexcluded');
+    excludedLine.textContent = excluded.length
+      ? excluded.length + (excluded.length === 1 ? ' gate memory is' : ' gate memories are')
+        + ' left out for every agent, because agents: cannot be read: '
+        + excluded.map((entry) => entry.file).join(', ')
+      : '';
+    excludedLine.title = excluded.map((entry) => entry.file + ': ' + entry.problem).join('\\n');
+    excludedLine.hidden = !excluded.length;
     if (g.errors?.length) $('mgsub').textContent += ' · ' + g.errors.join(' · ');
     // Gate memories in the other stores, which never compile. Folder names only.
     const other = g.otherStores;

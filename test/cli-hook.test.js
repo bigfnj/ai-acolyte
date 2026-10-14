@@ -1230,3 +1230,32 @@ test('a settings.json a real process holds open is left alone, and written once 
   assert.deepEqual(settingsOf(home).permissions.allow, ['Bash(git status *)', 'Bash(git diff *)']);
   assert.deepEqual(settingsOf(home).permissions.deny, POLICY.permissions.deny);
 });
+
+// The --drain verb names what it withheld, on both of its paths (2026-10-14). K2 put a user
+// ask in the report as `asked` and nothing printed it; and a drain that withheld every entry
+// changed nothing, so its "nothing to do" counted a denied or asked entry as project-specific
+// without saying why.
+test('--drain names an entry a user ask or deny withheld, even when nothing else changed', (t) => {
+  // MUTATION: drop the `asked` loop in drain()'s withheld(). The first run loses its line: this
+  // fails. MUTATION: drop withheld(report) from the nothing-to-do branch. The second run loses
+  // both lines: this fails. Confirmed 2026-10-14.
+  const home = tempHome(t, { permissions: { allow: [], ask: ['Bash(git status:*)'], deny: ['Bash(rm *)'] } });
+  const workspace = path.join(home, 'project');
+  fs.mkdirSync(path.join(workspace, '.claude'), { recursive: true });
+  const local = (allow) => fs.writeFileSync(path.join(workspace, '.claude', 'settings.local.json'),
+    JSON.stringify({ permissions: { allow } }, null, 2) + '\n');
+
+  local(['Bash(git status)', 'Bash(rg x)']);
+  const changed = runVerb(home, ['--drain', '--workspace', workspace]);
+  assert.equal(changed.status, 0, changed.stderr);
+  assert.match(changed.stdout, /promoted 1 to user scope/);
+  assert.match(changed.stdout,
+    /! Bash\(git status \*\) not promoted — your ask rule Bash\(git status:\*\) would still prompt for it/);
+
+  local(['Bash(git status)', 'Bash(rm -rf build)']);
+  const unchanged = runVerb(home, ['--drain', '--workspace', workspace]);
+  assert.equal(unchanged.status, 0, unchanged.stderr);
+  assert.match(unchanged.stdout, /nothing to do/, 'precondition: everything was withheld, so nothing changed');
+  assert.match(unchanged.stdout, /your ask rule Bash\(git status:\*\)/);
+  assert.match(unchanged.stdout, /! Bash\(rm \*\) not promoted — your deny rule Bash\(rm \*\) outranks it/);
+});

@@ -664,6 +664,17 @@ function drain(args) {
   }
   const dryRun = args.includes('--dry-run');
 
+  // Named on both paths: a drain that withheld everything changed nothing, and its "nothing
+  // to do" used to count a denied or asked entry as project-specific without saying why.
+  const withheld = (report) => {
+    for (const { candidate, rule } of report.denied || []) {
+      process.stdout.write(`  ! ${candidate} not promoted — your deny rule ${rule} outranks it\n`);
+    }
+    for (const { candidate, rule } of report.asked || []) {
+      process.stdout.write(`  ! ${candidate} not promoted — your ask rule ${rule} would still prompt for it\n`);
+    }
+  };
+
   withPolicyLock('--drain', () => {
     const report = drainWorkspace(workspaceRoot, { dryRun });
 
@@ -690,6 +701,7 @@ function drain(args) {
         `wildcard-perms --drain: nothing to do — ${report.kept} local ` +
         `${report.kept === 1 ? 'entry is' : 'entries are'} project-specific\n`
       );
+      withheld(report);
       return;
     }
 
@@ -708,9 +720,7 @@ function drain(args) {
         'filtering it. Nothing was pruned on its account.\n'
       );
     }
-    for (const { candidate, rule } of report.denied) {
-      process.stdout.write(`  ! ${candidate} not promoted — your deny rule ${rule} outranks it\n`);
-    }
+    withheld(report);
     if (report.backup) process.stdout.write(`  snapshot: ${report.backup}\n`);
   });
 }

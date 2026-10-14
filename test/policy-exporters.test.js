@@ -123,11 +123,19 @@ for (const [root, command] of [
       assert.equal((rendered.match(/prefix_rule\(/g) || []).length, 0,
         `${JSON.stringify(item.prefix)} must not become a reviewed Codex rule:\n${rendered}`);
     }
-    // Control: refusal is of the BARE runner only, the same treatment `sh` gets. A
-    // reviewer who narrowed the prefix still gets it, so this is not a blanket ban.
-    // MUTATION: make wrapperIsBroad return true for every wrapper; this assertion fails.
+    // Control: for just and make, refusal is of the BARE runner only, the same treatment `sh`
+    // gets. A reviewer who narrowed the prefix to a recipe still gets it, so this is not a
+    // blanket ban. MUTATION: make wrapperIsBroad return true for every wrapper; this fails.
+    // Changed 2026-10-14, as a decision: hyperfine and duckdb are no longer in this control.
+    // `["hyperfine", "build"]` admits a second benchmarked command and `["duckdb", "build"]` a
+    // `.shell` line (both measured, src/policy-exporters.js RUNNER_GRAMMAR), so naming
+    // something narrows neither; "hyperfine, duckdb and wsl are broad at any depth" holds them.
     const narrow = renderCodexRules([{ prefix: [root, 'build'] }], { includeReviewed: true });
-    assert.ok(compact(narrow).includes('pattern = ' + JSON.stringify([root, 'build'])), narrow);
+    if (root === 'just' || root === 'make') {
+      assert.ok(compact(narrow).includes('pattern = ' + JSON.stringify([root, 'build'])), narrow);
+    } else {
+      assert.equal((narrow.match(/prefix_rule\(/g) || []).length, 0, narrow);
+    }
   });
 }
 
@@ -1170,5 +1178,51 @@ test('the validator bans a bare interpreter or a broad PowerShell prefix in ever
   }
   for (const pattern of [['python3-config'], ['pwsh.cmd', '-File', 'x.ps1'], ['python3.12', 'x.py']]) {
     assert.equal(validateCodexRulesText(manualRule(pattern)).valid, true, JSON.stringify(pattern));
+  }
+});
+
+// MEASURED 2026-10-14 against 4a02252 (src/policy-exporters.js RUNNER_GRAMMAR has the tool
+// measurements): 25 of the 27 rows of the first list rendered as a reviewed prefix_rule there,
+// `["duckdb", "--version"]` included, through the generic rule and its informational exception;
+// `["duckdb", "-version"]` (not a DEFAULT_INFO word) and `["xargs", "duckdb"]` (the bare root)
+// were refused already. The 7 informational controls rendered there and still do. duckdb runs an
+// `-init` file before it prints its version, so it keeps no exception.
+test('hyperfine, duckdb and wsl are broad at any depth, but for the informational forms measured inert', () => {
+  for (const prefix of [
+    ['hyperfine', 'echo SAFE'], ['hyperfine', '-N', 'x'], ['hyperfine', '--runs', '1', 'x'], ['hyperfine', '--setup', 'x'],
+    ['hyperfine', 'build'], ['hyperfine.exe', 'x'],
+    ['duckdb', 'x.db'], ['duckdb', 'x.db', 'SELECT 1'], ['duckdb', '-c', 'SELECT 1'], ['duckdb', '-readonly', 'x.db'],
+    ['duckdb', '--version'], ['duckdb', '-version'], ['duckdb', '--help'], ['duckdb', '-h'], ['duckdb.exe', 'x.db'],
+    ['wsl', 'ls'], ['wsl', '-e', 'ls'], ['wsl', '--exec', 'ls'], ['wsl', '-d', 'Ubuntu', 'ls'], ['wsl', '-u', 'root'],
+    ['wsl', '--', 'ls'], ['wsl', '-h'], ['wsl', '-V'], ['wsl.exe', 'ls'],
+    // and through every wrapper, by the recursion
+    ['timeout', '5', 'hyperfine', 'x'], ['xargs', 'duckdb'], ['nohup', 'wsl', 'ls'],
+  ]) {
+    // MUTATION: delete the hyperfine entry from RUNNER_GRAMMAR. `["hyperfine", "echo SAFE"]`
+    // falls to the generic rule and renders. Confirmed 2026-10-14.
+    // MUTATION: give duckdb `infoOnly(DEFAULT_INFO)`. `["duckdb", "--version"]` renders.
+    // Confirmed 2026-10-14.
+    // MUTATION: delete the wsl entry. `["wsl", "ls"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop `if (node.any) return true;` in runnerIsBroad. An infoOnly root then
+    // reads as a dispatcher with no subcommands and `["hyperfine", "echo SAFE"]` renders.
+    // Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs a command or code it names`);
+  }
+  for (const prefix of [['hyperfine', '--version'], ['hyperfine', '-V'], ['hyperfine', '--help'], ['hyperfine', '-h'],
+    ['wsl', '--version'], ['wsl', '--help'], ['wsl.exe', '--version']]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} was measured to print and exit`);
+  }
+  // The learner hands over exactly these shapes: a bare root, or the root and an
+  // informational word (prefixFor), and `duckdb --version` is the one that rendered.
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const command of ['duckdb --version', 'duckdb x.db', "hyperfine 'sleep 1'", 'wsl ls']) {
+    const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
+    assert.equal((renderCodexRules([learned], { includeReviewed: true }).match(/prefix_rule\(/g) || []).length, 0, command);
+  }
+  // The Claude half refused all three at any depth already, by membership (64b4eaa), and
+  // still does: a pin.
+  for (const permission of ['Bash(hyperfine --version *)', 'Bash(duckdb x.db *)', 'Bash(wsl --version *)',
+    'PowerShell(wsl ls *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
   }
 });

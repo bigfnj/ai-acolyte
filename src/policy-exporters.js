@@ -25,7 +25,10 @@ const CODEX_END_MARKER = '# END permission-wildcarding generated rules';
 // allowing a reviewed, narrower one (`["just", "build"]`), which is exactly how `sh` and
 // `bash` are already treated. On the Claude side the bare `Bash(<root> *)` was already
 // refused (it is on neither root list); membership also refuses a reviewed multi-token
-// form such as `Bash(just --version *)`, as for every wrapper here.
+// form such as `Bash(just --version *)`, as for every wrapper here. For hyperfine and duckdb
+// the "narrower one" was a mistake, corrected 2026-10-14: naming a command or a database
+// narrows neither (measured; RUNNER_GRAMMAR, at their entries), so they are broad at any
+// depth now, hyperfine bar its informational forms and duckdb with none.
 //
 // The gap that sentence used to record ("NOT the full list of runners the learner
 // knows: node, npx, uvx, xargs and others are absent") is closed as of 2026-10-13.
@@ -690,6 +693,9 @@ function interpreterIsBroad(base, prefix) {
 //
 // A node is one of:
 //   * RUNS_ANY_COMMAND: broad at any depth, with the reason beside its use.
+//   * infoOnly(info): broad at any depth too, except for exactly the two-token forms in
+//     `info`, each MEASURED inert with a trailing payload before it is listed (2026-10-14;
+//     hyperfine and wsl, the reasons beside their entries).
 //   * `{ exec }`: a runner-exec form. `exec` is an execWrapperInner grammar (flags, values,
 //     fused, operands, and the two runner keys there); the command after it is judged by
 //     wrapperIsBroad, recursively.
@@ -716,6 +722,10 @@ function interpreterIsBroad(base, prefix) {
 // (internal/devbox/devbox.go, below), uv run and uvx (uv CLI reference), npm exec, npx and
 // npm config (npm docs).
 const RUNS_ANY_COMMAND = 'broad';
+const infoOnly = (info) => ({ info, any: true });
+// The long informational forms alone: the short `-h`/`-V` are other options to too many of
+// the tools this is used for (`tar -h` follows symlinks, `tar -V` is a volume label).
+const LONG_INFO = new Set(['--version', '--help']);
 // pflag clusters for docker: `-it`, `-dit`. `-u`/`--user` and `--privileged` are absent on
 // purpose, so they are unknown and broad: one changes the identity the command runs as in
 // the container, the other hands it the host's devices and capabilities, which is the
@@ -1068,6 +1078,33 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
   // refuses both, and the recursion carries it through every wrapper (`["xargs", "tar"]`).
   rsync: RUNS_ANY_COMMAND, scp: RUNS_ANY_COMMAND, sftp: RUNS_ANY_COMMAND, tar: RUNS_ANY_COMMAND,
   find: RUNS_ANY_COMMAND, fd: RUNS_ANY_COMMAND, fdfind: RUNS_ANY_COMMAND,
+  // Runners whose arguments are commands or code wherever they sit, so naming one narrows
+  // nothing (2026-10-14). Until then all three had only the generic ends-in-an-option rule at
+  // the bottom of wrapperIsBroad, so `["hyperfine", "echo SAFE"]`, `["duckdb", "x.db"]` and
+  // `["wsl", "ls"]` each rendered as a reviewed prefix_rule (measured against 4a02252). Each
+  // was refused BARE since edb59ed and refused at any depth on the Claude side by membership;
+  // only the Codex half narrowed them. MEASURED 2026-10-14 in a private temp directory with
+  // harmless payloads that write a marker file:
+  //   * hyperfine 1.20.0: every positional is a command to benchmark, so `hyperfine --runs 1
+  //     -N 'cmd /c echo SAFE' 'cmd /c echo SECOND>m1.txt'` wrote m1.txt; `--prepare`, `--setup`,
+  //     `--cleanup`, `--conclude` and `-S`/`--shell` are commands too. Its four informational
+  //     forms are exact and inert: `hyperfine --version 'cmd /c echo X>m2.txt'`, `--help`, `-V`
+  //     and `-h`, and `--version --setup '...' '...'`, wrote nothing (clap exits while parsing).
+  //   * duckdb v1.5.5: `duckdb x.db ".shell cmd /c echo PWNED>d1.txt"` wrote d1.txt. And NO form
+  //     of it is inert: `-version`, `--version`, `--help` and `-h` each exit before a trailing
+  //     `.shell` argument runs, but `duckdb -version -init init1.sql`, with `.shell` in the init
+  //     file, ran it before printing the version, as did `--version`, `--help` and `-h` (the
+  //     sqlite3-derived shell reads `-init` in its first argument pass and runs the file before
+  //     the second pass reaches `-version`). So `["duckdb", "--version"]`, which the generic
+  //     rule's info exception rendered, admits a program too, and duckdb has no exception.
+  //   * wsl 2.7.12: a command line after `wsl` runs in the distribution's login shell, `--`
+  //     hands the rest over as-is, `-u`/`--user` picks the identity, and `-e`/`--exec` alone
+  //     skips the shell. The `--exec` form could not be measured (this box has no distribution
+  //     installed), and the learner never hands over a wsl prefix deeper than its informational
+  //     forms, so a bounded exec form would buy no grant: broad. `wsl --version echo SAFE`
+  //     printed the version and ran nothing (with no distribution, an attempt would have
+  //     failed loudly), and `--help` likewise, so those two exact forms stay narrow.
+  hyperfine: infoOnly(DEFAULT_INFO), duckdb: RUNS_ANY_COMMAND, wsl: infoOnly(LONG_INFO),
 }));
 
 // The index of the first token at or after `k` that is not one of `grammar`'s options, or
@@ -1119,6 +1156,7 @@ function targetIsBroad(grammar, rest) {
 function runnerIsBroad(node, rest) {
   if (node === RUNS_ANY_COMMAND) return true;
   if (rest.length === 1 && node.info?.has(rest[0])) return false;
+  if (node.any) return true;                                              // infoOnly: nothing else narrows it
   if (node.exec) {
     const inner = execWrapperInner(node.exec, ['', ...rest]);
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
@@ -1138,7 +1176,7 @@ function runnerIsBroad(node, rest) {
 // rule is refused only while it names no target (`Bash(mise run *)`); a fixed subcommand
 // (`Bash(docker ps *)`, `Bash(uv sync *)`, `Bash(kubectl get *)`) is untouched.
 function reachesRunnerExec(node, rest) {
-  if (node === RUNS_ANY_COMMAND || node.exec) return true;
+  if (node === RUNS_ANY_COMMAND || node.exec || node.any) return true;
   if (!node.sub) return false;
   const at = skipRunnerOptions(node.options, rest, 0);
   if (at < 0 || at >= rest.length) return true;
@@ -1200,7 +1238,8 @@ function wrapperIsBroad(prefix) {
   // Development-environment, package and task runners (RUNNER_GRAMMAR above), including
   // npm, npx, uvx, pnpm, yarn, make and just, which until 2026-10-13 had only the rule below.
   if (runner) return runnerIsBroad(runner, prefix.slice(1).map(String));
-  // Every other runner (java, duckdb, hyperfine, ...): a prefix that ends in an option has
+  // Every other runner (java, `.`, `source`, ...; duckdb, hyperfine and wsl left this rule for
+  // RUNNER_GRAMMAR on 2026-10-14): a prefix that ends in an option has
   // not reached anything it could pin, and the next token could be the very switch that
   // hands over code, so it is broad unless it is exactly an informational form. Value
   // options are not modelled for these roots. The note that stood here, "`["make", "-C",

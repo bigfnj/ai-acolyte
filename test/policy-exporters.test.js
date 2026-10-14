@@ -2061,6 +2061,36 @@ test('L3: strace -E/--env VAR=VAL is judged as an environment assignment, and a 
   assert.deepEqual(renderClaudePermissions(['Bash(strace -E LD_PRELOAD=x cat *)'], { includeReviewed: true }), []);
 });
 
+// M2: strace `-o |cmd` / `-o !cmd` pipes strace's output to a command (strace(1); src/strace.c), so it
+// is broad, separated or fused, abbreviation included. A plain file path stays narrow, and ltrace's
+// `-o`, which fopen()s the name with no pipe rule (ltrace options.c), is a plain value option. Against
+// the M1 commit every STRACE_OUT_BROAD row rendered.
+const STRACE_OUT_BROAD = [
+  ['strace', '-o', '|./x', 'cat'], ['strace', '-o', '!./x', 'cat'], ['strace', '-o|./x', 'cat'],
+  ['strace', '-o!./x', 'cat'], ['strace', '--output=|./x', 'cat'], ['strace', '--output', '|./x', 'cat'],
+  ['strace', '--out=|./x', 'cat'], ['strace', '--ou=|./x', 'cat'], ['strace', '--o=|./x', 'cat'],
+  ['strace', '-f', '-o', '|./x', 'ls'], ['timeout', '5', 'strace', '-o', '|./x', 'cat'],
+];
+const STRACE_OUT_NARROW = [
+  ['strace', '-o', 'out.txt', 'cat'], ['strace', '-oout.txt', 'cat'], ['strace', '--output=out.txt', 'cat'],
+  ['strace', '--output', 'out.txt', 'ls'], ['strace', 'cat'],
+  // ltrace -o is a plain file (fopen), not a pipe: it stays narrow.
+  ['ltrace', '-o', '|./x', 'ls'], ['ltrace', '-o|./x', 'ls'], ['ltrace', '--output=|./x', 'ls'],
+];
+
+test('M2: strace -o |cmd or !cmd pipes its output to a command, so it is broad; ltrace -o does not', () => {
+  for (const prefix of STRACE_OUT_BROAD) {
+    // MUTATION: drop `outSep` from strace's entry — the separated `-o`/`--output` rows render.
+    // MUTATION: drop `outFused` — the fused `-o...` and `--output=`/`--out=` rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} pipes strace output to a program`);
+  }
+  for (const prefix of STRACE_OUT_NARROW) {
+    // MUTATION: make outputPipesToCommand always return true — the plain-path strace rows are
+    // refused and this fails.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} writes a file (or is ltrace) and renders`);
+  }
+});
+
 // node options that name a file deciding what loads (src/policy-exporters.js, node's `broad`).
 // Each row's verdict at 1d66310 is in the commit that added this test.
 const NODE_FILE_BROAD = [

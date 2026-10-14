@@ -506,10 +506,21 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
   // longopts, read the same day). Until then `-E` was a plain value option, so `["strace", "-E",
   // "LD_PRELOAD=./x.so", "cat"]` rendered (measured against 0f29d7f). `-e` is strace's filter
   // expression, not the environment, and stays a value option.
+  //
+  // `-o`/`--output` (M2, 2026-10-14): "If the argument begins with '|' or '!', the rest of the
+  // argument is treated as a command and all output is piped to it" (strace(1), man7.org, read
+  // 2026-10-14), so a value starting with `|` or `!` is a program strace runs, judged broad by
+  // `outputPipesToCommand`; a plain file path stays narrow. getopt_long resolves `--output`, and
+  // its ambiguous prefixes `--o`/`--ou`/`--out`/`--outp`/`--outpu`, through `outSep`/`outFused`, so
+  // `--out=|./x`, which the generic `--[a-z-]+=` fused form accepted as inert, is refused too. `-o`
+  // and `--output` leave `values` for those two keys; `o` stays in the fused char class but outFused,
+  // checked first, handles every `-o...`. Until this, `-o`/`--output` were plain value options, so
+  // `["strace", "-o", "|./x", "cat"]` and `--out=|./x` rendered (measured against the M1 commit).
   strace: { flagPattern: /^-[cCdDfFhiknqrtTvVwxyzZ]+$/,
-    values: ['-e', '-o', '-p', '-s', '-E', '-P', '-S', '-a', '-b', '-I', '-u', '-X', '-O', '-U', '--output', '--trace',
+    values: ['-e', '-p', '-s', '-E', '-P', '-S', '-a', '-b', '-I', '-u', '-X', '-O', '-U', '--trace',
       '--expr', '--attach', '--string-limit', '--env', '--trace-path', '--columns', '--user'],
     fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/,
+    outSep: /^(?:-o|--o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?)$/, outFused: /^(?:-o|--o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?=)(.+)$/,
     env: ['-E', '--env'], envFused: /^(?:-E|--e(?:nv?)?=)(.+)$/, envUnsetsBare: true },
   ltrace: { flagPattern: /^-[bcCfhiLrSStTV]+$/,
     values: ['-a', '-A', '-e', '-l', '-n', '-o', '-p', '-s', '-u', '-x', '-D', '-F', '-w', '--align', '--config',
@@ -659,6 +670,14 @@ const WRAPPER_INFO_ROOTS = new Set(['env', 'xargs', 'timeout', 'nice', 'nohup', 
 // command, so a prefix with no `--` walks to its end and names none) and `module` (`uv
 // run -m X` runs `python -m X`, handed on as exactly that so the interpreter grammar
 // judges it).
+// strace writes its trace to a command, not a file, when the `-o`/`--output` value begins with `|`
+// or `!` (strace(1); M2, 2026-10-14). ltrace's `-o` has no such rule: it fopen()s the name
+// (ltrace options.c, `case 'o'`), so ltrace keeps a plain value option and only strace carries these.
+function outputPipesToCommand(value) {
+  const text = String(value == null ? '' : value);
+  return text.startsWith('|') || text.startsWith('!');
+}
+
 function execWrapperInner(grammar, prefix) {
   const flags = new Set(grammar.flags || []);
   const values = new Set(grammar.values || []);
@@ -681,6 +700,15 @@ function execWrapperInner(grammar, prefix) {
     }
     const fusedEnv = grammar.envFused?.exec(token);
     if (fusedEnv && envOptionIsUnsafe(grammar, fusedEnv[1])) return null;
+    // strace's `-o`/`--output` piped to a command (`|cmd`/`!cmd`; M2, 2026-10-14). Judged before the
+    // value is skipped: a separated value is the next token, a fused one is captured. A plain file path
+    // continues as a normal value option.
+    if (grammar.outSep?.test(token)) {
+      if (outputPipesToCommand(prefix[k + 1])) return null;
+      k += 1; continue;
+    }
+    const outPipe = grammar.outFused?.exec(token);
+    if (outPipe) { if (outputPipesToCommand(outPipe[1])) return null; continue; }
     if (values.has(token)) { k += 1; continue; }
     if (grammar.fused?.test(token)) continue;
     return null;

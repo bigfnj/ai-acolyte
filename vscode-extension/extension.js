@@ -186,10 +186,10 @@ function readSettings() {
 // The state constants, the "why is there no value" read, and the rebasing writer
 // all moved to src/settings-write.js so the CLI — whose hook is the highest-
 // frequency writer of this file — uses the same one instead of a naive spread.
-// Re-exported as locals here so every existing call site is untouched.
+// Re-exported as locals; SETTINGS_ABSENT, read nowhere in this file, dropped 2026-10-14.
 const {
   createSettingsWriter,
-  SETTINGS_ABSENT, SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
+  SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
 } = require('./src/settings-write');
 
 // backupPolicy is INJECTED rather than imported by the writer: it reaches

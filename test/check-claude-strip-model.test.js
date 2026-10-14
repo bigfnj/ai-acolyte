@@ -136,7 +136,10 @@ test('M5: claudeStripsAssignment is case-exact — LANG=C strips, lang=C does no
 test('M5: the script reports whether the membership lookup converts case, when it can read it', (t) => {
   // A Set followed by a case-exact `IG.has(e)` reads as 'exact'; one that upper-cases first reads as
   // 'folded'; a binary with no `.has` call near the list says nothing (null), not a guess.
-  const exact = check(binary(t, DECOYS[0], literal(KNOWN), 'function u(e){return IG.has(e)}', DECOYS[3]));
+  // The `;` is the delimiter real JavaScript puts before the binding. Without it, DECOYS[0]'s random
+  // last byte is an identifier character about one time in four (`xIG`), the detector reads that
+  // name, finds no `xIG.has(`, and says null: a flake in the masked suite on 2026-10-14.
+  const exact = check(binary(t, DECOYS[0], ';', literal(KNOWN), 'function u(e){return IG.has(e)}', DECOYS[3]));
   assert.equal(exact.lookupCase, 'exact');
   // MUTATION: drop the `.to(Upper|Lower)Case` branch in detectLookupCaseConversion — this reads 'exact'.
   const folded = check(binary(t, literal(KNOWN), 'function u(e){return IG.has(e.toUpperCase())}'));

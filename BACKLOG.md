@@ -24,6 +24,32 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
+### In flight: v1.6.3 CI and the confirmation audit (2026-10-14)
+
+The 1.6.3 release commit (7cbba2b) is not tagged: `test.yml` run 38525363435 failed 5 of 7
+jobs. Two causes were seen in the logs. First, the `codex-version` tests were cancelled on
+Node 20 and 22, because an unref'd timer left the event loop empty. Second, two
+`dashboard-project-trust` tests failed on Ubuntu, because the POSIX process-group kill does not
+reach a hung grandchild.
+
+A confirmation audit of the same commit found:
+
+- **MEDIUM.** A stored null-rule family that has not run since the upgrade can be written
+  despite a user deny or managed ask. The boundary checks judge the stored null field; the write
+  renders the derived rule. Deny still wins at runtime, so this is a dead entry reported as
+  applied, not an escalation.
+- **LOW.** `endProcessTree` can tree-kill a freed pid after a child exited by signal (it checks
+  `exitCode` only).
+- **LOW.** A missing configured history root pins the Codex evidence rebuild without saying so.
+- **LOW.** A pending project-trust verdict can render "No saved permissions yet".
+- **LOW.** A transient trust-ask timeout is cached with no expiry.
+- **LOW.** make's other implicit program variables (`RM=`, `AR=`, …) still render in Codex
+  export.
+- **LOW.** `memory.recallScript` and `backupMirrorPath` are window-scoped, so a workspace can
+  choose them.
+
+Each one moves to the engineering record with its disposition when it is fixed and gated.
+
 ### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
 
 The audit's findings are fixed and recorded in `docs/engineering-record.md` under "The v1.6.2

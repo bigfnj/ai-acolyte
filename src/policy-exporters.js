@@ -3,6 +3,25 @@
 // Cross-agent policy exporters for Auto Learn. The learner emits a neutral
 // candidate; these exporters are the final safety boundary before it becomes a
 // Claude wildcard or a Codex executable-policy rule.
+//
+// The governing principle (stated 2026-10-14, after the v1.6.2 audit's residuals, so that a new
+// tool, option or variable is judged by it rather than by a new audit): a reviewed prefix is
+// narrow only when it pins the program it runs, a script, module, package or fixed-purpose
+// subcommand named literally, and every option and variable it carries is one a table here
+// models as inert. Anything else makes it broad: an option or variable whose value is code text
+// (`-c`, `-e`, `--eval`, make's `!=`), or names a program, a shell or the shell's arguments
+// (`SHELL=`, `.SHELLFLAGS=`, `--shell`, `GIT_PAGER=`, `-e`/`--rsh`), or names a file that can load
+// code or choose what runs (an env or dotenv file, an init, rc, config or OpenSSL file, a preload),
+// or changes who the program runs as (`-u`, `--privileged`, sudo); an option no table lists, since
+// its arity and effect are unknown; and a prefix that ends before the program is pinned. An exact
+// informational form (`--version`, `--help`) is narrow only where it was MEASURED to print and
+// exit before anything after it runs. The broad verdict is the safe failure, always: a reviewer
+// can narrow a refused prefix, but cannot see what a narrow verdict let through. Two limits are
+// known and recorded rather than closed: tokens after a fixed-purpose subcommand or a task target
+// are that command's own and stay unread (make excepted, which reads them all), so a prefix still
+// admits whatever its continuation adds (`["npm", "test"]` admits `npm test --node-options=...`,
+// ACCEPTED-RECORDED); and the Claude half is stricter than this, refusing a wrapper or runner root
+// at any depth by membership (64b4eaa), whatever the rest of the rule names.
 
 // The one thing taken from the learner, and only to REFUSE more; see SHELL_WRAPPERS
 // below for why that direction, and only that one, is safe to share.

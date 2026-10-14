@@ -116,6 +116,21 @@ function commandLaunch(name, args = []) {
   };
 }
 
+// taskkill BY ABSOLUTE PATH, never by bare name (2026-10-14). libuv resolves a
+// bare name itself and looks in the CURRENT DIRECTORY before PATH, unless the
+// environment carries NoDefaultCurrentDirectoryInExePath. Measured on the
+// development box (libuv 1.52.1, Node 24.19.0): with that variable unset, a
+// taskkill.exe planted in the cwd ran in place of System32's; with it set, it did
+// not. The extension host's cwd is wherever VS Code was started (`code .` inside
+// a clone makes it that clone), and the Codex config worker inherits it, so a
+// repository could have supplied the program every deactivate runs. An agent
+// shell often sets the variable, which is how this hid: a test has to unset it.
+// SystemRoot is read first so a Windows installed off C: is honoured; the drive
+// is a last resort for an environment that carries neither variable.
+function taskkillPath() {
+  return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+}
+
 // End a child AND everything it started, which on Windows child.kill() does not.
 //
 // The launch above is why it matters. A batch shim runs through the command
@@ -176,7 +191,7 @@ function endProcessTree(child) {
   }
   return new Promise((resolve) => {
     try {
-      childProcess.execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'],
+      childProcess.execFile(taskkillPath(), ['/PID', String(child.pid), '/T', '/F'],
         { windowsHide: true, timeout: 5000 }, () => { fallback(); resolve(); });
     } catch {
       fallback();
@@ -191,5 +206,5 @@ function endProcessTree(child) {
 // the case where neither holds the name. A test on the directory LIST would pin
 // less than the tests that already exist.
 module.exports = {
-  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree,
+  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath,
 };

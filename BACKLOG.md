@@ -53,8 +53,6 @@ and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It
 - **execFile's own `timeout` orphans grandchildren.** A `.cmd` shim killed this way leaves its
   node child alive. The sites are `execFileCaptured` and the Python children in `extension.js`.
   The fix is the version probe's pattern: its own timer calling `endProcessTree`.
-- **Bare `taskkill` is resolved by libuv, which searches the cwd before PATH.** Use
-  `%SystemRoot%\System32\taskkill.exe`.
 - **The trust worker's graceful timeout can lose to the host backstop on a slow machine.**
   CI run 38535034218 failed on the Node 20 Windows job only; the same test passed on all 7 jobs
   one push earlier. The test was `test/codex-mcp-config.test.js`, "the asynchronous layers read

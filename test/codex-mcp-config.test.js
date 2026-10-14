@@ -452,3 +452,58 @@ test('a worker whose host dies outright ends the codex it started and exits', as
   // codex is still running here. Confirmed 2026-10-14.
   assert.equal(await waitFor(() => gone(hung), 3000), true, 'the codex under the worker outlived the host');
 });
+
+// THE WORKER'S OWN KILL RUNS SYSTEM32's taskkill TOO (2026-10-14). The worker
+// inherits the host's cwd, and its grace kill named taskkill bare, which libuv
+// looks for in the cwd first unless NoDefaultCurrentDirectoryInExePath is set
+// (src/exec-resolve.js, taskkillPath). The host here is a real Node process
+// standing in a directory that holds a copy of node named taskkill.exe; a
+// --require preload writes a flag only when it runs as that copy. With a 4 s
+// budget the worker's deadline is 1 s and its grace 1 s, so its own kill is the
+// one that ends the stand-in codex, well inside the host's backstop. The flag is
+// not the only witness: endpoint scanning can hold the first run of a freshly
+// copied executable past the 4 s, and then the copy dies before its preload runs.
+// The answer is the witness that holds either way: only a kill that worked lets
+// the worker report its own deadline instead of the host's backstop.
+test('the config worker\'s own kill runs System32\'s taskkill, not one planted in its cwd', { skip: process.platform !== 'win32' }, async t => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-planted-'));
+  const pids = [];
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex'), cwd = path.join(root, 'cwd');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+  const flag = path.join(root, 'planted-taskkill-ran');
+  const marker = path.join(root, 'planted-marker.js');
+  fs.writeFileSync(marker, `if (/taskkill\\.exe$/i.test(process.execPath)) require('fs').writeFileSync(${JSON.stringify(flag)}, process.argv.slice(1).join(' '));\n`);
+  fs.copyFileSync(process.execPath, path.join(cwd, 'taskkill.exe'));
+  const codex = hangingCodex(t);
+  const env = { ...process.env, NODE_OPTIONS: `--require "${marker.split(path.sep).join('/')}"` };
+  // An agent shell often sets this, and with it set the unfixed code passes too.
+  delete env.NoDefaultCurrentDirectoryInExePath;
+  const host = spawn(process.execPath, ['-e', `
+    require(${JSON.stringify(path.join(__dirname, '..', 'src', 'codex-mcp-config.js'))}).readCodexConfigLayersAsync({
+      home: ${JSON.stringify(home)}, codexHome: ${JSON.stringify(codexHome)}, workspaceRoot: ${JSON.stringify(root)},
+      codexExecutable: ${JSON.stringify(codex.executable)}, timeoutMs: 4000,
+    }).then(() => process.stdout.write('answered'), error => process.stdout.write(error.message));`],
+  { cwd, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+  pids.push(host.pid);
+  let outcome = '';
+  host.stdout.setEncoding('utf8');
+  host.stdout.on('data', chunk => { outcome += chunk; });
+  await new Promise(resolve => host.once('close', resolve));
+  assert.ok(fs.existsSync(codex.pidFile), `precondition: the stand-in codex started; the host said: ${outcome}`);
+  const hung = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  pids.push(hung);
+  // MUTATION: name 'taskkill' bare in the worker's grace kill again. The copy in
+  // the cwd runs instead (writing the flag once it is past the scan), the stand-in
+  // survives until the host's backstop ends the worker's tree, and the answer is
+  // "unavailable: the worker timed out". Confirmed 2026-10-14: both, on separate runs.
+  assert.equal(fs.existsSync(flag), false,
+    `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}`);
+  assert.match(outcome, /refused: Codex config operation timed out/, 'the worker\'s deadline, not the host\'s backstop');
+  assert.equal(await waitFor(() => gone(hung), 3000), true, 'the worker\'s kill ended the stand-in codex');
+});

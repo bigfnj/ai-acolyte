@@ -196,6 +196,17 @@ Every test was run against a revert of its fix:
   its own 0.9 s. A contended hook run is therefore bounded by about 1.8 s of retries, which the
   async registration keeps off the tool call.
 
+## Process spawns: the v1.6.3 lifecycle and performance confirmation (2026-10-14)
+
+The second confirmation audit of the 1.6.3 commit (lifecycle and performance, measured) found
+four process-spawn defects. Each was re-verified in the code before it was changed; the
+measurements below were taken again for this record, on the development box, with the method
+named in each row.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| Bare `taskkill` is resolved from the current directory | **FIXED** | libuv resolves a bare name itself and looks in the cwd before PATH unless the environment carries `NoDefaultCurrentDirectoryInExePath`. Measured (libuv 1.52.1, Node 24.19.0): with the variable unset, a copy of node named `taskkill.exe` in the cwd ran in place of System32's; with it set, it did not. The extension host's cwd is wherever VS Code was started, and the Codex config worker inherits it. The variable was set in the agent shell the audit ran from, and in neither the user nor the machine environment, so a test run from such a shell passes against the unfixed code: both new tests remove it. `endProcessTree` and the config worker's grace kill now run `taskkillPath()`, `%SystemRoot%\System32\taskkill.exe`. Pinned by "the tree kill runs System32's taskkill, not one planted in the current directory" (test/exec-resolve.test.js) and "the config worker's own kill runs System32's taskkill, not one planted in its cwd" (test/codex-mcp-config.test.js); each fails with its own site reverted. The planted copy's flag is not the only witness, because endpoint scanning can hold a freshly copied executable's first run past the kill's own timeout: the first test also requires that the node under a cmd.exe dies, which only `/T` does, and the second that the worker's own deadline is the answer. Same class, not changed here: `bin/wildcard-perms` spawns `TOOLBOX_PYTHON \|\| 'python'` by bare name, and `commandLaunch` hands an unresolved name back bare, which `execFileCaptured` then spawns. |
+
 ## The 1.6.2 backlog clearance (2026-10-13)
 
 Prompted by two dashboard rows that were both false: Auto Learn read **"scan degraded —

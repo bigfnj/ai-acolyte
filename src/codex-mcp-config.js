@@ -9,7 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync, spawn } = require('node:child_process');
 const { resolveCodexHome } = require('./codex-paths');
-const { commandLaunch, endProcessTree } = require('./exec-resolve');
+const { commandLaunch, endProcessTree, taskkillPath } = require('./exec-resolve');
 const { writeFileAtomicSync } = require('./permissions');
 
 const MODES = new Set(['auto', 'prompt', 'writes', 'approve']);
@@ -589,7 +589,9 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
         child.stdin.end();
         const kill = setTimeout(() => {
           if (child.exitCode !== null) return;
-          if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 });
+          // By absolute path: this worker inherits the host's cwd (exec-resolve's
+          // taskkillPath says why a bare name is not safe there).
+          if (process.platform === 'win32') spawnSync(taskkillPath(), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 });
           else child.kill('SIGTERM');
         }, graceMs);
         await closed; clearTimeout(kill);

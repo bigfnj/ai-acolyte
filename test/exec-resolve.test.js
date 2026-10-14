@@ -191,7 +191,7 @@ test('a child its own execFile timeout ended gets no tree kill, and a live child
   const treeKills = [];
   const stub = () => {
     childProcess.execFile = function execFile(file, args, options, callback) {
-      if (file !== 'taskkill') return realExecFile.apply(this, arguments);
+      if (!/^taskkill(\.exe)?$/i.test(path.basename(String(file)))) return realExecFile.apply(this, arguments);
       treeKills.push(['taskkill', ...args]);
       process.nextTick(callback);
       return null;
@@ -232,4 +232,79 @@ test('a child its own execFile timeout ended gets no tree kill, and a live child
   await ending;
   await exited;
   assert.deepEqual(treeKills, windows ? [['taskkill', '/PID', String(live.pid), '/T', '/F']] : [['group', -live.pid, 'SIGTERM']]);
+});
+
+// A PLANTED taskkill.exe IS NEVER THE ONE THAT RUNS (2026-10-14). libuv resolves a
+// bare name itself and looks in the current directory before PATH, unless the
+// environment carries NoDefaultCurrentDirectoryInExePath; the extension host's cwd
+// is wherever VS Code was started, so a repository opened with `code .` could
+// supply it. The stand-in is a copy of node named taskkill.exe, and a --require
+// preload writes a flag only when it runs as that copy. The variable is removed for
+// the call, because an agent shell that sets it makes the unfixed code pass too.
+//
+// The flag alone is not the witness. Endpoint scanning can hold the first run of a
+// freshly copied executable for longer than the 5 s the tree kill waits, and then
+// the copy is ended before its preload runs. What only System32's taskkill can do
+// is the witness: the tree is cmd.exe -> node, and the node grandchild dies only by
+// `/T`, because the fallback child.kill() ends cmd.exe alone.
+function plantedTaskkill(dir) {
+  const flag = path.join(dir, 'planted-taskkill-ran');
+  const marker = path.join(dir, 'planted-marker.js');
+  fs.writeFileSync(marker, `if (/taskkill\\.exe$/i.test(process.execPath)) require('fs').writeFileSync(${JSON.stringify(flag)}, process.argv.slice(1).join(' '));\n`);
+  fs.copyFileSync(process.execPath, path.join(dir, 'taskkill.exe'));
+  // NODE_OPTIONS reads a backslash inside quotes as an escape: forward slashes.
+  return { flag, nodeOptions: `--require "${marker.split(path.sep).join('/')}"` };
+}
+
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function waitUntil(predicate, ms) {
+  const start = Date.now();
+  while (!predicate() && Date.now() - start < ms) await new Promise((resolve) => setTimeout(resolve, 50));
+  return predicate();
+}
+
+test('the tree kill runs System32\'s taskkill, not one planted in the current directory', { skip: !windows }, async (t) => {
+  const { endProcessTree, taskkillPath } = require('../src/exec-resolve');
+  const childProcess = require('node:child_process');
+  const dir = scratch('planted');
+  const planted = plantedTaskkill(dir);
+  assert.equal(taskkillPath(), path.join(process.env.SystemRoot, 'System32', 'taskkill.exe'));
+  // cmd.exe -> node, the npm shim's shape. The node writes its pid and waits.
+  const pidFile = path.join(dir, 'grandchild.pid');
+  const script = path.join(dir, 'hang.js');
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`);
+  const shim = path.join(dir, 'wchang.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}"\r\n`);
+  const launch = commandLaunch(shim, []);
+  const root = childProcess.spawn(launch.file, launch.args, { ...launch.options, stdio: 'ignore', windowsHide: true });
+  t.after(() => { try { root.kill('SIGKILL'); } catch {} });
+  assert.ok(await waitUntil(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8').trim(), 10000),
+    'precondition: the node under cmd.exe started');
+  const grandchild = Number(fs.readFileSync(pidFile, 'utf8'));
+  t.after(() => { try { process.kill(grandchild, 'SIGKILL'); } catch {} });
+  const saved = { cwd: process.cwd(), noCwd: process.env.NoDefaultCurrentDirectoryInExePath, nodeOptions: process.env.NODE_OPTIONS };
+  delete process.env.NoDefaultCurrentDirectoryInExePath;
+  process.env.NODE_OPTIONS = planted.nodeOptions;
+  process.chdir(dir);
+  try {
+    await endProcessTree(root);
+  } finally {
+    process.chdir(saved.cwd);
+    for (const [key, value] of [['NoDefaultCurrentDirectoryInExePath', saved.noCwd], ['NODE_OPTIONS', saved.nodeOptions]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+  // MUTATION: name 'taskkill' bare in endProcessTree again. The copy in the cwd runs
+  // instead of System32's (and writes the flag once it gets past the scan), the
+  // fallback ends cmd.exe alone, and the node under it is still running here.
+  // Confirmed 2026-10-14.
+  assert.equal(fs.existsSync(planted.flag), false,
+    `the taskkill in the current directory ran: ${fs.existsSync(planted.flag) ? fs.readFileSync(planted.flag, 'utf8') : ''}`);
+  assert.equal(await waitUntil(() => !alive(grandchild), 3000), true, 'the node under cmd.exe outlived the tree kill');
+
+  // SystemRoot decides the directory, so a Windows installed off C: is honoured.
+  const before = process.env.SystemRoot;
+  process.env.SystemRoot = 'D:\\WinRoot';
+  try { assert.equal(taskkillPath(), path.join('D:\\WinRoot', 'System32', 'taskkill.exe')); }
+  finally { process.env.SystemRoot = before; }
 });

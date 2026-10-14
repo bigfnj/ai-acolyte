@@ -55,11 +55,6 @@ and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It
   The fix is the version probe's pattern: its own timer calling `endProcessTree`.
 - **Bare `taskkill` is resolved by libuv, which searches the cwd before PATH.** Use
   `%SystemRoot%\System32\taskkill.exe`.
-- **The hook's in-place fallback can empty `settings.json` if the hook is killed mid-write.**
-  The fallback runs whenever another process holds the file for 0.9 s or more. The window is
-  about 0.4–1.2 ms. That matters now that the installers register the hook as async, because
-  `claude -p` kills an async hook at teardown. Orphaned `*.wc.tmp` copies of `settings.json` are
-  never swept.
 - **On Windows, an npm `.cmd` codex can outlive an extension host that dies outright.**
   MEASURED 2026-10-14 with a stand-in that never reads stdin. A Node host killed outright (not
   deactivated) takes the trust worker with it through libuv's kill-on-close job, and the
@@ -85,7 +80,10 @@ environment rather than the code:
 - **Applying `"async": true` to the live hook registration.** The installers now write it (it
   takes a Node spawn, about 0.35–0.57 s on this box, off every Bash/PowerShell call). Re-running
   the installer from the checkout the hook should use applies it. The recorded cost is that
-  `claude -p` kills a still-running async hook at teardown.
+  `claude -p` kills a still-running async hook at teardown. Since wave-f8 (2026-10-14), that
+  kill can no longer empty `settings.json`: the hook never writes in place. A killed pass is
+  simply redone on the next tool call. See the engineering record's v1.6.2 post-release audit
+  section.
 
 ### VS Code acceptance has not run against the 1.6.2 tree
 

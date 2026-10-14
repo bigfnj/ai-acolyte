@@ -1614,6 +1614,52 @@ test('a forked rollout files an append slice under the session a full read uses'
     'append and full must agree on the identity, or archiving the fork counts this call twice');
 });
 
+// THE SEED APPLIES WHAT THE FULL PARSE APPLIES (2026-10-14). The in-order parse
+// runs applyCodexSessionState on EVERY record, and for a record that is not
+// `session_meta` that still takes a top-level `sessionId`, `session_id` or `cwd`.
+// The fork fix stopped the head at the first non-`session_meta` record, so a head
+// record of that kind -- first in the file, or after a `session_meta` -- set the
+// full read's session and not the seed's, and an append slice filed its calls
+// under a second identity. No real rollout with this shape is known (the 13 on
+// the development box and the five sanitized fixtures carry no top-level session
+// field anywhere); the two reads must agree regardless.
+test('an append slice and a full read agree when a head record that is not session_meta sets the session', (t) => {
+  // One shape per field applyCodexSessionState takes from a record of any type.
+  for (const [label, head, expected] of [
+    ['first line, session_id', () => [{ type: 'turn_context', session_id: 'top-level-thread' }], 'top-level-thread'],
+    ['after session_meta, sessionId', (root) => [
+      { type: 'session_meta', payload: { id: 'meta-thread', cwd: root } },
+      { type: 'event_msg', sessionId: 'override-thread' },
+    ], 'override-thread'],
+    ['after session_meta, cwd', (root) => [
+      { type: 'session_meta', payload: { id: 'meta-thread', cwd: root } },
+      { type: 'turn_context', cwd: path.join(root, 'elsewhere') },
+    ], 'meta-thread'],
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wildcard-history-head-session-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const file = path.join(root, 'rollout-head.jsonl');
+    fs.writeFileSync(file, jsonl(...head(root)) + codexCall('first-call', 'git status --short'));
+    const initial = scanHistoryFiles({ roots: { codex: root }, platform: 'win32', overlapBytes: 48 });
+    assert.equal(initial.observations[0].session, expected, `${label}: precondition: the full parse applies the head record`);
+
+    fs.appendFileSync(file, codexCall('second-call', 'rg TODO src'));
+    const appended = scanHistoryFiles({
+      roots: { codex: root }, cursors: JSON.parse(JSON.stringify(initial.cursors)),
+      platform: 'win32', overlapBytes: 48,
+    });
+    assert.equal(appended.files[0].mode, 'append', label);
+    assert.deepEqual(appended.observations.map(({ command }) => command), ['rg TODO src'],
+      `${label}: precondition: the slice starts past the head, so only the seed can supply the session`);
+    const fromFull = scanHistoryFiles({ roots: { codex: root }, platform: 'win32' })
+      .observations.find((item) => item.callId === 'second-call');
+    assert.equal(appended.observations[0].session, fromFull.session,
+      `witness:head-session-seed -- ${label}: the seed said ${appended.observations[0].session}, a full read says ${fromFull.session}`);
+    assert.equal(appended.observations[0].cwd, fromFull.cwd, label);
+    assert.equal(appended.observations[0].id, fromFull.id, `${label}: append and full must agree on the identity`);
+  }
+});
+
 test('a rollout moved into archived_sessions is read whole under its new path with the same identities', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wildcard-history-archive-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

@@ -800,16 +800,16 @@ function scanStats(value) {
     prunedCandidates: count('prunedCandidates'),
     prunedGrants: count('prunedGrants'),
     blindScan: value.blindScan === true,
-    codexEvidence: object(value.codexEvidence) ? {
-      revision: Math.max(0, Number(value.codexEvidence.revision) || 0), pending: value.codexEvidence.pending === true,
-      legacyCandidates: Math.max(0, Number(value.codexEvidence.legacyCandidates) || 0),
-      uncertainCandidates: Math.max(0, Number(value.codexEvidence.uncertainCandidates) || 0),
-      quarantinedRuns: Math.max(0, Number(value.codexEvidence.quarantinedRuns) || 0),
-      remainingFiles: Math.max(0, Number(value.codexEvidence.remainingFiles) || 0),
-      untimedFailureRuns: Math.max(0, Number(value.codexEvidence.untimedFailureRuns) || 0),
-      reasons: (Array.isArray(value.codexEvidence.reasons) ? value.codexEvidence.reasons : [])
-        .filter((reason) => ['unfinished-transcripts', 'history-unavailable', 'untimed-failures-preserved'].includes(reason)),
-    } : null,
+    // NO `codexEvidence` HERE (dropped 2026-10-14). It was a second saved copy of
+    // the rebuild status, written by every scan and whitelisted here, and nothing
+    // in production read it: the extension's card and notes, the CLI and the
+    // measuring script all take `codexEvidence` from `status()` or the scan's
+    // return, which compute it live from the state (`codexEvidenceStatus`). One
+    // test read the copy. A snapshot is also the weaker answer: it says what the
+    // last scan saw, and a migration on load changes the status before any scan
+    // runs. An older state file's copy is simply not rebuilt on the next load.
+    // Its sibling `codexHistoryNotes` below stays: it is the probe's own output,
+    // with no live equivalent, and the extension may surface it.
     // "The Codex rollout directory this scan read may no longer be where Codex
     // writes." Persisted with the rest of the scan stats, because a stale
     // directory is exactly as invisible as a blind scan and the numbers beside
@@ -981,7 +981,7 @@ function changeOutcome(item, before, after, source) {
 // deduped by `observationHashes`, so it cannot inflate a count", and for the
 // files it evicts that was false. A cursor-less file takes `mode: 'full'`
 // (`safeContinuation` returns false with no prior), a full read emits every
-// observation in the file wholesale (`src/history-adapters.js:2215#selected`), and each
+// observation in the file wholesale (`src/history-adapters.js:2278#selected`), and each
 // one whose hash is gone is counted again -- into `counts.success`, which is
 // what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
 // on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with
@@ -1356,11 +1356,11 @@ function defaultCodexValidator(text, context) {
 }
 function createAutoLearnManager(options = {}) {
   const aliases = object(options.paths) ? options.paths : {};
-  // One spelling each. The `homeDir` and `successThreshold` legs were removed
-  // 2026-10-13: the extension set both spellings to the same values on one
-  // literal, so each leg was shadowed whenever it was supplied, and no other
-  // caller (CLI, scripts, tests) used them. test/codex-inventory-ui.test.js now
-  // fails if the extension supplies a key this factory does not read.
+  // One spelling each. `homeDir` and `successThreshold` went 2026-10-13: the extension set both spellings
+  // to one value, so each leg was shadowed (test/codex-inventory-ui.test.js now fails on a supplied key this
+  // factory does not read). `claudeHistoryPath`, `codexHistoryPath`, `validateCodexRules` and `codexBundlePath`
+  // went 2026-10-14 with no supplier at all in src, bin, vscode-extension, scripts or test, and
+  // test/auto-learn-manager.test.js pins each as ignored and the spelling that remains as read.
   const home = path.resolve(options.home || os.homedir());
   const codexHome = resolveCodexHome({ codexHome: options.codexHome,
     ...(options.home !== undefined ? { home } : {}) });
@@ -1404,13 +1404,13 @@ function createAutoLearnManager(options = {}) {
   const codexBackupPath = path.join(home, '.ai-acolyte', 'backups',
     `codex-policy.${hash(Buffer.from(normalizedPath(codexHome))).slice(0, 16)}.json`);
   const claudeRoots = configuredRoots(home,
-    options.claudeRoots ?? options.claudeHistoryPath ?? aliases.claudeHistory,
+    options.claudeRoots ?? aliases.claudeHistory,
     [path.join(home, '.claude', 'projects')]);
   // BOTH folders Codex writes transcripts to: archiving a thread MOVES its rollout
   // from `sessions/YYYY/MM/DD/` to a flat `archived_sessions/` (measured 2026-10-13),
   // and a default of `sessions/` alone dropped its calls from the corpus on the spot.
   const codexRoots = configuredRoots(home,
-    options.codexRoots ?? options.codexHistoryPath ?? aliases.codexHistory,
+    options.codexRoots ?? aliases.codexHistory,
     [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')]);
   const historyScanner = typeof options.historyScanner === 'function' ? options.historyScanner : scanHistoryFiles;
   // Injectable for the fixtures that have to make the two stores disagree, and
@@ -1425,17 +1425,17 @@ function createAutoLearnManager(options = {}) {
   // into one either. `skipped` stays the worst, because "no input at all" is
   // less of an answer than "one half of the comparison could not run".
   const RANK = { exact: 0, unavailable: 1, partial: 2, skipped: 3 };
-  // Takes no arguments, and used to be CALLED with `{ home, codexRoots }`. Both
-  // are closed over from the enclosing manager, so the object was built and
-  // silently discarded on every scan -- and had the parameter ever been added,
-  // the two would have disagreed about which roots to probe.
+  // Roots and home are closed over, never passed: this was once CALLED with `{ home, codexRoots }`, an
+  // object built and discarded on every scan. Its one argument (2026-10-14) is the SCAN RESULT, handed on
+  // as `scan` because it holds what nothing else here does: that scan's own listing of these folders, the
+  // probe's first walk (codexHistoryStoreState, prewalkedRollouts in history-adapters.js).
   //
   // ONE PROBE PER CODEX HOME, NOT PER ROOT. The roots are grouped by the folder
   // that holds them, and each group is probed once with all of its roots. Per
   // root was right while there was one root per home; with `sessions/` and
   // `archived_sessions/` side by side, a probe of either alone reads the other's
   // threads as orphans, and the corpus is stale by construction.
-  function codexHistoryStore() {
+  function codexHistoryStore(scan) {
     const roots = codexRoots.length ? codexRoots
       : [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')];
     const groups = new Map();
@@ -1450,9 +1450,9 @@ function createAutoLearnManager(options = {}) {
     const notes = [];
     const findings = { orphans: 0, relocated: 0, projectionAhead: 0, emptyRollouts: 0 };
     for (const group of groups.values()) {
-      const state = historyStoreProbe({
-        home, codexHome: group.codexHome, sessionsDirs: group.dirs, sessionsDir: group.dirs[0],
-      }) || {};
+      // No `sessionsDir: group.dirs[0]` (dropped 2026-10-14): the probe reads it only when `sessionsDirs`
+      // is empty, which `group.dirs` never is, so it was ignored on every call. Direct callers still may.
+      const state = historyStoreProbe({ home, codexHome: group.codexHome, sessionsDirs: group.dirs, scan }) || {};
       if (state.stale) stale = true;
       // Worst wins. One root inspected exactly does not redeem another that
       // could not be read: the answer for the corpus is only as good as its
@@ -1470,7 +1470,7 @@ function createAutoLearnManager(options = {}) {
     return { stale, inspected, reasons, notes, findings };
   }
   const codexValidator = typeof options.codexValidator === 'function' ? options.codexValidator
-    : typeof options.validateCodexRules === 'function' ? options.validateCodexRules : defaultCodexValidator;
+    : defaultCodexValidator;
   const codexExecutable = options.codexExecutable || 'codex';
   const afterPolicyWrite = typeof options.testHooks?.afterPolicyWrite === 'function'
     ? options.testHooks.afterPolicyWrite : null;
@@ -1814,7 +1814,7 @@ function createAutoLearnManager(options = {}) {
     const current = statusFrom(state);
     const codexManaged = { policy: 'absent', degraded: false, entries: [] };
     try {
-      const bundle = JSON.parse(fs.readFileSync(options.codexBundlePath || path.join(codexHome, 'cloud-config-bundle-cache.json'), 'utf8'));
+      const bundle = JSON.parse(fs.readFileSync(path.join(codexHome, 'cloud-config-bundle-cache.json'), 'utf8'));
       if (!Array.isArray(bundle?.signed_payload?.bundle?.requirements_toml?.enterprise_managed)) throw new Error('Unsupported Codex managed bundle');
       const health = enterprisePrefixRuleHealth(bundle);
       codexManaged.policy = health.degraded ? 'unreadable' : 'present';
@@ -2686,7 +2686,41 @@ function createAutoLearnManager(options = {}) {
         // ONLY on a clean walk. A Codex root or subtree that could not be listed
         // (`scope: 'root'`) may still hold the file, and "not enumerated" from a
         // walk that could not look is not "gone".
-        if (!codexFiles.some((entry) => entry.scope === 'root')) {
+        //
+        // NOR CAN A ROOT THAT IS NOT THERE (2026-10-14). The walk skips a missing
+        // root silently, so a vanished root read as clean, and its ids were
+        // dropped: the v1.6.2 audit had success in root A, `git status` exit 1
+        // in root B, B absent for two scans, and auto-safe wrote
+        // `PowerShell(git status *)` on scan 2 and revoked it on scan 3 when B
+        // came back. So a missing configured Codex root (`missingRoots`, see
+        // findJsonlFiles) blocks the drop too, and the pending ids wait for it.
+        //
+        // WHY NOT "A ROOT THAT EXISTED AND VANISHED" instead. Nothing can tell
+        // which root a pending id came from -- it is a path hash -- and the
+        // migration runs on the load just before the first rebuilding scan, so
+        // existence recorded then is the same observation that scan makes: the
+        // audit's root B was already gone. Persisting it would not have caught
+        // the reproduced case.
+        //
+        // THE ONE BENIGN ABSENCE is this Codex home's `archived_sessions/` with
+        // nothing at all at its path. Codex creates it on the first archive (on
+        // the development box it is dated 2026-09-30 14:58, six hours after
+        // `sessions/`), so a box that never archived lacks it for good, and
+        // blocking on it would bring back, on every such box, the rebuild held
+        // open forever by a deleted transcript. Its absence cannot hide a pending
+        // file: never created, nothing was archived into it; deleted, its files
+        // went with it, and a deletion is what the drop exists for. A LINK at
+        // that path whose target is missing (a junction to an unplugged drive)
+        // is the exception: that folder comes back with its files. `sessions/`
+        // is not exempt, because Codex writes every live rollout there and makes
+        // it again on its next run, so blocking costs a scan or two at most. A
+        // root the user configured and then deleted holds the rebuild until it
+        // returns or leaves the configuration: gone and unplugged look alike, and
+        // guessing "gone" is how the audit's grant-then-revoke happened.
+        const benignAbsence = normalizedPath(path.join(codexHome, 'archived_sessions'));
+        const missingCodexRoot = (Array.isArray(result.missingRoots) ? result.missingRoots : []).some((entry) =>
+          entry?.source === 'codex' && (entry.link === true || normalizedPath(entry.path) !== benignAbsence));
+        if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoot) {
           for (const id of [...pendingFiles]) if (!enumerated.has(id)) pendingFiles.delete(id);
         }
         state.codexEvidencePendingFiles = [...pendingFiles].sort();
@@ -2710,7 +2744,7 @@ function createAutoLearnManager(options = {}) {
       // otherwise healthy-looking result; taking the result down with it would
       // be a worse outcome than the blindness it reports.
       let codexHistory = { stale: false, inspected: 'skipped', reasons: [], notes: [], findings: null };
-      try { codexHistory = codexHistoryStore(); }
+      try { codexHistory = codexHistoryStore(result); }
       catch (error) {
         // `findings: null`, not zeros: a check that threw found nothing because
         // it did not look, and a zero would say it looked.
@@ -2756,7 +2790,7 @@ function createAutoLearnManager(options = {}) {
         // ordinary quiet scan. The signal is in the data -- walk failures carry
         // `scope: 'root'` -- so this only surfaces it.
         blindScan,
-        codexEvidence: codexEvidenceStatus(state),
+        // No `codexEvidence` copy: `status()` and the return below compute it live (see `scanStats`).
         codexHistoryStale: codexHistory.stale === true,
         codexHistoryInspected: codexHistory.inspected,
         codexHistoryReasons: codexHistory.reasons,

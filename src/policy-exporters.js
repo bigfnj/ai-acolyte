@@ -452,16 +452,27 @@ const ALWAYS_BROAD_WRAPPERS = new Set([
 
 // The prefix after an exec wrapper's options and operands: possibly empty, `LOOKUP` for
 // `command -v`, or null when an option is unknown or the "command" is an option.
-function execWrapperInner(base, prefix) {
-  const grammar = EXEC_WRAPPER_GRAMMAR.get(base);
+//
+// `grammar` is an EXEC_WRAPPER_GRAMMAR entry, or (since 2026-10-13) the exec half of a
+// RUNNER_GRAMMAR node below, with prefix[0] being the runner's own exec word (`run`,
+// `exec`). Two keys exist only for runners: `untilDashDash` (kubectl exec and mise exec
+// read positionals and options alike until `--`, and only what follows it is the
+// command, so a prefix with no `--` walks to its end and names none) and `module` (`uv
+// run -m X` runs `python -m X`, handed on as exactly that so the interpreter grammar
+// judges it).
+function execWrapperInner(grammar, prefix) {
   const flags = new Set(grammar.flags || []);
   const values = new Set(grammar.values || []);
   let k = 1;
   for (; k < prefix.length; k += 1) {
     const token = String(prefix[k]);
     if (token === '--') { k += 1; break; }
-    if (!token.startsWith('-') || token === '-') break;
+    if (!token.startsWith('-') || token === '-') {
+      if (grammar.untilDashDash) continue;
+      break;
+    }
     if (grammar.lookup?.test(token)) return LOOKUP;
+    if (grammar.module?.includes(token)) return ['python', '-m', ...prefix.slice(k + 1)];
     if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
     if (values.has(token)) { k += 1; continue; }
     if (grammar.fused?.test(token)) continue;
@@ -609,11 +620,403 @@ function interpreterIsBroad(base, prefix) {
   return target === undefined || target.startsWith('-');
 }
 
+// Development-environment runners, package runners and task runners (decided 2026-10-13).
+// A runner-exec form is broad until it names a concrete command, and is then judged by
+// that command, exactly as the exec wrappers above are: `["uv", "run", "pytest"]` is
+// `["pytest"]` inside the project environment, `["uv", "run", "python"]` is `["python"]`,
+// and `["docker", "exec", "ctr", "sh"]` is `["sh"]` in a container. Claude Code's own page
+// names the class (code.claude.com/docs/en/permissions, "Wrappers", read 2026-10-13):
+// "Development environment runners such as `direnv exec`, `devbox run`, `mise exec`,
+// `npx`, and `docker exec` are not in the list. Because these tools execute their
+// arguments as a command, a rule like `Bash(devbox run *)` matches whatever comes after
+// `run`, including `devbox run rm -rf .`."
+//
+// MEASURED 2026-10-13 against bceb66f with a 268-prefix synthetic probe: none of docker,
+// kubectl, uv, poetry, pipx, direnv, devbox, mise or ssh was on either wrapper table, so
+// under `includeReviewed` a reviewed `["uv", "run"]`, `["docker", "exec", "ctr", "sh"]`,
+// `["kubectl", "exec", "pod", "--", "sh"]`, `["ssh", "host"]`, and even the bare `["uv"]`
+// and `["docker"]`, each rendered as a valid prefix_rule. The learner hands over exactly
+// those two-token shapes (`uv run pytest -x` keys on `["uv", "run"]`, because `run` is in
+// its FAMILY_SUBCOMMANDS). npm, npx, uvx, pnpm, yarn, make and just were on the table but
+// had only the generic rule, so `["npx", "sh"]`, `["npm", "exec", "sh"]` and `["make",
+// "-C", "dir"]` rendered too. The probe counts are in the commit that added this block.
+//
+// A node is one of:
+//   * RUNS_ANY_COMMAND: broad at any depth, with the reason beside its use.
+//   * `{ exec }`: a runner-exec form. `exec` is an execWrapperInner grammar (flags, values,
+//     fused, operands, and the two runner keys there); the command after it is judged by
+//     wrapperIsBroad, recursively.
+//   * `{ target }`: a task runner (make, just, `npm run`, `mise run`). Its options are
+//     walked (`target` is the grammar), and the first positional, a target, recipe, script
+//     or task NAME, narrows it, as a named recipe already did (`["just", "build"]`). A
+//     prefix that ends inside the options, including right after a value option's value
+//     (`["make", "-C", "dir"]`, `["npm", "--prefix", "dir"]`), has named none and is broad,
+//     because the next token can be any target or another option.
+//   * `{ sub }`: a dispatcher. Its own `options` (a grammar, or none modelled) are walked,
+//     the next word selects a child; a word with no child is a fixed-purpose subcommand and
+//     narrow (`["docker", "ps"]`, `["uv", "sync"]`), unless `fallback: 'exec'` says the tool
+//     runs an unknown word as a command (pnpm and yarn run a package bin by name), in which
+//     case that word is judged as the command.
+// Everywhere: an option a table does not list is broad (its arity is unknown, so the
+// command could be taken for its value or its value for the command), and `info` is the
+// exact two-token forms that print and exit, as for the interpreters.
+//
+// What each table admits was read from each tool's own reference and, where one claim
+// carries the decision, its source, the same day: docker exec/run (Docker CLI reference),
+// kubectl exec (kubectl reference), mise exec (src/cli/exec.rs: the command needs `--` and
+// is exec'd directly; only `-c` goes through a shell), direnv exec
+// (internal/cmd/cmd_exec.go: `DIR COMMAND [...ARGS]`, run with syscall.Exec), devbox run
+// (internal/devbox/devbox.go, below), uv run and uvx (uv CLI reference), npm exec, npx and
+// npm config (npm docs).
+const RUNS_ANY_COMMAND = 'broad';
+// pflag clusters for docker: `-it`, `-dit`. `-u`/`--user` and `--privileged` are absent on
+// purpose, so they are unknown and broad: one changes the identity the command runs as in
+// the container, the other hands it the host's devices and capabilities, which is the
+// reason sudo is broad at any depth (ALWAYS_BROAD_WRAPPERS). docker parses no option after
+// the CONTAINER operand, so whatever follows it is the command.
+const DOCKER_EXEC = {
+  flags: ['-d', '-i', '-t', '--detach', '--interactive', '--tty'], flagPattern: /^-[dit]+$/,
+  values: ['-e', '--env', '--env-file', '-w', '--workdir', '--detach-keys'],
+  fused: /^(?:-[ew].|--(?:env|env-file|workdir|detach-keys)=)/, operands: 1,
+};
+// `docker run IMAGE COMMAND`. Absent, so broad: `-v`/`--volume`/`--mount` (a bind mount of
+// `/` makes the container root on the host), `--privileged`, `-u`/`--user`, `--entrypoint`
+// (it replaces the program the prefix appears to name), and the namespace and capability
+// switches (`--pid`, `--ipc`, `--userns`, `--uts`, `--network`, `--cap-add`, `--device`,
+// `--security-opt`). `["docker", "run", "img"]` names no command and is broad: the next
+// token can be any program in the image.
+const DOCKER_RUN = {
+  flags: ['-d', '-i', '-t', '--detach', '--interactive', '--tty', '--rm', '--init', '--read-only'],
+  flagPattern: /^-[dit]+$/,
+  values: ['-e', '--env', '--env-file', '-w', '--workdir', '--name', '-l', '--label', '--platform', '--pull',
+    '-p', '--publish'],
+  fused: /^(?:-[ewlp].|--(?:env|env-file|workdir|name|label|platform|pull|publish)=)/, operands: 1,
+};
+// `docker compose exec|run SERVICE COMMAND`, with `-T` (no TTY) beside the docker flags.
+const COMPOSE_EXEC = {
+  flags: ['-d', '-i', '-t', '-T', '--detach', '--interactive', '--tty', '--no-TTY'], flagPattern: /^-[ditT]+$/,
+  values: ['-e', '--env', '-w', '--workdir', '--index'], fused: /^(?:-[ew].|--(?:env|workdir|index)=)/, operands: 1,
+};
+const COMPOSE_RUN = {
+  ...DOCKER_RUN, flagPattern: /^-[ditT]+$/,
+  flags: [...DOCKER_RUN.flags, '-T', '--no-TTY', '--no-deps', '--service-ports', '--build', '--use-aliases',
+    '--remove-orphans', '--quiet-pull'],
+};
+const DOCKER = {
+  info: DEFAULT_INFO,
+  sub: {
+    exec: { exec: DOCKER_EXEC }, run: { exec: DOCKER_RUN },
+    container: { sub: { exec: { exec: DOCKER_EXEC }, run: { exec: DOCKER_RUN } } },
+    compose: { sub: { exec: { exec: COMPOSE_EXEC }, run: { exec: COMPOSE_RUN } } },
+  },
+};
+// kubectl parses its options anywhere before `--` (pflag, interspersed), so in `kubectl
+// exec pod ls` a later `--as=system:admin`, `--context` or `-n kube-system` is kubectl's own:
+// only `--` bounds the command, and the reference has deprecated the form without it.
+// Absent, so broad: `--as`, `--as-group`, `--as-uid` (impersonation), `--user`, `--token`,
+// `--kubeconfig`, `--context`, `--cluster` and `-s`/`--server` (who and where).
+// `run`, `debug` and `attach` start a pod or debug container on a command line, or attach to
+// a running process's stdin, and are not modelled: broad.
+const KUBECTL = {
+  info: DEFAULT_INFO,
+  options: { values: ['-n', '--namespace'], fused: /^(?:-n.|--namespace=)/ },
+  sub: {
+    exec: { exec: {
+      flags: ['-i', '-t', '-q', '--stdin', '--tty', '--quiet'], flagPattern: /^-[itq]+$/,
+      values: ['-c', '--container', '-n', '--namespace', '-f', '--filename', '--pod-running-timeout'],
+      fused: /^(?:-[cnf].|--(?:container|namespace|filename|pod-running-timeout)=)/, untilDashDash: true,
+    } },
+    run: RUNS_ANY_COMMAND, debug: RUNS_ANY_COMMAND, attach: RUNS_ANY_COMMAND,
+  },
+};
+// `uvx` and `uv tool run`: fetch a tool by name and run it. `["uvx", "python"]` runs an
+// interpreter (uv resolves `python` there), and the recursion refuses it like `["python"]`.
+const UVX_EXEC = {
+  flags: ['--isolated', '-q', '--quiet', '-v', '--verbose', '--offline', '--no-cache', '-n', '--refresh',
+    '--native-tls', '--no-config', '--no-progress', '--lfs', '--preview', '--managed-python', '--no-managed-python'],
+  flagPattern: /^-[qvn]+$/,
+  values: ['--from', '--with', '-w', '--with-editable', '--with-requirements', '--python', '-p', '--index',
+    '--default-index', '--index-url', '-i', '--extra-index-url', '--find-links', '-f', '--cache-dir', '--color',
+    '--config-file', '--directory', '--project', '--env-file', '--prerelease', '--resolution', '--exclude-newer',
+    '--refresh-package', '--upgrade-package', '-P'],
+  fused: /^(?:-[wpifP].|--(?:from|with|with-editable|with-requirements|python|index|default-index|index-url|extra-index-url|find-links|cache-dir|color|config-file|directory|project|env-file|prerelease|resolution|exclude-newer|refresh-package|upgrade-package)=)/,
+};
+// `uv run [OPTIONS] COMMAND`: the command runs in the project environment, directly.
+// `-s`/`--script` marks the command as a script path, which the recursion then reads as one.
+const UV_RUN = {
+  ...UVX_EXEC,
+  flags: [...UVX_EXEC.flags, '--no-project', '--all-extras', '--no-dev', '--frozen', '--locked', '--no-sync',
+    '--no-env-file', '-s', '--script', '--gui-script', '--active', '--exact', '--all-packages', '--no-editable',
+    '--only-dev', '--no-default-groups', '--all-groups', '--compile-bytecode'],
+  flagPattern: /^-[qvns]+$/,
+  values: [...UVX_EXEC.values.filter((value) => !['--from', '-w'].includes(value)), '--package', '--extra',
+    '--group', '--only-group', '--no-group'],
+  fused: /^(?:-[pifP].|--(?:with|with-editable|with-requirements|python|index|default-index|index-url|extra-index-url|find-links|cache-dir|color|config-file|directory|project|env-file|prerelease|resolution|exclude-newer|refresh-package|upgrade-package|package|extra|group|only-group|no-group)=)/,
+  module: ['-m', '--module'],
+};
+const UV = {
+  info: DEFAULT_INFO,
+  options: {
+    flags: ['-q', '--quiet', '-v', '--verbose', '--offline', '--no-cache', '-n', '--native-tls', '--no-config',
+      '--no-progress', '--preview'], flagPattern: /^-[qvn]+$/,
+    values: ['--directory', '--project', '--cache-dir', '--color', '--config-file'],
+    fused: /^--(?:directory|project|cache-dir|color|config-file)=/,
+  },
+  sub: { run: { exec: UV_RUN }, tool: { sub: { run: { exec: UVX_EXEC } } } },
+};
+// npm reads its config options anywhere on the line (nopt), so these are walked at the top
+// level and again after `run` or `exec`. Absent, so broad: `--script-shell` (the program
+// every script runs through), `--node-options` (NODE_OPTIONS for every node a script starts,
+// so `--require` anything), `--userconfig`/`--globalconfig` (a file that can set either),
+// and `-c`/`--call` (a shell command line). A boolean option may be followed by `true` or
+// `false`, which nopt takes as its value, hence `booleans`.
+const NPM_OPTIONS = {
+  booleans: true,
+  flags: ['-g', '--global', '-s', '--silent', '-q', '--quiet', '-d', '-dd', '-ddd', '--ws', '--workspaces',
+    '--include-workspace-root', '--if-present', '--ignore-scripts', '--json', '--offline', '--prefer-offline',
+    '--prefer-online', '--no-audit', '--no-fund', '--force', '-f', '--legacy-peer-deps', '-y', '--yes', '--no',
+    '--foreground-scripts', '--dry-run', '-D', '--save-dev', '-S', '--save', '-E', '--save-exact', '-O',
+    '--save-optional', '--no-save', '-P', '--save-prod'],
+  values: ['-C', '--prefix', '-w', '--workspace', '--loglevel', '--cache', '--registry', '--tag', '--omit',
+    '--include', '--before'],
+  fused: /^--(?:prefix|workspace|loglevel|cache|registry|tag|omit|include|before)=/,
+};
+const NPM_EXEC = {
+  ...NPM_OPTIONS, values: [...NPM_OPTIONS.values, '--package'],
+  fused: /^--(?:prefix|workspace|loglevel|cache|registry|tag|omit|include|before|package)=/,
+};
+// npx is npm exec. `-p` is `--package` here (it is `--parseable` elsewhere in npm).
+const NPX_EXEC = {
+  flags: ['-y', '--yes', '--no', '-q', '--quiet', '--ws', '--workspaces', '--include-workspace-root',
+    '--prefer-offline', '--offline', '--prefer-online'],
+  values: ['-p', '--package', '-w', '--workspace', '--registry', '--cache'],
+  fused: /^--(?:package|workspace|registry|cache)=/,
+};
+// GNU make. A cluster of no-value letters may end in a value letter (`-kC dir`, `-kCdir`);
+// `-j` and `-l` take an optional number; `NAME=VALUE` overrides a variable and names no
+// target. Absent, so broad: `-E`/`--eval`, which evaluates its argument as makefile text,
+// rules and recipes included.
+const MAKE = {
+  info: DEFAULT_INFO,
+  target: {
+    assignments: true,
+    flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
+      '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',
+      '--no-builtin-variables', '--silent', '--quiet', '--no-silent', '--touch', '--trace', '--print-directory',
+      '--no-print-directory', '--warn-undefined-variables', '--check-symlink-times', '--debug', '--output-sync',
+      '--shuffle'],
+    flagPattern: /^-[bBdeikLmnpqrRsStw]+$/,
+    values: ['--directory', '--file', '--makefile', '--include-dir', '--old-file', '--assume-old', '--what-if',
+      '--new-file', '--assume-new'],
+    valuePattern: /^-[bBdeikLmnpqrRsStw]*[CfIoW]$/,
+    optionalNumber: ['-j', '-l', '--jobs', '--load-average', '--max-load'],
+    fused: /^(?:-[bBdeikLmnpqrRsStw]*[CfIoW].|-j\d+|-l[\d.]+|-O\w*|--(?:directory|file|makefile|include-dir|old-file|assume-old|what-if|new-file|assume-new|jobs|load-average|max-load|output-sync|debug|shuffle|jobserver-style)=)/,
+  },
+};
+// just. `--set NAME VALUE` takes two tokens. Absent, so broad: `-c`/`--command` (runs a
+// command), `--shell`, `--shell-arg` and `--shell-command` (they choose what runs every
+// recipe line), `--chooser`/`--choose` (a chooser command run through a shell), and the
+// modes that run no named recipe (`--evaluate`, which runs the justfile's backticks,
+// `--edit`, `--list`, `--fmt`, `--init`, `--show`, ...).
+const JUST = {
+  info: DEFAULT_INFO,
+  target: {
+    assignments: true,
+    flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
+      '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
+    flagPattern: /^-v+$/,
+    values: ['-f', '--justfile', '-d', '--working-directory', '--dotenv-filename', '-E', '--dotenv-path', '--color',
+      '--timestamp-format'],
+    values2: ['--set'],
+    fused: /^(?:-[fdE].|--(?:justfile|working-directory|dotenv-filename|dotenv-path|color|timestamp-format)=)/,
+  },
+};
+const MISE_RUN = {
+  flags: ['-f', '--force', '-n', '--dry-run', '-r', '--raw', '--timings', '--no-timings', '-q', '--quiet', '-S',
+    '--silent', '--no-cache', '--no-prepare'],
+  values: ['-j', '--jobs', '-o', '--output'], fused: /^(?:-j\d+|--(?:jobs|output)=)/,
+};
+// `mise exec [TOOL@VERSION]... -- COMMAND`: positionals before `--` are tools, not the
+// command, and the command is exec'd directly (src/cli/exec.rs). `-c`/`--command` takes a
+// shell command line and is absent.
+const MISE_EXEC = {
+  untilDashDash: true,
+  flags: ['--raw', '--fresh-env', '--no-deps', '--deny-all', '--deny-env', '--deny-net', '--deny-read', '--deny-write'],
+  values: ['-j', '--jobs', '--allow-env', '--allow-net', '--allow-read', '--allow-write'],
+  fused: /^(?:-j\d+|--(?:jobs|allow-env|allow-net|allow-read|allow-write)=)/,
+};
+const PNPM_OPTIONS = {
+  flags: ['-r', '--recursive', '-w', '--workspace-root', '-s', '--silent', '--parallel', '--stream'],
+  values: ['-C', '--dir', '-F', '--filter', '--filter-prod'], fused: /^(?:-[CF].|--(?:dir|filter|filter-prod)=)/,
+};
+const RUNNER_GRAMMAR = new Map(Object.entries({
+  // ssh hands its arguments to the remote login shell as one command line, so naming a
+  // command narrows nothing, and the remote host is outside anything a prefix can bound.
+  ssh: RUNS_ANY_COMMAND,
+  direnv: { info: DEFAULT_INFO, sub: { exec: { exec: { operands: 1 } } } },
+  // devbox runs an ad-hoc command through `eval`: internal/devbox/devbox.go RunScript
+  // (jetify-com/devbox main, read 2026-10-13) sets `env["DEVBOX_RUN_CMD"] =
+  // strings.Join(append([]string{runCmd}, cmdArgs...), " ")` after `cmdArgs[idx] =
+  // strconv.Quote(arg)`, and the generated script body is `eval $DEVBOX_RUN_CMD`. Go's
+  // double quotes do not stop `$(...)`, backticks or `$VAR` in a POSIX shell, so `["devbox",
+  // "run", "npm", "test"]` admits `devbox run npm test '$(rm -rf .)'`. A devbox.json script
+  // is run from a joined command line too. Broad at any depth, like watch; `shell` and
+  // `global` (whose own `run` is the same) likewise.
+  devbox: { info: DEFAULT_INFO, sub: { run: RUNS_ANY_COMMAND, shell: RUNS_ANY_COMMAND, global: RUNS_ANY_COMMAND } },
+  // `mise watch` drives watchexec with options this module does not model: refused, not guessed.
+  mise: {
+    info: DEFAULT_INFO,
+    sub: { exec: { exec: MISE_EXEC }, x: { exec: MISE_EXEC }, run: { target: MISE_RUN }, r: { target: MISE_RUN },
+      watch: RUNS_ANY_COMMAND },
+  },
+  uv: UV,
+  uvx: { info: DEFAULT_INFO, exec: UVX_EXEC },
+  // poetry's own options after `run` are not modelled, so any of them is broad. `shell` starts one.
+  poetry: {
+    info: DEFAULT_INFO,
+    options: {
+      flags: ['-q', '--quiet', '-v', '-vv', '-vvv', '--verbose', '-n', '--no-interaction', '--no-plugins',
+        '--no-cache', '--ansi', '--no-ansi'],
+      values: ['-C', '--directory', '-P', '--project'], fused: /^--(?:directory|project)=/,
+    },
+    sub: { run: { exec: {} }, shell: RUNS_ANY_COMMAND },
+  },
+  pipx: {
+    info: DEFAULT_INFO,
+    sub: { run: { exec: {
+      flags: ['--no-cache', '--pypackages', '-v', '--verbose', '-q', '--quiet', '-e', '--editable', '--system-site-packages'],
+      values: ['--spec', '--python', '--index-url', '-i', '--pip-args', '--backend'],
+      fused: /^--(?:spec|python|index-url|pip-args|backend)=/,
+    } } },
+  },
+  // `npm init <initializer>` is `npm exec create-<initializer>` (npm docs, init), so it needs
+  // its target like `run`. `explore` spawns a shell in the package directory.
+  npm: {
+    info: DEFAULT_INFO, options: NPM_OPTIONS,
+    sub: {
+      exec: { exec: NPM_EXEC }, x: { exec: NPM_EXEC },
+      run: { target: NPM_OPTIONS }, 'run-script': { target: NPM_OPTIONS }, rum: { target: NPM_OPTIONS },
+      urn: { target: NPM_OPTIONS }, init: { target: NPM_OPTIONS }, create: { target: NPM_OPTIONS },
+      innit: { target: NPM_OPTIONS }, explore: RUNS_ANY_COMMAND,
+    },
+  },
+  npx: { info: DEFAULT_INFO, exec: NPX_EXEC },
+  // pnpm and yarn run a word that is neither one of their commands nor a script as a package
+  // bin (`pnpm jest`), hence `fallback: 'exec'`. pnpm's `-c`/`--shell-mode` (a shell) is
+  // absent from every pnpm table. Yarn's `exec` runs its arguments as a script in Yarn's
+  // portable shell, and `workspace`/`workspaces` re-dispatch a whole yarn command line.
+  pnpm: {
+    info: DEFAULT_INFO, options: PNPM_OPTIONS, fallback: 'exec',
+    sub: {
+      exec: { exec: { ...PNPM_OPTIONS, flags: [...PNPM_OPTIONS.flags, '--no-bail', '--report-summary', '--reverse'],
+        values: [...PNPM_OPTIONS.values, '--resume-from'] } },
+      dlx: { exec: { flags: ['-s', '--silent'], values: ['--package', '--allow-build'], fused: /^--(?:package|allow-build)=/ } },
+      run: { target: PNPM_OPTIONS }, 'run-script': { target: PNPM_OPTIONS }, create: { target: PNPM_OPTIONS },
+    },
+  },
+  yarn: {
+    info: DEFAULT_INFO, fallback: 'exec',
+    options: { flags: ['-s', '--silent'], values: ['--cwd'], fused: /^--cwd=/ },
+    sub: {
+      exec: RUNS_ANY_COMMAND, workspace: RUNS_ANY_COMMAND, workspaces: RUNS_ANY_COMMAND,
+      dlx: { exec: { flags: ['-q', '--quiet'], values: ['-p', '--package'], fused: /^--package=/ } },
+      // berry's `run` runs a script, or else a bin of that name, so it is judged as a command
+      run: { exec: {} }, create: { target: {} },
+    },
+  },
+  docker: DOCKER, podman: DOCKER,
+  kubectl: KUBECTL,
+  make: MAKE, just: JUST,
+}));
+
+// The index of the first token at or after `k` that is not one of `grammar`'s options, or
+// -1 at an option it does not list. `grammar` may be undefined: nothing is modelled, so
+// any option is unknown.
+function skipRunnerOptions(grammar, tokens, k) {
+  const flags = new Set(grammar?.flags || []);
+  const values = new Set(grammar?.values || []);
+  for (; k < tokens.length; k += 1) {
+    const token = tokens[k];
+    if (!token.startsWith('-')) return k;
+    if (flags.has(token) || grammar?.flagPattern?.test(token)) {
+      if (grammar.booleans && ['true', 'false'].includes(tokens[k + 1])) k += 1;
+      continue;
+    }
+    if (values.has(token)) { k += 1; continue; }
+    if (grammar?.fused?.test(token)) continue;
+    return -1;
+  }
+  return k;
+}
+
+// A task runner's options, then the target. True (broad) when the prefix ends before one
+// is named, or at an option the grammar does not list.
+function targetIsBroad(grammar, rest) {
+  const flags = new Set(grammar.flags || []);
+  const values = new Set(grammar.values || []);
+  let dashDash = false;
+  for (let k = 0; k < rest.length; k += 1) {
+    const token = rest[k];
+    if (!dashDash && token === '--') { dashDash = true; continue; }
+    if (dashDash || !token.startsWith('-') || token === '-') {
+      if (grammar.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
+      return false;                                                       // a named target
+    }
+    if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
+    if (grammar.optionalNumber?.includes(token)) {
+      if (/^\d+(?:\.\d+)?$/.test(rest[k + 1] ?? '')) k += 1;
+      continue;
+    }
+    if (values.has(token) || grammar.valuePattern?.test(token)) { k += 1; continue; }
+    if (grammar.values2?.includes(token)) { k += 2; continue; }
+    if (grammar.fused?.test(token)) continue;
+    return true;                                                          // an option this table does not know
+  }
+  return true;
+}
+
+function runnerIsBroad(node, rest) {
+  if (node === RUNS_ANY_COMMAND) return true;
+  if (rest.length === 1 && node.info?.has(rest[0])) return false;
+  if (node.exec) {
+    const inner = execWrapperInner(node.exec, ['', ...rest]);
+    return inner === null || inner.length === 0 || wrapperIsBroad(inner);
+  }
+  if (node.target) return targetIsBroad(node.target, rest);
+  const at = skipRunnerOptions(node.options, rest, 0);
+  if (at < 0 || at >= rest.length) return true;                          // no subcommand located
+  if (Object.hasOwn(node.sub, rest[at])) return runnerIsBroad(node.sub[rest[at]], rest.slice(at + 1));
+  return node.fallback === 'exec' ? wrapperIsBroad(rest.slice(at)) : false;
+}
+
+// The Claude half (claudePermissionIsSafe). A rule that reaches a runner-exec form is
+// refused at ANY depth, the decision 64b4eaa made for every wrapper: `Bash(uv run pytest *)`
+// would need the inner command judged by this module's Claude tables, which hold `rm` and
+// `git push` to a stricter line than a reviewed Codex prefix, so the runner's own membership
+// decides, as `Bash(npx tsc *)` and `Bash(timeout 5 rg *)` already are. A task runner's
+// rule is refused only while it names no target (`Bash(mise run *)`); a fixed subcommand
+// (`Bash(docker ps *)`, `Bash(uv sync *)`, `Bash(kubectl get *)`) is untouched.
+function reachesRunnerExec(node, rest) {
+  if (node === RUNS_ANY_COMMAND || node.exec) return true;
+  if (!node.sub) return false;
+  const at = skipRunnerOptions(node.options, rest, 0);
+  if (at < 0 || at >= rest.length) return true;
+  if (Object.hasOwn(node.sub, rest[at])) return reachesRunnerExec(node.sub[rest[at]], rest.slice(at + 1));
+  return node.fallback === 'exec';
+}
+function claudeRuleRunsAnyCommand(tokens) {
+  const node = RUNNER_GRAMMAR.get(canonicalRoot(tokens[0]).replace(/\.(?:exe|cmd)$/, ''));
+  if (!node) return false;
+  const rest = tokens.slice(1).map(String);
+  return reachesRunnerExec(node, rest) || runnerIsBroad(node, rest);
+}
+
 function wrapperIsBroad(prefix) {
   const root = canonicalRoot(prefix?.[0]);
-  if (!SHELL_WRAPPERS.has(root)) return false;
-  if (prefix.length === 1) return true;
   const base = root.replace(/\.(?:exe|cmd)$/, '');
+  const runner = RUNNER_GRAMMAR.get(base);
+  if (!SHELL_WRAPPERS.has(root) && !runner) return false;
+  if (prefix.length === 1) return true;
   if (INLINE_CODE_FLAGS.has(base) && prefix.slice(1).some((token) => INLINE_CODE_FLAGS.get(base)(String(token)))) {
     return true;
   }
@@ -629,7 +1032,7 @@ function wrapperIsBroad(prefix) {
   // ones no named command can narrow (ALWAYS_BROAD_WRAPPERS).
   if (ALWAYS_BROAD_WRAPPERS.has(base)) return true;
   if (EXEC_WRAPPER_GRAMMAR.has(base)) {
-    const inner = execWrapperInner(base, prefix);
+    const inner = execWrapperInner(EXEC_WRAPPER_GRAMMAR.get(base), prefix);
     if (inner === LOOKUP) return false;
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
   }
@@ -649,11 +1052,15 @@ function wrapperIsBroad(prefix) {
   // above). The POSIX shells used to be checked on the second token alone (`-c`, `-lc`),
   // which let `["bash", "-x"]`, `["bash", "-ec"]` and `["sh", "-s"]` render.
   if (INTERPRETER_GRAMMAR.has(base)) return interpreterIsBroad(base, prefix);
-  // Every other runner (npm, npx, uvx, make, just, java, ...): a prefix that ends in an
-  // option has not reached anything it could pin, and the next token could be the very
-  // switch that hands over code (`npx -c`, `npm --prefix x exec`), so it is broad unless it
-  // is exactly an informational form. Value options are not modelled for these roots, so
-  // `["make", "-C", "dir"]` still renders; that is recorded, not solved, here.
+  // Development-environment, package and task runners (RUNNER_GRAMMAR above), including
+  // npm, npx, uvx, pnpm, yarn, make and just, which until 2026-10-13 had only the rule below.
+  if (runner) return runnerIsBroad(runner, prefix.slice(1).map(String));
+  // Every other runner (java, duckdb, hyperfine, ...): a prefix that ends in an option has
+  // not reached anything it could pin, and the next token could be the very switch that
+  // hands over code, so it is broad unless it is exactly an informational form. Value
+  // options are not modelled for these roots. The note that stood here, "`["make", "-C",
+  // "dir"]` still renders; that is recorded, not solved", is solved by the make and just
+  // tables above (2026-10-13).
   if (String(prefix[prefix.length - 1]).startsWith('-')) {
     return !(prefix.length === 2 && DEFAULT_INFO.has(String(prefix[1])));
   }
@@ -700,7 +1107,11 @@ function candidateEligibleForCodex(candidate, options) {
   if ((!isAutoSafe(candidate) && !reviewed) || candidateIsComplex(candidate)) return null;
   const prefix = normalizePrefix(candidate);
   if (!prefix || candidateContainsSecret(candidate, prefix)) return null;
-  if (candidateIsWrapper(candidate, prefix)) {
+  // A runner root (RUNNER_GRAMMAR) is judged like a wrapper here and only here: it is not a
+  // SHELL_WRAPPERS member, because membership there would also refuse `Bash(docker ps *)`
+  // on the Claude side, at any depth (claudeRuleRunsAnyCommand draws that line instead).
+  if (candidateIsWrapper(candidate, prefix) ||
+      RUNNER_GRAMMAR.has(canonicalRoot(prefix[0]).replace(/\.(?:exe|cmd)$/, ''))) {
     if (!reviewed || wrapperIsBroad(prefix)) return null;
   }
   if (!reviewed && (candidateRiskIsUnsafe(candidate) || candidateHasAutomaticBlock(candidate) ||
@@ -1032,6 +1443,7 @@ function claudePermissionIsSafe(parsed, options) {
   const root = parsed.root.toLowerCase();
   if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
       STATE_MUTATING_ROOTS.has(root) || SHELL_WRAPPERS.has(root)) return false;
+  if (claudeRuleRunsAnyCommand(parsed.tokens)) return false;
   if (!reviewed && !prefixIsAutoSuffixClosed(parsed.tokens)) return false;
   if (parsed.tokens.length === 1) {
     const automatic = parsed.tool === 'PowerShell'

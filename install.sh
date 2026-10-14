@@ -74,6 +74,39 @@ const viaNode      = process.env.HOOK_VIA_NODE === '1';
 const shellQuoted  = (p) => (!/\s/.test(p) ? p : p.includes("'") ? `"${p}"` : `'${p}'`);
 const hookCommand  = viaNode ? `node "${hookCmd}"` : shellQuoted(hookCmd);
 
+// "async": true, since 2026-10-14. A synchronous PostToolUse hook is waited for on
+// every Bash and PowerShell call, and this one does nothing that call needs: it
+// rewrites the allow list for the NEXT prompt, prints nothing on stdout, and writes
+// one stderr line only on the rare call that changes something. On the development
+// box a bare `node -e 0` costs ~330 ms (endpoint security), so every tool call
+// waited 0.35-0.57 s on it against ~4 ms of the product's own work (v1.6.2
+// performance audit).
+//
+// The key is documented for command hooks, "If true, runs in the background
+// without blocking", and an async hook "can't block or control Claude's behavior",
+// which this one never tries to (code.claude.com/docs/en/hooks, "Run hooks in the
+// background", read 2026-10-14). It entered the CLI's schema in 2.1.15
+// (2026-01-21): absent from 2.1.14's published cli.js, present in 2.1.15's. An
+// OLDER client ignores it rather than rejecting it, and that had to be shown,
+// because before 2.1.122 a malformed hooks entry invalidated the WHOLE
+// settings.json, allow list and all (CHANGELOG 2.1.122). Every published cli.js
+// from 1.0.82 to 2.1.14 declares the command hook as a plain zod object() with
+// no .strict(), which strips an unknown key instead of failing the parse, so
+// there the hook simply stays synchronous, as before.
+//
+// Overlapping runs are safe: they contend for the policy lock, the loser exits
+// silently and the next tool call retries, and the pass is idempotent (the
+// finish() comment in bin/wildcard-perms). Known costs: `claude -p` kills a run
+// still going at teardown and the next session redoes it, and 2.1.15-2.1.118
+// wrote an empty transcript entry per async PostToolUse hook with no output
+// (fixed in 2.1.119).
+//
+// Written on a new registration, on a repoint, and on this checkout's own
+// registration when the key is ABSENT. A hook that already carries `async`, of
+// any value, is the user's choice and is left alone; recognising a registration
+// never looks at the key.
+const ASYNC_HOOK   = true;
+
 // `catch {}` here meant that ANY read failure fell through to `cfg = {}` and
 // the write below replaced the user's whole settings.json with just this hook.
 // ENOENT is the legitimate case; a SyntaxError is not — it is the zero-byte or
@@ -267,6 +300,12 @@ for (const f of found) {
     f.hook.command = hookCommand;
     notices.push(`✓ wildcard-perms hook path quoted, because a shell splits an unquoted path at its space: ${old} -> ${hookCommand}`);
   }
+  // The registration that stays, in any of the branches above, runs in the
+  // background unless it already says otherwise (ASYNC_HOOK has why).
+  if (keepers.get(f.matcher) === f && !Object.hasOwn(f.hook, 'async')) {
+    f.hook.async = ASYNC_HOOK;
+    notices.push(`✓ wildcard-perms hook now runs in the background ("async": true), so a tool call no longer waits for it: ${f.hook.command}`);
+  }
 }
 
 if (drop.size) {
@@ -283,7 +322,7 @@ if (!found.length || notices.length) {
   if (!found.length) {
     cfg.hooks.PostToolUse.push({
       matcher: 'Bash|PowerShell',
-      hooks: [{ type: 'command', command: hookCommand }],
+      hooks: [{ type: 'command', command: hookCommand, async: ASYNC_HOOK }],
     });
   }
   // The bytes as FOUND, not the object we are about to write — by now `cfg`

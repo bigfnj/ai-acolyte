@@ -240,7 +240,9 @@ list is already a fixed point, and everything authoritative is redone inside the
 the result differs. `finish()` is the one exit path and takes a single lock acquisition covering
 both the wildcarding write and the project-local drain; locking them separately left a window for
 Auto Learn to land its settings write and its claims write in between. A busy lock stays silent,
-because the next tool call fires the hook again and the pass is idempotent.
+because the next tool call fires the hook again and the pass is idempotent. That is also what
+makes it safe to register the hook with `"async": true`: its work is for the next prompt, so no
+tool call waits on it, and two runs that overlap simply contend for the lock.
 
 ### Generalization, coverage, and the local drain
 
@@ -428,8 +430,11 @@ given a method it never had.
 Both halves need Node 20 or newer, the floor CI tests: `.github/workflows/test.yml` runs the suite
 on every push and pull request across Node 20 and 22 on Linux and Windows, `fail-fast` off so a
 platform-specific failure is never hidden. On Linux and macOS `install.sh` registers the hook's
-bare path; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
-`node "<path>"`, because a bare extensionless path has no Windows association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
+bare path, quoted if it has a space in it; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
+`node "<path>"`, because a bare extensionless path has no Windows association. Both write
+`"async": true`, so Claude Code runs the hook in the background rather than holding every Bash and
+PowerShell call for it; a Claude Code older than 2.1.15 strips the key and runs it synchronously,
+as before. Neither uninstaller touches the allow list. Each removes its own checkout's hook
 and any left by a checkout that no longer exists, and names, without removing, one that belongs
 to another checkout still on disk. Cutting a GitHub Release builds and
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:

@@ -331,7 +331,7 @@ if (-not $install) {
         Add-Result 'install: repoints another checkout in place' `
         ($r.code -eq 0 -and $ptu.Count -eq 3 -and $tool.Count -eq 1 `
                 -and $ptu[1].hooks[0].command -eq $box.real -and $ptu[1].matcher -eq 'Bash|PowerShell|Edit' `
-                -and $ptu[1].hooks[0].timeout -eq 30 `
+                -and $ptu[1].hooks[0].timeout -eq 30 -and $ptu[1].hooks[0].async -eq $true `
                 -and $ptu[0].hooks[0].command -eq 'first-neighbour' -and $ptu[2].hooks[0].command -eq 'last-neighbour' `
                 -and $null -ne $after.hooks.SessionStart -and $after.model -eq 'claude-opus-5' `
                 -and $r.output.Contains($box.stale) -and $r.output -match 'repointed' -and $r.output -match 'no longer exists') `
@@ -371,10 +371,12 @@ if (-not $install) {
     }
 
     # 10. Already this checkout: no write at all, so no backup and the same bytes.
+    # The fixture carries "async": true, as the installer leaves it since
+    # 2026-10-14; without the key the install adds it (case 21), which is a write.
     $currentOnly = {
         param($real, $stale)
         '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
-            + (ConvertTo-Json $real) + ' }, { "type": "command", "command": "neighbour-tool" } ] } ] } }'
+            + (ConvertTo-Json $real) + ', "async": true }, { "type": "command", "command": "neighbour-tool" } ] } ] } }'
     }
     $box = New-SeededInstallBox -Content $currentOnly
     if (-not $box) {
@@ -528,7 +530,7 @@ if (-not $install) {
             param($real, $stale, $dir)
             $short = ($script:ShortRoot + $dir.Substring($script:SandboxRoot.Length)) -replace '\\', '/'
             '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
-                + (ConvertTo-Json ('node "' + $short + '/bin/wildcard-perms"')) + ' } ] } ] } }'
+                + (ConvertTo-Json ('node "' + $short + '/bin/wildcard-perms"')) + ', "async": true } ] } ] } }'
         }
         $box = New-SeededInstallBox -Content $shortSpelled
         if (-not $box) {
@@ -642,7 +644,7 @@ if (-not $install) {
         $bare = ($real -replace '^node\s+"?', '') -replace '"$', ''
         $cyg = '/cygdrive/' + $bare.Substring(0, 1).ToLowerInvariant() + '/' + $bare.Substring(3)
         '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
-            + (ConvertTo-Json ('node "' + $cyg + '"')) + ' } ] } ] } }'
+            + (ConvertTo-Json ('node "' + $cyg + '"')) + ', "async": true } ] } ] } }'
     }
     $box = New-SeededInstallBox -Content $cygCurrent
     if (-not $box) {
@@ -656,6 +658,55 @@ if (-not $install) {
                 -and $r.output -match 'already registered' -and $r.output -notmatch 'another checkout') `
             "identical=$identical exit=$($r.code)"
         Remove-Box $box
+    }
+
+    # 20-21. "async": true (2026-10-14; install.sh's ASYNC_HOOK comment has the
+    #    evidence that an older Claude Code strips the key rather than rejecting
+    #    the file). 20: a fresh registration carries it, in install.sh's key order,
+    #    and a second run is "already registered".
+    $box = New-Box -Source $install -NoFile
+    $r = Invoke-Box $box
+    $again = Invoke-Box $box
+    $fresh = if (Test-Path $box.settings) { @((Get-Content $box.settings -Raw | ConvertFrom-Json).hooks.PostToolUse)[0].hooks[0] } else { $null }
+    $keys = if ($fresh) { @($fresh.PSObject.Properties.Name) -join ',' } else { '' }
+    Add-Result 'install: registers the hook to run in the background' `
+    ($r.code -eq 0 -and $null -ne $fresh -and $fresh.async -eq $true -and $fresh.async -is [bool] -and $keys -eq 'type,command,async' `
+            -and $again.output -match 'already registered') `
+        "keys=$keys async=$(if ($fresh) { $fresh.async } else { 'none' })"
+    Remove-Box $box
+
+    # 21. This checkout registered WITHOUT the key gains it in place, timeout and
+    #    neighbour kept, with its own notice; one that says "async": false is the
+    #    user's choice and stays byte-for-byte.
+    $noAsync = {
+        param($real, $stale)
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json $real) + ', "timeout": 30 }, { "type": "command", "command": "neighbour-tool" } ] } ] } }'
+    }
+    $optedOut = {
+        param($real, $stale)
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json $real) + ', "async": false } ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $noAsync
+    $optBox = New-SeededInstallBox -Content $optedOut
+    if (-not $box -or -not $optBox) {
+        Add-Result 'install: adds async in place, keeps an explicit false' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $h = @((Get-Content $box.settings -Raw | ConvertFrom-Json).hooks.PostToolUse)[0].hooks
+        $keys = @($h[0].PSObject.Properties.Name) -join ','
+        $before = [System.IO.File]::ReadAllBytes($optBox.settings)
+        $rk = Invoke-Box $optBox
+        $identical = ([Convert]::ToBase64String($before) -eq [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($optBox.settings)))
+        Add-Result 'install: adds async in place, keeps an explicit false' `
+        ($r.code -eq 0 -and @($h).Count -eq 2 -and $h[0].command -eq $box.real -and $h[0].async -eq $true `
+                -and $keys -eq 'type,command,timeout,async' -and $h[1].command -eq 'neighbour-tool' `
+                -and $r.output -match 'in the background' -and $r.output -notmatch 'another checkout' `
+                -and $rk.code -eq 0 -and $identical -and $rk.output -match 'already registered') `
+            "keys=$keys optedOutIdentical=$identical"
+        Remove-Box $box
+        Remove-Box $optBox
     }
 }
 
@@ -944,6 +995,32 @@ if (-not $uninstall) {
             -and $r.output.Contains('left ' + $otherCyg)) `
         "exit=$($r.code) survivor=$($ptu[0].hooks[0].command)"
     Remove-Box $box
+
+    # 14. Recognition never reads "async" (install case 20): this checkout's
+    #    registration is removed whether the key says true, false, or is absent,
+    #    and the neighbour sharing the entry stays.
+    $asyncVariants = {
+        param($real)
+        '{ "model": "x", "hooks": { "PostToolUse": [
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json $real) + ', "async": true },
+    { "type": "command", "command": "neighbour-tool" } ] },
+  { "matcher": "Bash", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json $real) + ', "async": false } ] },
+  { "matcher": "PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json $real) + ' } ] }
+] } }'
+    }
+    $box = New-UninstallBox -Content $asyncVariants
+    if (-not $box) {
+        Add-Result 'uninstall: removes ours whatever its async key says' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        Add-Result 'uninstall: removes ours whatever its async key says' `
+        ($r.code -eq 0 -and $r.output -match 'removed 3' -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 1 `
+                -and $ptu[0].hooks[0].command -eq 'neighbour-tool') `
+            "exit=$($r.code) PostToolUse=$($ptu.Count) survivor=$($ptu[0].hooks[0].command)"
+        Remove-Box $box
+    }
 }
 
 # -- cleanup ----------------------------------------------------------------------
@@ -982,11 +1059,12 @@ Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
 # A floor, because without one this harness passes by doing nothing. An empty
 # results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
 # this would go green having verified nothing at all -- which is the failure
-# this whole script exists to prevent, turned on itself. It records 34 cases
-# today on a box with Git for Windows and an 8.3 %TEMP%, 31 with neither (16
+# this whole script exists to prevent, turned on itself. It records 37 cases
+# today on a box with Git for Windows and an 8.3 %TEMP%, 34 with neither (16
 # until the other-checkout cases landed 2026-10-13, then 23, 24 with the
 # sandbox-cleanup case, 26 with the Git Bash pair, 28 with the 8.3 pair, 34
-# with the spaced-path and /cygdrive/ cases on 2026-10-14); the floor sits
+# with the spaced-path and /cygdrive/ cases and 37 with the async ones, both on
+# 2026-10-14); the floor sits
 # below that so adding or reordering a case does not break it, but no
 # plausible breakage leaves more than a handful behind.
 $MinimumCases = 18

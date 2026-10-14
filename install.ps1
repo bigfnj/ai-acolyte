@@ -13,6 +13,13 @@ $hookCmdNormalized = $hookCmd.Replace("\", "/")
 # via `node "<path>"`. Registering the bare path makes Windows show a
 # "How do you want to open this file?" dialog on every hook fire.
 $hookCommand = 'node "' + $hookCmdNormalized + '"'
+# "async": true on the registration this script leaves, since 2026-10-14, so a
+# Bash or PowerShell tool call no longer waits ~0.35-0.57 s for a hook whose work
+# is for the NEXT prompt. A Claude Code too old to know the key (before 2.1.15)
+# strips it and runs the hook synchronously as before; install.sh's ASYNC_HOOK
+# comment has the evidence. Written only where the key is ABSENT, so a user's own
+# value, `false` included, stands.
+$asyncHook = $true
 
 $userProfile = [System.Environment]::GetFolderPath("UserProfile")
 $settingsDir = Join-Path $userProfile ".claude"
@@ -306,6 +313,12 @@ foreach ($f in $found) {
             $notices += "[OK] wildcard-perms hook path quoted, because a shell splits an unquoted path at its space: $($f.command) -> $hookCommand"
         }
     }
+    # The registration that stays, from any branch above, runs in the background
+    # unless it already says otherwise ($asyncHook has why).
+    if ($keepers[$f.matcher] -eq $f.id -and -not $f.hook.Contains("async")) {
+        $f.hook["async"] = $asyncHook
+        $notices += "[OK] wildcard-perms hook now runs in the background (""async"": true), so a tool call no longer waits for it: $($f.hook['command'])"
+    }
 }
 
 if ($drop.Count -gt 0) {
@@ -338,6 +351,7 @@ if ($found.Count -eq 0) {
             [ordered]@{
                 type = "command"
                 command = $hookCommand
+                async = $asyncHook
             }
         )
     }

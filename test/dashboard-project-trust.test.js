@@ -75,15 +75,22 @@ function fixture(t, { projectRules = true, codexConfigOnly = false } = {}) {
 //   answer -- --version, execpolicy check and app-server config/read all answer
 //   hang   -- app-server writes its pid to `pidFile` and never answers anything
 // `markFile`, when given, gets one line per invocation: proof it was run at all.
-function fakeCodex(dir, mode, pidFile, markFile) {
+// `versionGate`, when given, holds `--version` until that file exists (20 s at
+// most), so a test decides when the version probe lands instead of racing it.
+function fakeCodex(dir, mode, pidFile, markFile, versionGate) {
   fs.mkdirSync(dir, { recursive: true });
   const script = path.join(dir, 'fake-codex.js');
   fs.writeFileSync(script, `
 const args = process.argv.slice(2);
 if (${JSON.stringify(markFile || '')}) require('fs').appendFileSync(${JSON.stringify(markFile || '')}, args.join(' ') + '\\n');
-if (args[0] === '--version') { process.stdout.write('codex-cli 0.161.0\\n'); process.exit(0); }
-if (args[0] === 'execpolicy') { process.stdout.write(JSON.stringify({ decision: 'allow', matchedRules: [] }) + '\\n'); process.exit(0); }
-if (${JSON.stringify(mode)} === 'hang') {
+if (args[0] === '--version') {
+  const gate = ${JSON.stringify(versionGate || '')};
+  const answer = () => { process.stdout.write('codex-cli 0.161.0\\n'); process.exit(0); };
+  if (!gate) answer();
+  const started = Date.now();
+  setInterval(() => { if (require('fs').existsSync(gate) || Date.now() - started > 20000) answer(); }, 20);
+} else if (args[0] === 'execpolicy') { process.stdout.write(JSON.stringify({ decision: 'allow', matchedRules: [] }) + '\\n'); process.exit(0); }
+else if (${JSON.stringify(mode)} === 'hang') {
   require('fs').writeFileSync(${JSON.stringify(pidFile || '')}, String(process.pid));
   setInterval(() => {}, 1000);
 } else {
@@ -404,6 +411,11 @@ test('a codex that never answers costs the push nothing, and deactivate ends it 
     // MUTATION: make killLiveChildren call child.kill() alone again. On Windows the
     // stand-in (worker -> cmd.exe -> node) outlives the extension and this times
     // out. Confirmed 2026-10-14.
+    // On POSIX the same kill is a group signal, and it reaches the stand-in only
+    // because the worker leads its own group. MUTATION: spawn the worker with
+    // `detached: false` in nativeRpcAsync (src/codex-mcp-config.js), which is what
+    // execFile made of `detached: true` until 2026-10-14. This times out on Linux,
+    // as it did on every Ubuntu leg of CI run 38525363435. Confirmed 2026-10-14.
     await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, 5000,
       'the hung codex to be killed with the worker that started it');
     pid = null;
@@ -440,13 +452,24 @@ test('"Why did this prompt?" awaits the off-thread trust answer and then names t
 
 test('the Codex version probe a push started pushes once when it lands, and then stops', async (t) => {
   const box = fixture(t, { projectRules: false });
-  const codex = fakeCodex(path.join(box.base, 'bin'), 'answer');
+  // THE TEST DECIDES WHEN THE PROBE LANDS (2026-10-14). The precondition below
+  // assumed the stand-in's --version took longer than the 150 ms settle. On
+  // Windows it does (cmd.exe -> node); on Linux (sh exec node) it answered inside
+  // it on all three Ubuntu legs of CI run 38525363435, the probe's own push had
+  // already happened, and the precondition read the version. Run alone the file
+  // passed there too, because the first spawn was slower. Gated, the probe cannot
+  // land until the precondition has been checked.
+  const gate = path.join(box.base, 'version-gate');
+  const codex = fakeCodex(path.join(box.base, 'bin'), 'answer', null, null, gate);
   const app = harness(box, { codexExecutable: codex });
   try {
     app.open();
     await settle();
+    // MUTATION: drop the `versionGate` argument above. On Linux the stand-in
+    // answers inside the settle and this fails as it did in CI. Confirmed 2026-10-14.
     assert.equal(app.posted.at(-1).codexMemory.cli, null, 'precondition: nothing cached yet, so the line is blank');
     const before = app.posted.length;
+    fs.writeFileSync(gate, '');
     // MUTATION: drop `onSettled` from the push's dashboardCodexVersion call. The
     // line stays blank until an unrelated push and this times out. Confirmed 2026-10-14.
     await until(() => app.posted.length > before, 10000, 'the push the settled probe asks for');

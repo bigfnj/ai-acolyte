@@ -140,13 +140,32 @@ function commandLaunch(name, args = []) {
 // is not a leader there is no group with its PID (a PID is never reused while a
 // group still carries it), so that signal fails with ESRCH and the plain kill
 // below is all that happens: the same as before for every other caller.
+//
+// `detached` HAS TO GO TO spawn ITSELF (2026-10-14). execFile copies a fixed list
+// of options to spawn and drops `detached` silently, so a child started through
+// execFile is never a leader and takes the ESRCH branch: the trust worker did,
+// and every Ubuntu CI leg left its hung codex running (src/codex-mcp-config.js,
+// "SPAWN, NOT execFile").
+//
+// EXITED BY A SIGNAL IS EXITED (2026-10-14). A child ended by a signal (execFile's
+// own timeout, or any kill from outside) has `exitCode` null and `signalCode`
+// set, and by its 'exit' event Node has reaped it and closed its handle, so its
+// PID is free for the system to reuse. The extension forgets a child on 'close',
+// which follows 'exit' once its stdio drains (0.04-0.16 ms on the development
+// box after an execFile timeout, about 16 ms in the v1.6.3 confirmation audit),
+// so deactivate could reach one inside that gap. The old guard read `exitCode`
+// alone and sent taskkill /T, or a group signal, to a PID that might already be
+// someone else's. Suspected and not verified: taskkill /T finds the tree by
+// ParentProcessId, which Windows does not clear when a parent dies, so a reused
+// PID would also take every process that still names it as a parent.
 function endProcessTree(child) {
   const fallback = () => { try { child.kill(); } catch { /* already gone */ } };
   if (!child) return Promise.resolve();
   // Required here, not at the top: the CLI hook loads this module on every call,
   // and only a caller that is ending children needs a spawner.
   const childProcess = require('child_process');
-  if (!(child instanceof childProcess.ChildProcess) || !Number.isInteger(child.pid) || child.exitCode != null) {
+  if (!(child instanceof childProcess.ChildProcess) || !Number.isInteger(child.pid)
+    || child.exitCode != null || child.signalCode != null) {
     fallback();
     return Promise.resolve();
   }

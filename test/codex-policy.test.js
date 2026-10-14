@@ -701,6 +701,69 @@ test('a refresh that fails falls back to config.toml, and one abandoned mid-ask 
     'nothing was stored, so the next activation asks again');
 });
 
+// A TIMEOUT IS NOT A VERDICT (2026-10-14; src/codex-policy.js PROJECT_TRUST_RETRY_MS).
+// A cold app-server that missed the host's budget left the narrow config.toml
+// fallback cached until config.toml or the candidate folders changed, which for a
+// quiet config is the life of the window. Driven through the host's two doors with
+// a test clock, in both wordings a timeout reaches them in: the worker's own
+// deadline and the host's backstop.
+test('a timed-out trust ask stands for a minute and is then asked again, and a definitive failure stays', async (t) => {
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  let clock = 1000000;
+  const now = () => clock;
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  for (const reason of ['Codex config RPC refused: Codex config operation timed out',
+    'Codex config RPC is unavailable: the worker timed out']) {
+    const rpc = deferredRpc((cwd) => [projectLayer(path.join(cwd, '.codex'))]);
+    const options = { home: box.home, workspaceRoot: box.workspace, rpc, now };
+    const first = refreshProjectTrust(options);
+    await tick();
+    rpc.pending[0].fail(new Error(reason));
+    assert.equal(await first, true);
+    const meanwhile = codexRuleFileSet({ ...options, projectTrust: 'cached' });
+    assert.equal(meanwhile.projectPending, false, `${reason}: the fallback is the answer for now`);
+    assert.ok(meanwhile.files.includes(box.projectFile), 'read from the exact trusted entry, as before');
+    assert.ok(meanwhile.blindSpots.some((note) => /Codex could not be asked .*timed out/.test(note)));
+    assert.equal(await refreshProjectTrust(options), false, 'within the minute nothing asks again');
+    assert.equal(rpc.calls, 1);
+
+    clock += 61000;
+    // MUTATION: store a timeout like any other failure (`retryAt` always null in
+    // settleProjectTrust). The fallback stays fresh, this reads false, and Codex is
+    // never asked again. Confirmed 2026-10-14.
+    assert.equal(codexRuleFileSet({ ...options, projectTrust: 'cached' }).projectPending, true,
+      `${reason}: a minute on, the timeout no longer stands`);
+    const second = refreshProjectTrust(options);
+    await tick();
+    assert.equal(rpc.calls, 2, 'so the next push asks Codex again');
+    rpc.pending[1].answer();
+    assert.equal(await second, true);
+    clock += 10 * 60000;
+    const answered = codexRuleFileSet({ ...options, projectTrust: 'cached' });
+    assert.equal(answered.projectPending, false, 'an answer from Codex has no expiry');
+    assert.ok(answered.files.includes(box.projectFile));
+    assert.equal(answered.blindSpots.some((note) => /Codex could not be asked/.test(note)), false,
+      'and it replaced the fallback');
+  }
+
+  // The control: a failure that describes the installation stays until
+  // config.toml or the folders change, exactly as before.
+  const absent = deferredRpc(() => []);
+  const options = { home: box.home, workspaceRoot: box.workspace, rpc: absent, now };
+  const refused = refreshProjectTrust(options);
+  await tick();
+  absent.pending[0].fail(new Error('Codex config RPC refused: Codex executable is not reachable'));
+  assert.equal(await refused, true);
+  clock += 10 * 60000;
+  // MUTATION: treat every failure as transient (`timedOutAsk` always true). This
+  // reads true and a missing codex is asked about again every minute. Confirmed 2026-10-14.
+  assert.equal(codexRuleFileSet({ ...options, projectTrust: 'cached' }).projectPending, false,
+    '"not reachable" is an answer about the installation, and it stays');
+  assert.equal(await refreshProjectTrust(options), false);
+  assert.equal(absent.calls, 1);
+});
+
 test('a config.toml edited while the ask runs does not let the old answer stand for the new file', async (t) => {
   const box = projectFixture(t);
   const rpc = deferredRpc((cwd) => [projectLayer(path.join(cwd, '.codex'))]);

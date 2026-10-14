@@ -297,7 +297,7 @@ test('MCP intent rechecks exact bytes immediately before native write', t => {
 });
 
 // THE ASYNCHRONOUS READ (2026-10-14): the extension host's trust ask, launched with
-// execFile instead of spawnSync. Driven through the REAL worker against a stand-in
+// spawn instead of spawnSync. Driven through the REAL worker against a stand-in
 // codex that starts and then never answers, which is the case that blocked the host
 // for 31 s on the synchronous route. Bounded end to end by `timeoutMs`, and the
 // worker's own deadline kills its codex, so nothing is left behind even with no
@@ -347,4 +347,108 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   assert.equal(alive, false, 'the worker tree-killed the codex it started');
   await assert.rejects(api.readCodexConfigLayersAsync({ home, codexHome, codexExecutable: codex.executable,
     rpc: () => Promise.resolve([{ config: {} }]) }), /did not return layers/, 'an injected route is checked like the real one');
+});
+
+const gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };
+async function waitFor(predicate, ms) {
+  const start = Date.now();
+  while (!predicate() && Date.now() - start < ms) await new Promise(resolve => setTimeout(resolve, 50));
+  return predicate();
+}
+
+// THE TREE KILL REACHES THE CODEX ON POSIX TOO (2026-10-14). The worker's
+// `detached` went through execFile, which drops it, so the worker never led a
+// process group, endProcessTree's group signal failed with ESRCH, and the kill
+// deactivate makes ended the worker alone: on every Ubuntu CI leg of run
+// 38525363435 the hung codex outlived it. Driven through the real worker and the
+// real endProcessTree, which is deactivate's own path (killLiveChildren). The
+// worker's deadline here is its 25 s ceiling, so within the 3 s this waits only
+// the kill can have ended the codex.
+test('a tree kill of the asynchronous worker ends the codex it started, on every platform', async t => {
+  const { endProcessTree } = require('../src/exec-resolve');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-tree-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const codex = hangingCodex(t);
+  const tracked = [];
+  const outcome = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
+    timeoutMs: 40000, track: child => tracked.push(child) }).then(() => 'answered', error => error.message);
+  t.after(() => { for (const child of tracked) { try { child.kill('SIGKILL'); } catch {} } });
+  assert.ok(await waitFor(() => fs.existsSync(codex.pidFile) && fs.readFileSync(codex.pidFile, 'utf8').trim(), 10000),
+    'precondition: the worker started the stand-in codex');
+  const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.equal(gone(pid), false, 'precondition: the stand-in codex is running');
+  if (process.platform !== 'win32') {
+    // MUTATION: spawn the worker with `detached: false`, which is what execFile
+    // made of `detached: true`. No group carries the worker's PID and this throws
+    // ESRCH. Confirmed 2026-10-14.
+    assert.doesNotThrow(() => process.kill(-tracked[0].pid, 0), 'the worker leads a process group of its own');
+  }
+  await endProcessTree(tracked[0]);
+  // MUTATION: spawn the app-server `detached` in the worker. It leads a group of
+  // its own, the host's group signal misses it, and it is still running here.
+  // Confirmed 2026-10-14.
+  assert.equal(await waitFor(() => gone(pid), 3000), true, 'the codex under the worker was ended with it');
+  assert.match(await outcome, /^Codex config RPC is unavailable: Command failed: the worker exited/,
+    'a killed worker reads as unavailable, the way the execFile route reported it');
+});
+
+// A WORKER WHOSE HOST DIES ENDS ITS CODEX AND EXITS (2026-10-14). The tree kill
+// above needs a host alive to send it. Killed outright, the host sends nothing:
+// on Linux the worker (a group and session of its own, so not even a signal to
+// the host's group reaches it) ran to its 25 s deadline and then died writing its
+// answer to the dead host (EPIPE, unhandled), after its kill was armed and before
+// it fired, and the hung codex was still running 30 s after the host. The host
+// here is a real Node process running the real module, killed with SIGKILL.
+//
+// WINDOWS IS DIFFERENT, AND HAS A RESIDUAL. libuv puts every child a Node process
+// spawns in a kill-on-close job object, so the worker dies WITH its host, before
+// its own watch can run; that is pinned below. The same job allows silent
+// breakaway, so a `.cmd` codex's node, a grandchild through cmd.exe, is in neither
+// job and outlives an abrupt host death (measured 2026-10-14 with this stand-in,
+// which never reads its stdin; a codex that reads it sees EOF when the worker
+// dies). Deactivate's taskkill /T is unaffected: it runs while the host is alive.
+test('a worker whose host dies outright ends the codex it started and exits', async t => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-host-death-'));
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const workerPidFile = path.join(root, 'worker.pid');
+  // One hook, in this order: on Windows the surviving stand-in runs with its cwd in
+  // `home`, and a directory a live process stands in cannot be removed. Its hidden
+  // console host stands there for about a second more after it dies, and Node 24's
+  // rmSync does not retry that EPERM itself (measured 2026-10-14), so retry here.
+  const pids = [];
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await waitFor(() => pids.every(gone), 3000);
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const codex = hangingCodex(t);
+  const host = spawn(process.execPath, ['-e', `
+    require(${JSON.stringify(path.join(__dirname, '..', 'src', 'codex-mcp-config.js'))}).readCodexConfigLayersAsync({
+      home: ${JSON.stringify(home)}, codexHome: ${JSON.stringify(codexHome)}, workspaceRoot: ${JSON.stringify(root)},
+      codexExecutable: ${JSON.stringify(codex.executable)}, timeoutMs: 40000,
+      track: child => require('fs').writeFileSync(${JSON.stringify(workerPidFile)}, String(child.pid)),
+    }).catch(() => {});
+    setInterval(() => {}, 1000);`], { stdio: 'ignore', windowsHide: true });
+  pids.push(host.pid);
+  const readPid = file => (fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8').trim()) || null : null);
+  assert.ok(await waitFor(() => readPid(codex.pidFile) && readPid(workerPidFile), 10000),
+    'precondition: the host started the worker and the worker started the stand-in codex');
+  const worker = readPid(workerPidFile), hung = readPid(codex.pidFile);
+  pids.push(worker, hung);
+  host.kill('SIGKILL');
+  // The worker's deadline is its 25 s ceiling, so within these 5 s only noticing
+  // the host's death can have ended either of them.
+  // MUTATION: drop the worker's host watch. It waits out its deadline and this
+  // fails on Linux. Confirmed 2026-10-14.
+  assert.equal(await waitFor(() => gone(worker), 5000), true, 'the worker outlived its host');
+  if (process.platform === 'win32') return;
+  // MUTATION: drop the worker's stdout 'error' listener. The watch fires, the
+  // answer's write to the dead host is EPIPE, the worker dies of it, and the
+  // codex is still running here. Confirmed 2026-10-14.
+  assert.equal(await waitFor(() => gone(hung), 3000), true, 'the codex under the worker outlived the host');
 });

@@ -55,6 +55,13 @@ and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It
   The fix is the version probe's pattern: its own timer calling `endProcessTree`.
 - **Bare `taskkill` is resolved by libuv, which searches the cwd before PATH.** Use
   `%SystemRoot%\System32\taskkill.exe`.
+- **The trust worker's graceful timeout can lose to the host backstop on a slow machine.**
+  CI run 38535034218 failed on the Node 20 Windows job only; the same test passed on all 7 jobs
+  one push earlier. The test was `test/codex-mcp-config.test.js`, "the asynchronous layers read
+  does not block…". The worker's deadline counts from the worker's own start, so its startup is
+  not budgeted. After the deadline it still waits 1 s of grace plus a synchronous `taskkill`.
+  The graceful path therefore needs startup plus taskkill under 2 s, in the test and in
+  production alike. Both paths end the codex and both read as a timeout.
 - **On Windows, an npm `.cmd` codex can outlive an extension host that dies outright.**
   MEASURED 2026-10-14 with a stand-in that never reads stdin. A Node host killed outright (not
   deactivated) takes the trust worker with it through libuv's kill-on-close job, and the

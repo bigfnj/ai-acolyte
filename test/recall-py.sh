@@ -377,12 +377,12 @@ echo "ok: the clean verdict tests every finding it prints, not five of eight"
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1060#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1142#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1052#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1134#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.
@@ -683,6 +683,101 @@ printf '%s\n' "$FRESH_OUT" | grep -q '^FRESH RETURNED' \
   || fail "a home with no projects dir refused the gates compile, where a fresh machine is a quiet no-op: $FRESH_OUT"
 [ -e "$FRESH/.claude/gates.generated.md" ] && fail "a fresh machine's no-op gates compile wrote a gates file"
 echo "ok: a home with no ~/.claude/projects is a fresh machine, and its gates compile stays a no-op"
+
+# ------------------------------------------- gates in OTHER stores are reported, never compiled
+# The maintainer's decision (2026-10-14): the compiler reads one store (RECALL_MEMORY_DIR, else
+# the largest) and a scope:global gate anywhere else was ignored in silence. It is still never
+# compiled; --lint now names each other store, by folder name only, with how many gate memories
+# it holds that are not installed. A gate whose text the compile store already has is installed,
+# so a store copied rather than moved is not reported for it.
+#
+# Mutations, one assertion each:
+#   delete the other-store section in lint()                  -> "--lint did not report the other store"
+#   drop `body not in primary_bodies` in _other_store_gates   -> the count reads 2: "did not report"
+#   drop `or other_gates or other_unreadable` from `clean:`   -> "called a corpus ... clean"
+#   drop the unreadable append in _other_store_gates          -> "skipped in silence"
+# (The `== primary` skip is not separately falsifiable: every gate the compile store holds is in
+# primary_bodies by construction, so the dedup already zeroes it. The skip saves the re-read.)
+OHOME="$TMP/other-home"
+OP="$OHOME/.claude/projects"
+mkdir -p "$OP/main-store/memory" "$OP/side-store/memory" "$OP/quiet-store/memory" "$OHOME/.claude"
+gate() { printf -- '---\nname: %s\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **%s**\n<!-- /gate -->\n' "$1" "$2"; }
+printf -- '# Memory Index\n' > "$OP/main-store/memory/MEMORY.md"
+gate m1 'Main-store gate.' > "$OP/main-store/memory/m1.md"
+printf -- '---\nname: m2\n---\nplain\n' > "$OP/main-store/memory/m2.md"
+printf -- '---\nname: m3\n---\nplain\n' > "$OP/main-store/memory/m3.md"
+printf -- '# Memory Index\n' > "$OP/side-store/memory/MEMORY.md"
+gate s1 'Side-store gate.' > "$OP/side-store/memory/s1.md"
+gate s2 'Main-store gate.' > "$OP/side-store/memory/s2-copied.md"   # installed via main-store
+printf -- '# Memory Index\n' > "$OP/quiet-store/memory/MEMORY.md"
+printf -- '---\nname: q1\n---\nno gate here\n' > "$OP/quiet-store/memory/q1.md"
+olint()    { HOME="$OHOME" USERPROFILE="$OHOME" RECALL_MEMORY_DIR="${1:-}" "$PY" "$RECALL" --lint 2>&1; }
+ocompile() { HOME="$OHOME" USERPROFILE="$OHOME" RECALL_MEMORY_DIR="${1:-}" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1; }
+OGATES="$OHOME/.claude/gates.generated.md"
+
+OUT="$(olint)"
+printf '%s\n' "$OUT" | grep -q '1 scope:global gate memory in other memory stores -- not installed' \
+  || fail "--lint did not report the other store's gate: $OUT"
+printf '%s\n' "$OUT" | grep -qx '    side-store: 1' \
+  || fail "--lint counted a gate the compile store installs, or did not name side-store by folder: $OUT"
+printf '%s\n' "$OUT" | grep -q 'main-store:' && fail "--lint reported the compile store as another store: $OUT"
+printf '%s\n' "$OUT" | grep -q 'quiet-store' && fail "--lint reported a store that holds no gate: $OUT"
+printf '%s\n' "$OUT" | grep -q 'projects[\\/]' && fail "--lint printed a store's path, not its folder name: $OUT"
+printf '%s\n' "$OUT" | grep -q 'not compiled' && fail "the section says 'not compiled', which verify-release.ps1 fails on: $OUT"
+printf '%s\n' "$OUT" | grep -q 'clean:' && fail "--lint called a corpus with an uninstalled gate clean: $OUT"
+ocompile || fail "precondition: the compile over main-store failed"
+grep -q 'Main-store gate' "$OGATES" || fail "precondition: main-store, the largest, is the store that compiles"
+grep -q 'Side-store gate' "$OGATES" && fail "a gate in another store was compiled into the standing orders"
+echo "ok: a gate in another store is reported by folder name and count, and is not compiled"
+
+# Control: the compile is byte-identical with the other store and without it.
+WITH="$("$PY" -c "import sys;print(open(sys.argv[1],'rb').read().hex())" "$OGATES")"
+mv "$OP/side-store" "$OHOME/side-store.away"
+ocompile || fail "the compile without side-store failed"
+WITHOUT="$("$PY" -c "import sys;print(open(sys.argv[1],'rb').read().hex())" "$OGATES")"
+{ [ -n "$WITH" ] && [ "$WITH" = "$WITHOUT" ]; } || fail "the other store changed the compiled bytes"
+# Control: with no gate in any other store, there is no section at all.
+OUT="$(olint)"
+printf '%s\n' "$OUT" | grep -q 'other memory stores' && fail "--lint reported other-store gates where there are none: $OUT"
+mv "$OHOME/side-store.away" "$OP/side-store"
+echo "ok: the compile is byte-identical with and without the other store, which reports nothing once it holds no gate"
+
+# A pinned store is respected: point RECALL_MEMORY_DIR at side-store and IT compiles, while
+# main-store, now the other store, is the one reported, for its one gate side-store lacks.
+gate m4 'Main-only gate.' > "$OP/main-store/memory/m4.md"
+SIDE_W="$(cygpath -m "$OP/side-store/memory" 2>/dev/null || echo "$OP/side-store/memory")"
+OUT="$(olint "$SIDE_W")"
+printf '%s\n' "$OUT" | grep -qx '    main-store: 1' \
+  || fail "under RECALL_MEMORY_DIR the unpinned store was not the one reported: $OUT"
+printf '%s\n' "$OUT" | grep -q 'side-store:' && fail "the pinned store was reported as another store: $OUT"
+ocompile "$SIDE_W" || fail "the compile over the pinned side-store failed"
+grep -q 'Side-store gate' "$OGATES" || fail "RECALL_MEMORY_DIR did not decide which store compiles"
+grep -q 'Main-only gate' "$OGATES" && fail "under the pin, a gate in the unpinned store was compiled"
+echo "ok: RECALL_MEMORY_DIR decides the compile store, and the census reports the rest"
+
+# A store the census cannot read is named, not skipped in silence. In-process, as above, so no
+# chmod is needed.
+UNREAD="$(RECALL_MEMORY_DIR= "$PY" - "$RECALL" "$OHOME" 2>&1 <<'PY'
+import importlib.util, os, sys
+recall, home = sys.argv[1:3]
+os.environ.pop("RECALL_MEMORY_DIR", None)
+os.environ["HOME"] = os.environ["USERPROFILE"] = home
+s = importlib.util.spec_from_file_location("recall", recall)
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+quiet = os.path.join(home, ".claude", "projects", "quiet-store", "memory")
+key = lambda p: os.path.normcase(os.path.abspath(p))
+real = os.listdir
+def listdir(p="."):
+    if key(p) == key(quiet):
+        raise PermissionError(13, "Permission denied", p)
+    return real(p)
+os.listdir = listdir
+m.lint()
+PY
+)"
+printf '%s\n' "$UNREAD" | grep -qx '    quiet-store: could not be read' \
+  || fail "an unreadable other store was skipped in silence: $UNREAD"
+echo "ok: an other store the census cannot read is named as such"
 
 # ------------------------------------------------ rank() must refuse a partial parts tuple
 # Passing idx+names with lex=None silently returned pure-vector ordering at exactly half score

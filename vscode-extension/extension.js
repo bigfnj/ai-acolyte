@@ -59,7 +59,7 @@ const {
 // memoryReport() also backs the dashboard Memory card (stats only, still pure Node).
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
-const { MemoryLint, memoryReport, discoverDirs, cfg: memoryConf } = require('./memoryLint');
+const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, cfg: memoryConf } = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP_DIR    = path.join(os.homedir(), '.claude', 'backups');
@@ -1133,14 +1133,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:362-370#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:461-469#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:661-665#conf.enabled), and test/memory-lint-watchers.test.js:425#lintMemory
+    // (memoryLint.js:760-764#conf.enabled), and test/memory-lint-watchers.test.js:429#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:590#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:689#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1376,7 +1376,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5501#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5539#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1631,7 +1631,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5531#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5569#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -3857,6 +3857,18 @@ function gatesCardData(precomputed = null) {
       gateSources: (() => {
         try { return (precomputed || memoryReport()).report?.gateSources; } catch { return undefined; }
       })(),
+      // Gate memories in the OTHER stores, which never compile (memoryLint.js otherStoreGates,
+      // the maintainer's decision of 2026-10-14). `dir` is the store compileGates pins as
+      // RECALL_MEMORY_DIR, so this follows memory.dir when it is set and the largest store
+      // when it is not, and cannot change which store compiles. Null when there is no
+      // compile store to compare against, or the census fails: one line lost, not the card.
+      otherStores: (() => {
+        try {
+          const memory = precomputed || memoryReport();
+          if (!memory?.dir || !memory.report) return null;
+          return otherStoreGates(memory.dir, memory.report.gateBodies || []);
+        } catch { return null; }
+      })(),
       agents: states.filter((state) => state.on).map((state) => state.agent),
       targets: states.map((state) => state.agent),
       errors: states.filter((state) => state.error).map((state) => state.agent + ': ' + state.error),
@@ -4685,6 +4697,7 @@ class WildcardingViewProvider {
       <div class="card">
         <div class="status"><span id="mgdot" class="dot idle"></span><span id="mgtext">Memory gates</span></div>
         <div class="muted sub" id="mgsub"></div>
+        <div class="muted sub" id="mgother" hidden></div>
         <button class="managed-action" id="gatesBtn">Compile and add</button>
       </div>
     </div>
@@ -5282,6 +5295,31 @@ class WildcardingViewProvider {
         ? 'your standing orders, resident every session · ' + g.path
         : g.count + ' compiled gate' + (g.count === 1 ? '' : 's') + ' waiting to be installed';
     if (g.errors?.length) $('mgsub').textContent += ' · ' + g.errors.join(' · ');
+    // Gate memories in the other stores, which never compile. Folder names only.
+    const other = g.otherStores;
+    const otherLine = $('mgother');
+    const unread = (other && other.unreadable) || [];
+    if (other && (other.count || unread.length)) {
+      const parts = [];
+      if (other.count) {
+        parts.push(other.count + (other.count === 1
+          ? ' gate in another memory store is not installed: '
+          : ' gates in other memory stores are not installed: ')
+          + other.stores.map((store) => store.name + ' (' + store.count + ')').join(', '));
+      }
+      if (unread.length) {
+        parts.push(unread.length + ' other memory store' + (unread.length === 1 ? '' : 's')
+          + ' could not be read: ' + unread.join(', '));
+      }
+      otherLine.textContent = parts.join(' · ');
+      otherLine.title = 'Only one memory store compiles: memory.dir when it is set, else the store '
+        + 'with the most memory files. Move a gate memory into that store to install it.';
+      otherLine.hidden = false;
+    } else {
+      otherLine.textContent = '';
+      otherLine.title = '';
+      otherLine.hidden = true;
+    }
     const btn = $('gatesBtn');
     // Nothing compiled AND no memory the compiler could take: offering "Compile
     // gates" here spent a modal, a compile and a warning toast to end up saying

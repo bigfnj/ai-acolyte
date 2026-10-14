@@ -305,9 +305,11 @@ if (-not (Test-Path $py)) {
 
     # The positive check the four negatives rest on, and it replaces one that could not hold.
     #
-    # `clean:` prints only when the corpus has NO finding of ANY kind (memory/recall.py:1009-1011#over_budget):
+    # `clean:` prints only when the corpus has NO finding of ANY kind (memory/recall.py:1032-1035#over_budget):
     # not over budget, not over the entry ceiling, no over-long index line, no broken link, no
-    # unresolved [[link]], no unscoped feedback, no gate edited without a recompile. A corpus
+    # unresolved [[link]], no unscoped feedback, no gate edited without a recompile, no gate left
+    # in another memory store (reported, never compiled, and worded so the 'not compiled' check
+    # below does not fire on it: the user's own arrangement is not a release defect). A corpus
     # carrying one long index line is perfectly releasable and still never prints it, so on
     # this box the one positive check failed on every single run -- which is how a check gets
     # read as noise and then ignored. These two lines are printed UNCONDITIONALLY by _lint

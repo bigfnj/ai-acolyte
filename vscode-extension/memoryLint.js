@@ -30,10 +30,20 @@ const MEMORY_INDEX = 'MEMORY.md';
 // lone `<!-- gate -->` that is prose describing this very pipeline.
 const GATE_BEGIN = '<!-- gate -->';
 const GATE_END = '<!-- /gate -->';
-const GATE_BLOCK = new RegExp(`${escapeRe(GATE_BEGIN)}[\\s\\S]*?${escapeRe(GATE_END)}`);
+const GATE_BLOCK = new RegExp(`${escapeRe(GATE_BEGIN)}([\\s\\S]*?)${escapeRe(GATE_END)}`);
 
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The gate block a memory contributes, trimmed, or null. recall.py's _gate_body: `scope:
+// global` in the frontmatter plus a PAIRED block. One rule for the primary's gate count and
+// for the other stores' census below, as recall.py shares one rule between its compiler and
+// its --lint census.
+function gateBody(raw) {
+  if (frontmatter(raw, 'scope') !== 'global') return null;
+  const m = GATE_BLOCK.exec(raw);
+  return m ? m[1].trim() : null;
 }
 
 // One frontmatter scalar, scoped to the real `---` block. recall.py's _fm, transliterated.
@@ -313,8 +323,11 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1061#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1143#EXCLUDE excludes it.
   let gateSources = 0;
+  // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
+  // tell a gate this store already installs from one it does not. Free for the same reason.
+  const gateBodies = [];
   for (const f of files) {
     let raw;
     try { raw = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
@@ -323,8 +336,10 @@ function fullReport(dir, conf, known = null) {
     valid.add(norm(f.slice(0, -3)));
     const nm = raw.slice(0, 400).match(/^\s*name:\s*(.+)$/m);
     if (nm) valid.add(norm(nm[1].trim().replace(/^["']|["']$/g, '')));
-    if (f !== MEMORY_INDEX && frontmatter(raw, 'scope') === 'global' && GATE_BLOCK.test(raw)) {
+    const body = f !== MEMORY_INDEX ? gateBody(raw) : null;
+    if (body !== null) {
       gateSources += 1;
+      gateBodies.push(body);
     }
   }
   // AFTER the corpus pass, not before it, so `indexText` and `files` are both available:
@@ -338,7 +353,91 @@ function fullReport(dir, conf, known = null) {
   const unresolved = [...new Set(
     [...stripCode(all).matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]).filter((l) => !valid.has(norm(l)))
   )].sort();
-  return { ...fast, fileCount: files.length, unresolved, gateSources };
+  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies };
+}
+
+// ── Gates in the OTHER memory stores: reported, never compiled ────────────────────
+//
+// The maintainer's decision (2026-10-14), the dashboard half of recall.py's --lint census
+// (recall.py _other_store_gates). Only one store compiles: memory.dir when the user sets it,
+// else the store with the most memory files, and extension.js pins that store as
+// RECALL_MEMORY_DIR for every compile. A `scope: global` gate in any other store used to be
+// ignored in silence. It is still not compiled, because a second store must not be able to
+// install a standing order without anyone choosing it; the gates card says how many there are.
+//
+// `primaryDir` is the compile store (memoryReport().dir) and `primaryBodies` the gate texts
+// it compiles (its report's gateBodies). A gate whose text the compile store already has is
+// installed, so a store copied rather than moved is not reported for it. Every
+// ~/.claude/projects/*/memory directory is a candidate, with or without a MEMORY.md, because
+// recall.py accepts either. Folder names only, never paths.
+//
+// The dashboard asks on every push, so the answer is held for CENSUS_MAX_AGE_MS for the same
+// compile store and gate texts, and a census that does run reads a file only when its
+// (mtime, size) changed. Measured in one process on the development box (2026-10-14,
+// indicative, not the record's fresh-process protocol): 4 other stores of 50 files each cost
+// 207 ms cold and 12.5 ms min / 15.7 ms p50 warm, which is one stat per file; far too much
+// to pay on the extension host thread per push. With the window, a push inside it costs no
+// fs call at all, and the line is at most a minute behind an edit in another store. On a
+// one-store install a census costs one listing of ~/.claude/projects and nothing else.
+const CENSUS_MAX_AGE_MS = 60 * 1000;
+const otherGateMemo = new Map();   // file -> { mtimeMs, size, body }
+let lastCensus = null;             // { key, at, result }
+
+function samePath(a, b) {
+  const key = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  return key(a) === key(b);
+}
+
+const copyCensus = (result) => ({ count: result.count, stores: result.stores.map((store) => ({ ...store })),
+  unreadable: [...result.unreadable] });
+
+function otherStoreGates(primaryDir, primaryBodies = [], { maxAgeMs = CENSUS_MAX_AGE_MS, now = Date.now } = {}) {
+  const key = JSON.stringify([primaryDir ? path.resolve(primaryDir) : null, primaryBodies]);
+  if (lastCensus && lastCensus.key === key && now() - lastCensus.at < maxAgeMs) return copyCensus(lastCensus.result);
+  const result = takeCensus(primaryDir, primaryBodies);
+  lastCensus = { key, at: now(), result };
+  return copyCensus(result);
+}
+
+function takeCensus(primaryDir, primaryBodies) {
+  const known = new Set(primaryBodies);
+  const stores = [];
+  const unreadable = [];
+  const seen = new Set();
+  let projects;
+  try { projects = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true }); }
+  catch { return { count: 0, stores, unreadable }; }
+  for (const entry of projects) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(PROJECTS_DIR, entry.name, 'memory');
+    if (primaryDir && samePath(dir, primaryDir)) continue;
+    let names;
+    try { names = fs.readdirSync(dir); }
+    catch (err) {
+      // No memory dir under this project is the common case, not a fault.
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') unreadable.push(entry.name);
+      continue;
+    }
+    let count = 0;
+    for (const name of names) {
+      if (!name.endsWith('.md') || name === MEMORY_INDEX) continue;
+      const file = path.join(dir, name);
+      let stat;
+      try { stat = fs.statSync(file); } catch { continue; }
+      seen.add(file);
+      let hit = otherGateMemo.get(file);
+      if (!hit || hit.mtimeMs !== stat.mtimeMs || hit.size !== stat.size) {
+        let raw;
+        try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
+        hit = { mtimeMs: stat.mtimeMs, size: stat.size, body: gateBody(raw) };
+        otherGateMemo.set(file, hit);
+      }
+      if (hit.body !== null && !known.has(hit.body)) count += 1;
+    }
+    if (count) stores.push({ name: entry.name, count });
+  }
+  for (const file of otherGateMemo.keys()) if (!seen.has(file)) otherGateMemo.delete(file);
+  return { count: stores.reduce((sum, store) => sum + store.count, 0), stores, unreadable };
 }
 
 class MemoryLint {
@@ -749,4 +848,4 @@ function memoryReport() {
 // production importer either, but test/memory-line-cap.test.js and
 // test/memory-lint-watchers.test.js call them directly, and those calls are the
 // mutation-killing assertions for the line cap and the store-selection rule.
-module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport };
+module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates };

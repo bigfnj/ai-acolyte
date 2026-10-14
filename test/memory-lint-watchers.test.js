@@ -15,7 +15,9 @@ const Module = require('node:module');
 
 function disposable() { return { dispose() {} }; }
 
-function harness(tempHome, overrides = {}) {
+// `fsHooks[name](target)` may return an Error for memoryLint's own fs call to throw, so a
+// test can make one directory unreadable without changing its ACL.
+function harness(tempHome, overrides = {}, fsHooks = {}) {
   const created = [];
   const statusText = [];
   // Command ids are recorded, not discarded: whether a command is registered
@@ -99,6 +101,8 @@ function harness(tempHome, overrides = {}) {
   for (const name of Object.keys(calls)) {
     countingFs[name] = (target, ...rest) => {
       calls[name].push(String(target));
+      const injected = fsHooks[name] && fsHooks[name](String(target));
+      if (injected) throw injected;
       return fs[name](target, ...rest);
     };
   }
@@ -640,7 +644,7 @@ test('a gate source is counted only when recall.py would compile it', () => {
   const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
   const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
 
-  // The index itself. recall.py:1061#EXCLUDE skips EXCLUDE before it looks at anything
+  // The index itself. recall.py:1143#EXCLUDE skips EXCLUDE before it looks at anything
   // else, so a MEMORY.md carrying frontmatter and a gate block is still not a gate source.
   fs.writeFileSync(path.join(dir, 'MEMORY.md'),
     fm('global') + '# Memory Index\n\n' + block, 'utf8');
@@ -669,6 +673,188 @@ test('a gate source is counted only when recall.py would compile it', () => {
     h.restore();
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
+});
+
+// ── Gates in the OTHER stores: reported, never compiled (2026-10-14) ──────────────────
+// Only one store compiles, the one memoryReport() picks (memory.dir, else the largest), which
+// extension.js pins as RECALL_MEMORY_DIR. A scope:global gate anywhere else was ignored in
+// silence. otherStoreGates reports those for the gates card, by folder name, and counts only
+// gates whose text the compile store does not already install.
+function otherStoresFixture() {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-other-'));
+  const projects = path.join(tempHome, '.claude', 'projects');
+  const store = (name, files, index = true) => {
+    const dir = path.join(projects, name, 'memory');
+    fs.mkdirSync(dir, { recursive: true });
+    if (index) fs.writeFileSync(path.join(dir, 'MEMORY.md'), '# Memory Index\n', 'utf8');
+    for (const [file, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, file), text, 'utf8');
+    return dir;
+  };
+  const gate = (text, scope = 'global') => `---\nmetadata:\n  scope: ${scope}\n---\n<!-- gate -->\n- **${text}**\n<!-- /gate -->\n`;
+  const plain = '---\nname: plain\n---\nnothing resident\n';
+  const main = store('main-store', { 'm1.md': gate('Main gate.'), 'm2.md': plain, 'm3.md': plain, 'm4.md': plain });
+  const side = store('side-store', {
+    's1.md': gate('Side gate.'),
+    's2-copied.md': gate('Main gate.'),          // the compile store installs this text already
+    's3-project.md': gate('Project gate.', 'project'),   // not scope: global, so never a gate
+  });
+  const bare = store('bare-store', { 'b1.md': gate('Bare gate.') }, false);   // no MEMORY.md: recall.py takes it
+  const quiet = store('quiet-store', { 'q1.md': plain });
+  fs.mkdirSync(path.join(projects, 'no-memory-project'), { recursive: true });
+  return { tempHome, projects, main, side, bare, quiet, gate };
+}
+
+const byName = (result) => ({ ...result, stores: [...result.stores].sort((a, b) => a.name.localeCompare(b.name)) });
+
+test('gates in other stores are counted by folder name, never the compile store, and a copied gate is not', () => {
+  const f = otherStoresFixture();
+  const h = harness(f.tempHome);
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    assert.equal(dir, f.main, 'precondition: the largest store is the compile store');
+    assert.deepEqual(report.gateBodies, ['- **Main gate.**'], 'its gate texts travel with the report');
+    assert.deepEqual(byName(h.loaded.otherStoreGates(dir, report.gateBodies)), {
+      count: 2,
+      stores: [{ name: 'bare-store', count: 1 }, { name: 'side-store', count: 1 }],
+      unreadable: [],
+    });
+
+    // Control: once the other stores hold no gate of their own, there is nothing to report.
+    // (`maxAgeMs: 0` skips the one-minute answer cache, which has its own test below.)
+    fs.rmSync(path.join(f.side, 's1.md'));
+    fs.rmSync(path.join(f.bare, 'b1.md'));
+    assert.deepEqual(h.loaded.otherStoreGates(dir, report.gateBodies, { maxAgeMs: 0 }),
+      { count: 0, stores: [], unreadable: [] });
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+
+  // MUTATION: drop `&& !known.has(hit.body)` in otherStoreGates and side-store counts 2.
+  // MUTATION: test GATE_BLOCK alone in gateBody (drop the scope check) and side-store counts 2.
+});
+
+test('a pinned memory.dir is the compile store, and the census reports the rest around it', () => {
+  const f = otherStoresFixture();
+  fs.writeFileSync(path.join(f.main, 'm5.md'), f.gate('Main-only gate.'), 'utf8');
+  const h = harness(f.tempHome, { 'memory.dir': f.side });
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    assert.equal(dir, f.side, 'precondition: memory.dir decides, not size');
+    assert.deepEqual(byName(h.loaded.otherStoreGates(dir, report.gateBodies)), {
+      count: 2,
+      // main-store's "Main gate." is side-store's copy, so only its Main-only gate counts.
+      stores: [{ name: 'bare-store', count: 1 }, { name: 'main-store', count: 1 }],
+      unreadable: [],
+    });
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+});
+
+test('an other store that cannot be listed is named, and a project with no memory dir is not', () => {
+  const f = otherStoresFixture();
+  const quiet = path.resolve(f.quiet);
+  const h = harness(f.tempHome, {}, {
+    readdirSync: (target) => (path.resolve(target) === quiet
+      ? Object.assign(new Error(`EACCES: permission denied, scandir '${target}'`), { code: 'EACCES' }) : null),
+  });
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    const result = h.loaded.otherStoreGates(dir, report.gateBodies);
+    assert.deepEqual(result.unreadable, ['quiet-store']);
+    assert.equal(result.count, 2, 'the readable stores are still counted');
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+
+  // MUTATION: drop `unreadable.push(entry.name)` in otherStoreGates and `unreadable` is [].
+});
+
+test('the census reads a file only when it changed, and costs one listing on a one-store install', () => {
+  const f = otherStoresFixture();
+  const h = harness(f.tempHome);
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    const fresh = { maxAgeMs: 0 };   // past the answer cache, so the per-file memo is what is tested
+    h.loaded.otherStoreGates(dir, report.gateBodies, fresh);
+    h.resetCalls();
+    assert.equal(h.loaded.otherStoreGates(dir, report.gateBodies, fresh).count, 2);
+    assert.ok(h.calls.statSync.length > 0, 'precondition: the census really ran again');
+    assert.equal(h.calls.readFileSync.length, 0, 'an unchanged store is answered from the memo');
+    assert.equal(h.countsFor('readdirSync', 'main-store' + path.sep + 'memory'), 0, 'the compile store is never listed');
+
+    // A content change is seen: the gate in s1 is edited into a plain note.
+    fs.writeFileSync(path.join(f.side, 's1.md'), '---\nname: s1\n---\nno longer a gate, and longer than before\n', 'utf8');
+    h.resetCalls();
+    assert.equal(h.loaded.otherStoreGates(dir, report.gateBodies, fresh).count, 1);
+    assert.deepEqual(h.calls.readFileSync.map((p) => path.basename(p)), ['s1.md'], 'and only that file is re-read');
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+
+  const solo = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-other-solo-'));
+  const c = makeCorpus(solo, 'd---solo');
+  c.write('MEMORY.md', '# Memory Index\n');
+  c.write('one.md', '---\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- x\n<!-- /gate -->\n');
+  const h2 = harness(solo);
+  try {
+    const { dir, report } = h2.loaded.memoryReport();
+    h2.resetCalls();
+    assert.deepEqual(h2.loaded.otherStoreGates(dir, report.gateBodies), { count: 0, stores: [], unreadable: [] });
+    assert.deepEqual(Object.fromEntries(Object.entries(h2.calls).map(([k, v]) => [k, v.length])),
+      { readFileSync: 0, existsSync: 0, readdirSync: 1, statSync: 0 },
+      'one listing of ~/.claude/projects, and the compile store skipped without a call');
+  } finally {
+    h2.restore();
+    fs.rmSync(solo, { recursive: true, force: true });
+  }
+
+  // MUTATION: re-read every file (drop the `hit.mtimeMs !== stat.mtimeMs ...` memo test) and
+  // the first readFileSync count is 3. Drop the `samePath(dir, primaryDir)` skip and the
+  // compile store is listed: the one-store budget reads readdirSync 2 and statSync 1.
+});
+
+test('a census inside the minute is answered with no fs call, and a new compile store is not', () => {
+  const f = otherStoresFixture();
+  const h = harness(f.tempHome);
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    let clock = 1_000_000;
+    const now = () => clock;
+    const first = h.loaded.otherStoreGates(dir, report.gateBodies, { now });
+    assert.equal(first.count, 2);
+    first.stores.length = 0;   // a caller cannot reach into the cached answer
+    h.resetCalls();
+    clock += 59_000;
+    const cached = h.loaded.otherStoreGates(dir, report.gateBodies, { now });
+    assert.deepEqual([cached.count, cached.stores.length], [2, 2], 'the cached answer is whole');
+    assert.deepEqual(Object.values(h.calls).map((list) => list.length), [0, 0, 0, 0],
+      'a push inside the window costs no fs call at all');
+
+    // Past the window it looks again.
+    fs.rmSync(path.join(f.bare, 'b1.md'));
+    clock += 2_000;
+    assert.equal(h.loaded.otherStoreGates(dir, report.gateBodies, { now }).count, 1);
+    // Inside the window, new gate texts in the compile store are a new question: with none,
+    // side-store's copied gate is no longer installed, so it counts.
+    assert.deepEqual(h.loaded.otherStoreGates(dir, [], { now }).stores.find((s) => s.name === 'side-store'),
+      { name: 'side-store', count: 2 });
+    // And a different compile store is never answered from the old one's census.
+    h.resetCalls();
+    assert.equal(h.loaded.otherStoreGates(f.side, [], { now }).stores.some((s) => s.name === 'main-store'), true);
+    assert.ok(h.calls.readdirSync.length > 0);
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+
+  // MUTATION: drop the cache check in otherStoreGates and the in-window push makes calls.
+  // Key it on the store alone (drop primaryBodies from `key`) and side-store reads 1, not 2.
+  // Return `lastCensus.result` uncopied and the cached answer has no stores: the caller emptied it.
 });
 
 // The two watcher sets in extension.js hang off this hook rather than a third timer of

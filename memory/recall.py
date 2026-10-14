@@ -938,6 +938,29 @@ def lint():
             print(f"    {s}")
         print()
 
+    # Gate memories in the OTHER stores, which never compile (see _other_store_gates). Worded
+    # without the phrase "not compiled" on purpose: scripts/verify-release.ps1 fails its
+    # "every standing order is compiled" check on that phrase, and a gate the user keeps in a
+    # second store is the user's arrangement, not a defect in the release being verified. It
+    # is still a finding here, and `clean:` below counts it, because the line names a fix.
+    primary_bodies = set()
+    for s in gateable:
+        body = _gate_body(texts[s])
+        if body is not None:
+            primary_bodies.add(body)
+    other_gates, other_unreadable = _other_store_gates(primary_bodies)
+    if other_gates or other_unreadable:
+        total_other = sum(n for _, n in other_gates)
+        print(f"  {total_other} scope:global gate memor{'y' if total_other == 1 else 'ies'} in other "
+              f"memory stores -- not installed, because only this")
+        print("  store compiles. Move one into this store to install it, or point RECALL_MEMORY_DIR")
+        print("  (the extension's memory.dir) at its store:")
+        for slug, n in other_gates:
+            print(f"    {slug}: {n}")
+        for slug in other_unreadable:
+            print(f"    {slug}: could not be read")
+        print()
+
     # Reference material wearing a standing order's clothes. These only matter once you are
     # already on the subject, so they belong behind a recall query. Reported and never
     # acted on: demoting a memory with no trigger pointing at it makes it invisible rather
@@ -1007,7 +1030,8 @@ def lint():
     # decorative. If a finding is worth a line above, it is worth a bit here -- and if it is
     # not (demote), the message must not claim it.
     if not (over_budget or over_ceiling or over or broken or unresolved
-            or no_scope or no_gate or gate_no_scope or index_gate or stale_gates):
+            or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
+            or other_gates or other_unreadable):
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
 
 
@@ -1040,6 +1064,64 @@ def _installed_gate_bytes():
         return 0
 
 
+def _gate_body(text):
+    """The gate block a memory contributes, stripped, or None: `scope: global` in the
+    frontmatter plus a paired GATE_BLOCK. The one selection rule, shared by the compiler and
+    by --lint's census of the OTHER stores, so the census cannot count a memory the compiler
+    would skip, or skip one it would take."""
+    if _fm(text, "scope") != "global":
+        return None
+    m = GATE_BLOCK.search(text)
+    return m.group(1).strip() if m else None
+
+
+# Gates in memory stores OTHER than MEMORY_DIR: reported, never compiled (the maintainer's
+# decision, 2026-10-14). Discovery takes ONE store, the configured one or the largest, and a
+# `scope: global` gate in any other store used to be ignored in silence: the second
+# workstation's only real gate sat in its 41-file store while the 48-file store won. Compiling
+# from every store is not the fix, for the reason _search_dirs records: a gate is a standing
+# order, and a second corpus must not be able to install one silently. So --lint names each
+# other store and how many gate memories it holds that are not installed, and the dashboard's
+# gates card says the same (vscode-extension/memoryLint.js otherStoreGates).
+#
+# "Not installed" means the block's text is not one this store compiles. A store copied
+# rather than moved holds the same gates as the primary, and counting those would report
+# standing orders that ARE installed. Folder names only, never paths: the line can be pasted.
+def _other_store_gates(primary_bodies):
+    """([(folder, count)], [unreadable folder]) over ~/.claude/projects/*/memory, MEMORY_DIR
+    excluded, counting memories whose gate block is not among `primary_bodies`."""
+    root = os.path.expanduser(r"~/.claude/projects")
+    try:
+        slugs = sorted(os.listdir(root))
+    except OSError:
+        return [], []   # no projects dir, or one discovery has already warned about
+    primary = os.path.normcase(os.path.abspath(MEMORY_DIR))
+    found, unreadable = [], []
+    for slug in slugs:
+        store = os.path.join(root, slug, "memory")
+        if not os.path.isdir(store) or os.path.normcase(os.path.abspath(store)) == primary:
+            continue
+        try:
+            names = sorted(os.listdir(store))
+        except OSError:
+            unreadable.append(slug)
+            continue
+        count = 0
+        for name in names:
+            if not name.endswith(".md") or name in EXCLUDE:
+                continue
+            try:
+                text = open(os.path.join(store, name), encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            body = _gate_body(text)
+            if body is not None and body not in primary_bodies:
+                count += 1
+        if count:
+            found.append((slug, count))
+    return found, unreadable
+
+
 def _compile_gates_text(texts=None):
     """The compiled gates file as bytes, WITHOUT writing it. Pure over the corpus, so both
     the compiler and the lint drift-check produce identical output from the same memories --
@@ -1065,11 +1147,9 @@ def _compile_gates_text(texts=None):
         if text is None:
             text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8",
                         errors="replace").read()
-        if _fm(text, "scope") != "global":
-            continue
-        m = GATE_BLOCK.search(text)
-        if m:
-            blocks.append((name, m.group(1).strip()))
+        body = _gate_body(text)
+        if body is not None:
+            blocks.append((name, body))
 
     body = "\n".join(b for _, b in blocks)
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]

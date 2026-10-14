@@ -248,7 +248,7 @@ test('an index inside the line cap says nothing about lines at all', () => {
   }
 });
 
-// memoryLint.js pickPrimaryDir and recall.py:116#_discover_memory_dir answer the same
+// memoryLint.js pickPrimaryDir and recall.py:123#_discover_memory_dir answer the same
 // question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
 // sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.
 // Until these two tests existed, every test that reached pickPrimaryDir had at most one
@@ -644,7 +644,7 @@ test('a gate source is counted only when recall.py would compile it', () => {
   const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
   const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
 
-  // The index itself. recall.py:1280#EXCLUDE skips EXCLUDE before it looks at anything
+  // The index itself. recall.py:1288#EXCLUDE skips EXCLUDE before it looks at anything
   // else, so a MEMORY.md carrying frontmatter and a gate block is still not a gate source.
   fs.writeFileSync(path.join(dir, 'MEMORY.md'),
     fm('global') + '# Memory Index\n\n' + block, 'utf8');

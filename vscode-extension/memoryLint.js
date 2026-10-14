@@ -17,11 +17,11 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-// recall.py's EXCLUDE (recall.py:223#EXCLUDE): the index is just hooks, so it is never a search
+// recall.py's EXCLUDE (recall.py:230#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:256-257#GATE_BEGIN), and the pattern
+// recall.py's gate markers (recall.py:263-264#GATE_BEGIN), and the pattern
 // _compile_gates_text actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one
@@ -422,7 +422,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1280#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1288#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.

@@ -93,6 +93,38 @@ jobs:
       - name: Starter pack mirror check
         run: node scripts/mirror-pack.js
 
+  # The Python half of retiring and restoring memory gates (2026-10-14, ported from rampage
+  # e5c0ee7): recall.py --gates-list, --gates-retire and --gates-restore, the snapshot they take
+  # first and its keep-30 prune, the gate-edit lock, and per-agent gates surviving a retire byte
+  # for byte, all in a throwaway HOME. recall.py checks that numpy and onnxruntime are INSTALLED
+  # before every verb, these included, so the job installs both even though no model is
+  # downloaded. The pins are the ones rampage's CI runs this script against.
+  #
+  # CI=true is set explicitly as well as by GitHub: test/gates-manage.sh turns a missing
+  # interpreter from a local SKIP into a FAILURE under it, so this job cannot report green having
+  # run nothing. test/recall-py.sh and test/gates-stale.sh are NOT here: they skip on a missing
+  # interpreter whatever CI says, and they were never run on these runners, so they stay the
+  # local checks they were written as until someone makes and proves that move.
+  gates-manage:
+    name: recall.py gate edits on Python 3.11
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        id: py
+        with:
+          python-version: "3.11"
+
+      - name: Install recall.py's runtime
+        run: python -m pip install numpy==2.4.6 onnxruntime==1.30.0
+
+      - name: test/gates-manage.sh
+        env:
+          CI: "true"
+          TOOLBOX_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: bash test/gates-manage.sh
+
   # A separate job, because it needs a shell the matrix above cannot give it.
   #
   # install.ps1 once replaced the user's whole settings.json with nothing but its

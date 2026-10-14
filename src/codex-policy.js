@@ -581,6 +581,20 @@ let projectTrustEpoch = 0;
 // app-server's kill included (src/codex-mcp-config.js readCodexConfigLayersAsync).
 // The write path keeps its 25 s deadline; a cold read measured 1.1 s here.
 const PROJECT_TRUST_ASYNC_TIMEOUT_MS = 10000;
+// A TIMEOUT IS NOT A VERDICT (2026-10-14). Every failed ask settled into the
+// config.toml fallback, cached like an answer until config.toml or the candidate
+// folders changed. For "Codex is not reachable", or a reply from Codex itself,
+// that is right: the answer describes the installation or the config, and an
+// edit or install re-asks. A timeout describes neither. A cold app-server can
+// miss the 7 s the worker gets inside PROJECT_TRUST_ASYNC_TIMEOUT_MS (one took
+// 3.3 s in an isolated home in the v1.6.3 confirmation audit), and that one
+// slow start then held the narrow fallback for the life of the window. A timed-out
+// ask is still shown as the fallback, which is the honest answer for now, but
+// only for this long: after it the read is a miss again, the next push is
+// pending and asks once more. A codex that never answers therefore costs one
+// ask per minute of pushes, not one per push.
+const PROJECT_TRUST_RETRY_MS = 60000;
+const timedOutAsk = (asked) => asked instanceof Error && /\btimed out\b/i.test(String(asked.message || asked));
 const injectedRpcIds = new WeakMap();
 let nextInjectedRpcId = 0;
 
@@ -789,7 +803,7 @@ function projectTrustLookup(options, codexHome, platform) {
     let text = '';
     try { text = fs.readFileSync(configFile, 'utf8'); } catch {}
     entry = { config, wide: /project_root_markers/.test(text), trust: projectTrustEntries(text),
-      signature: null, verdict: null };
+      signature: null, verdict: null, retryAt: null };
   }
   PROJECT_TRUST_CACHE.delete(key);
   PROJECT_TRUST_CACHE.set(key, entry);
@@ -803,8 +817,11 @@ function projectTrustLookup(options, codexHome, platform) {
   const signature = JSON.stringify(candidates.map(fold));
   const ask = { home: options.home, codexHome, workspaceRoot: root,
     codexExecutable: options.codexExecutable || 'codex', nodeExecutable: options.nodeExecutable, rpc };
-  return { key, entry, root, fold, platform, codexHome, candidates, signature, ask,
-    fresh: entry.verdict !== null && entry.signature === signature };
+  // `options.now` is a test clock for PROJECT_TRUST_RETRY_MS; callers pass none.
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  return { key, entry, root, fold, platform, codexHome, candidates, signature, ask, now,
+    fresh: entry.verdict !== null && entry.signature === signature
+      && (entry.retryAt === null || now() < entry.retryAt) };
 }
 
 // What Codex said, read into a verdict, or the narrow config.toml fallback when
@@ -824,10 +841,13 @@ function verdictFrom(state, asked) {
 
 // Stores only into the entry that is still cached: a config edit while the ask
 // ran replaced it, and an answer about the old config must not stand for the new.
-function settleProjectTrust(state, verdict) {
+// `asked` is what verdictFrom read the verdict from; a timeout stands only until
+// PROJECT_TRUST_RETRY_MS has passed (see there).
+function settleProjectTrust(state, verdict, asked) {
   if (PROJECT_TRUST_CACHE.get(state.key) !== state.entry) return;
   state.entry.verdict = verdict;
   state.entry.signature = state.signature;
+  state.entry.retryAt = timedOutAsk(asked) ? state.now() + PROJECT_TRUST_RETRY_MS : null;
 }
 
 const asError = (error) => (error instanceof Error ? error : new Error(String(error)));
@@ -850,7 +870,7 @@ function projectRuleDirectories(options, codexHome, platform) {
         const { readCodexConfigLayers } = require('./codex-mcp-config');
         asked = readCodexConfigLayers(state.ask);
       } catch (error) { asked = asError(error); }
-      settleProjectTrust(state, verdictFrom(state, asked));
+      settleProjectTrust(state, verdictFrom(state, asked), asked);
     }
   }
   // Settled above if it was not fresh: a synchronous ask cannot race the entry
@@ -884,7 +904,7 @@ function refreshProjectTrust(options = {}) {
       .then((response) => response, asError)
       .then((asked) => {
         if (epoch !== projectTrustEpoch) return false;
-        settleProjectTrust(state, verdictFrom(state, asked));
+        settleProjectTrust(state, verdictFrom(state, asked), asked);
         // True even when the entry moved on meanwhile: the caller's next read is
         // then a miss again, and asks again, which is the right answer to a
         // config.toml that changed under the question.

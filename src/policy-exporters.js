@@ -123,7 +123,7 @@ const OWN_SHELL_WRAPPERS = [
   'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe', 'dx', 'dx.exe',
   ...['builtin', 'busybox', 'bwrap', 'caffeinate', 'cgexec', 'chroot', 'chrt', 'doas', 'firejail',
     'flock', 'gdb', 'ionice', 'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'numactl',
-    'pkexec', 'prlimit', 'proot', 'runas', 'runuser', 'sandbox-exec', 'script', 'setpriv', 'setsid',
+    'pkexec', 'prlimit', 'proot', 'psexec', 'psexec64', 'runas', 'runuser', 'sandbox-exec', 'script', 'setpriv', 'setsid',
     'sg', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-nspawn', 'systemd-run', 'taskset', 'time',
     'timeout', 'unbuffer', 'unshare', 'valgrind', 'watch', 'xvfb-run'].flatMap((root) => [root, `${root}.exe`]),
 ];
@@ -677,9 +677,14 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
 //     (systemd-nspawn(1)); proot's `-0`/`--root-id` "Make current user appear as root", `-q`/`--qemu`
 //     "Execute guest programs through QEMU as specified by command" names an emulator, and `-b`/`--bind`
 //     maps host paths (proot(1)).
+//   * psexec, psexec64 (2026-10-14): Sysinternals PsExec, which wave-f14's census deferred as
+//     niche. It is the Windows sibling of runas and sudo: `-s` runs the command as SYSTEM, and
+//     `-u`/`-p` run it as another user (Sysinternals' PsExec documentation). It also runs it on a
+//     remote computer named by `\\computer`. On the Windows boxes this tool runs on, that is not
+//     niche, so it is always broad, like runas.
 const ALWAYS_BROAD_WRAPPERS = new Set([
   'bwrap', 'doas', 'eval', 'firejail', 'gdb', 'icm', 'iex', 'invoke-command', 'invoke-expression', 'parallel',
-  'pkexec', 'proot', 'runas', 'runuser', 'script', 'setpriv', 'sg', 'su', 'sudo', 'systemd-nspawn',
+  'pkexec', 'proot', 'psexec', 'psexec64', 'runas', 'runuser', 'script', 'setpriv', 'sg', 'su', 'sudo', 'systemd-nspawn',
   'systemd-run', 'watch',
 ]);
 

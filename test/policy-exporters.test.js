@@ -911,7 +911,7 @@ test('the Claude side refuses the same wrappers at any depth, by membership', ()
 // so a drop from its table fails by name (the header's "names every newly covered root" rule). Each
 // rendered as a reviewed prefix_rule against the base source (M1_ALWAYS_BROAD bare and named,
 // M1_EXEC_WRAPPERS bare).
-const M1_ALWAYS_BROAD = ['bwrap', 'setpriv', 'sg', 'systemd-nspawn', 'proot'];
+const M1_ALWAYS_BROAD = ['bwrap', 'setpriv', 'sg', 'systemd-nspawn', 'proot', 'psexec', 'psexec64'];
 const M1_EXEC_WRAPPERS = ['numactl', 'prlimit', 'cgexec', 'unbuffer', 'xvfb-run', 'caffeinate', 'sandbox-exec'];
 
 test('M1: a newly covered exec wrapper or identity changer is refused bare, in both spellings', () => {
@@ -930,6 +930,10 @@ test('M1: an identity changer or sandbox is broad at any depth, like sudo', () =
     ['bwrap', '--bind', '/', '/', 'ls'], ['setpriv', '--reuid=0', 'ls'], ['setpriv', 'ls'],
     ['sg', 'grp', 'ls'], ['sg', 'grp', '-c', 'cmd'], ['systemd-nspawn', '-D', '/srv', 'ls'],
     ['systemd-nspawn', 'ls'], ['proot', '-0', 'ls'], ['proot', '-r', '/srv', 'bash'],
+    // MUTATION: drop psexec from ALWAYS_BROAD_WRAPPERS. `["psexec", "-s", "whoami"]` falls to the
+    // exec rule as a wrapper naming `whoami` and renders. Confirmed 2026-10-14.
+    ['psexec', '-s', 'whoami'], ['psexec', 'whoami'], ['psexec64', '-u', 'admin', 'ipconfig'],
+    ['psexec.exe', '-s', 'whoami'],
   ]) {
     // MUTATION: drop the root from ALWAYS_BROAD_WRAPPERS. The named-command rows fall to the
     // generic/exec rule and render.

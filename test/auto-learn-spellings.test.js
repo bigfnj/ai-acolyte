@@ -105,6 +105,8 @@ test('the exporter and the learner agree on what one spelling of a rule is', () 
   for (const rule of [
     'Bash(git.exe status *)', 'Bash(git status *)', 'PowerShell(WHERE.EXE *)',
     'Bash(x.exe *)', 'Bash(.exe *)', 'WebFetch(domain:host.exe.com)', 'WebSearch', '',
+    // env-led rules: the command root is normalized, the assignment value is not (2026-10-13)
+    'Bash(FOO=1 cat.exe *)', 'Bash(FOO=x.exe cat *)', 'Bash(FOO=bar git.exe status *)',
   ]) {
     const normalised = exporterNormalize(rule);
     assert.equal(normalised, normalizePermissionSpelling(rule), rule);

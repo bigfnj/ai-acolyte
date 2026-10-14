@@ -1668,12 +1668,22 @@ function candidateClaudePermission(candidate, options) {
 // gate before a rule is written and takes no dependency on the learner it
 // checks. `test/auto-learn-spellings.test.js` asserts the two agree, so a change to
 // one that the other does not follow fails loudly instead of drifting.
+// The command root is the first word that is not a kept assignment (an env-led rule keeps its
+// assignment values verbatim, 2026-10-13), so `Bash(FOO=1 cat *)` and `Bash(FOO=1 cat.exe *)`
+// reconcile like `Bash(git status *)` and `Bash(git.exe status *)`. An independent copy of the
+// learner's commandRootIndex, by the same drift rule as the rest of this file.
 const EXPORTER_PERMISSION_ROOT = /^([A-Za-z_][A-Za-z0-9_]*)\(([^\s)]+)([\s\S]*)\)$/;
+function exporterCommandRootIndex(words) {
+  return words.findIndex((word) => !word.includes('='));
+}
 function normalizePermissionSpelling(permission) {
   const text = String(permission == null ? '' : permission);
   const match = EXPORTER_PERMISSION_ROOT.exec(text);
   if (!match) return text;
-  return `${match[1]}(${match[2].replace(/\.exe$/i, '')}${match[3]})`;
+  const words = `${match[2]}${match[3]}`.split(' ');
+  const at = exporterCommandRootIndex(words);
+  if (at >= 0) words[at] = words[at].replace(/\.exe$/i, '');
+  return `${match[1]}(${words.join(' ')})`;
 }
 
 function alternateSpellings(candidate, primary) {

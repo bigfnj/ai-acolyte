@@ -80,12 +80,89 @@ test('the env-led rule is the one the wildcarding pass writes for the same appro
     assert.equal(family.key, key, command);
     assert.equal(family.claudePermission, rule, command);
     assert.equal(generalizePermission(`Bash(${command})`), rule, `${command}: the pass and the learner disagree`);
-    // MUTATION: give normalizeCandidateKey no env-led exception. `FOO=x.exe cat f` keys as
-    // `bash:FOO=x cat`, a family nobody ran. Confirmed 2026-10-13.
+    // MUTATION: normalize the key's FIRST word instead of its command root (the pre-2026-10-13
+    // regex). `FOO=x.exe cat f` keys as `bash:FOO=x cat`, a family nobody ran, because the
+    // assignment VALUE is stripped. Confirmed 2026-10-13.
     assert.equal(normalizeCandidateKey(key), key, `${key} is stable under the key migration`);
   }
-  // The old keys still normalize as before.
+  // The old plain keys still normalize as before.
   assert.equal(normalizeCandidateKey('bash:git.exe status'), 'bash:git status');
+});
+
+test('an env-led command root unifies its `.exe` spelling, like a plain root, keeping the assignment verbatim', () => {
+  // `FOO=1 cat` and `FOO=1 cat.exe` are one family now (normalizeCandidateKey strips `.exe`
+  // from the command root of an env-led key too), as `git`/`git.exe` already were. MEASURED
+  // 2026-10-13 against 520103d: they were two families with one rule each.
+  assert.equal(candidateKey(extractInvocations('Bash', 'FOO=1 cat f', { shell: 'bash' })[0]), 'bash:FOO=1 cat');
+  assert.equal(candidateKey(extractInvocations('Bash', 'FOO=1 cat.exe f', { shell: 'bash' })[0]), 'bash:FOO=1 cat');
+  // MUTATION: restore `if (... .includes('=')) return text` (leave env-led keys verbatim).
+  // `bash:FOO=1 cat.exe` stays itself and the two never merge. Confirmed 2026-10-13.
+  assert.equal(normalizeCandidateKey('bash:FOO=1 cat.exe'), 'bash:FOO=1 cat');
+  assert.equal(normalizeCandidateKey('bash:FOO=bar git.exe status'), 'bash:FOO=bar git status');
+  // the assignment value is verbatim; a later token keeps its suffix
+  assert.equal(normalizeCandidateKey('bash:FOO=x.exe cat'), 'bash:FOO=x.exe cat');
+  assert.equal(normalizeCandidateKey('bash:FOO=1 git status.exe'), 'bash:FOO=1 git status.exe');
+
+  // The two spellings become one family with the combined count and both grants. `cat.exe`
+  // is not a safe-listed root (only `cat` is), so the exporter emits only the `cat` spelling
+  // from this family's list, exactly as it would for a plain `Bash(cat.exe *)`.
+  const catFams = aggregateObservations([
+    run('a', 'FOO=1 cat a'), run('b', 'FOO=1 cat b'), run('c', 'FOO=1 cat.exe c'),
+  ], { threshold: 3 });
+  assert.equal(catFams.length, 1, 'one family, not two');
+  assert.equal(catFams[0].key, 'bash:FOO=1 cat');
+  assert.equal(catFams[0].counts.success, 3, 'split two-and-one, neither half reaches a threshold of three alone');
+  assert.equal(catFams[0].meetsThreshold, true);
+  assert.equal(catFams[0].claudePermission, 'Bash(FOO=1 cat *)', 'the canonical spelling is reported');
+  // MUTATION: leave the exporter/learner normalizePermissionSpelling normalizing only the
+  // first word. The two rules no longer reconcile: the family nulls its permission as a
+  // conflict and this fails. Confirmed 2026-10-13.
+  assert.deepEqual(catFams[0].permissions, ['Bash(FOO=1 cat *)', 'Bash(FOO=1 cat.exe *)'],
+    'both observed spellings are kept on the family, so the exporter can grant each one it clears');
+  assert.deepEqual(renderClaudePermissions([catFams[0]], { includeReviewed: true }), ['Bash(FOO=1 cat *)']);
+
+  // A root whose `.exe` spelling is also safe (`git`/`git.exe`) renders both, as the plain
+  // git family does: the `.exe` invocations are covered too.
+  const gitFams = aggregateObservations([
+    run('d', 'FOO=bar git status --short'), run('e', 'FOO=bar git status'), run('f', 'FOO=bar git.exe status'),
+  ], { threshold: 3 });
+  assert.equal(gitFams.length, 1);
+  assert.equal(gitFams[0].key, 'bash:FOO=bar git status');
+  assert.deepEqual(gitFams[0].permissions, ['Bash(FOO=bar git status *)', 'Bash(FOO=bar git.exe status *)']);
+  assert.deepEqual(renderClaudePermissions([gitFams[0]], { includeReviewed: true }),
+    ['Bash(FOO=bar git status *)', 'Bash(FOO=bar git.exe status *)']);
+});
+
+test('a stored state with an env-led `.exe` key is merged onto the unified key, not overwritten', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-env-exe-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const statePath = path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json');
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  const half = (key, rule, success) => ({
+    key, tool: 'Bash', kind: 'shell', shell: 'bash', root: 'cat', prefix: ['cat'],
+    claudePermission: rule, permissions: [rule], risk: 'read-only', baseAutoSafe: false, complex: false,
+    reasons: ['environment-prefix', 'known-read-only-command'], sources: ['claude'],
+    counts: { success, failed: 0, unknown: 0, total: success },
+  });
+  fs.writeFileSync(statePath, `${JSON.stringify({
+    version: 1, mode: 'recommend', threshold: 3,
+    candidates: {
+      'bash:FOO=1 cat': half('bash:FOO=1 cat', 'Bash(FOO=1 cat *)', 2),
+      'bash:FOO=1 cat.exe': half('bash:FOO=1 cat.exe', 'Bash(FOO=1 cat.exe *)', 1),
+    },
+    observationHashes: {}, cursors: {}, applied: { claude: [], codex: [] },
+    reviewed: { claude: [], codex: [] }, codexTargets: {}, managedClaude: {},
+    lastScanAt: null, lastScanStats: null, lastApplication: null,
+  }, null, 2)}\n`);
+
+  const learn = createAutoLearnManager({ home, threshold: 3, codexRulesPath: null, statePath });
+  const candidates = learn.listCandidates();
+  // MUTATION: restore the env-led verbatim return in normalizeCandidateKey. The two keys
+  // survive as two families and this length check fails. Confirmed 2026-10-13.
+  assert.equal(candidates.length, 1, 'the two env-led halves are now one family');
+  assert.equal(candidates[0].key, 'bash:FOO=1 cat');
+  assert.equal(candidates[0].counts.success, 3, 'both halves were counted evidence; dropping either would lose runs');
+  assert.deepEqual(candidates[0].permissions, ['Bash(FOO=1 cat *)', 'Bash(FOO=1 cat.exe *)']);
 });
 
 test('an assignment the rule cannot carry still separates the family, and nothing secret is kept', () => {

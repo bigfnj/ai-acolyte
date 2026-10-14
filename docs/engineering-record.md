@@ -179,6 +179,14 @@ Every test was run against a revert of its fix:
   its own 0.9 s. A contended hook run is therefore bounded by about 1.8 s of retries, which the
   async registration keeps off the tool call.
 
+### Follow-ups to the v1.6.3 confirmation audit (2026-10-14)
+
+Found while closing that audit's F1, F3 and F7, each verified in the code before anything changed.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| A refused alternate spelling was written dead | **FIXED** (G2) | `applyUnlocked` judged a family's rule against the managed-inert and user-deny checks and then wrote every spelling the exporter renders, so a deny or managed ask covering only `Bash(git.exe status *)` left that entry in `allow` and the family reported applied with nothing withheld (reproduced on `b1cf72c`, fresh scan and stored state alike). The class F1 closed for a null rule, and older than F1. Each spelling is now judged by the same `refusal()` as the rule; a refused one is not added and is reported in `withheldByPolicy`, so that report is per spelling. **Decision:** the family's other spellings still apply. That mirrors the exporter, which emits an alternate only after the rule passes its safety gate and drops a failing alternate alone; a deny naming only `git.exe status` covers nothing `Bash(git status *)` grants. A refused rule still withholds the whole family, and a retained family with a refused rule gains no spelling (reported with `withRule`). Only additions are withheld: a spelling already in the file stays and stays claimed, by the gate's standing "new grants only" limit. The listing's `clone` keeps judging the rule alone, which is consistent with that decision. |
+
 ## The 1.6.2 backlog clearance (2026-10-13)
 
 Prompted by two dashboard rows that were both false: Auto Learn read **"scan degraded —
@@ -1381,10 +1389,10 @@ Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `const updated = {` at `src/auto-learn-manager.js:2286-2289#updated`, written `src/auto-learn-manager.js:2343#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2340-2342#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2850#next`, written `src/auto-learn-manager.js:2931#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:2062#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2058#change.afterHash`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2950#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:2946#item.restored.hash` hash guard. |
+| `const updated = {` at `src/auto-learn-manager.js:2332-2335#updated`, written `src/auto-learn-manager.js:2389#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2386-2388#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2896#next`, written `src/auto-learn-manager.js:2977#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:2064#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2060#change.afterHash`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2996#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:2992#item.restored.hash` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:278#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:217#readFileSync` read → `src/local-settings.js:278#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -1399,7 +1407,7 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `src/auto-learn-manager.js:2062#change.before.content` blindly restores `change.before.content`. If the writer
+- `rollback()` at `src/auto-learn-manager.js:2064#change.before.content` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a

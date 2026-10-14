@@ -70,7 +70,7 @@ function applicationSummary(...results) {
   // then applies again produces two prunes and one toast. A `.bak` that could not be
   // deleted is the one outcome of backup pruning worth a word — the manager counts
   // it rather than throwing, because by then the policy is already written and a
-  // locked file is not worth failing an apply over (src/auto-learn-manager.js:2032#Failures).
+  // locked file is not worth failing an apply over (src/auto-learn-manager.js:2034#Failures).
   // It had no reader until 2026-09-25, so "counted rather than thrown" meant
   // "swallowed".
   let backupsUnremovable = 0;

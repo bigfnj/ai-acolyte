@@ -1653,7 +1653,9 @@ function createAutoLearnManager(options = {}) {
     // a family a managed ask covers cannot be granted here: writing the rule
     // changes nothing and the prompt survives. Withhold the proposal rather
     // than offer work that cannot pay off. Policy is never consulted to WIDEN
-    // eligibility, only to withhold it.
+    // eligibility, only to withhold it. The verdict is the family RULE's, on
+    // purpose: an ask covering only an alternate spelling leaves the family
+    // eligible, and the write withholds that spelling alone (applyUnlocked, G2).
     const policyVerdict = assessPermission(policy, item.claudePermission);
     const eligibleTargets = [
       ...(claudeSettingsPath && policyVerdict !== 'inert' && claudeEligible(item, true) ? ['claude'] : []),
@@ -2195,21 +2197,19 @@ function createAutoLearnManager(options = {}) {
     // gate above was added to fix. Read once per application, for the reason
     // given above.
     const userDeny = useClaude ? readUserDeny() : [];
+    // Why one permission cannot pay off, or null: a managed rule makes it inert, or the user's
+    // own deny covers it. One verdict for the family's rule here and for each of its spellings
+    // at the write below, so the two can never judge by different rules.
+    const refusal = (permission) => {
+      if (assessPermission(policy, permission) === 'inert') return overridingRule(policy, permission) || {};
+      const denied = userDeny.find((rule) => coversPermission(rule, permission));
+      return denied ? { decision: 'deny', rule: denied, source: 'user-deny' } : null;
+    };
     if (useClaude) for (const item of selected) {
       if (!claudeEligible(item, includeReviewed)) continue;
-      if (assessPermission(policy, item.claudePermission) === 'inert') {
-        withheld.push({
-          key: item.key, permission: item.claudePermission,
-          ...(overridingRule(policy, item.claudePermission) || {}),
-        });
-        continue;
-      }
-      const denied = userDeny.find((rule) => coversPermission(rule, item.claudePermission));
-      if (denied) {
-        withheld.push({
-          key: item.key, permission: item.claudePermission,
-          decision: 'deny', rule: denied, source: 'user-deny',
-        });
+      const refused = refusal(item.claudePermission);
+      if (refused) {
+        withheld.push({ key: item.key, permission: item.claudePermission, ...refused });
         continue;
       }
       if (!nextClaude.includes(item.key)) newly.claude.push(item.key);
@@ -2247,10 +2247,51 @@ function createAutoLearnManager(options = {}) {
       // A list per key, not one permission. A family that observed both `git`
       // and `git.exe` renders two entries, and taking only the first would
       // write one of them and claim neither the other nor the runs behind it.
+      //
+      // And EVERY one of them is judged (2026-10-14, G2). The gate above reads
+      // `item.claudePermission`, the family's rule, while this writes each spelling
+      // the exporter renders, so a deny or managed ask covering only
+      // `Bash(git.exe status *)` left that entry written dead and the family reported
+      // as applied: the class F1 closed for a null rule, older than F1. A spelling
+      // refusal() rejects is not added and is reported in withheldByPolicy, so the
+      // report is per spelling: an entry whose key is also in `applied` withheld
+      // that spelling alone.
+      //
+      // The family's other spellings still apply. That is the exporter's own shape:
+      // renderClaudePermissions emits an alternate only after the family's rule
+      // passes its safety gate, and an alternate that fails it is dropped alone. A
+      // refused RULE withholds the family (the gate above, for a new grant), so an
+      // alternate never applies without its rule; a refused ALTERNATE withholds
+      // itself, because a deny that names only `git.exe status` covers nothing the
+      // `git status` entry grants, and that entry stops prompts the deny never meant
+      // to keep. The same shape holds for a retained family here: with its rule
+      // refused, none of its spellings is added, and one an alternate's own verdict
+      // does not refuse is reported with the rule's verdict and `withRule` naming it.
+      //
+      // Only what the write would ADD is withheld. A spelling already in the file
+      // stays and stays claimed, refused or not, by the same "new grants only"
+      // limit as the gate above: the retention filter never revokes a grant on a
+      // policy copy's say-so, and dropping it from the desired set would do exactly
+      // that, through updateClaudeClaims, for an entry this claimant manages.
+      const fileAllow = new Set(current);
+      const reported = new Set(withheld.map((entry) => `${entry.key}\u0000${entry.permission}`));
+      const report = (key, permission, verdict) => {
+        if (reported.has(`${key}\u0000${permission}`)) return;
+        reported.add(`${key}\u0000${permission}`);
+        withheld.push({ key, permission, ...verdict });
+      };
       const permissionsByKey = new Map();
       for (const item of items) {
         const rendered = renderClaudePermissions([item], { includeReviewed: true });
-        if (rendered.length) permissionsByKey.set(item.key, rendered);
+        const ruleRefused = rendered.length ? refusal(item.claudePermission) : null;
+        const kept = rendered.filter((permission) => {
+          if (fileAllow.has(permission)) return true;
+          const own = refusal(permission);
+          if (!own && !ruleRefused) return true;
+          report(item.key, permission, own || { ...ruleRefused, withRule: item.claudePermission });
+          return false;
+        });
+        if (kept.length) permissionsByKey.set(item.key, kept);
       }
 
       const claimsBefore = snapshot(claudeClaimsPath);
@@ -2272,8 +2313,13 @@ function createAutoLearnManager(options = {}) {
       current = updateClaudeClaims(
         claims, claudeClaimantId, desiredPermissions, current, legacyManaged, coveredBy,
       );
+      // An addition no family still wants is a withheld spelling, so it is dropped.
+      // What `current` holds is never touched here: a withheld spelling is never in
+      // it (only what the file lacks is withheld, and the claims update only removes).
+      const held = new Set(current);
+      const wanted = new Set(desiredPermissions);
       const allow = mergeClaudeAllow(current, items, { includeReviewed: true })
-        .filter((entry) => !coveredBy.has(entry));
+        .filter((entry) => !coveredBy.has(entry) && (held.has(entry) || wanted.has(entry)));
       // Keyed by PERMISSION rather than by candidate key, because a key can now
       // carry more than one. Nothing reads these keys -- both consumers take
       // `Object.values` -- so the map stays a set of permissions by another

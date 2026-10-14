@@ -124,3 +124,192 @@ test('an entry the file simply does not have is still claimed as managed', (t) =
   assert.equal(record.managed, true);
   assert.equal(record.coveredBy, undefined);
 });
+
+// ── every spelling a family writes, not only its rule (2026-10-14, G2) ────────
+//
+// A family that observed `git status` and `git.exe status` writes two entries
+// (renderClaudePermissions), and the gates above judged only `claudePermission`,
+// the family's rule. So a deny or a managed ask that covers ONLY the alternate
+// left `Bash(git.exe status *)` written dead and the family reported as applied
+// with nothing withheld, the class F1 closed for a null rule (819e4ab), older than
+// it. Reproduced against b1cf72c by all three tests below that fail. A refused
+// alternate withholds itself; the family's rule still applies, because the deny
+// names nothing that rule grants (applyUnlocked's comment has the reasoning).
+const BOTH_SPELLINGS = [
+  observed('s1', 'git status'), observed('s2', 'git status --short'), observed('s3', 'git.exe status'),
+];
+
+test('a deny that covers only the alternate spelling withholds that spelling and applies the rule', (t) => {
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], deny: ['Bash(git.exe status:*)'] } });
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  const [family] = learn.listCandidates();
+  assert.deepEqual(family.permissions, ['Bash(git status *)', 'Bash(git.exe status *)'],
+    'precondition: the family renders both spellings');
+
+  // MUTATION: restore b1cf72c's applyUnlocked (judge `item.claudePermission` only and
+  // write every rendered spelling). The allow list gains `Bash(git.exe status *)` and
+  // nothing is withheld, so both assertions below fail. Confirmed 2026-10-14.
+  const result = learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)'],
+    'no dead entry is written for the spelling the user denies');
+  assert.deepEqual(result.withheldByPolicy, [{
+    key: 'bash:git status', permission: 'Bash(git.exe status *)',
+    decision: 'deny', rule: 'Bash(git.exe status:*)', source: 'user-deny',
+  }]);
+  // The rest of the family is applied: the deny covers nothing `Bash(git status *)` grants.
+  assert.deepEqual(result.appliedKeys, ['bash:git status']);
+  assert.deepEqual(Object.keys(readClaims(home).permissions), ['Bash(git status *)'],
+    'nothing is claimed for a spelling that was not written');
+});
+
+test('the control: a deny that covers neither spelling withholds neither', (t) => {
+  // Passes with and without G2. It is what fails if the spelling gate refuses too
+  // much: MUTATION: make refusal() refuse every alternate. This fails. Confirmed
+  // 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], deny: ['Bash(git push:*)'] } });
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  const result = learn.apply();
+  assert.deepEqual(result.withheldByPolicy, []);
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)', 'Bash(git.exe status *)']);
+});
+
+test('a managed ask that covers only the alternate spelling withholds that spelling', (t) => {
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [] } });
+  fs.writeFileSync(path.join(home, '.claude', 'remote-settings.json'),
+    JSON.stringify({ permissions: { ask: ['Bash(git.exe status:*)'], allow: [], deny: [] } }));
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  const [family] = learn.listCandidates();
+  // The family's rule is not what the ask covers, so the listing still offers it.
+  assert.notEqual(family.policy, 'inert');
+  assert.ok(family.eligibleTargets.includes('claude'));
+
+  // MUTATION: restore b1cf72c's applyUnlocked. The ask-covered entry is written and nothing
+  // is withheld: this fails. Confirmed 2026-10-14.
+  const result = learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)']);
+  assert.deepEqual(result.withheldByPolicy.map(({ key, permission, decision, rule }) => [key, permission, decision, rule]),
+    [['bash:git status', 'Bash(git.exe status *)', 'ask', 'Bash(git.exe status:*)']]);
+  assert.deepEqual(result.appliedKeys, ['bash:git status']);
+});
+
+// Stored state alone, the shape test/auto-learn-null-revival.test.js uses for F1: the family
+// is read from the state file and no scan runs, so nothing a fresh run brings can stand in for
+// what the load produced.
+function storedBothSpellings(t, { deny = [], ask = [] } = {}) {
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: ['WebSearch'], deny } });
+  fs.writeFileSync(path.join(home, '.claude', 'remote-settings.json'),
+    JSON.stringify({ permissions: { ask, allow: [], deny: [] } }));
+  const statePath = path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json');
+  const family = {
+    key: 'bash:git status', tool: 'Bash', kind: 'shell', shell: 'bash', root: 'git', prefix: ['git', 'status'],
+    claudePermission: 'Bash(git status *)', permissions: ['Bash(git status *)', 'Bash(git.exe status *)'],
+    risk: 'read-only', baseAutoSafe: false, complex: false, reasons: ['known-read-only-git-operation'],
+    sources: ['claude'], counts: { success: 3, failed: 0, unknown: 0, total: 3 },
+  };
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3, mode: 'recommend', threshold: 3, candidates: { [family.key]: family },
+    observationHashes: {}, cursors: {}, applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
+    codexTargets: {}, managedClaude: {}, lastScanAt: null, lastScanStats: null, lastApplication: null,
+  }, null, 2) + '\n');
+  const learn = createAutoLearnManager({
+    home, statePath, threshold: 3, codexRulesPath: null, codexValidator: () => ({ valid: true, decision: 'allow' }),
+    // No scan runs in these tests; one that did would bring a fresh run this test excludes.
+    historyScanner: () => { throw new Error('no scan may run'); },
+  });
+  const [listed] = learn.listCandidates();
+  assert.deepEqual(listed.permissions, family.permissions, 'precondition: the load kept both spellings');
+  const result = learn.applyClaude({
+    keys: [listed.key], includeReviewed: true, expectedFingerprints: { [listed.key]: listed.fingerprint },
+  });
+  return { result, allow: readSettings(home).permissions.allow };
+}
+
+test('stored state alone: a reviewed apply withholds a user-denied alternate and writes the rule', (t) => {
+  // MUTATION: restore b1cf72c's applyUnlocked. The reviewed apply writes both entries and
+  // withholds nothing: this fails. Confirmed 2026-10-14.
+  const { result, allow } = storedBothSpellings(t, { deny: ['Bash(git.exe status *)'] });
+  assert.deepEqual(result.withheldByPolicy.map(({ permission, source }) => [permission, source]),
+    [['Bash(git.exe status *)', 'user-deny']]);
+  assert.deepEqual(result.appliedKeys, ['bash:git status']);
+  assert.deepEqual(allow, ['WebSearch', 'Bash(git status *)']);
+});
+
+test('stored state alone: a reviewed apply withholds a managed-ask alternate and writes the rule', (t) => {
+  // MUTATION: restore b1cf72c's applyUnlocked. This fails the same way. Confirmed 2026-10-14.
+  const { result, allow } = storedBothSpellings(t, { ask: ['Bash(git.exe status:*)'] });
+  assert.deepEqual(result.withheldByPolicy.map(({ permission, decision }) => [permission, decision]),
+    [['Bash(git.exe status *)', 'ask']]);
+  assert.deepEqual(allow, ['WebSearch', 'Bash(git status *)']);
+});
+
+test('stored state alone, the control: with no deny and no ask both spellings are written', (t) => {
+  // Passes with and without G2.
+  const { result, allow } = storedBothSpellings(t);
+  assert.deepEqual(result.withheldByPolicy, []);
+  assert.deepEqual(allow, ['WebSearch', 'Bash(git status *)', 'Bash(git.exe status *)']);
+});
+
+// The two limits on a family that is ALREADY applied, where the retention filter keeps the key.
+test('a spelling already written stays written and claimed when a deny later covers it', (t) => {
+  // Passes with and without G2: the spelling gate withholds only what the write would ADD.
+  // MUTATION: drop the `fileAllow.has(permission)` keep in applyUnlocked. The entry this
+  // claimant manages leaves the desired set, and updateClaudeClaims then deletes it from
+  // `allow` on a deny's say-so, which the retention filter exists to refuse. This fails.
+  // Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [] } });
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)', 'Bash(git.exe status *)']);
+
+  writeSettings(home, { permissions: {
+    allow: ['Bash(git status *)', 'Bash(git.exe status *)'], deny: ['Bash(git.exe status:*)'],
+  } });
+  learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)', 'Bash(git.exe status *)']);
+  assert.equal(readClaims(home).permissions['Bash(git.exe status *)']?.managed, true, 'the claim is kept');
+});
+
+test('an applied family whose rule is now denied does not gain its alternate', (t) => {
+  // The family was applied with one spelling; `git.exe status` arrives later, and by then the
+  // user denies the family's rule. The key is retained (no revocation), but an alternate is
+  // never added without its rule, as a new family with a denied rule writes nothing.
+  // MUTATION: restore b1cf72c's applyUnlocked. `Bash(git.exe status *)` is added: this fails.
+  // Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [] } });
+  const feed = THREE_GIT_STATUS.slice();
+  const learn = createAutoLearnManager({
+    home, codexRulesPath: null, codexValidator: () => ({ valid: true, decision: 'allow' }),
+    historyScanner: () => ({
+      observations: feed,
+      cursors: { [`path-sha256:${'a'.repeat(24)}`]: { source: 'claude', size: 100, offset: 100 } },
+      files: [{ source: 'claude', mode: 'full' }],
+    }),
+  });
+  learn.scan();
+  learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)']);
+
+  feed.push(observed('g4', 'git.exe status'));
+  learn.scan();
+  writeSettings(home, { permissions: { allow: ['Bash(git status *)'], deny: ['Bash(git status:*)'] } });
+  const [family] = learn.listCandidates();
+  assert.deepEqual(family.permissions, ['Bash(git status *)', 'Bash(git.exe status *)'], 'precondition');
+  const result = learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)'],
+    'the entry already there stays; the alternate is not added beside a denied rule');
+  const alternate = result.withheldByPolicy.find((entry) => entry.permission === 'Bash(git.exe status *)');
+  assert.ok(alternate, `the withheld alternate is reported: ${JSON.stringify(result.withheldByPolicy)}`);
+  assert.equal(alternate.withRule, 'Bash(git status *)', 'the report names the rule it was withheld with');
+  assert.equal(alternate.rule, 'Bash(git status:*)');
+});

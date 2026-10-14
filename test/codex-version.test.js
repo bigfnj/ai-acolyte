@@ -406,3 +406,51 @@ test('wildcard-perms --learn status reports codexCli only when there is a Codex 
   assert.equal(cli.severity, 'info');
   assert.match(cli.note, /not found/);
 });
+
+// THE PROBE RUNS THE FILE ITS IDENTITY NAMED (2026-10-14). Both doors located the file
+// (remembered for a minute) and keyed the cache on it, then launched the NAME, which
+// commandLaunch walked PATH for again. Here a copy appears earlier on PATH inside that
+// minute, so the second walk finds a different file from the one the answer is cached
+// under; a second walk that found nothing at all handed spawn the bare name, which libuv
+// looks for in the current directory first. Both doors, with stand-in spawners, so
+// nothing is ever run.
+test('the version probe launches the file its identity resolved, not whatever a second PATH walk finds', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-codex-version-split-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const early = path.join(dir, 'early');
+  const late = path.join(dir, 'late');
+  fs.mkdirSync(early);
+  fs.mkdirSync(late);
+  const binary = (folder, name) => path.join(folder, process.platform === 'win32' ? `${name}.exe` : name);
+  const savedPath = process.env.PATH;
+  t.after(() => { process.env.PATH = savedPath; });
+  process.env.PATH = [early, late, savedPath].join(path.delimiter);
+  const answer = 'codex-cli 0.161.0\n';
+  const doors = {
+    cli: (name, now, calls) => codexVersionStatus({ executable: name, now: () => now,
+      run: (file) => { calls.push(file); return { status: 0, stdout: answer }; } }),
+    dashboard: (name, now, calls) => dashboardCodexVersion({ executable: name, now: () => now,
+      execFile: (file, args, options, done) => { calls.push(file); process.nextTick(done, null, answer, ''); return {}; } }),
+  };
+  for (const [door, ask] of Object.entries(doors)) {
+    const name = `acolyte-split-${door}`;
+    const located = binary(late, name);
+    fs.writeFileSync(located, '#!/bin/sh\n', { mode: 0o755 });
+    const calls = [];
+    ask(name, 0, calls);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 1, `precondition (${door}): the first ask probes`);
+    // A new build lands in place (a new identity, so the cache misses) and another copy
+    // appears earlier on PATH, both inside the minute the location is remembered for.
+    fs.appendFileSync(located, '# upgraded\n');
+    fs.writeFileSync(binary(early, name), '#!/bin/sh\n', { mode: 0o755 });
+    ask(name, 1000, calls);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 2, `precondition (${door}): the changed identity is probed again`);
+    // MUTATION: launch `commandLaunch(executable, ...)` again in either door. On Windows
+    // the second walk finds the early copy; on POSIX the bare name goes to spawn.
+    // Confirmed 2026-10-14.
+    assert.equal(String(calls[1]).toLowerCase(), located.toLowerCase(),
+      `${door}: the probe ran a file other than the one its answer is cached under`);
+  }
+});

@@ -33,6 +33,78 @@ is unmeasurable at the process level.
 
 ---
 
+## Process-spawn follow-ups (2026-10-14)
+
+Three follow-ups to "Process spawns: the v1.6.3 lifecycle and performance confirmation", below,
+each re-verified in the code before it was changed.
+
+### Bare-name spawns: the census — FIXED
+
+1e11efa fixed this for taskkill. The premise, re-measured with libuv 1.52.1 and Node 24.19.0:
+handed a bare name, libuv looks in the CURRENT DIRECTORY before PATH, and the directory is the
+child's `cwd` option when one is given, the spawner's otherwise. A copy of node named
+`python.exe` in that directory answered a bare `spawnSync('python')` in place of Python 3.14.
+Only the SPAWNING process's own environment can turn it off, with
+`NoDefaultCurrentDirectoryInExePath` (libuv asks `NeedCurrentDirectoryForExePathW`, which reads
+the caller's environment). Setting it in the child's `env` did nothing, and with it set in the
+spawner the copy did not run. The agent shell this was measured from sets it, so every test
+below deletes it from the process that spawns.
+
+The census covers every `spawn`, `spawnSync`, `execFile` and `fork` in `src/`, `bin/` and
+`vscode-extension/` (the packed `vscode-extension/src/` copy excluded). The registered
+PostToolUse hook spawns nothing; `bin/wildcard-perms` has one spawn, behind `--gates`.
+
+| Site | Program | Runs in | Bare name before | Planted copy could run | Disposition |
+|---|---|---|---|---|---|
+| `--gates refresh` (`bin/wildcard-perms:895#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
+| `execFileCaptured` in vscode-extension/extension.js, "Why did this prompt?" | `autoLearn.codexExecutable`, default `codex` | the extension host's: wherever VS Code was started, per 1e11efa (not re-measured; listing a live host's directory handle needs elevation) | yes: commandLaunch handed an unresolved name back bare | **yes**, reproduced | **FIXED**: rejects with "spawn codex ENOENT", the words execFile used |
+| The version probe, both doors (`src/codex-version.js:254#commandLaunch`, `src/codex-version.js:311#commandLaunch`) | the located codex | `--learn status`: the shell's; the dashboard probe: the host's | only when the second PATH walk, made after the location was cached, found nothing | in that window only | **FIXED**: launches the identity's own file, so the launch and the cache key are one file |
+| Every `.cmd`/`.bat` launch (`src/exec-resolve.js:124#systemProgram`) | `ComSpec`, else `cmd.exe` | every caller's | yes, with ComSpec unset or relative | then | **FIXED**: ComSpec only when absolute, else System32's |
+| The PATH walk itself (`src/exec-resolve.js:87#isAbsolute`) | any | — | — | yes, through a relative entry: `.`, or an unexpanded `%VAR%\bin` that a REG_SZ PATH leaves literal | **FIXED**: absolute entries only |
+| `defaultCodexValidator` in src/auto-learn-manager.js (the Auto Learn `execpolicy check`) | `codexExecutable`, default `codex` | the Auto Learn worker thread's (the host's); `--learn`: the shell's | no: unresolved on Windows throws its "codex executable not found" | no | none |
+| `nativeRpc` and `nativeRpcAsync` in src/codex-mcp-config.js | `nodeExecutable`, default `node` | the caller's | no: unresolved throws | no | none |
+| The config worker's app-server | `npmShimLaunch`'s node, else commandLaunch | `request.home` | no: unresolved is "Codex executable is not reachable" | no | none |
+| `endProcessTree`, the worker's grace kill | `taskkillPath()` | — | no, since 1e11efa | no | none; the grace kill is the next entry |
+| `npmShimLaunch`'s node | the shim's own `node.exe`, else PATH's | — | no: none found returns null and the `.cmd` route is used | no | none |
+| `run` in src/codex-recall.js | an absolute `pythonExecutable`, an absolute existing `TOOLBOX_PYTHON`, or the toolbox manifest's absolute path | the worker's | no: anything else is the lexical fallback | no | none |
+| The recall rebuild, sync and gate compile (three `execFile(st.py, …)` in extension.js) | `toolboxPython()`: `CODEX_TOOLBOX` or `%LOCALAPPDATA%\DevToolbox`, then `python\.venv\Scripts\python.exe` | the host's | no: a path, checked to exist first | no; a relative `CODEX_TOOLBOX` would be the user's own environment | none |
+| src/spawn-thread.js's `execFile` | the caller's file: only the version probe | the host's | as the probe | — | covered by the probe row |
+| `new Worker()` (spawn-thread, autoLearnWorkerRunner) | a module path, not a program | — | — | — | not a spawn |
+
+**ACCEPTED-RECORDED, POSIX.** execvp walks PATH alone, so no site above searches the cwd
+there. An empty or relative PATH entry is a cwd lookup that the user's own PATH asked for,
+and execvp honours it; nothing here changes POSIX. **Not in the census:** the `scripts/`
+harnesses spawn bare `taskkill`, `git` and `powershell.exe`, and some spawn
+`commandLaunch('codex')` without checking it resolved. They are maintainer tools run from the
+checkout and are not shipped.
+
+**What changed.** `resolvedLaunch(name, args, syscall)` (`src/exec-resolve.js:143#resolvedLaunch`)
+is commandLaunch that never returns a bare name. On Windows an unresolved name throws the error
+spawn raises when there is nothing to find, in its words: `<syscall> <name> ENOENT`, code ENOENT,
+with spawn's `syscall`. The hook's compile and `execFileCaptured` use it, the second inside the
+promise, so it is a rejection there as before. extension.js is line-neutral. The version probe
+launches `id.resolved`. On POSIX that is the file `walkFor` found, which is the one execvp would
+run. A python found through PATHEXT can now be a `.cmd` or `.bat`, such as a pyenv-win shim, and
+it runs through cmd.exe. A bare spawn skipped those, because libuv tries `.com` and `.exe` only.
+
+**Pinned by**, each confirmed to fail with its own fix reverted:
+- "CLI --gates refresh never runs a python planted in the project directory it runs in"
+  (test/cli-gates.test.js). Reverted, the planted copy ran `recall.py --gates-compile`.
+- "\"Why did this prompt?\" refuses a codex name PATH does not hold, and never runs the copy in
+  the host's cwd" (test/dashboard-project-trust.test.js). Reverted, the planted copy ran the
+  `execpolicy check` arguments.
+- "the version probe launches the file its identity resolved, not whatever a second PATH walk
+  finds" (test/codex-version.test.js). It covers both doors, each reverted separately.
+- In test/exec-resolve.test.js:
+  - "a name nothing on PATH holds is refused before spawn, so a copy planted in the current
+    directory never runs". Its precondition runs the hazard for real.
+  - "a relative PATH entry is never searched, so \".\" and an unexpanded %VAR% entry cannot
+    supply a program".
+  - "a batch shim runs System32's cmd.exe when ComSpec is missing or not a full path".
+- Neutering `resolvedLaunch` alone fails both call-site tests as well.
+
+---
+
 ## The v1.6.3 release commit's CI failures (2026-10-14)
 
 CI run 38525363435 on `7cbba2b` failed 5 of 7 jobs; Windows Node 24 and the PowerShell 5.1
@@ -209,7 +281,7 @@ record, on the development box, with the method named in each row.
 | execFile's own `timeout` orphaned the program under a launcher | **FIXED** on Windows, `f1f2de1`; POSIX **ACCEPTED-RECORDED** | execFile's timeout is `child.kill()` on the one PID it holds, and on Windows each of the extension's four execFile children is a launcher: an npm `codex.cmd` (cmd.exe → node) for the 30 s `codex execpolicy check` in `execFileCaptured`, and the DevToolbox venv `python.exe` for the recall rebuild and sync (180 s) and the gate compile (60 s). That `python.exe` is a redirector whose interpreter is its child (measured: the interpreter's parent PID was the PID spawn returned). Ended that way the program kept running, and because it held the pipes it inherited, execFile's callback never came either; endProcessTree could not reach it afterwards, because it finds a tree by its root. Each site now takes its deadline from `endTreeAfter` (src/exec-resolve.js), the version probe's pattern: a timer of its own that tree-kills the still-live root. The four lengths and the reported wording ("Command failed: …" plus stderr) are unchanged. Pinned by "a deadline from endTreeAfter ends the program under a launcher, which killing the launcher alone leaves running" (test/exec-resolve.test.js; fails with the timer calling `child.kill()`) and "every execFile site takes its deadline from endTreeAfter, never from execFile's own timeout" (test/extension-lifecycle-async.test.js; fails with one site reverted). **POSIX:** endProcessTree reaches a whole tree only through a process group, and execFile cannot start a group leader (it drops `detached`, f8a3b92), so the deadline ends the child alone there, exactly as before. These sites have no grandchild on POSIX: a venv's python is the interpreter, `RECALL_REEXEC=1` suppresses recall.py's own re-run, and a native codex is one process. An npm-installed codex on POSIX is node → native codex; whether that launcher forwards SIGTERM was not re-verified here. |
 | The trust worker's graceful timeout could lose to the host's backstop | **FIXED**, `a140dc5` | CI run 38535034218 failed "the asynchronous layers read does not block…" on Node 20 / windows-latest only ("unavailable: the worker timed out", 6,478 ms). Confirmed in the code, not reproduced on the runner: the worker armed `deadlineMs` (timeoutMs − 3 s) as a length, after its own start, its module load and its codex spawn, then spent a 1 s grace and a synchronous taskkill before it exited, so the graceful path needed startup plus taskkill under 2 s, in the 4 s test and the 10 s product budget alike. The deadline is now a time, `deadlineAt`, fixed when `nativeRpcAsync` is called (src/codex-mcp-config.js, "THE DEADLINE IS A TIME, NOT A LENGTH"), so the worker's start comes out of the codex's 7 s and the whole 3 s margin is left for the grace, the kill and the exit. Budget, grace, backstop and wordings are unchanged; a worker that starts after its deadline fails the call at once. Pinned by "a worker that starts after its deadline still ends its own codex before the host's backstop" (a preload holds the worker 5.5 s, past the 5 s deadline of an 8 s budget; fails with the deadline made a length again). The original test still fails with `deadlineAt` dropped. |
 | On Windows an npm `codex.cmd` outlived an extension host that died outright | **FIXED** for the shim npm writes; any other `.cmd` **ACCEPTED-RECORDED** | Verified in "a worker whose host dies outright" (test/codex-mcp-config.test.js): libuv puts every child in a kill-on-close job that allows silent breakaway, so the worker's job held cmd.exe and not the shim's node, which survived the host. The worker now launches its app-server through `npmShimLaunch` (src/exec-resolve.js). A `.cmd` whose text is exactly cmd-shim's (npm 7 and later; @openai/codex needs one of those), with a relative target that exists, runs as `node <target>`, using the shim's own node.exe or else node from PATH, as the shim itself would choose. That node is then the worker's own child, in the worker's job, and the native codex the npm launcher starts is in that node's job. Anything else returns null and launches through cmd.exe as before. Small and in one place: the worker's launch only; the version probe and the execpolicy check exit by themselves and keep the `.cmd`. Pinned by "the shim npm writes is run as the node script it names; every other shape is left alone" (test/exec-resolve.test.js). Its shim is generated by the cmd-shim (8.0.0 here) bundled with the running node's npm, so it is npm's own output, and six other shapes return null. Also pinned by "on Windows, an npm-shim codex dies with a host that dies outright" (test/codex-mcp-config.test.js), which fails with the worker back on `commandLaunch` alone. A winget or standalone codex.exe was never affected: it is the worker's direct child. **Residual:** a hand-written or other-generator `.cmd` still breaks away. Deactivate's taskkill /T still ends it; only an outright host death does not. S1's design leaves this as it was, because the node worker still exists (design (b) was declined). Observed once and not reproduced: when a whole running suite was killed from outside, an npm stand-in that a worker started at that same instant survived. That fits libuv adding a child to its job only after CreateProcess returns (200–470 ms here), so a worker killed inside that call leaves the child in no job. Unverified. |
-| Bare `taskkill` is resolved from the current directory | **FIXED**, `1e11efa` | libuv resolves a bare name itself and looks in the cwd before PATH unless the environment carries `NoDefaultCurrentDirectoryInExePath`. Measured (libuv 1.52.1, Node 24.19.0): with the variable unset, a copy of node named `taskkill.exe` in the cwd ran in place of System32's; with it set, it did not. The extension host's cwd is wherever VS Code was started, and the Codex config worker inherits it. The variable was set in the agent shell the audit ran from, and in neither the user nor the machine environment, so a test run from such a shell passes against the unfixed code: both new tests remove it. `endProcessTree` and the config worker's grace kill now run `taskkillPath()`, `%SystemRoot%\System32\taskkill.exe`. Pinned by "the tree kill runs System32's taskkill, not one planted in the current directory" (test/exec-resolve.test.js) and "the config worker's own kill runs System32's taskkill, not one planted in its cwd" (test/codex-mcp-config.test.js); each fails with its own site reverted. The planted copy's flag is not the only witness, because endpoint scanning can hold a freshly copied executable's first run past the kill's own timeout: the first test also requires that the node under a cmd.exe dies, which only `/T` does, and the second that the worker's own deadline is the answer. Same class, not changed here: `bin/wildcard-perms` spawns `TOOLBOX_PYTHON \|\| 'python'` by bare name, and `commandLaunch` hands an unresolved name back bare, which `execFileCaptured` then spawns. |
+| Bare `taskkill` is resolved from the current directory | **FIXED**, `1e11efa` | libuv resolves a bare name itself and looks in the cwd before PATH unless the environment carries `NoDefaultCurrentDirectoryInExePath`. Measured (libuv 1.52.1, Node 24.19.0): with the variable unset, a copy of node named `taskkill.exe` in the cwd ran in place of System32's; with it set, it did not. The extension host's cwd is wherever VS Code was started, and the Codex config worker inherits it. The variable was set in the agent shell the audit ran from, and in neither the user nor the machine environment, so a test run from such a shell passes against the unfixed code: both new tests remove it. `endProcessTree` and the config worker's grace kill now run `taskkillPath()`, `%SystemRoot%\System32\taskkill.exe`. Pinned by "the tree kill runs System32's taskkill, not one planted in the current directory" (test/exec-resolve.test.js) and "the config worker's own kill runs System32's taskkill, not one planted in its cwd" (test/codex-mcp-config.test.js); each fails with its own site reverted. The planted copy's flag is not the only witness, because endpoint scanning can hold a freshly copied executable's first run past the kill's own timeout: the first test also requires that the node under a cmd.exe dies, which only `/T` does, and the second that the worker's own deadline is the answer. Same class, not changed here: `bin/wildcard-perms` spawns `TOOLBOX_PYTHON \|\| 'python'` by bare name, and `commandLaunch` hands an unresolved name back bare, which `execFileCaptured` then spawns. Both are fixed since, with the rest of the census, under "Bare-name spawns: the census". |
 
 ## The 1.6.2 backlog clearance (2026-10-13)
 

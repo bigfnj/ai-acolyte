@@ -67,6 +67,13 @@ function probeDirectories(dirs, value, extensions) {
 // Returns an absolute path on Windows, the name unchanged on POSIX (where
 // spawn resolves PATH itself), or null when neither PATH nor a standard install
 // location holds it.
+//
+// ABSOLUTE PATH ENTRIES ONLY (2026-10-14). A relative PATH entry is the current
+// directory by another name: "." is one, and so is an entry whose variable was never
+// expanded ("%TOOLS%\bin", which a REG_SZ PATH value leaves literal). Both are joined
+// to whatever directory the process stands in, which for the hook is the Claude Code
+// session's project, so a repository could supply either one. cmd.exe and libuv honour
+// them; a program this module finds for a caller that never typed a command does not.
 function resolveExecutable(name) {
   const value = String(name == null ? '' : name);
   if (!value) return null;
@@ -77,7 +84,7 @@ function resolveExecutable(name) {
     for (const extension of extensions) if (isFile(direct + extension)) return direct + extension;
     return null;
   }
-  const onPath = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const onPath = String(process.env.PATH || '').split(path.delimiter).filter((dir) => dir && path.isAbsolute(dir));
   // PATH stays authoritative; the fallback only answers where PATH said nothing.
   return probeDirectories(onPath, value, extensions) ||
     probeDirectories(fallbackDirectories(), value, extensions);
@@ -102,18 +109,43 @@ function commandLaunch(name, args = []) {
   const resolved = resolveExecutable(name);
   // Unresolved on Windows means nothing on PATH matched. Hand the bare name
   // back so the caller's own ENOENT contract still fires rather than inventing
-  // a different failure here.
+  // a different failure here. A caller that spawns the result without checking
+  // `resolved` first wants resolvedLaunch, below: libuv looks for a bare name in
+  // the current directory before PATH.
   if (!resolved) return { file: String(name == null ? '' : name), args: list, options: {}, resolved: null };
   if (process.platform !== 'win32' || !BATCH_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
     return { file: resolved, args: list, options: {}, resolved };
   }
   const line = [resolved, ...list].map(quoteForCommandProcessor).join(' ');
+  // ComSpec when it names a file outright, else System32's: a bare `cmd.exe` is the same
+  // current-directory lookup as any other bare name (resolvedLaunch, below).
+  const comspec = process.env.ComSpec;
   return {
-    file: process.env.ComSpec || 'cmd.exe',
+    file: comspec && path.isAbsolute(comspec) ? comspec : systemProgram('cmd.exe'),
     args: ['/d', '/s', '/c', `"${line}"`],
     options: { windowsVerbatimArguments: true },
     resolved,
   };
+}
+
+// A LAUNCH THAT NEVER HANDS spawn A BARE NAME (2026-10-14). commandLaunch returns the
+// name unchanged when nothing on PATH matched, so that the caller's own ENOENT fires.
+// On Windows that bare name then reaches libuv, which looks in the CURRENT DIRECTORY
+// before PATH: the child's `cwd` when one is given, the spawner's otherwise. Only the
+// SPAWNING process's own environment can turn that off, with
+// NoDefaultCurrentDirectoryInExePath; the child's `env` cannot (measured: libuv 1.52.1,
+// Node 24.19.0, see taskkillPath below). So "not on PATH" meant "run the copy in the
+// cwd", and the cwd is often a project: the hook runs in the Claude Code session's
+// project directory, and the extension host in whatever directory VS Code was started.
+// This throws the error spawn raises for a missing program, in its words
+// (`<syscall> <name> ENOENT`, code ENOENT), without the spawn. POSIX is unchanged:
+// execvp walks PATH alone, so the name goes to spawn as before.
+function resolvedLaunch(name, args = [], syscall = 'spawn') {
+  const launch = commandLaunch(name, args);
+  if (process.platform !== 'win32' || launch.resolved) return launch;
+  throw Object.assign(new Error(`${syscall} ${launch.file} ENOENT`), {
+    code: 'ENOENT', syscall: `${syscall} ${launch.file}`, path: launch.file, spawnargs: launch.args,
+  });
 }
 
 // AN npm SHIM, RUN AS THE NODE SCRIPT IT NAMES (2026-10-14). Launched through the
@@ -174,8 +206,11 @@ function npmShimLaunch(name, args = []) {
 // shell often sets the variable, which is how this hid: a test has to unset it.
 // SystemRoot is read first so a Windows installed off C: is honoured; the drive
 // is a last resort for an environment that carries neither variable.
+function systemProgram(file) {
+  return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', file);
+}
 function taskkillPath() {
-  return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+  return systemProgram('taskkill.exe');
 }
 
 // End a child AND everything it started, which on Windows child.kill() does not.
@@ -295,6 +330,6 @@ function endTreeAfter(child, ms) {
 // the case where neither holds the name. A test on the directory LIST would pin
 // less than the tests that already exist.
 module.exports = {
-  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
+  resolveExecutable, commandLaunch, resolvedLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
   END_TREE, npmShimLaunch,
 };

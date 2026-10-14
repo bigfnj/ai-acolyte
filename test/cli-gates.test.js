@@ -194,3 +194,55 @@ test('CLI --guidance off also sweeps an accepted derived block', (t) => {
   assert.deepEqual(stray.filter((name) => name.endsWith('.pre-derived')), [],
     `witness:pre-derived -- a second copy was left in ${strayDir}: ${JSON.stringify(stray)}`);
 });
+
+// THE REFRESH NEVER RUNS A PYTHON THE PROJECT SUPPLIED (2026-10-14). With TOOLBOX_PYTHON
+// unset the compile spawned a bare `python`, and on Windows libuv looks for a bare name in
+// the current directory before PATH unless the spawning process's environment carries
+// NoDefaultCurrentDirectoryInExePath. A SessionStart hook's cwd is the session's project,
+// so the project here holds a copy of node named python.exe, and a --require preload
+// writes a flag only when it runs as that copy. The CLI's environment drops the variable:
+// an agent shell often sets it, and with it set the unfixed code passes too.
+test('CLI --gates refresh never runs a python planted in the project directory it runs in', { skip: process.platform !== 'win32' }, (t) => {
+  const home = tempHome(t);
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-gates-project-'));
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }));
+  fs.copyFileSync(process.execPath, path.join(project, 'python.exe'));
+  const flag = path.join(home, 'planted-python-ran');
+  const marker = path.join(home, 'planted-marker.js');
+  fs.writeFileSync(marker, `if (/python\\.exe$/i.test(process.execPath)) { require('fs').writeFileSync(${JSON.stringify(flag)}, process.argv.slice(1).join(' ')); process.exit(0); }\n`);
+  const system32 = path.join(process.env.SystemRoot, 'System32');
+  const refresh = (PATH) => {
+    const root = path.parse(home).root;
+    const env = {
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), APPDATA: home,
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1), PATH,
+      // NODE_OPTIONS reads a backslash inside quotes as an escape: forward slashes.
+      NODE_OPTIONS: `--require "${marker.split(path.sep).join('/')}"`,
+    };
+    delete env.NoDefaultCurrentDirectoryInExePath;
+    delete env.TOOLBOX_PYTHON;
+    // Endpoint scanning can hold the first run of a freshly copied executable for seconds.
+    return spawnSync(process.execPath, [CLI, '--gates', 'refresh'], { cwd: project, env, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+  };
+  const planted = () => (fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : null);
+
+  // Nothing on PATH is called python: the failure is the ENOENT it always was.
+  const missing = refresh(system32);
+  // MUTATION: spawn `process.env.TOOLBOX_PYTHON || 'python'` bare again in gates(). The
+  // copy in the project runs and writes the flag. Confirmed 2026-10-14.
+  assert.equal(planted(), null, `the python in the project directory ran: ${planted()}`);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.match(missing.stderr, /compile failed, installing whatever was last compiled \(spawnSync python ENOENT\)/);
+
+  // A python on PATH is the one that runs.
+  const bin = path.join(home, 'bin');
+  const ranFromPath = path.join(home, 'path-python-ran');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'python.cmd'), `@echo off\r\necho %*> "${ranFromPath}"\r\n`);
+  const found = refresh([bin, system32].join(path.delimiter));
+  assert.equal(planted(), null, `the python in the project directory ran: ${planted()}`);
+  assert.equal(found.status, 0, found.stderr);
+  assert.ok(fs.existsSync(ranFromPath), `the python on PATH did not run: ${found.stderr}`);
+  assert.match(fs.readFileSync(ranFromPath, 'utf8'), /recall\.py" "--gates-compile"/);
+  assert.doesNotMatch(found.stderr, /compile failed/);
+});

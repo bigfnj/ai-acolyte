@@ -896,7 +896,11 @@ test('the manager probes each Codex home once, with every root under it', (t) =>
   assert.equal(calls.length, 1,
     `witness:probe-groups -- one Codex home was probed ${calls.length} times`);
   assert.deepEqual(calls[0].sessionsDirs, [sessions, archived]);
-  assert.equal(calls[0].sessionsDir, sessions);
+  // Exactly these keys. `sessionsDir: sessionsDirs[0]` was passed beside the list
+  // until 2026-10-14 and asserted here, though the probe reads it only when the
+  // list is empty, which the manager's never is: an argument nothing consumed.
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['codexHome', 'home', 'sessionsDirs'],
+    'witness:probe-arguments -- the manager passes the probe an argument it never reads');
   assert.equal(calls[0].codexHome, path.join(home, '.codex'));
   assert.deepEqual(one.codexHistoryFindings, { orphans: 1, relocated: 0, projectionAhead: 2, emptyRollouts: 0 });
 

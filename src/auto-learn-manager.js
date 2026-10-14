@@ -1450,9 +1450,9 @@ function createAutoLearnManager(options = {}) {
     const notes = [];
     const findings = { orphans: 0, relocated: 0, projectionAhead: 0, emptyRollouts: 0 };
     for (const group of groups.values()) {
-      const state = historyStoreProbe({
-        home, codexHome: group.codexHome, sessionsDirs: group.dirs, sessionsDir: group.dirs[0],
-      }) || {};
+      // No `sessionsDir: group.dirs[0]` (dropped 2026-10-14): the probe reads it only when `sessionsDirs`
+      // is empty, which `group.dirs` never is, so it was ignored on every call. Direct callers still may.
+      const state = historyStoreProbe({ home, codexHome: group.codexHome, sessionsDirs: group.dirs }) || {};
       if (state.stale) stale = true;
       // Worst wins. One root inspected exactly does not redeem another that
       // could not be read: the answer for the corpus is only as good as its

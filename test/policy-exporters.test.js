@@ -1412,3 +1412,56 @@ test('bunx and pnpx are judged as bun x and pnpm dlx: broad until they name a na
       `${command}: the learner's bare-root prefix is refused`);
   }
 });
+
+// The environment a runner hands its command (the lead's decision, 2026-10-14): an assignment
+// that loads or names a program is refused inside docker/podman/compose `-e` as it is after
+// `env`, and every environment FILE is refused, its contents being unknowable at review time.
+// node's and uv's `--env-file` were measured to load code (src/policy-exporters.js). Each row's
+// verdict at f23e978 is in the commit that added this test.
+const ENV_REFUSED = [
+  ['docker', 'exec', '-e', 'LD_PRELOAD=/x.so', 'ctr', 'cat'], ['docker', 'exec', '-eLD_PRELOAD=/x.so', 'ctr', 'cat'],
+  ['docker', 'exec', '--env=GIT_PAGER=x', 'ctr', 'git', 'log'], ['docker', 'exec', '--env', 'PATH=/tmp', 'ctr', 'ls'],
+  ['docker', 'exec', '-e', 'LD_PRELOAD', 'ctr', 'cat'], ['podman', 'run', '-e', 'BASH_ENV=x', 'img', 'make', 'test'],
+  ['nerdctl', 'exec', '-e', 'DYLD_INSERT_LIBRARIES=x', 'ctr', 'ls'],
+  ['docker', 'compose', 'exec', '-e', 'NODE_OPTIONS=--require=x', 'web', 'npm', 'test'],
+  ['docker', 'compose', 'run', '-e', 'LD_PRELOAD=x', 'web', 'ls'], ['docker-compose', 'exec', '-e', 'EDITOR=x', 'web', 'git', 'commit'],
+  ['docker', 'exec', '--env-file', 'x.env', 'ctr', 'cat'], ['docker', 'run', '--env-file=x.env', 'img', 'ls'],
+  ['podman', 'run', '--env-file', 'x.env', 'img', 'pytest'], ['uv', 'run', '--env-file', 'x.env', 'pytest'],
+  ['uv', 'run', '--env-file=x.env', 'pytest'], ['uvx', '--env-file', 'x.env', 'ruff'], ['uv', 'tool', 'run', '--env-file', 'x', 'ruff'],
+  ['node', '--env-file', 'x.env', 'x.js'], ['node', '--env-file=x.env', 'x.js'], ['node', '--env-file-if-exists=x.env', 'x.js'],
+  ['deno', 'run', '--env-file', 'x.ts'], ['deno', '--env-file', 'run', 'x.ts'], ['bun', '--env-file', 'x.env', 'x.ts'],
+  ['bun', 'run', '--env-file', 'x.env', 'x.ts'], ['just', '--dotenv-path', 'x.env', 'build'], ['just', '-E', 'x.env', 'build'],
+  ['just', '--dotenv-filename=x.env', 'build'], ['timeout', '5', 'node', '--env-file', 'x', 'x.js'],
+];
+const ENV_NARROW = [
+  ['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'ls'], ['docker', 'exec', '-eFOO=bar', 'ctr', 'ls'], ['docker', 'exec', '-e', 'FOO', 'ctr', 'ls'],
+  ['docker', 'run', '-e', 'CI=1', 'img', 'pytest'], ['docker', 'compose', 'exec', '-e', 'FOO=1', 'web', 'pytest'],
+  ['podman', 'exec', '--env=TZ=UTC', 'ctr', 'date'], ['uv', 'run', '--no-env-file', 'pytest'], ['node', 'x.js'],
+  ['just', '--no-dotenv', 'build'], ['just', '-f', 'x', 'build'],
+];
+
+test('an environment option that names or loads a program, and any environment file, make a runner prefix broad', () => {
+  for (const prefix of ENV_REFUSED) {
+    // MUTATION: delete the `grammar.env` check in execWrapperInner. `["docker", "exec", "-e",
+    // "LD_PRELOAD=/x.so", "ctr", "cat"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop the envFused check. `["docker", "exec", "-eLD_PRELOAD=/x.so", "ctr",
+    // "cat"]` renders. Confirmed 2026-10-14.
+    // MUTATION: put '--env-file' back into DOCKER_EXEC's values. `["docker", "exec",
+    // "--env-file", "x.env", "ctr", "cat"]` renders. Confirmed 2026-10-14.
+    // MUTATION: put '--env-file' back into UVX_EXEC's values. The uv rows render. Confirmed
+    // 2026-10-14.
+    // MUTATION: drop the env-file alternative from node's `broad`. `["node", "--env-file=x.env",
+    // "x.js"]` renders (the generic fused form). Confirmed 2026-10-14.
+    // MUTATION: put '--dotenv-path' back into JUST's values. `["just", "--dotenv-path", "x.env",
+    // "build"]` renders. Confirmed 2026-10-14.
+    // The four deno and bun rows were refused already (their top-level and post-subcommand
+    // options are not modelled, so `--env-file` was an unknown option): pins.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} lets the environment load or name a program`);
+  }
+  // Controls: a data-valued assignment, a copied safe name, the opt-out flags, and nothing at all.
+  for (const prefix of ENV_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is as narrow as its command`);
+  }
+  // A data-valued assignment does not narrow a broad command either.
+  assert.equal(codexRuleCount(['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'sh']), 0);
+});

@@ -569,6 +569,14 @@ function execWrapperInner(grammar, prefix) {
     if (grammar.lookup?.test(token)) return LOOKUP;
     if (grammar.module?.includes(token)) return ['python', '-m', ...prefix.slice(k + 1)];
     if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
+    // A container's environment option (`env`/`envFused`, docker and compose, 2026-10-14):
+    // judged before the value is skipped, by envAssignmentIsUnsafe.
+    if (grammar.env?.includes(token)) {
+      if (envAssignmentIsUnsafe(prefix[k + 1])) return null;
+      k += 1; continue;
+    }
+    const fusedEnv = grammar.envFused?.exec(token);
+    if (fusedEnv && envAssignmentIsUnsafe(fusedEnv[1])) return null;
     if (values.has(token)) { k += 1; continue; }
     if (grammar.fused?.test(token)) continue;
     return null;
@@ -650,13 +658,19 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
       '--preserve-symlinks-main', '--test', '--watch', '--abort-on-uncaught-exception', '--experimental-vm-modules',
       '--experimental-strip-types', '--no-experimental-strip-types', '--experimental-transform-types',
       '--frozen-intrinsics', '--no-addons', '--trace-exit', '--zero-fill-buffers'],
-    values: ['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions', '--env-file',
-      '--env-file-if-exists', '--inspect-port', '--title', '--input-type', '--watch-path', '--test-reporter',
+    values: ['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions',
+      '--inspect-port', '--title', '--input-type', '--watch-path', '--test-reporter',
       '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--redirect-warnings',
       '--unhandled-rejections', '--icu-data-dir', '--openssl-config', '--report-dir', '--diagnostic-dir'],
     // `--import=data:text/javascript,...` and friends carry the code in the option itself,
-    // fused or as the next token
-    broad: /^--(?:require|import|loader|experimental-loader)=data:/, broadValue: /^data:/,
+    // fused or as the next token. `--env-file` and `--env-file-if-exists`, fused or not, are
+    // broad too (2026-10-14, the env-file decision at DOCKER_EXEC): node applies a NODE_OPTIONS
+    // line from the file. MEASURED that day, Node 24.19.0, in a private temp directory:
+    // `node --env-file=x.env z.js` and `node --env-file x.env z.js`, x.env holding
+    // `NODE_OPTIONS=--require ./y.js`, each ran y.js; `node z.js` did not. Until then both were
+    // plain value options, so `["node", "--env-file", "x.env", "x.js"]` rendered.
+    broad: /^(?:--(?:require|import|loader|experimental-loader)=data:|--env-file(?:-if-exists)?(?:=|$))/,
+    broadValue: /^data:/,
     fused: /^--[a-z0-9-]+=/,
   },
   ruby: {
@@ -784,10 +798,19 @@ const LONG_INFO = new Set(['--version', '--help']);
 // the container, the other hands it the host's devices and capabilities, which is the
 // reason sudo is broad at any depth (ALWAYS_BROAD_WRAPPERS). docker parses no option after
 // the CONTAINER operand, so whatever follows it is the command.
+//
+// The environment the command gets (2026-10-14, the lead's decision on a finding of the same
+// day): `-e`/`--env NAME=VALUE`, or a bare `-e NAME` that copies the caller's value, is read by
+// `env` (envAssignmentIsUnsafe) and refused when NAME loads or names a program, as `["env",
+// "LD_PRELOAD=x", "cat"]` is; a data-valued `-e FOO=bar` stays narrow. `--env-file` is absent,
+// so broad, fused or not: the file's contents are unknowable when the prefix is reviewed, and
+// any of its lines can be `LD_PRELOAD=...`. Not measured here (no container runtime is set up
+// on the box); node's and uv's `--env-file` were, below.
 const DOCKER_EXEC = {
   flags: ['-d', '-i', '-t', '--detach', '--interactive', '--tty'], flagPattern: /^-[dit]+$/,
-  values: ['-e', '--env', '--env-file', '-w', '--workdir', '--detach-keys'],
-  fused: /^(?:-[ew].|--(?:env|env-file|workdir|detach-keys)=)/, operands: 1,
+  values: ['-e', '--env', '-w', '--workdir', '--detach-keys'],
+  fused: /^(?:-[ew].|--(?:env|workdir|detach-keys)=)/, operands: 1,
+  env: ['-e', '--env'], envFused: /^(?:-e|--env=)(.+)$/,
 };
 // `docker run IMAGE COMMAND`. Absent, so broad: `-v`/`--volume`/`--mount` (a bind mount of
 // `/` makes the container root on the host), `--privileged`, `-u`/`--user`, `--entrypoint`
@@ -798,14 +821,16 @@ const DOCKER_EXEC = {
 const DOCKER_RUN = {
   flags: ['-d', '-i', '-t', '--detach', '--interactive', '--tty', '--rm', '--init', '--read-only'],
   flagPattern: /^-[dit]+$/,
-  values: ['-e', '--env', '--env-file', '-w', '--workdir', '--name', '-l', '--label', '--platform', '--pull',
+  values: ['-e', '--env', '-w', '--workdir', '--name', '-l', '--label', '--platform', '--pull',
     '-p', '--publish'],
-  fused: /^(?:-[ewlp].|--(?:env|env-file|workdir|name|label|platform|pull|publish)=)/, operands: 1,
+  fused: /^(?:-[ewlp].|--(?:env|workdir|name|label|platform|pull|publish)=)/, operands: 1,
+  env: DOCKER_EXEC.env, envFused: DOCKER_EXEC.envFused,                  // the environment, as for exec
 };
 // `docker compose exec|run SERVICE COMMAND`, with `-T` (no TTY) beside the docker flags.
 const COMPOSE_EXEC = {
   flags: ['-d', '-i', '-t', '-T', '--detach', '--interactive', '--tty', '--no-TTY'], flagPattern: /^-[ditT]+$/,
   values: ['-e', '--env', '-w', '--workdir', '--index'], fused: /^(?:-[ew].|--(?:env|workdir|index)=)/, operands: 1,
+  env: DOCKER_EXEC.env, envFused: DOCKER_EXEC.envFused,
 };
 const COMPOSE_RUN = {
   ...DOCKER_RUN, flagPattern: /^-[ditT]+$/,
@@ -850,15 +875,20 @@ const KUBECTL = {
 };
 // `uvx` and `uv tool run`: fetch a tool by name and run it. `["uvx", "python"]` runs an
 // interpreter (uv resolves `python` there), and the recursion refuses it like `["python"]`.
+// `--env-file` is absent, so broad (2026-10-14, the env-file decision at DOCKER_EXEC): uv loads
+// the file into the command's environment. MEASURED that day in a private temp directory, uv
+// 0.12.2 offline: `uv run --no-project --env-file p.env python s.py`, p.env holding
+// `PYTHONPATH=sc` and sc/sitecustomize.py writing a marker, wrote the marker; the same run
+// without `--env-file` did not. `--no-env-file` (uv run) is a flag and stays.
 const UVX_EXEC = {
   flags: ['--isolated', '-q', '--quiet', '-v', '--verbose', '--offline', '--no-cache', '-n', '--refresh',
     '--native-tls', '--no-config', '--no-progress', '--lfs', '--preview', '--managed-python', '--no-managed-python'],
   flagPattern: /^-[qvn]+$/,
   values: ['--from', '--with', '-w', '--with-editable', '--with-requirements', '--python', '-p', '--index',
     '--default-index', '--index-url', '-i', '--extra-index-url', '--find-links', '-f', '--cache-dir', '--color',
-    '--config-file', '--directory', '--project', '--env-file', '--prerelease', '--resolution', '--exclude-newer',
+    '--config-file', '--directory', '--project', '--prerelease', '--resolution', '--exclude-newer',
     '--refresh-package', '--upgrade-package', '-P'],
-  fused: /^(?:-[wpifP].|--(?:from|with|with-editable|with-requirements|python|index|default-index|index-url|extra-index-url|find-links|cache-dir|color|config-file|directory|project|env-file|prerelease|resolution|exclude-newer|refresh-package|upgrade-package)=)/,
+  fused: /^(?:-[wpifP].|--(?:from|with|with-editable|with-requirements|python|index|default-index|index-url|extra-index-url|find-links|cache-dir|color|config-file|directory|project|prerelease|resolution|exclude-newer|refresh-package|upgrade-package)=)/,
 };
 // `uv run [OPTIONS] COMMAND`: the command runs in the project environment, directly.
 // `-s`/`--script` marks the command as a script path, which the recursion then reads as one.
@@ -870,7 +900,7 @@ const UV_RUN = {
   flagPattern: /^-[qvns]+$/,
   values: [...UVX_EXEC.values.filter((value) => !['--from', '-w'].includes(value)), '--package', '--extra',
     '--group', '--only-group', '--no-group'],
-  fused: /^(?:-[pifP].|--(?:with|with-editable|with-requirements|python|index|default-index|index-url|extra-index-url|find-links|cache-dir|color|config-file|directory|project|env-file|prerelease|resolution|exclude-newer|refresh-package|upgrade-package|package|extra|group|only-group|no-group)=)/,
+  fused: /^(?:-[pifP].|--(?:with|with-editable|with-requirements|python|index|default-index|index-url|extra-index-url|find-links|cache-dir|color|config-file|directory|project|prerelease|resolution|exclude-newer|refresh-package|upgrade-package|package|extra|group|only-group|no-group)=)/,
   module: ['-m', '--module'],
 };
 const UV = {
@@ -936,7 +966,10 @@ const MAKE = {
 // command), `--shell`, `--shell-arg` and `--shell-command` (they choose what runs every
 // recipe line), `--chooser`/`--choose` (a chooser command run through a shell), and the
 // modes that run no named recipe (`--evaluate`, which runs the justfile's backticks,
-// `--edit`, `--list`, `--fmt`, `--init`, `--show`, ...).
+// `--edit`, `--list`, `--fmt`, `--init`, `--show`, ...). Also absent since 2026-10-14, by the
+// env-file decision at DOCKER_EXEC: `--dotenv-filename`, `-E`/`--dotenv-path`, which name the
+// environment file every recipe line runs under. Not measured (the decision is about what a
+// reviewer cannot see, not about one tool's behavior); `--no-dotenv` stays a flag.
 const JUST = {
   info: DEFAULT_INFO,
   target: {
@@ -944,10 +977,9 @@ const JUST = {
     flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
       '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
     flagPattern: /^-v+$/,
-    values: ['-f', '--justfile', '-d', '--working-directory', '--dotenv-filename', '-E', '--dotenv-path', '--color',
-      '--timestamp-format'],
+    values: ['-f', '--justfile', '-d', '--working-directory', '--color', '--timestamp-format'],
     values2: ['--set'],
-    fused: /^(?:-[fdE].|--(?:justfile|working-directory|dotenv-filename|dotenv-path|color|timestamp-format)=)/,
+    fused: /^(?:-[fd].|--(?:justfile|working-directory|color|timestamp-format)=)/,
   },
 };
 const MISE_RUN = {
@@ -1783,9 +1815,18 @@ const PROGRAM_NAMING_ENV = new Set([
   'LESSOPEN', 'LESSCLOSE', 'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'GIT_EXTERNAL_DIFF',
   'GIT_PROXY_COMMAND', 'SSH_ASKPASS', 'SUDO_ASKPASS', 'CC', 'CXX', 'MAKE',
 ]);
-function assignmentIsUnsafe(token) {
-  const name = ASSIGNMENT_WORD.exec(token)[1];
+function envNameIsUnsafe(name) {
   return CODE_LOADING_ENV.has(name) || PROGRAM_NAMING_ENV.has(name) || /^(?:LD|DYLD)_/.test(name);
+}
+function assignmentIsUnsafe(token) {
+  return envNameIsUnsafe(ASSIGNMENT_WORD.exec(token)[1]);
+}
+// The value of a container's `-e`/`--env` (execWrapperInner, 2026-10-14): `NAME=VALUE`, or a
+// bare `NAME`, which docker and podman fill from the caller's own environment, so a value the
+// prefix does not even show. Judged by the name alone either way; a missing value (the prefix
+// ends at `-e`) is no assignment, and that prefix names no command anyway.
+function envAssignmentIsUnsafe(value) {
+  return value !== undefined && envNameIsUnsafe(String(value).split('=', 1)[0]);
 }
 
 function claudePermissionIsSafe(parsed, options) {

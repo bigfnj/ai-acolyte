@@ -34,6 +34,11 @@ installer declines an empty block so `CLAUDE.md` still looks correct, the dashbo
 and the `--lint` staleness check compares empty to empty and reports current. Pass
 `--gates-allow-empty` when deleting every gate is what you actually meant.
 
+A gate memory can name the agents it is for with `agents:` beside `scope:` (`[codex]`,
+`[claude]`, `[claude, codex]`, or a bare name). Once one does, the compile writes one section per
+agent into the same file, and each agent installs only its own. A name it does not know is never
+guessed at: that gate is left out for every agent, and the compile (on stderr) and `--lint` name it.
+
 Ranked output is `score  file  cos N  lex N  description  > best-matching line`.
 
 The **cosine** is the number to calibrate on, and it is the one every figure recorded before

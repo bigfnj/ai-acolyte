@@ -17,7 +17,7 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-// recall.py's EXCLUDE (recall.py:222#EXCLUDE): the index is just hooks, so it is never a search
+// recall.py's EXCLUDE (recall.py:223#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
@@ -36,30 +36,129 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// The gate block a memory contributes, trimmed, or null. recall.py's _gate_body: `scope:
-// global` in the frontmatter plus a PAIRED block. One rule for the primary's gate count and
-// for the other stores' census below, as recall.py shares one rule between its compiler and
-// its --lint census.
-function gateBody(raw) {
+// The gate a memory is, or null: recall.py's _gate. `scope: global` in the frontmatter plus a
+// PAIRED block, with gateAgents' reading of `agents:`; `problem` set means the compiler leaves
+// it out for every agent. One rule for the primary's gate count and for the other stores'
+// census below, as recall.py shares one rule between its compiler and its --lint census.
+function gateOf(raw) {
   if (frontmatter(raw, 'scope') !== 'global') return null;
   const m = GATE_BLOCK.exec(raw);
-  return m ? m[1].trim() : null;
+  return m ? { body: m[1].trim(), ...gateAgents(raw) } : null;
 }
 
-// One frontmatter scalar, scoped to the real `---` block. recall.py's _fm, transliterated.
+// The gate block a memory contributes to the compile, trimmed, or null. recall.py's
+// _gate_body: a gate whose `agents:` cannot be read contributes nothing.
+function gateBody(raw) {
+  const gate = gateOf(raw);
+  return gate && gate.problem === null ? gate.body : null;
+}
+
+// Python's whitespace, the one set str.isspace(), str.strip() and the `re` module's `\s` use
+// for text: checked code point by code point under the toolbox Python 3.11.15 on 2026-10-14,
+// and the list rampage measured. JavaScript's `\s` and trim() are a different set (they take
+// U+FEFF and leave out U+001C..U+001F and U+0085), and with them this read a gate recall.py
+// does not compile, or missed one it does: rampage measured it over generated frontmatter.
+const PY_SPACE = String.fromCharCode(0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
+  0x2028, 0x2029, 0x202f, 0x205f, 0x3000);
+const PY_WS = `[${PY_SPACE}]`;
+const pyStrip = (text, chars = PY_SPACE) => {
+  let start = 0;
+  let end = text.length;
+  while (start < end && chars.includes(text[start])) start += 1;
+  while (end > start && chars.includes(text[end - 1])) end -= 1;
+  return text.slice(start, end);
+};
+const pyLstrip = (text) => {
+  let start = 0;
+  while (start < text.length && PY_SPACE.includes(text[start])) start += 1;
+  return text.slice(start);
+};
+
+// The text between a memory's `---` fences, or '': recall.py's _frontmatter_block, over the
+// text as Python's text mode hands it over. Universal newlines turn `\r\n` and a lone `\r`
+// into `\n` and nothing else, then a BOM and blank lines before the fence are skipped.
 //
 // Scoped rather than searched over the whole text for the reason recall.py records: this
 // corpus contains memories that DOCUMENT gate syntax, so a whole-text match on
 // `scope: global` compiles a gate nobody declared. A leading UTF-8 BOM and blank lines are
 // tolerated because PowerShell 5.1's `Out-File -Encoding utf8` writes one, and a memory
 // edited by a one-liner would otherwise drop out of the count with nothing reporting it.
-function frontmatter(text, key) {
-  const head = text.replace(/^[﻿ \t\r\n]+/, '');
+function frontmatterBlock(text) {
+  const unix = String(text).replace(/\r\n?/g, '\n');
+  let start = 0;
+  while (start < unix.length && (unix.charCodeAt(start) === 0xfeff || ' \t\n'.includes(unix[start]))) start += 1;
+  const head = unix.slice(start);
   if (!head.startsWith('---')) return '';
   const end = head.indexOf('\n---', 3);
-  if (end === -1) return '';
-  const m = head.slice(3, end).match(new RegExp(`^\\s*${key}:\\s*(.+)$`, 'm'));
-  return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
+  return end === -1 ? '' : head.slice(3, end);
+}
+
+// One frontmatter scalar: recall.py's _fm, `^\s*key:\s*(.+)$` under re.MULTILINE, then strip,
+// then double quotes, then single quotes. Python breaks lines at `\n` only, for `^`, `$` and
+// `.` alike; JavaScript's m flag and `.` also break at `\r`, U+2028 and U+2029. So no m flag:
+// `^` and `$` are spelled as a `\n` on either side, and `.` as "not `\n`".
+function frontmatter(text, key) {
+  const m = new RegExp(`(?:^|(?<=\\n))${PY_WS}*${key}:${PY_WS}*([^\\n]+)(?=\\n|$)`).exec(frontmatterBlock(text));
+  return m ? pyStrip(pyStrip(pyStrip(m[1]), '"'), "'") : '';
+}
+
+// recall.py GATE_AGENTS: every agent a gate can name, in its section order.
+const GATE_AGENTS = ['claude', 'codex'];
+
+// A YAML value without its trailing comment: recall.py _uncomment.
+function uncomment(value) {
+  for (let i = 1; i < value.length; i += 1) {
+    if (value[i] === '#' && PY_SPACE.includes(value[i - 1])) return value.slice(0, i);
+  }
+  return value;
+}
+
+// Which agents a gate memory is for, { agents, problem }: recall.py's _gate_agents, line for
+// line, and held to it by test/recall-py.sh over generated frontmatter. Absent or empty means
+// every agent; an unknown name, two `agents:` lines, or a value this cannot read is a
+// `problem`, and the gate is left out for every agent rather than guessed at.
+function gateAgents(text) {
+  const lines = frontmatterBlock(text).split('\n');
+  const isKey = (line) => {
+    const rest = pyLstrip(line);
+    return rest.startsWith('agents') && pyLstrip(rest.slice(6)).startsWith(':');
+  };
+  const found = lines.flatMap((line, i) => (isKey(line) ? [i] : []));
+  if (!found.length) return { agents: [...GATE_AGENTS], problem: null };
+  if (found.length > 1) return { agents: [], problem: 'more than one `agents:` line' };
+  const line = lines[found[0]];
+  const rest = pyLstrip(line);
+  const indent = line.length - rest.length;
+  let value = pyStrip(uncomment(pyLstrip(rest.slice(6)).slice(1)));
+  let items;
+  if (value) {
+    if (value.startsWith('[') && value.endsWith(']')) value = value.slice(1, -1);
+    items = value.split(',');
+  } else {
+    items = [];
+    for (const below of lines.slice(found[0] + 1)) {
+      const item = pyLstrip(below);
+      if (!item || item.startsWith('#')) continue;
+      const depth = below.length - item.length;
+      if (depth >= indent && item[0] === '-' && (item.length === 1 || PY_SPACE.includes(item[1]))) {
+        items.push(uncomment(item.slice(1)));
+        continue;
+      }
+      if (depth > indent && !items.length) {
+        return { agents: [], problem: 'an `agents:` value on the line below it that is not a `- name` list' };
+      }
+      break;
+    }
+  }
+  const names = items.map((item) => pyStrip(pyStrip(pyStrip(pyStrip(item), '"'), "'"))).filter(Boolean);
+  if (!names.length) return { agents: [...GATE_AGENTS], problem: null };
+  const unknown = names.filter((name) => !GATE_AGENTS.includes(name.toLowerCase()));
+  if (unknown.length) {
+    return { agents: [], problem: '`agents:` names an agent this compiler does not know: ' + unknown.join(', ') };
+  }
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  return { agents: GATE_AGENTS.filter((agent) => wanted.has(agent)), problem: null };
 }
 
 // Backstop cadence for re-discovering the memory store. A file watcher can only
@@ -323,11 +422,15 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1143#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1280#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.
   const gateBodies = [];
+  // Gate memories the compiler leaves out for every agent, because their `agents:` cannot be
+  // read (recall.py _gate_agents), as { file, problem }: the gates card names them, since a
+  // standing order that loads nowhere is otherwise visible only in `recall.py --lint`.
+  const gateExcluded = [];
   for (const f of files) {
     let raw;
     try { raw = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
@@ -336,10 +439,11 @@ function fullReport(dir, conf, known = null) {
     valid.add(norm(f.slice(0, -3)));
     const nm = raw.slice(0, 400).match(/^\s*name:\s*(.+)$/m);
     if (nm) valid.add(norm(nm[1].trim().replace(/^["']|["']$/g, '')));
-    const body = f !== MEMORY_INDEX ? gateBody(raw) : null;
-    if (body !== null) {
+    const gate = f !== MEMORY_INDEX ? gateOf(raw) : null;
+    if (gate && gate.problem !== null) gateExcluded.push({ file: f, problem: gate.problem });
+    else if (gate) {
       gateSources += 1;
-      gateBodies.push(body);
+      gateBodies.push(gate.body);
     }
   }
   // AFTER the corpus pass, not before it, so `indexText` and `files` are both available:
@@ -353,7 +457,7 @@ function fullReport(dir, conf, known = null) {
   const unresolved = [...new Set(
     [...stripCode(all).matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]).filter((l) => !valid.has(norm(l)))
   )].sort();
-  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies };
+  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies, gateExcluded };
 }
 
 // ── Gates in the OTHER memory stores: reported, never compiled ────────────────────
@@ -848,4 +952,4 @@ function memoryReport() {
 // production importer either, but test/memory-line-cap.test.js and
 // test/memory-lint-watchers.test.js call them directly, and those calls are the
 // mutation-killing assertions for the line cap and the store-selection rule.
-module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates };
+module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf };

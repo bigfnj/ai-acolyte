@@ -23,6 +23,7 @@ Usage (from anywhere):
     python recall.py --lexical-only "..."  # BM25 alone; builds no ONNX session
     python recall.py --lint            # audit index bloat + links (no model needed)
     python recall.py --gates-compile   # lift scope:global gate blocks into ~/.claude/gates.generated.md
+                                       # (one section per agent once a gate names `agents:`)
     python recall.py --gates-compile --gates-allow-empty
                                        # ... and allow the result to be EMPTY. Without this flag a
                                        # compile that finds no gates refuses to overwrite a non-empty
@@ -781,14 +782,91 @@ def _fm(text, key):
     # a BOM, so a memory edited by a PowerShell one-liner would drop out of the compiled gates
     # with nothing reporting it. No file in either live corpus has one today: this is a guard
     # against a regression, not a fix for a present breakage.
+    m = re.search(rf'^\s*{key}:\s*(.+)$', _frontmatter_block(text), re.MULTILINE)
+    return m.group(1).strip().strip('"').strip("'") if m else ""
+
+
+def _frontmatter_block(text):
+    """The text between a memory's `---` fences, or "" when it has none. _fm's scoping, shared
+    with _gate_agents so the two keys are read from the same block."""
     head = text.lstrip("﻿ \t\r\n")
     if not head.startswith("---"):
         return ""
     end = head.find("\n---", 3)
-    if end == -1:
-        return ""
-    m = re.search(rf'^\s*{key}:\s*(.+)$', head[3:end], re.MULTILINE)
-    return m.group(1).strip().strip('"').strip("'") if m else ""
+    return head[3:end] if end != -1 else ""
+
+
+# Every agent a gate memory can name in `agents:`, in the order the per-agent compile writes
+# their sections (_compile_gates_text). src/agent-gates.js GATE_AGENTS is the same list.
+GATE_AGENTS = ("claude", "codex")
+
+
+def _uncomment(value):
+    """A YAML value without its trailing comment: from the first `#` that follows whitespace."""
+    for i in range(1, len(value)):
+        if value[i] == "#" and value[i - 1].isspace():
+            return value[:i]
+    return value
+
+
+def _gate_agents(text):
+    """Which agents a gate memory is for: (agents, problem).
+
+    `agents:` sits in the frontmatter at any indent, like `scope:` (nested under `metadata:` is
+    the shape Claude Code's memory writer emits). Accepted values, case-insensitive: `codex`,
+    `claude`, a flow list (`[codex]`, `[claude, codex]`), or a block list of `- name` lines
+    under it. Absent or empty means every agent, which is what a gate meant before `agents:`
+    was read at all.
+
+    A declaration this cannot read is never guessed at. An unknown name, or two `agents:`
+    lines, returns `problem` and no agents, and the compiler leaves that gate out for every
+    agent: guessing "every agent" would put a Codex-only rule in CLAUDE.md, which is the one
+    failure the key exists to prevent. --lint names each one.
+
+    Python's whitespace throughout, and lines split on "\\n" only, because the text arrives
+    through universal newlines. vscode-extension/memoryLint.js gateAgents is the same reading in
+    JavaScript, held to this one by test/recall-py.sh over generated frontmatter."""
+    lines = _frontmatter_block(text).split("\n")
+    # `agents :` is still the key in YAML. Missing it would read as "absent", every agent.
+    found = [i for i, line in enumerate(lines)
+             if line.lstrip().startswith("agents") and line.lstrip()[6:].lstrip().startswith(":")]
+    if not found:
+        return GATE_AGENTS, None
+    if len(found) > 1:
+        return (), "more than one `agents:` line"
+    line = lines[found[0]]
+    rest = line.lstrip()
+    indent = len(line) - len(rest)
+    value = _uncomment(rest[6:].lstrip()[1:]).strip()
+    if value:
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
+        items = value.split(",")
+    else:
+        # A block list. Its items may sit at the key's own indent, which YAML allows, and a
+        # comment line between them is skipped: stopping there read the list as empty, which
+        # is every agent. A deeper line that is not an item is a value this cannot read (a
+        # plain scalar continued onto the next line), so it is refused rather than taken as empty.
+        items = []
+        for below in lines[found[0] + 1:]:
+            item = below.lstrip()
+            if not item or item.startswith("#"):
+                continue
+            depth = len(below) - len(item)
+            if depth >= indent and item[0] == "-" and (len(item) == 1 or item[1].isspace()):
+                items.append(_uncomment(item[1:]))
+                continue
+            if depth > indent and not items:
+                return (), "an `agents:` value on the line below it that is not a `- name` list"
+            break
+    names = [n for n in (i.strip().strip('"').strip("'").strip() for i in items) if n]
+    if not names:
+        return GATE_AGENTS, None
+    unknown = [n for n in names if n.lower() not in GATE_AGENTS]
+    if unknown:
+        return (), "`agents:` names an agent this compiler does not know: " + ", ".join(unknown)
+    wanted = {n.lower() for n in names}
+    return tuple(a for a in GATE_AGENTS if a in wanted), None
 
 
 def _strip_code(text):
@@ -938,6 +1016,24 @@ def lint():
             print(f"    {s}")
         print()
 
+    # The compile, once, from the texts already read: the per-agent counts below, the gates it
+    # left out, and the drift check further down all describe this one result.
+    fresh_gates, gate_names, gate_agents, gate_excluded = _compile_gates_text(texts)
+
+    # What each agent's instruction file gets (`agents:`, _gate_agents). A count, not a finding.
+    if gate_names:
+        print(f"  {len(gate_names)} gate memor{'y' if len(gate_names) == 1 else 'ies'} compile: "
+              + ", ".join(f"{a} {len(gate_agents[a])}" for a in GATE_AGENTS))
+        print()
+
+    # A gate whose `agents:` cannot be read is left out for every agent rather than guessed at,
+    # so it is a standing order that loads nowhere, and that is a finding with a fix.
+    if gate_excluded:
+        print("  gate memory whose `agents:` cannot be read -- left out for every agent, not compiled:")
+        for name, problem in gate_excluded:
+            print(f"    {name[:-3]}  ({problem})")
+        print()
+
     # Gate memories in the OTHER stores, which never compile (see _other_store_gates). Worded
     # without the phrase "not compiled" on purpose: scripts/verify-release.ps1 fails its
     # "every standing order is compiled" check on that phrase, and a gate the user keeps in a
@@ -985,7 +1081,7 @@ def lint():
     # when both are stale together it reports "current". The extension's watcher recompiles
     # on edit, but a CLI-only user, or one with the extension closed, has no other signal.
     # This is the one place the source is compared to what a recompile would produce.
-    stale_gates = _gates_are_stale(texts)
+    stale_gates = _gates_are_stale(texts, fresh_gates)
     if stale_gates:
         print("  gates.generated.md is STALE: a gate block changed since the last compile.")
         # Both commands below REFUSE when the corpus compiles nothing, and neither
@@ -993,7 +1089,7 @@ def lint():
         # advising them unconditionally sent a user who had legitimately deleted their last gate
         # into a loop: lint says run X, X refuses, refresh warns on every session forever. Name
         # the escape hatch in the one case where the ordinary advice cannot work.
-        if not _compile_gates_text(texts)[1]:
+        if not gate_names:
             print("    this corpus compiles ZERO gate blocks, so --gates-compile will REFUSE")
             print("    rather than erase what is installed. If that is a surprise, check")
             print("    RECALL_MEMORY_DIR: it is probably pointing at the wrong corpus. If you")
@@ -1031,7 +1127,7 @@ def lint():
     # not (demote), the message must not claim it.
     if not (over_budget or over_ceiling or over or broken or unresolved
             or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
-            or other_gates or other_unreadable):
+            or other_gates or other_unreadable or gate_excluded):
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
 
 
@@ -1064,15 +1160,26 @@ def _installed_gate_bytes():
         return 0
 
 
-def _gate_body(text):
-    """The gate block a memory contributes, stripped, or None: `scope: global` in the
-    frontmatter plus a paired GATE_BLOCK. The one selection rule, shared by the compiler and
-    by --lint's census of the OTHER stores, so the census cannot count a memory the compiler
-    would skip, or skip one it would take."""
+def _gate(text):
+    """(body, agents, problem) for a memory that is a gate, or None: `scope: global` in the
+    frontmatter plus a paired GATE_BLOCK, and _gate_agents' reading of `agents:`. The one
+    selection rule, shared by the compiler, --lint, and --lint's census of the OTHER stores
+    (through _gate_body), so no report can count a memory the compiler would skip, or skip one
+    it would take. `problem` set means the compiler leaves the gate out for every agent."""
     if _fm(text, "scope") != "global":
         return None
     m = GATE_BLOCK.search(text)
-    return m.group(1).strip() if m else None
+    if not m:
+        return None
+    agents, problem = _gate_agents(text)
+    return m.group(1).strip(), agents, problem
+
+
+def _gate_body(text):
+    """The gate block a memory contributes to the compile, stripped, or None. A gate whose
+    `agents:` cannot be read contributes nothing, so the census does not count it either."""
+    gate = _gate(text)
+    return gate[0] if gate and gate[2] is None else None
 
 
 # Gates in memory stores OTHER than MEMORY_DIR: reported, never compiled (the maintainer's
@@ -1122,11 +1229,41 @@ def _other_store_gates(primary_bodies):
     return found, unreadable
 
 
+def _render_gates(blocks):
+    """One compiled gate set from [(name, body)]: the header with its sha, the count line, and
+    the bodies. "" for no gates. This is the whole file when no gate names a subset of agents,
+    byte for byte what every compile wrote before `agents:` was read, and it is each agent's
+    section of a per-agent compile."""
+    if not blocks:
+        # No gates means "" (write NOTHING), not a header over an empty body. The installer's
+        # "refuse to install an empty block" guard tests file content, and a file that always
+        # carried a header would sail past it and fence off a heading with no rules under it.
+        return ""
+    body = "\n".join(b for _, b in blocks)
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+    return (f"<!-- generated by recall.py --gates-compile; sha {digest} -->\n"
+            f"## Standing gates ({len(blocks)} memories, managed)\n\n{body}\n")
+
+
 def _compile_gates_text(texts=None):
     """The compiled gates file as bytes, WITHOUT writing it. Pure over the corpus, so both
     the compiler and the lint drift-check produce identical output from the same memories --
     which is the whole point: lint can ask "would a recompile change the file?" without a
-    second, divergent implementation. Returns (text, [names]); text is "" for no gates.
+    second, divergent implementation. Returns (text, [names], {agent: [names]}, [(name,
+    problem)]): the file, every gate compiled, the gates each agent gets, and the gates left
+    out because their `agents:` could not be read. text is "" for no gates.
+
+    ONE FILE FOR EVERY AGENT, written by one os.replace (the per-agent gates design, 2026-10-14).
+    When every gate is for every agent, which is every corpus with no `agents:` key, the file is
+    _render_gates over all of them: the bytes this function wrote before, so every installed
+    block stays byte-identical. When any gate names a subset, the file is a per-agent header
+    giving each agent's section length in UTF-8 bytes, then each agent's _render_gates in
+    GATE_AGENTS order, an agent with no gates contributing "". src/agent-gates.js
+    compiledForAgents reads it in one read and checks every section against its own sha, so an
+    install can never mix two compiles, and no per-agent file exists that could be left behind.
+    The header begins as every compile does, so an installer with compiledIsWhole that predates
+    it refuses the file as torn rather than installing every agent's text everywhere. One older
+    than that (1.6.3 and earlier) checks nothing and would install it whole: run one version.
 
     Selected on scope, not type. Residency is a question of reach, and a `reference` can be
     every bit as resident-worthy as a `feedback` when its failure is silent -- a heredoc
@@ -1138,7 +1275,7 @@ def _compile_gates_text(texts=None):
     files were opened three times in one run for one answer. Passing the map keeps this
     function pure over the corpus, which is the property the drift check depends on: it
     still derives the answer from the same bytes, it just stops re-reading them."""
-    blocks = []
+    blocks, excluded = [], []
     for name in sorted(os.listdir(MEMORY_DIR)):
         if not name.endswith(".md") or name in EXCLUDE:
             continue
@@ -1147,29 +1284,36 @@ def _compile_gates_text(texts=None):
         if text is None:
             text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8",
                         errors="replace").read()
-        body = _gate_body(text)
-        if body is not None:
-            blocks.append((name, body))
+        gate = _gate(text)
+        if gate is None:
+            continue
+        body, agents, problem = gate
+        if problem is not None:
+            excluded.append((name, problem))
+        else:
+            blocks.append((name, body, agents))
 
-    body = "\n".join(b for _, b in blocks)
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
-    # No gates means "" (write NOTHING), not a header over an empty body. The installer's
-    # "refuse to install an empty block" guard tests file content, and a file that always
-    # carried a header would sail past it and fence off a heading with no rules under it.
-    out = ("" if not blocks else
-           f"<!-- generated by recall.py --gates-compile; sha {digest} -->\n"
-           f"## Standing gates ({len(blocks)} memories, managed)\n\n{body}\n")
-    return out, [name for name, _ in blocks]
+    per_agent = {a: [name for name, _, agents in blocks if a in agents] for a in GATE_AGENTS}
+    if all(agents == GATE_AGENTS for _, _, agents in blocks):
+        out = _render_gates([(name, body) for name, body, _ in blocks])
+    else:
+        sections = [_render_gates([(name, body) for name, body, agents in blocks if a in agents])
+                    for a in GATE_AGENTS]
+        sizes = ", ".join(f"{a} {len(s.encode('utf-8'))}" for a, s in zip(GATE_AGENTS, sections))
+        out = f"<!-- generated by recall.py --gates-compile; per agent: {sizes} -->\n" + "".join(sections)
+    return out, [name for name, _, _ in blocks], per_agent, excluded
 
 
-def _gates_are_stale(texts=None):
+def _gates_are_stale(texts=None, fresh=None):
     """True when a recompile would change gates.generated.md -- i.e. someone edited a gate
-    block in a memory but never ran --gates-compile. This is the failure the whole feature
-    exists to prevent, one level up: a standing order silently out of date. Only meaningful
-    once gates have been compiled at least once, so a never-compiled corpus is not 'stale'."""
+    block in a memory, or moved one between agents, but never ran --gates-compile. This is the
+    failure the whole feature exists to prevent, one level up: a standing order silently out of
+    date. Only meaningful once gates have been compiled at least once, so a never-compiled
+    corpus is not 'stale'. `fresh` is _compile_gates_text's text, for a caller that has it."""
     if not os.path.isdir(MEMORY_DIR) or not os.path.exists(GATES_OUT):
         return False
-    fresh, _ = _compile_gates_text(texts)
+    if fresh is None:
+        fresh = _compile_gates_text(texts)[0]
     on_disk = open(GATES_OUT, encoding="utf-8", errors="replace").read()
     return fresh != on_disk
 
@@ -1213,7 +1357,7 @@ def compile_gates(allow_empty=False):
         print(f"\n  no memory dir at {MEMORY_DIR} -- nothing to compile\n")
         return
 
-    out, names = _compile_gates_text()
+    out, names, per_agent, excluded = _compile_gates_text()
 
     # Refuse to replace a compiled file with nothing. A corpus that yields zero gates is
     # almost always RECALL_MEMORY_DIR pointing somewhere unintended, and the damage is
@@ -1232,15 +1376,18 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: vscode-extension/extension.js:3702#slice cuts this stderr
+            # Kept short on purpose: vscode-extension/extension.js:3687#slice cuts this stderr
             # to 300 chars before showing it (`#slice` is checked by scripts/check-line-refs.js;
             # this said :3013 until 2026-10-13, when .py comments were first scanned). Re-measured
             # 2026-09-14 after MEMORY_DIR was normpath'd and `installed` became a real byte count:
             # 226 here, and 228 for the sibling refusal above. Both still fit, and both still
             # name GATES_OUT and MEMORY_DIR inside the slice.
+            # A corpus whose every gate was left out for its `agents:` says so, after the part
+            # that has to fit, since "no gate blocks" alone would send the user to the wrong store.
+            left_out = f" ({len(excluded)} left out for their `agents:`, see --lint)" if excluded else ""
             sys.exit(f"[recall] refusing to empty {GATES_OUT} ({installed} bytes): "
                      f"no gate blocks in {MEMORY_DIR}. Check RECALL_MEMORY_DIR, or pass "
-                     f"--gates-allow-empty to erase every gate.")
+                     f"--gates-allow-empty to erase every gate.{left_out}")
 
     # newline="\n" on purpose: a CRLF translation on Windows would change the bytes and
     # make the hash useless as a "has anything actually changed" signal.
@@ -1279,12 +1426,19 @@ def compile_gates(allow_empty=False):
         sys.exit(f"[recall] could not write {GATES_OUT} ({type(e).__name__}: {e}); "
                  f"the previous file is unchanged.")
 
+    # On stderr, so `wildcard-perms --gates refresh` passes it through: a gate the user wrote
+    # and the compile left out is a standing order that is not loading anywhere.
+    for name, problem in excluded:
+        print(f"[recall] gate left out for every agent: {name}: {problem}",
+              file=sys.stderr)
+
     if not names:
         print(f"\n  no scope:global gate blocks found -- wrote 0 bytes to {GATES_OUT}")
         print("  (the installer will refuse rather than fence off an empty block)\n")
         return
 
-    print(f"\n  compiled {len(names)} gate(s), {len(out)} bytes\n  -> {GATES_OUT}\n")
+    print(f"\n  compiled {len(names)} gate(s), {len(out)} bytes\n  -> {GATES_OUT}")
+    print("  " + ", ".join(f"{a} {len(per_agent[a])}" for a in GATE_AGENTS) + "\n")
     for name in names:
         print(f"    {name}")
     print()

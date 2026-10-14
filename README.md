@@ -101,12 +101,12 @@ matrix and dated evidence are in
 
 Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2660#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4154#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:4163#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:3974#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:3983#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1421#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1856#derivedFor`); observed runs are not reported as measured
@@ -194,6 +194,22 @@ compiled into the instruction files both agents read at the start of every sessi
 The compiler is deliberately strict: a gate must say where it belongs, and one that
 does not is reported rather than guessed at. The extension watches the memory
 directory and recompiles when a gate changes.
+
+A gate is for both agents unless it says otherwise. To keep one to a single agent, name the
+agent in the memory's frontmatter, beside `scope:`:
+
+```yaml
+metadata:
+  scope: global
+  agents: [codex]      # or [claude], [claude, codex], or a bare codex / claude
+```
+
+Names are case-insensitive, and a block list (`- codex` lines under `agents:`) works too. No
+`agents:` line, or an empty one, means both agents. A name the compiler does not know, or two
+`agents:` lines, is never guessed at: that gate is left out for both agents, and
+`recall.py --lint` and the dashboard name it. `--gates status` and the card give each agent's
+own count, such as "Claude 13 · Codex 14", and a gate moved from one agent to the other leaves
+the first on the next compile.
 
 ## 6. Recall over your memory
 
@@ -353,7 +369,12 @@ on scope is deliberate: residency is a question of reach, and a reference memory
 when its failure is silent. The compiled file is the block's body, so staleness needs no version
 bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling and diffing
 against disk rather than comparing the installed block to the compiled file. A compile finding
-zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
+zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Once any
+gate names a subset of agents (`agents:`), the same file holds one section per agent: a first
+line giving each section's size in UTF-8 bytes, then each agent's own compile under its own
+header sha. One write and one read cover both agents, `compiledForAgents` refuses the whole file
+when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
+with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
 (`vscode-extension/extension.js:2827#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.

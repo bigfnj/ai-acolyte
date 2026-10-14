@@ -877,10 +877,15 @@ function gates(args) {
       process.stdout.write('wildcard-perms gates: no agent instruction file found\n');
       return;
     }
+    // Each agent's own count, because a gate can name the agents it is for (src/agent-gates.js):
+    // "[claude]: ON, 13 gates" beside "[codex]: ON, 14 gates". An agent the compile gives none
+    // says so, rather than reading as switched off.
     for (const state of states) {
+      const count = state.compiled ? `, ${state.gates} gate${state.gates === 1 ? '' : 's'}` : '';
       process.stdout.write(
-        `wildcard-perms gates [${state.agent}]: ${state.on ? 'ON' : 'OFF'}` +
+        `wildcard-perms gates [${state.agent}]: ${state.on ? 'ON' : 'OFF'}${count}` +
         `${state.on && !state.current ? ' (corpus changed — run --gates on to refresh)' : ''}` +
+        `${state.compiled && !state.applicable ? ` (none compiled for ${state.agent})` : ''}` +
         `${state.compiled ? '' : ' (nothing compiled)'} ` +
         `(${state.readable ? state.path : `unreadable: ${state.path}`})\n`
       );
@@ -973,12 +978,15 @@ function gates(args) {
     // session's context. Stay silent when nothing changed, so the common case costs no
     // tokens and a line appearing actually means something moved.
     if (cmd === 'refresh' && !result.changed) continue;
+    // `on` and `refresh` turn an agent off when the compile gives it no gates (a gate moved to
+    // the other agent), and that row says so instead of ON.
+    const removed = cmd !== 'off' && !result.on;
     process.stdout.write(
-      `wildcard-perms gates [${result.agent}]: ${cmd.toUpperCase()}` +
+      `wildcard-perms gates [${result.agent}]: ${removed ? `OFF, none compiled for ${result.agent}` : cmd.toUpperCase()}` +
       `${result.changed ? '' : ' (already)'} — ${result.path}\n`
     );
   }
-  if (cmd !== 'off' && results.some((result) => result.changed)) {
+  if (cmd !== 'off' && results.some((result) => result.changed && result.on)) {
     process.stdout.write('  standing orders resident from the next session on.'
       + (cmd === 'on' ? ' Re-run after editing a gate in a memory file.\n' : '\n'));
   }

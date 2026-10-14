@@ -13,7 +13,7 @@
 // the backup tests (test/policy-backup.test.js); this file holds the manifest and the script.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:407#sharing).
+// (test/extension-activation.test.js:505#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

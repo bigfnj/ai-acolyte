@@ -128,6 +128,9 @@ const TEST_ONLY = {
   // copies of these modules that way (`require(path.join(extensionDir, 'src', ...))`),
   // and nothing used to see them.
   'src/agent-guidance.js': ['guidanceBlock', 'guidanceStatus', 'instructionLockPath', 'setGuidance'],
+  // readCompiled joined 2026-10-14: the dashboard's gate count now rides on gatesStatusAll's
+  // per-agent rows, so extension.js no longer reads the compiled file a second time.
+  'src/agent-gates.js': ['readCompiled'],
   'src/auto-learn-manager.js': ['migrateStateTo'],
   'src/auto-learn-worker.js': ['run'],
   // These are exercised inside their own production modules; exporting them
@@ -174,7 +177,9 @@ const TEST_ONLY = {
   // `main`), and scripts/measure-push-host-thread.js now loads a tree's extension.js by path and calls both, which the
   // census counts. Before that only the lifecycle tests did, which is why they were here.
   // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
-  'vscode-extension/memoryLint.js': ['pickPrimaryDir'],
+  // gateOf joined 2026-10-14: test/gate-agents.test.js holds it to recall.py's _gate file by
+  // file; in production it is called inside the module, by fullReport and the census.
+  'vscode-extension/memoryLint.js': ['gateOf', 'pickPrimaryDir'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
   // drives a command-line tool through; the tools themselves are run by hand or by CI.
   'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],

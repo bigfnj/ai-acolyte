@@ -582,10 +582,14 @@ function setGuidance(on, {
 // Every installed agent's file, as one call — what the CLI and the extension
 // actually drive. Each target is independent: an unreadable or failed one is
 // reported in its own row rather than aborting the others.
-function guidanceStatusAll(homeOrOptions, block = SHELL_BLOCK) {
+//
+// `block` may be a function of the agent's name instead, for a block whose text differs per
+// agent (the memory gates once a gate names `agents:`, src/agent-gates.js).
+function guidanceStatusAll(homeOrOptions, blockOrFor = SHELL_BLOCK) {
   return installedGuidanceTargets(homeOrOptions).map((target) => {
     if (target.error) return { agent: target.agent, path: target.path, readable: false,
       on: false, current: false, error: target.error };
+    const block = typeof blockOrFor === 'function' ? blockOrFor(target.agent) : blockOrFor;
     const status = { agent: target.agent, ...guidanceStatus(target.path, block) };
     const shadowed = (target.candidates || []).filter((file) => file !== target.path)
       .map((file) => guidanceStatus(file, block));
@@ -597,16 +601,23 @@ function guidanceStatusAll(homeOrOptions, block = SHELL_BLOCK) {
   });
 }
 
+// `options.forAgent(agent)`, when given, returns `{ block, on }` for that agent's target: its
+// own block, and whether that agent gets it at all. The memory gates pass it, because a gate
+// can name the agents it is for, so one agent may have gates to install while another has
+// none and must lose its block. Everything else (target discovery, Codex's override selection
+// and its re-check under the lock, the inactive-copy cleanup) is the same per target.
 function setGuidanceAll(on, options = {}) {
   const home = options.home ?? os.homedir();
   const backupDir = options.backupDir || path.join(home, '.claude', 'backups');
-  const block = options.block || SHELL_BLOCK;
   const backupSuffix = options.backupSuffix || 'pre-guidance';
   const inPlaceFallback = options.inPlaceFallback !== false;
   return installedGuidanceTargets(options).map((target) => {
+    const own = typeof options.forAgent === 'function' ? options.forAgent(target.agent) : null;
+    const block = own?.block || options.block || SHELL_BLOCK;
+    const enabled = typeof own?.on === 'boolean' ? own.on : on;
     const results = [];
     const validateTarget = () => {
-      if (!on || target.agent !== 'codex') return null;
+      if (!enabled || target.agent !== 'codex') return null;
       const selected = codexGuidanceTarget(options);
       return selected.error || (selected.path !== target.path
         ? 'Codex instruction selection changed during the update; retry' : null);
@@ -619,13 +630,13 @@ function setGuidanceAll(on, options = {}) {
         error: error || active.error || validateTarget() || null };
     };
     if (target.error) return finish(target.error);
-    const write = (file, enabled) => {
-      const result = setGuidance(enabled, { file, backupDir, block, validateTarget, inPlaceFallback,
+    const write = (file, want) => {
+      const result = setGuidance(want, { file, backupDir, block, validateTarget, inPlaceFallback,
         backupName: `${path.basename(file)}.${backupSuffix}` });
       results.push(result);
       return result;
     };
-    if (on) {
+    if (enabled) {
       const active = write(target.path, true);
       if (active.error) return finish(active.error);
       // A concurrently created override must not turn the sibling cleanup into
@@ -638,7 +649,7 @@ function setGuidanceAll(on, options = {}) {
     }
     // Clear inactive copies on enable, and both candidates on disable. An old
     // managed block must not return when the user later removes the override.
-    const cleanup = on ? (target.candidates || []).filter((file) => file !== target.path)
+    const cleanup = enabled ? (target.candidates || []).filter((file) => file !== target.path)
       : [...new Set([target.path, ...(target.candidates || [])])];
     for (const file of cleanup) {
       const state = guidanceStatus(file, block);

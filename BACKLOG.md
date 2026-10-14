@@ -38,7 +38,18 @@ sections:
 - "Follow-ups to the v1.6.3 confirmation audit".
 
 The exporter's header now records a third standing limit: a runner that no table names is
-judged as an ordinary program. What remains is one final audit of `7cbba2b..HEAD`, then the tag.
+judged as an ordinary program.
+
+The final audit of `7cbba2b..2074deb` found no regression. Its documentation findings are fixed
+in `4d39174`. It found two MEDIUM security defects, both older than the delta, and both are in
+flight on wave-f15 before the tag:
+
+- **"Why did this prompt?" can run code through cmd.exe.** It happens when codex is an npm
+  `.cmd` and the pasted command carries `%CMDCMDLINE:~-1%&…` (the BatBadBut class). The audit
+  reproduced it end to end.
+- **A workspace `memory.dir` chooses the corpus.** The gate blocks compiled from it are
+  installed into the user's global `CLAUDE.md` and `AGENTS.md`. The audit traced this in code;
+  it has not been run.
 
 ### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
 

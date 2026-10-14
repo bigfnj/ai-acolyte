@@ -580,7 +580,16 @@ let projectTrustEpoch = 0;
 // The whole budget of one read-only ask from the host, worker deadline and its
 // app-server's kill included (src/codex-mcp-config.js readCodexConfigLayersAsync).
 // The write path keeps its 25 s deadline; a cold read measured 1.1 s here.
-const PROJECT_TRUST_ASYNC_TIMEOUT_MS = 10000;
+// 25 s, not 10 (2026-10-14). 10 s was sized while the ask still held the extension
+// host. It has run on a worker thread since 2d8d223, behind a pending card, so a
+// longer budget blocks nothing. Too short a budget, though, turns a slow machine into
+// a minute of the narrow fallback. In CI run 38555104195 (Node 20, windows-latest) the
+// ask settled after about 11 s, and its stand-in codex never wrote its start mark.
+// That reads as a timeout; it is inferred, not measured on the runner. The same test
+// takes about 2.8 s on Node 20 here. It sits just
+// under the worker's own 25 s clamp: the deadline is this less 3 s, leaving 3 s for
+// the grace, the kill and the exit.
+const PROJECT_TRUST_ASYNC_TIMEOUT_MS = 25000;
 // A TIMEOUT IS NOT A VERDICT (2026-10-14). Every failed ask settled into the
 // config.toml fallback, cached like an answer until config.toml or the candidate
 // folders changed. For "Codex is not reachable", or a reply from Codex itself,

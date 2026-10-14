@@ -399,7 +399,7 @@ test('a cold push starts no process on the host thread, and both Codex answers s
   try {
     app.open();
     await until(() => app.posted.some((data) => data.codexMemory?.cli?.version)
-      && app.posted.at(-1)?.codexPermissions?.pending === false, 20000, 'the version and the trust verdict');
+      && app.posted.at(-1)?.codexPermissions?.pending === false, 30000, 'the version and the trust verdict');
     const ran = fs.readFileSync(marks, 'utf8');
     assert.match(ran, /^--version$/m, 'precondition: the version probe ran the stand-in');
     assert.match(ran, /^app-server --stdio$/m, 'precondition: the trust worker ran the stand-in');

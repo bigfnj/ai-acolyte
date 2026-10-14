@@ -117,7 +117,7 @@ const RISK_RANK = new Map([
 // One spelling of the control-character class, so the three sites that reject
 // them cannot drift apart.
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
-const RETRY_RENAME = new Set(['EPERM', 'EACCES', 'EBUSY', 'ETXTBSY']);
+const { RETRYABLE_RENAME_CODES: RETRY_RENAME } = require('./permissions'); // the one shared set (2026-10-14)
 
 function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }

@@ -158,7 +158,10 @@ const TEST_ONLY = {
   // readBypassState joined on 2026-09-25 off PENDING_REMOVAL: see the note above that
   // list. test/bypass-round-trip.test.js is the only caller and is the whole reason the
   // `--bypass off` restore can fail a build.
-  'src/permissions.js': ['coverIndexKeyCacheStats', 'coverKeyCacheStats', 'readBypassState'],
+  // RENAME_RETRY_ATTEMPTS and renameRetryDelayMs joined 2026-10-14: the shared rename-retry
+  // budget, read inside permissions.js and held against the other writers' own numbers by
+  // test/rename-retry-policy.test.js. RETRYABLE_RENAME_CODES has production importers.
+  'src/permissions.js': ['RENAME_RETRY_ATTEMPTS', 'coverIndexKeyCacheStats', 'coverKeyCacheStats', 'readBypassState', 'renameRetryDelayMs'],
   // The shared Codex claims reader now consumes CODEX_BEGIN_MARKER in production.
   'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],

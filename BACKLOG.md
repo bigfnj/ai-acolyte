@@ -24,45 +24,33 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Codex 0.161.0 history shapes the parser does not read yet
+### In flight on 2026-10-13
 
-Found 2026-10-13 by running every CLI-only runtime harness against codex-cli 0.161.0.
+- **Codex dev-environment runners.** Reviewed two-token Codex prefixes still render for
+  `uv run`, `poetry run`, `pipx run`, `npm exec`, `direnv exec`, `devbox run`, `mise exec`,
+  `docker exec`, `kubectl exec` and `ssh <host>`, and the value options of make/just/npm are not
+  modelled, so `["make","-C","dir"]` renders.
+- **Env-led learner families.** A family mixing runs led by an assignment Claude Code keeps
+  with plain runs gets no Claude rule at all; the kept-assignment runs should be their own
+  family.
+- **The recall model download uses one fixed temp name**, so two windows downloading at once
+  share it.
+- **A code-mode cell whose nested command Codex refused** (approval policy never with
+  `require_escalated`) reads `failed` although the command never ran.
+- `docs/claude-code-permissions.md` merges two separate docs bullets into one sentence about
+  `watch`/`setsid`/`ionice`/`flock`.
+- The Windows file-holder stress harness used for the 2026-10-13 rename fixes lives only in a
+  session scratchpad; re-runnable tooling belongs in the repo.
 
-- **MCP results are invisible.** 0.161.0 no longer writes `event_msg/mcp_tool_call_end`, the
-  only shape `codexMcpObservation` reads; each outcome is now an `event_msg/item_completed`
-  whose item is `{type: "McpToolCall", server, tool, status, result: {content, isError}}`. The
-  parser saw 0 of 5 real outcomes, so reviewed-MCP Auto Learn learns nothing from 0.161.0
-  history. The approvals themselves still apply.
-- **Continued code-mode cells earn no evidence.** With `code_mode`, a yielded `exec` cell's
-  completion arrives in a later `wait` call's output, linked only by a per-session cell id.
-  Such cells are withheld as unknown (safe: no false success, no failure credit) because no
-  join exists.
-- **Harness isolation.** The temp workspaces sit under `%TEMP%`, inside the user's home; Codex
-  walks up to the nearest project root and loaded the home directory's own `AGENTS.md` as
-  project instructions in harness sessions. It went only to the loopback and only into temp
-  evidence, but it makes harness results depend on the user's files.
-- **The POSIX case list of the wrapper runtime matrix has not run.** The Windows list passed
-  13/13 against the guidance; the Linux run was cut short when the container host stopped.
+### VS Code acceptance has not run against the 1.6.2 tree
 
-### The Codex Stop hook's failure reasons never reach the user
-
-Measured against codex-rs 0.161.0: for a Stop hook, Codex reads stderr only on exit 2 (which
-BLOCKS the run and must never be used here); any other non-zero exit marks the run Failed with
-"hook exited with code N" and nothing else. So every reason the hook has ever printed on
-failure was discarded. Exit 0 with a `systemMessage` is shown as a warning.
-
-### Follow-ups from the shell-grammar fix
-
-- `timeout`, `command` and `builtin` still collapse to root-wide grants. Whether that is a
-  defect depends on whether Claude Code strips them before matching; unmeasured.
-- Narrower Codex prefixes ending in an inline-code flag (`["python","-c"]`, `["node","-e"]`,
-  `["env","FOO=1"]`) still render.
-- The PowerShell generalizer refuses digit-leading roots, so `7z` grants stay exact.
-- The path-rooted check misses `~/…` and relative `.venv/bin/…`.
-- No diagnostic names wildcard grants the old generalizer minted from shell grammar
-  (`Bash(export *)` on this box).
-- Codex memory diagnostics number lines from 0 and the gate compiler's from 1, merged into one
-  array by `inspectNativeCodexGates`.
+`scripts/drive-vscode.js` launches an isolated VS Code instance, and on 2026-10-13 every launch
+was refused: a staged VS Code update held the `vscode-updating` mutex ("Code is currently being
+updated"), which is released only when the running VS Code exits. The packaged-build drive
+(`scripts/drive-installed.js`), both suites and every CLI-only Codex harness passed; the
+real-editor groups, including the MCP acceptance suite's new 0.161.0 shape check, are unrun.
+Run `node scripts/drive-vscode.js --extension-dir <stage>` (plus `--review-runtime yes
+--dashboard-ui yes`) after the next VS Code restart.
 
 ### The `file:line` gate catches less than it looks like it catches
 
@@ -78,13 +66,12 @@ whose anchor moved to exactly one other line. See the engineering record, "`file
 Converting the existing corpus waits until code stops moving. The `.py`/`.yml`/`.yaml` blind
 spot is closed, and the `memory/recall.py` citation it hid is corrected and anchored.
 
-### Tests that fail under parallel load
+### A worker-runner timing test was cancelled once under heavy load
 
-Measured 2026-10-13 while several worktrees ran the suite at once: "parent link replacement
-after inventory is stale…" (`test/codex-reviewed-plans.test.js`) failed once in a full run and
-passed three isolated reruns; `test/codex-memory-gates.test.js` hit one `EPERM` on a temp-dir
-rename; and one full run on `main` reported a single failure that did not reproduce on the
-immediate rerun. Each is a test that depends on timing or on exclusive temp-directory access.
+2026-10-13, while four worktrees ran full suites at once: a long timing test in
+`test/auto-learn-worker-runner.test.js` was cancelled in one full run; the file alone passed 16
+of 16. The Windows rename-holder flakes measured the same day had a different cause and are
+fixed; this one is unreproduced.
 
 ---
 
@@ -103,4 +90,7 @@ screenshots, which stay until a re-capture.
 
 **Standing limits** are stated where they bite rather than tracked here: Codex managed
 requirements are read only from the local bundle cache; Codex account identity is
-deliberately never read because that would mean opening `~/.codex/auth.json`.
+deliberately never read because that would mean opening `~/.codex/auth.json`; and the
+Claude Code allow-path model (the 39 known-safe environment variables and the wrapper
+stripper in `src/permission-match.js`) was read from Claude Code 2.1.296 and must be re-read
+when Claude Code updates, because the public docs list neither.

@@ -146,8 +146,8 @@ const TEST_ONLY = {
   // exercised; this census is what noticed, on the merge.
   'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRules', 'enterpriseRequirements'],
   'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'reconcileDerived'],
-  // resolveExecutable left this list 2026-10-13: src/codex-version.js keys its cache on it.
-  'src/exec-resolve.js': ['quoteForCommandProcessor'],
+  // resolveExecutable left this list 2026-10-13 (src/codex-version.js keys its cache on it); taskkillPath joined 2026-10-14 (the config worker's grace kill is endProcessTree's now).
+  'src/exec-resolve.js': ['quoteForCommandProcessor', 'taskkillPath'],
   'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
   'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl'],
   'src/legacy-backup-cleanup.js': ['parseBackupText'],

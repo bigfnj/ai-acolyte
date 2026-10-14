@@ -9,7 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync, spawn } = require('node:child_process');
 const { resolveCodexHome } = require('./codex-paths');
-const { commandLaunch, endProcessTree, taskkillPath, npmShimLaunch } = require('./exec-resolve');
+const { commandLaunch, endProcessTree, npmShimLaunch } = require('./exec-resolve');
 const { writeFileAtomicSync } = require('./permissions');
 
 const MODES = new Set(['auto', 'prompt', 'writes', 'approve']);
@@ -619,13 +619,16 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       closing = true; clearTimeout(timeout); clearInterval(hostWatch);
       if (child) {
         child.stdin.end();
-        const kill = setTimeout(() => {
-          if (child.exitCode !== null) return;
-          // By absolute path: this worker inherits the host's cwd (exec-resolve's
-          // taskkillPath says why a bare name is not safe there).
-          if (process.platform === 'win32') spawnSync(taskkillPath(), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 });
-          else child.kill('SIGTERM');
-        }, graceMs);
+        // THE ONE TREE KILL (2026-10-14), src/exec-resolve.js's endProcessTree: System32's
+        // taskkill /T on Windows (this worker inherits the host's cwd, so never a bare
+        // name), and child.kill() on POSIX, where the app-server leads no group of its
+        // own. Its guard reads `signalCode` as well as `exitCode`. This one read only
+        // `exitCode`, and a child that exited by a signal has none, so the kill would
+        // have gone to a PID the system may already have reused. Not reachable today:
+        // on Windows `signalCode` is set only by this process's own child.kill(), which
+        // the worker never calls there, and on POSIX child.kill() after 'exit' sends
+        // nothing. One guard means the next change cannot make it reachable.
+        const kill = setTimeout(() => { endProcessTree(child); }, graceMs);
         await closed; clearTimeout(kill);
       }
       reader?.close();

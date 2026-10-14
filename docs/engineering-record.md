@@ -103,6 +103,35 @@ it runs through cmd.exe. A bare spawn skipped those, because libuv tries `.com` 
   - "a batch shim runs System32's cmd.exe when ComSpec is missing or not a full path".
 - Neutering `resolvedLaunch` alone fails both call-site tests as well.
 
+### The config worker's grace kill read `exitCode` alone — UNREACHABLE as shipped; FIXED anyway
+
+**Verified in form.** The kill in the worker's `finally` (src/codex-mcp-config.js) skipped a
+child only when `exitCode` was set. A child that exited by a signal has `exitCode` null and
+`signalCode` set, so this is the shape 6dfe60b fixed in `endProcessTree`. **Refuted as a live
+defect**, measured on this box with Node 24.19.0:
+- On Windows, `signalCode` is set only when THIS process ends the child with `child.kill()`
+  (`SIGTERM`, exit code null). An outside `taskkill /F` gives exit code 1 with no signal, and
+  an exit by itself gives its own code. libuv sets the exit signal only in `uv_process_kill`,
+  and the worker never calls `child.kill()` on Windows.
+- On POSIX the old branch was `child.kill('SIGTERM')`. After 'exit', Node's `kill` finds
+  `_handle` null and returns false without signalling (read from Node 24's own source; the
+  probe returned false on all three exit kinds).
+
+**What changed.** The grace kill is now `endProcessTree(child)`. Its guard reads both codes,
+and on Windows it runs System32's taskkill /T. On POSIX it tries the group signal, which fails
+with ESRCH because the app-server leads no group, and then calls `child.kill()`, exactly what
+the old branch did. One guard for every tree kill means a later `child.kill()` in the worker
+cannot make the old shape reachable. Its Windows taskkill is now asynchronous; the worker was
+only awaiting 'close' anyway. Pinned by "the config worker's grace kill skips an app-server
+that exited by a signal, and still ends a live one" (test/codex-mcp-config.test.js,
+Windows-only, because on POSIX the two versions behave the same). It drives the state in the
+real worker: a preload kills the `.cmd` stand-in's cmd.exe as the `finally` begins, so the exit
+is by a real signal. The node under it holds stdout, so 'close' comes 3 s after the 1 s grace,
+and the preload records every taskkill and runs none. Under the old kill it recorded
+`taskkill /PID <the signalled PID> /T /F`, 1.0 s after that PID's exit. Its control, a live
+app-server, records the tree kill with the fix in place. 1e11efa's planted-taskkill worker test
+still fails with taskkill named bare, now in `endProcessTree`.
+
 ---
 
 ## The v1.6.3 release commit's CI failures (2026-10-14)

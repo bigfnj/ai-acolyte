@@ -598,12 +598,124 @@ test('the config worker\'s own kill runs System32\'s taskkill, not one planted i
   assert.ok(fs.existsSync(codex.pidFile), `precondition: the stand-in codex started; the host said: ${outcome}`);
   const hung = Number(fs.readFileSync(codex.pidFile, 'utf8'));
   pids.push(hung);
-  // MUTATION: name 'taskkill' bare in the worker's grace kill again. The copy in
+  // MUTATION: name 'taskkill' bare in the worker's grace kill again (since 2026-10-14
+  // that kill is endProcessTree's, so in src/exec-resolve.js). The copy in
   // the cwd runs instead (writing the flag once it is past the scan), the stand-in
   // survives until the host's backstop ends the worker's tree, and the answer is
-  // "unavailable: the worker timed out". Confirmed 2026-10-14: both, on separate runs.
+  // "unavailable: the worker timed out". Confirmed 2026-10-14: both, on separate runs,
+  // and again through endProcessTree.
   assert.equal(fs.existsSync(flag), false,
     `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}; the host said: ${outcome}`);
   assert.match(outcome, /refused: Codex config operation timed out/, `the worker's deadline, not the host's backstop; the host said: ${outcome}`);
   assert.equal(await waitFor(() => gone(hung), 3000), true, 'the worker\'s kill ended the stand-in codex');
+});
+
+// THE WORKER'S GRACE KILL IS NEVER AIMED AT A FREED PID (2026-10-14), the guard
+// endProcessTree gained in 6dfe60b. The grace kill read `exitCode` alone, and a child
+// that exited by a signal has `signalCode` instead, so by its 'exit' Node has closed its
+// handle and its PID is free. Not reachable in the shipped worker: on Windows
+// `signalCode` is set only by this process's own child.kill(), which the worker never
+// calls there, and on POSIX child.kill() after 'exit' sends nothing, which is also why
+// this is Windows-only. So the state is DRIVEN, in the real worker, by a --require
+// preload. It ends the app-server with child.kill() as the worker's finally begins, so
+// the exit is a real one by a signal. The stand-in is cmd.exe -> node, and the node holds
+// the stdout cmd.exe handed it for 3 s more, so 'close' comes after the 1 s grace and the
+// grace kill has to decide. The preload records every taskkill and runs none.
+test('the config worker\'s grace kill skips an app-server that exited by a signal, and still ends a live one', { skip: process.platform !== 'win32' }, async t => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-grace-'));
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const pids = [];
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await waitFor(() => pids.every(gone), 3000);
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const script = path.join(root, 'linger.js');
+  fs.writeFileSync(script, [
+    "require('fs').writeFileSync(process.env.ACOLYTE_TEST_LOG + '.pid', String(process.pid));",
+    'process.stdin.resume();',
+    "process.stdin.on('end', () => setTimeout(() => process.exit(0), 3000));",
+    'setTimeout(() => process.exit(0), 30000);',
+  ].join('\n') + '\n');
+  const shim = path.join(root, 'codex.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  const preload = path.join(root, 'grace-preload.js');
+  fs.writeFileSync(preload, `
+if (process.argv.includes('--rpc-worker')) {
+  const fs = require('fs');
+  const cp = require('child_process');
+  const log = (entry) => fs.appendFileSync(process.env.ACOLYTE_TEST_LOG, JSON.stringify({ at: Date.now(), ...entry }) + '\\n');
+  const taskkill = (file) => /taskkill(\\.exe)?$/i.test(String(file));
+  const { spawn, spawnSync, execFile } = cp;
+  cp.spawnSync = function (file, args) {
+    if (!taskkill(file)) return spawnSync.apply(this, arguments);
+    log({ kill: 'spawnSync', args });
+    return { status: 0, stdout: '', stderr: '', output: [] };
+  };
+  cp.execFile = function (file, args, ...rest) {
+    if (!taskkill(file)) return execFile.apply(this, arguments);
+    log({ kill: 'execFile', args });
+    const done = rest.find((item) => typeof item === 'function');
+    if (done) process.nextTick(done, null, '', '');
+    return null;
+  };
+  cp.spawn = function (file, args) {
+    const child = spawn.apply(this, arguments);
+    if (!Array.isArray(args) || !args.some((arg) => String(arg).includes('app-server'))) return child;
+    log({ event: 'spawn', pid: child.pid });
+    child.once('exit', (code, signal) => log({ event: 'exit', code, signal }));
+    child.once('close', () => log({ event: 'close' }));
+    const end = child.stdin.end.bind(child.stdin);
+    child.stdin.end = (...rest) => {
+      const result = end(...rest);
+      log({ event: 'finally' });
+      if (process.env.ACOLYTE_TEST_SIGNAL_EXIT === '1') child.kill();
+      return result;
+    };
+    return child;
+  };
+}
+`);
+  const worker = path.join(__dirname, '..', 'src', 'codex-mcp-config.js');
+  const run = signalExit => new Promise(resolve => {
+    const log = path.join(root, `${signalExit ? 'signal' : 'live'}.jsonl`);
+    const child = spawn(process.execPath, ['--require', preload, worker, '--rpc-worker'], {
+      env: { ...process.env, ACOLYTE_TEST_LOG: log, ACOLYTE_TEST_SIGNAL_EXIT: signalExit ? '1' : '' },
+      stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    pids.push(child.pid);
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.once('close', () => {
+      if (fs.existsSync(`${log}.pid`)) pids.push(Number(fs.readFileSync(`${log}.pid`, 'utf8')));
+      const entries = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+      resolve({ output, entries });
+    });
+    child.stdin.end(JSON.stringify({ requests: [{ method: 'config/read', params: { cwd: null, includeLayers: true } }],
+      home, codexHome, codexExecutable: shim, deadlineAt: Date.now() + 1500 }));
+  });
+  const at = (entries, event) => entries.find(entry => entry.event === event)?.at;
+
+  const signal = await run(true);
+  const said = `the worker said ${signal.output}; it logged ${JSON.stringify(signal.entries)}`;
+  assert.ok(at(signal.entries, 'spawn') && at(signal.entries, 'finally'), `precondition: the worker reached its finally; ${said}`);
+  const exit = signal.entries.find(entry => entry.event === 'exit');
+  assert.deepEqual([exit?.code, exit?.signal], [null, 'SIGTERM'], `precondition: the app-server exited by a signal; ${said}`);
+  assert.ok(at(signal.entries, 'close') - at(signal.entries, 'finally') > 1300,
+    `precondition: 'close' came after the 1 s grace, so the grace kill had to decide; ${said}`);
+  // MUTATION: put the old grace kill back (`if (child.exitCode !== null) return;` and then
+  // spawnSync(taskkillPath(), ['/PID', pid, '/T', '/F'])). It sends taskkill /T to the
+  // signalled app-server's PID and this lists it. Confirmed 2026-10-14.
+  assert.deepEqual(signal.entries.filter(entry => entry.kill), [],
+    `a tree kill was aimed at an app-server that had already exited by a signal; ${said}`);
+  assert.match(signal.output, /Codex config operation timed out/);
+
+  // The control: a live app-server at the end of the grace gets the tree kill, so the
+  // preload sees one when one is sent.
+  const live = await run(false);
+  const spawned = live.entries.find(entry => entry.event === 'spawn');
+  assert.deepEqual(live.entries.filter(entry => entry.kill).map(entry => entry.args), [['/PID', String(spawned?.pid), '/T', '/F']],
+    `the control: the live app-server got no tree kill; it logged ${JSON.stringify(live.entries)}`);
 });

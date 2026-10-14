@@ -188,7 +188,7 @@ function atomicWrite(target, value) {
       catch (error) {
         last = error;
         if (!RETRY_RENAME.has(error.code)) break;
-        sleep(20 * (attempt + 1));
+        if (attempt + 1 < 10) sleep(20 * (attempt + 1)); // no sleep after the last attempt: 0.9 s, not 1.1 s
       }
     }
     throw last;

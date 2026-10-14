@@ -1551,16 +1551,41 @@ function parseClaudePermission(permission) {
 // is), `BASH_ENV` and `ENV` (read and run by a non-interactive bash or sh), and the
 // interpreters' start-up options and module paths. `Bash(LD_PRELOAD=./x.so cat *)` runs
 // whatever `./x.so` holds, as broad as the `Bash(python *)` this module already refuses.
-// Not covered, and recorded: variables that name a program the tool runs later (`PAGER`,
-// `EDITOR`, `GIT_PAGER`, `GIT_SSH_COMMAND`); the rule pins their value.
+//
+// PROGRAM_NAMING_ENV (added 2026-10-13) closes what that paragraph used to record as not
+// covered: a variable whose VALUE names a program a tool later runs. The rule pins the value,
+// but the value IS the program, so `Bash(GIT_PAGER=x git log *)` is a grant to run `x`, and
+// `Bash(GIT_SSH_COMMAND=x git fetch *)` a grant to run `x` as git's transport, each as broad
+// as the `Bash(x *)` this module gates on its own. A reviewer reading the git half sees a
+// read-only subcommand and may miss that the assignment turns it into running `x`. The set is
+// an explicit list, not a classifier:
+//   * PAGER, GIT_PAGER, MANPAGER (the pager git, man and others spawn), EDITOR, VISUAL,
+//     GIT_EDITOR (the editor they spawn), BROWSER (git web--browse, man -H), PROMPT_COMMAND
+//     (bash runs it before each prompt), LESSOPEN and LESSCLOSE (an input preprocessor less
+//     runs through a shell).
+//   * git's command-valued variables: GIT_SSH and GIT_SSH_COMMAND (the transport), GIT_ASKPASS
+//     (the credential prompt), GIT_EXTERNAL_DIFF (run per changed file) and GIT_PROXY_COMMAND.
+//     SSH_ASKPASS and SUDO_ASKPASS are the same for ssh and sudo.
+//   * CC, CXX and MAKE choose the compiler or the make a build runs. Refused deliberately,
+//     though `CC=gcc make` is common and benign: the class is "a value that is a program", and
+//     refusing more is the safe failure. The decision costs nothing measured here (0 of the
+//     development box's 581 allow entries is an env-led rule that renders at all).
+// NODE_OPTIONS, PYTHONSTARTUP, PERL5OPT and RUBYOPT are this class too and are already in
+// CODE_LOADING_ENV (the interpreter start-up set), so they are not repeated. The Codex
+// exporter is unaffected: its prefix is the command's, with the assignment stripped.
 const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 const CODE_LOADING_ENV = new Set([
   'PATH', 'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'NODE_OPTIONS', 'NODE_PATH',
   'PERL5OPT', 'PERL5LIB', 'PERLLIB', 'RUBYOPT', 'RUBYLIB', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS',
 ]);
-function assignmentLoadsCode(token) {
+const PROGRAM_NAMING_ENV = new Set([
+  'PAGER', 'GIT_PAGER', 'MANPAGER', 'EDITOR', 'VISUAL', 'GIT_EDITOR', 'BROWSER', 'PROMPT_COMMAND',
+  'LESSOPEN', 'LESSCLOSE', 'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'GIT_EXTERNAL_DIFF',
+  'GIT_PROXY_COMMAND', 'SSH_ASKPASS', 'SUDO_ASKPASS', 'CC', 'CXX', 'MAKE',
+]);
+function assignmentIsUnsafe(token) {
   const name = ASSIGNMENT_WORD.exec(token)[1];
-  return CODE_LOADING_ENV.has(name) || /^(?:LD|DYLD)_/.test(name);
+  return CODE_LOADING_ENV.has(name) || PROGRAM_NAMING_ENV.has(name) || /^(?:LD|DYLD)_/.test(name);
 }
 
 function claudePermissionIsSafe(parsed, options) {
@@ -1569,7 +1594,7 @@ function claudePermissionIsSafe(parsed, options) {
   const command = parsed.tokens.findIndex((token) => !ASSIGNMENT_WORD.test(token));
   if (command !== 0) {
     if (command < 0 || !reviewed || parsed.tool !== 'Bash') return false;
-    if (parsed.tokens.slice(0, command).some(assignmentLoadsCode)) return false;
+    if (parsed.tokens.slice(0, command).some(assignmentIsUnsafe)) return false;
     return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
   }
   const root = parsed.root.toLowerCase();

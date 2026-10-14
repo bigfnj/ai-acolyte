@@ -213,9 +213,18 @@ What the code does, since 2026-10-13:
   an assignment that makes the program load code named by its value (`LD_*`, `DYLD_*`,
   `PATH`, `BASH_ENV`, `ENV`, and the interpreters' start-up options and module paths),
   so `Bash(LD_PRELOAD=x cat *)` is proposed by the learner and still never rendered.
-  Before, every root table read the assignment as the root, and a reviewed
-  `Bash(FOO=1 rm *)` rendered. The Codex exporter, which renders argv prefixes, is
-  unchanged.
+  Since 2026-10-13 it also refuses an assignment whose value *names a program a tool
+  then runs* (`PROGRAM_NAMING_ENV`): `PAGER`, `GIT_PAGER`, `MANPAGER`, `EDITOR`,
+  `VISUAL`, `GIT_EDITOR`, `BROWSER`, `PROMPT_COMMAND`, `LESSOPEN`/`LESSCLOSE`, git's
+  `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_EXTERNAL_DIFF` and
+  `GIT_PROXY_COMMAND`, `SSH_ASKPASS`, `SUDO_ASKPASS`, and the compiler/build choosers
+  `CC`, `CXX` and `MAKE`. The rule pins the value, but the value is the program, so
+  `Bash(GIT_PAGER=x git log *)` grants running `x`; `NODE_OPTIONS`, `PYTHONSTARTUP`,
+  `PERL5OPT` and `RUBYOPT` are the same class and were already in the code-loading set.
+  A value that is data, not a program (`LANG=C`, `NODE_ENV=production`, `CFLAGS=-O2`),
+  still renders at review. Before, every root table read the assignment as the root, and
+  a reviewed `Bash(FOO=1 rm *)` rendered. The Codex exporter, which renders argv prefixes
+  with the assignment stripped, is unchanged.
 
 **Not** stripped: `bash -c`, `python -c`, `npx`, `docker exec`, `devbox run`,
 `direnv exec`, `mise exec`. To approve work inside a runner you must name both,

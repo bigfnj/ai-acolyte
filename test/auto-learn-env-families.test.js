@@ -131,7 +131,7 @@ test('the exporter judges an env-led rule by the command after the assignments, 
     'Bash(FOO=1 PYTHONPATH=. cat *)', 'PowerShell(FOO=1 Get-ChildItem *)']) {
     // MUTATION: delete the assignment branch in claudePermissionIsSafe. `Bash(FOO=1 rm *)`
     // renders. Confirmed 2026-10-13.
-    // MUTATION: drop the `assignmentLoadsCode` line. `Bash(LD_PRELOAD=x cat *)` renders.
+    // MUTATION: drop the `assignmentIsUnsafe` line. `Bash(LD_PRELOAD=x cat *)` renders.
     // Confirmed 2026-10-13.
     assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
   }
@@ -148,6 +148,40 @@ test('the exporter judges an env-led rule by the command after the assignments, 
   const [family] = aggregateObservations([run('1', 'FOO=bar git status --short')], { threshold: 1 });
   assert.deepEqual(renderClaudePermissions([family], { includeReviewed: true }), ['Bash(FOO=bar git status *)']);
   assert.match(renderCodexRules([family], { includeReviewed: true }), /pattern = \["git", "status"\]/);
+});
+
+test('an assignment whose value names a program the tool runs later is refused, pinned or not', () => {
+  // The rule pins the value, but the value IS the program (PROGRAM_NAMING_ENV in
+  // src/policy-exporters.js): `Bash(GIT_PAGER=x git log *)` runs `x`, not `git log`. MEASURED
+  // 2026-10-13 against 894e86d: all 20 rendered under review, because only the code-loading
+  // set was refused.
+  const programNaming = ['PAGER', 'GIT_PAGER', 'MANPAGER', 'EDITOR', 'VISUAL', 'GIT_EDITOR', 'BROWSER',
+    'PROMPT_COMMAND', 'LESSOPEN', 'LESSCLOSE', 'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'GIT_EXTERNAL_DIFF',
+    'GIT_PROXY_COMMAND', 'SSH_ASKPASS', 'SUDO_ASKPASS', 'CC', 'CXX', 'MAKE'];
+  for (const name of programNaming) {
+    // Over a read subcommand, the half a reviewer might wave through, and over a plain root.
+    for (const rule of [`Bash(${name}=x git status *)`, `Bash(${name}=/usr/bin/x cat *)`]) {
+      // MUTATION: drop `PROGRAM_NAMING_ENV.has(name)` from assignmentIsUnsafe.
+      // `Bash(PAGER=x git status *)` renders. Confirmed 2026-10-13.
+      // MUTATION: remove any one name from PROGRAM_NAMING_ENV; that name's rule renders.
+      // Confirmed 2026-10-13 for GIT_SSH_COMMAND and CC.
+      assert.deepEqual(renderClaudePermissions([rule], { includeReviewed: true }), [], rule);
+    }
+  }
+  // NODE_OPTIONS, PYTHONSTARTUP, PERL5OPT and RUBYOPT are the same class and were already
+  // refused (CODE_LOADING_ENV); these pin that they still are.
+  for (const name of ['NODE_OPTIONS', 'PYTHONSTARTUP', 'PERL5OPT', 'RUBYOPT']) {
+    assert.deepEqual(renderClaudePermissions([`Bash(${name}=x git status *)`], { includeReviewed: true }), [], name);
+  }
+  // Controls: a safe-shaped variable (locale, log level, a build toggle) whose value is DATA,
+  // not a program, still renders at review. `LANG=C`-style vars are unaffected.
+  for (const rule of ['Bash(LANG=C git status *)', 'Bash(LC_ALL=C.UTF-8 git log *)', 'Bash(TZ=UTC git status *)',
+    'Bash(NODE_ENV=production git diff *)', 'Bash(RUST_LOG=debug git status *)', 'Bash(CI=1 git log *)',
+    'Bash(FOO=bar git status *)', 'Bash(CFLAGS=-O2 git status *)']) {
+    // MUTATION: add 'CFLAGS' to PROGRAM_NAMING_ENV; this control fails (a value is flags, not
+    // a program). Confirmed 2026-10-13.
+    assert.deepEqual(renderClaudePermissions([rule], { includeReviewed: true }), [rule], rule);
+  }
 });
 
 // observationHash's formula (src/auto-learn-manager.js): the call's id and the family key.

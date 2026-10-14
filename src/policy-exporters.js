@@ -956,10 +956,33 @@ const NPX_EXEC = {
 // `-j` and `-l` take an optional number; `NAME=VALUE` overrides a variable and names no
 // target. Absent, so broad: `-E`/`--eval`, which evaluates its argument as makefile text,
 // rules and recipes included.
+//
+// A variable override is judged since 2026-10-14 (`unsafeVariable`). GNU make reads ANY argument
+// holding `=` as a variable definition with the makefile's own operators (`=`, `:=`, `::=`,
+// `:::=`, `+=`, `?=`, `!=`), and a command-line definition overrides the makefile's (GNU make
+// manual, "Overriding Variables"). So a prefix is broad when an override:
+//   * uses `!=`, the shell assignment, which runs its value as a command while the line is read;
+//   * sets the variable that chooses what runs every recipe line: SHELL (the shell program),
+//     .SHELLFLAGS (its arguments, `-c` by default), MAKESHELL (the Windows and MS-DOS
+//     spelling), or what make reads as more options or makefiles: MAKEFLAGS, MFLAGS,
+//     MAKEFILES;
+//   * names a variable that loads or names a program (envNameIsUnsafe: CC, MAKE, PATH,
+//     LD_PRELOAD, ...), because make exports a command-line variable to every recipe's
+//     environment. This makes `["make", "CC=gcc", "all"]` broad, which rendered until then: a
+//     decision, the one 520103d made for `Bash(CC=gcc make *)`.
+// A data override (`CFLAGS=-O2`, `V=1`) stays narrow. Until then the override test matched only
+// `NAME=` with a C identifier, so `.SHELLFLAGS=...` and `X!=...` read as TARGET names: `["make",
+// "SHELL=./x.sh", "test"]`, `["make", ".SHELLFLAGS=-ec", "test"]` and `["make", "X!=cmd", "all"]`
+// rendered (measured against c16728e). No make is installed on the box, so this rests on the
+// manual, not a run.
+const MAKE_SHELL_VARIABLES = new Set(['SHELL', '.SHELLFLAGS', 'MAKESHELL', 'MAKEFLAGS', 'MFLAGS', 'MAKEFILES']);
 const MAKE = {
   info: DEFAULT_INFO,
   target: {
-    assignments: true,
+    // A name holds no whitespace, `:`, `#` or `=`; spaces may surround it (`SHELL := x`).
+    assignments: /^\s*([^\s:#=]*?)\s*([:+?!]*)=/,
+    unsafeVariable: (name, operator) => operator.includes('!') || MAKE_SHELL_VARIABLES.has(name) || envNameIsUnsafe(name),
+    scanAll: true,
     flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
       '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',
       '--no-builtin-variables', '--silent', '--quiet', '--no-silent', '--touch', '--trace', '--print-directory',
@@ -981,10 +1004,20 @@ const MAKE = {
 // env-file decision at DOCKER_EXEC: `--dotenv-filename`, `-E`/`--dotenv-path`, which name the
 // environment file every recipe line runs under. Not measured (the decision is about what a
 // reviewer cannot see, not about one tool's behavior); `--no-dotenv` stays a flag.
+//
+// The shell options stay absent, now MEASURED (just 1.58.0, private temp directory, 2026-10-14):
+// `--shell pwsh --shell-arg ...` ran the recipe under pwsh, and `--dotenv-command "pwsh -File
+// s.ps1"` (1.58's option to load a command's output as the environment) ran s.ps1, which wrote
+// its marker. A variable override, `NAME=VALUE` or `--set NAME VALUE`, is judged by
+// envNameIsUnsafe since the same day: under `set export` it reaches every recipe's environment,
+// and `just NODE_OPTIONS=--require=./y.js build` (NODE_OPTIONS declared in the justfile) ran y.js,
+// measured. just overrides only variables the justfile declares, and no variable chooses the
+// shell, so a data override stays narrow.
 const JUST = {
   info: DEFAULT_INFO,
   target: {
-    assignments: true,
+    assignments: /^([A-Za-z_][A-Za-z0-9_-]*)()=/,
+    unsafeVariable: (name) => envNameIsUnsafe(name),
     flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
       '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
     flagPattern: /^-v+$/,
@@ -1251,16 +1284,32 @@ function skipRunnerOptions(grammar, tokens, k) {
 
 // A task runner's options, then the target. True (broad) when the prefix ends before one
 // is named, or at an option the grammar does not list.
+//
+// `assignments` (a pattern capturing the variable name and the operator) and `unsafeVariable`
+// judge a variable override (2026-10-14, MAKE and JUST above): one that names a shell or a
+// program makes the prefix broad, a data override is skipped. `scanAll` is make's: GNU make
+// permutes its options and reads overrides anywhere on the line, so the walk does not stop at
+// the first target there but judges every token the prefix carries, and `["make", "test",
+// "SHELL=./x.sh"]` or `["make", "test", "--eval=x"]` is as broad as with the token before the
+// target. Until then the walk returned at the target and both rendered (measured against
+// c16728e). Elsewhere (just, `npm run`, `mise run`, `pnpm run`) the tokens after the target are
+// the recipe's or script's arguments and stay unread.
 function targetIsBroad(grammar, rest) {
   const flags = new Set(grammar.flags || []);
   const values = new Set(grammar.values || []);
   let dashDash = false;
+  let named = false;
   for (let k = 0; k < rest.length; k += 1) {
     const token = rest[k];
     if (!dashDash && token === '--') { dashDash = true; continue; }
     if (dashDash || !token.startsWith('-') || token === '-') {
-      if (grammar.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
-      return false;                                                       // a named target
+      const assignment = grammar.assignments?.exec(token);
+      if (assignment) {
+        if (grammar.unsafeVariable?.(assignment[1], assignment[2])) return true;   // names a shell or a program
+        continue;
+      }
+      if (!grammar.scanAll) return false;                                 // a named target
+      named = true; continue;
     }
     if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
     if (grammar.optionalNumber?.includes(token)) {
@@ -1268,11 +1317,14 @@ function targetIsBroad(grammar, rest) {
       continue;
     }
     if (values.has(token) || grammar.valuePattern?.test(token)) { k += 1; continue; }
-    if (grammar.values2?.includes(token)) { k += 2; continue; }
+    if (grammar.values2?.includes(token)) {
+      if (grammar.unsafeVariable?.(String(rest[k + 1] ?? ''), '')) return true;  // `--set NAME VALUE`
+      k += 2; continue;
+    }
     if (grammar.fused?.test(token)) continue;
     return true;                                                          // an option this table does not know
   }
-  return true;
+  return !named;
 }
 
 function runnerIsBroad(node, rest) {

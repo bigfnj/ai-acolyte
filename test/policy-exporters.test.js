@@ -510,7 +510,7 @@ test('make, just and npm value options are modelled: ending right after a value 
   // target, script or a further option (`make -C dir --eval=...`, `npm --prefix dir exec sh`).
   for (const prefix of [
     ['make', '-C', 'dir'], ['make', '-f', 'x.mk'], ['make', '-C', 'dir', '-f', 'x.mk'], ['make', '--directory', 'dir'],
-    ['make', '--directory=dir'], ['make', '-j', '4'], ['make', '-j4'], ['make', 'CC=gcc'], ['make', '-Cdir'],
+    ['make', '--directory=dir'], ['make', '-j', '4'], ['make', '-j4'], ['make', 'CFLAGS=-O2'], ['make', '-Cdir'],
     ['make', '-kC', 'dir'], ['make', '-I', 'inc'], ['make', '--eval', 'x', 'all'], ['make', '-E', 'x', 'all'],
     ['make', '--bogus', 'all'],
     ['just', '-f', 'x'], ['just', '--justfile', 'x'], ['just', '-d', 'dir'], ['just', '--working-directory', 'dir'],
@@ -525,15 +525,19 @@ test('make, just and npm value options are modelled: ending right after a value 
     // renders. Confirmed 2026-10-13.
     // MUTATION: read a value option as a flag (drop `k += 1` on the values line).
     // `["make", "-C", "dir"]` takes `dir` for the target and renders. Confirmed 2026-10-13.
-    // MUTATION: drop the `assignments` continue. `["make", "CC=gcc"]` reads the override
-    // as a target and renders. Confirmed 2026-10-13.
+    // MUTATION: drop the `assignments` continue. `["make", "CFLAGS=-O2"]` reads the override
+    // as a target and renders. Confirmed 2026-10-13 with `CC=gcc`, which is a refused
+    // program-naming override since 2026-10-14 (the next test), so the row is a data one now;
+    // reconfirmed with it 2026-10-14.
     // MUTATION: drop `booleans` from skipRunnerOptions. `["npm", "--json", "false"]` reads
     // `false` as a subcommand and renders. Confirmed 2026-10-13.
     assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} has named no target`);
   }
   for (const prefix of [
     ['make', '-C', 'dir', 'test'], ['make', '-f', 'x.mk', 'all'], ['make', '-j', '4', 'test'], ['make', '-j', 'test'],
-    ['make', '-k', 'test'], ['make', 'CC=gcc', 'all'], ['make', '--directory=dir', 'all'], ['make', '-Cdir', 'test'],
+    // `["make", "CC=gcc", "all"]` stood here until 2026-10-14; CC names the compiler every
+    // recipe runs, so it is refused now, as a decision (src/policy-exporters.js MAKE).
+    ['make', '-k', 'test'], ['make', 'CFLAGS=-O2', 'all'], ['make', '--directory=dir', 'all'], ['make', '-Cdir', 'test'],
     ['make', '--', 'test'], ['make', '--version'], ['make', 'test'],
     ['just', '-f', 'x', 'build'], ['just', '--set', 'a', 'b', 'build'], ['just', '-n', 'build'], ['just', 'a=b', 'build'],
     ['just', 'build'], ['just', '--version'],
@@ -1399,6 +1403,44 @@ test('Invoke-Command and icm are broad at any depth, in every spelling', () => {
   }
   // Control: a different cmdlet of the same verb is judged as before.
   assert.equal(codexRuleCount(['Invoke-WebLint', 'x']), 1);
+});
+
+// make and just overrides that choose the recipe shell or load a program (src/policy-exporters.js
+// MAKE and JUST). Each row's verdict at c16728e is in the commit that added this test.
+const OVERRIDE_BROAD = [
+  ['make', 'SHELL=./x.sh', 'test'], ['make', '.SHELLFLAGS=-ec', 'test'], ['make', 'MAKESHELL=x', 'all'],
+  ['make', 'SHELL :=x', 'all'], ['make', 'X!=cmd', 'all'], ['make', 'MAKEFLAGS=--eval=x', 'all'],
+  ['make', 'MAKEFILES=x.mk', 'all'], ['make', 'CC=gcc', 'all'], ['make', 'LD_PRELOAD=x', 'all'], ['make', 'PATH=/tmp', 'all'],
+  ['make', 'test', 'SHELL=./x.sh'], ['make', 'test', '--eval=x'], ['make', 'test', '-E', 'x'], ['make', '--', 'SHELL=x', 'all'],
+  ['just', 'NODE_OPTIONS=x', 'build'], ['just', '--set', 'PATH', '/tmp', 'build'], ['just', '--shell', 'sh', 'build'],
+  ['just', '--shell-arg', '-c', 'build'], ['just', '--shell-command', 'build'], ['just', '--dotenv-command', 'x', 'build'],
+  ['just', '--clear-shell-args', 'build'],
+];
+const OVERRIDE_NARROW = [
+  ['make', 'CFLAGS=-O2', 'all'], ['make', 'V=1', 'test'], ['make', 'test', 'CFLAGS=-O2'], ['make', 'test', 'all'],
+  ['make', '-j4', 'test', '-k'], ['make', 'X:=1', 'all'], ['make', 'X::=1', 'all'], ['make', 'X+=1', 'all'], ['make', 'X?=1', 'all'],
+  ['just', 'a=b', 'build'], ['just', '--set', 'a', 'b', 'build'], ['just', 'build', 'SHELL=x'],
+];
+
+test('a make or just override that names the recipe shell or a program is broad, a data override is not', () => {
+  for (const prefix of OVERRIDE_BROAD) {
+    // MUTATION: make MAKE's unsafeVariable return false. `["make", "SHELL=./x.sh", "test"]`
+    // renders. Confirmed 2026-10-14.
+    // MUTATION: drop `operator.includes('!')`. `["make", "X!=cmd", "all"]` renders. Confirmed
+    // 2026-10-14.
+    // MUTATION: drop `scanAll: true` from MAKE. `["make", "test", "SHELL=./x.sh"]` and `["make",
+    // "test", "--eval=x"]` render: the walk stops at the target. Confirmed 2026-10-14.
+    // MUTATION: restore the old `NAME=` pattern for make. `.SHELLFLAGS=-ec` reads as a target
+    // and renders. Confirmed 2026-10-14.
+    // MUTATION: drop the `--set` check. `["just", "--set", "PATH", "/tmp", "build"]` renders.
+    // Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses what runs the recipes`);
+  }
+  for (const prefix of OVERRIDE_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
+  }
+  // `just build SHELL=x` passes SHELL=x to the recipe as an argument (just reads overrides only
+  // before the first recipe), so it is the recipe's business, as `["just", "build", "x"]` is.
 });
 
 // bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each

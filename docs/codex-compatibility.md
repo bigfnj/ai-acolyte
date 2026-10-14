@@ -28,16 +28,16 @@ its own real-host evidence below.
 | High-water policy backup and restore | FIXED in development for captured literal declarations | Saved declarations survive scans and later grants, scoped to their original Codex home/file. Restore preserves current declarations and claims, excludes intentional removals, and journals interrupted writes. Default/custom-home runtime checks and four actual VS Code recovery flows pass. A no-op Restore fails its native group. See the recovery batch below. |
 | Existing rule inventory and prune | Implemented in development for literal local rules | The separate Show Codex rules command lists local allow/prompt/forbidden declarations and source files. Confirmed allow-rule removal records shared suppression before writing; current builds prevent other workspaces and ordinary Undo from reviving a removed prefix. Unsupported computed files and ambiguous ownership are read-only. Real-app acceptance for this development batch is recorded below. |
 | Post-tool approval hook | FIXED in development for after-turn learning | Codex 0.145.0 flushes completed results before Stop, but after synchronous PostToolUse. The Stop adapter scans completed Codex history with the persisted learning mode. Actual no-editor default/custom-profile checks pass success, failure, deduplication, automatic export and fresh-process reuse. Native Configure/Cancel/Remove passes; a no-op writer fails. Hook configuration still requires Codex's separate exact-definition review. Immediate per-tool timing is not claimed. |
-| Shell history scan and outcome learning | Implemented; separate-wait completion FIXED in development | `parseCodexJsonl` (`src/history-adapters.js:956`) parses actual new Codex shell transcripts. The real dashboard Scan button learns individually approved executions and deduplicates repeat scans. Fresh direct exec_command/write_stdin runs now preserve success and failure; ambiguous or interactive outcomes remain unknown. Revision 3 replays old Codex evidence once while preserving Claude counts and grant/undo records. Custom cell continuations and unobserved formats remain outside this proof. |
+| Shell history scan and outcome learning | Implemented; separate-wait completion FIXED in development | `parseCodexJsonl` (`src/history-adapters.js:1316#parseCodexJsonl`) parses actual new Codex shell transcripts. The real dashboard Scan button learns individually approved executions and deduplicates repeat scans. Fresh direct exec_command/write_stdin runs now preserve success and failure; ambiguous or interactive outcomes remain unknown. Revision 3 replays old Codex evidence once while preserving Claude counts and grant/undo records. Custom cell continuations and unobserved formats remain outside this proof. |
 | Non-shell Auto Learn | FIXED in development for exact reviewed MCP approvals | Authoritative MCP records supply exact server/tool identity and success/failure/unknown counts without retaining arguments or response bodies. Review changes one native user-config approval setting; these candidates cannot become Claude permissions or shell rules. Actual VS Code passes six groups with seven fresh runtime calls and three failing controls. Hosted web and other built-in tools do not inherit this proof. |
 | Built-in image and web tools | Measured native boundary; hosted-web outcomes remain unverified | Three fresh `view_image` calls needed no approval. Only the valid image returned structured image content; invalid input also emitted a completion event, so completion alone cannot establish success. Seventy historical web completion records exposed no authoritative outcome status. No speculative approval exporter or successful-run counters were added. See the measured boundary below. |
 | Reviewed and automatic policy export | Implemented, including shared ownership in 1.5.10 | Real VS Code safe-apply produces effective rules. The actual dashboard Review button, checkbox and Grant dialog export a rule learned from real Codex history. A fresh process executes it without approval; a different executable still prompts. Shared ownership retains other workspaces' grants and rechecks effective policy even when only ownership changes. The learned custom-command prefix covers its arguments, so changing only an argument is not a negative control for that grant. |
 | Auto Learn backup and undo | Implemented, with conservative shared-policy conflicts | The actual dashboard Undo button restores exact policy bytes and learner state in one workspace; a fresh Codex process requests approval again. Version 1.5.10 also checks shared ownership before Undo, including identical rules whose bytes never changed. A conflicting older Undo refuses without writing; undoing the newer transaction first permits the earlier Undo. |
-| Shell-style guidance | Implemented for default/custom home and overrides | Wording now distinguishes Codex shell splitting from Claude generalization (`src/agent-guidance.js:91`). Real VS Code configuration events write/remove the blocks. Actual dashboard Add, Cancel and Remove also have file and persisted-setting checks, including installation into empty Codex and Claude files. Fresh Codex receives the full packaged guidance body; removal is verified. Custom homes, nonempty overrides, empty override fallback and unreadable targets have focused checks. |
+| Shell-style guidance | Implemented for default/custom home and overrides | Wording now distinguishes Codex shell splitting from Claude generalization (`src/agent-guidance.js:91#GUIDANCE_BODY`). Real VS Code configuration events write/remove the blocks. Actual dashboard Add, Cancel and Remove also have file and persisted-setting checks, including installation into empty Codex and Claude files. Fresh Codex receives the full packaged guidance body; removal is verified. Custom homes, nonempty overrides, empty override fallback and unreadable targets have focused checks. |
 | Memory gates | FIXED in development for explicitly marked native global sections | A separate native compiler reviews the full body and refreshes an installed block without changing native sources. Fresh default/custom Codex sessions load installed/refreshed bodies and confirm absence after Remove. Actual editor checks cover Cancel/Install, edits, zero/refill, override migration, malformed-source retention, Remove and stale review refusal. The old malformed-scope compiler fails the preserved case; install and refresh no-ops fail their intended native groups. |
 | Memory index, lint and recall integration | FIXED in development for native discovery, lint and semantic recall | Reads the native summary, task registry, rollout summaries and memory skills with exact passage provenance. Raw staging inputs, SQLite and sessions are excluded. Actual later-created sources, diagnostic repair/deletion, search, inspection and BOM selections pass in VS Code. CPU semantic retrieval finds zero-keyword paraphrases across registry, rollout and skill sources; actual rebuild replaces poisoned vectors and missing-model searches visibly fall back to keywords. Three disabled-path controls fail their intended native groups. |
 | Derived guidance for recurring friction | FIXED in development for supported repository-query advice | Current cached Codex managed prompt rules are compared with Codex-only successful run counts. A full-body dialog reviews advice before installation into the active Codex instruction file. Actual Accept/Decline and fresh instruction loading/removal pass; a no-op Accept fails the native check. Counts describe observed runs, not historical prompt dialogs. |
-| "Why did this prompt?" | Implemented for visible local policy | `explainAutoLearnPrompt` (`vscode-extension/extension.js:1891`) inspects visible rules and cached requirements. Three actual diagnostic dialogs agree with adjacent fresh Codex outcomes: reviewed command allowed, unrelated executable declined, original command declined after Undo. They name the selected rules file and disclose that managed/system policy, session approval state and sandbox restrictions remain outside the check. |
+| "Why did this prompt?" | Implemented for visible local policy | `explainAutoLearnPrompt` (`vscode-extension/extension.js:1891#explainAutoLearnPrompt`) inspects visible rules and cached requirements. Three actual diagnostic dialogs agree with adjacent fresh Codex outcomes: reviewed command allowed, unrelated executable declined, original command declined after Undo. They name the selected rules file and disclose that managed/system policy, session approval state and sandbox restrictions remain outside the check. |
 
 ## September 27-28 runtime evidence
 
@@ -287,13 +287,13 @@ Later hook/memory work is separate and does not change this frozen test subject.
 
 The retained catalog is under `<home>/.ai-acolyte/backups`, separate from the usual
 default or custom Codex directory. Scans, inventory views and Codex grants retain
-literal declarations (`src/codex-rule-store.js:190`). A reset of a Codex directory
+literal declarations (`src/codex-rule-store.js:210#backup`). A reset of a Codex directory
 that itself contains this backup directory also deletes the backup; this is not
 whole-user-home disaster recovery. Computed files and unsupported generated bodies
 remain read-only. The feature cannot recover declarations it never captured.
 
 Restore rechecks the displayed original path, existence, hash and saved identity
-(`src/codex-rule-store.js:253`). Current decisions and ownership moves are conflicts.
+(`src/codex-rule-store.js:267#restore`). Current decisions and ownership moves are conflicts.
 Removed allow overlaps stay excluded, including broader and narrower saved grants.
 External prompt/forbidden declarations can be restored. Restored generated grants
 become an unowned baseline; surviving workspace claims remain and missing old owners
@@ -310,7 +310,7 @@ Evidence is retained in `acolyte-codex-restore-runtime-q6c0KW` and
 `acolyte-codex-restore-runtime-mWJoIr` under the Windows temporary directory.
 
 Derived advice uses current managed policy and per-source evidence
-(`derivedFor`, `src/auto-learn-manager.js:1785`; `src/derived-guidance.js:236`). It offers reuse of
+(`derivedFor`, `src/auto-learn-manager.js:1813#derivedFor`; `src/derived-guidance.js:236#deriveCodexMitigations`). It offers reuse of
 known Git query results while their scope and repository state remain unchanged.
 It does not infer historical approval dialogs, suggest bypassing managed policy,
 or copy Claude-specific tool advice into Codex. Unreadable or absent policy preserves
@@ -353,24 +353,24 @@ Repeatable development validation uses `node scripts/stage-extension.mjs --out
 `--extension-dir` and checks either `--codex-layout default` or `custom-override`.
 Staging records file hashes and leaves the manifests, installed extension and VSIX alone.
 
-`parseCodexRules` (`src/codex-rule-inventory.js:155`) reads a complete restricted literal
+`parseCodexRules` (`src/codex-rule-inventory.js:155#parseCodexRules`) reads a complete restricted literal
 Starlark file or returns an explicit unsupported result with no partial rule list. Declaration spans retain UTF-8
-and CRLF text outside the selected declaration (`src/codex-rule-inventory.js:178`).
-`inventory` (`src/codex-rule-store.js:63`) enumerates user
+and CRLF text outside the selected declaration (`src/codex-rule-inventory.js:178#removeRuleSpans`).
+`inventory` (`src/codex-rule-store.js:77#inventory`) enumerates user
 rules under the selected Codex home, preserves source and decision, and requires current
 file hashes plus real `codex execpolicy check` validation before removal
-(`src/codex-rule-store.js:131`). The extension offers this through Show Codex rules and
+(`src/codex-rule-store.js:170-184#found.fileHash`). The extension offers this through Show Codex rules and
 the dashboard's Codex prefix rules row.
 
 The shared removal record is scoped to the Codex home. It suppresses overlapping learned
 prefixes, including broader grants that would cover a removed narrower command, across
 workspaces using current builds. Removing a generated declaration updates every identical
-ownership claim while retaining unrelated claims (`src/codex-claims.js:86`). Ordinary
+ownership claim while retaining unrelated claims (`src/codex-claims.js:86#pruneCodexClaims`). Ordinary
 Undo refuses a snapshot that could restore a suppressed prefix. A transaction for another configured Codex target
 refuses after deliberate removals rather than guessing the old target's removal scope.
 
 An interruption retains the intended before/after hashes and bytes. `finish`
-(`src/codex-rule-store.js:117`), exposed as "Finish interrupted Codex removal", resumes
+(`src/codex-rule-store.js:129#finish`), exposed as "Finish interrupted Codex removal", resumes
 only when each target still contains its exact recorded before or
 after bytes; a concurrent edit is preserved and requires reconciliation. New Codex writes
 and Undo refuse while removal is pending. The last completed removal retains original
@@ -1327,7 +1327,7 @@ either way. **sqlite is a projection, so the reader was not changed.**
 `codexHistoryStoreState` compares the two on every scan and reports `codexHistoryStale`
 plus `codexHistoryInspected`. The current implementation distinguishes `exact`,
 `unavailable`, `partial` and `skipped`: an unavailable SQLite API is not proof of
-healthy storage or of stale history (`src/history-adapters.js:1847`). VS Code 1.141.1
+healthy storage or of stale history (`src/history-adapters.js:2286#unavailable`). VS Code 1.141.1
 (Node 24.21.0) loads `node:sqlite`; hosts within the `^1.80` engine floor may not, so the
 `unavailable` tier stays (measured 2026-10-13). This storage check does not detect every
 possible rollout-format change.
@@ -1376,8 +1376,8 @@ successful and declined outcomes with the packaged parser. That closes the missi
 claim for this shape. The September 28 direct exec_command/write_stdin proof above closes
 terminal process completion for that shape. Custom cell continuations, other unobserved
 shell/tool formats and parser-format monitoring remain open. `classifyCodexOutput` is
-defined at `src/history-adapters.js:769`; nested outcomes are handled by
-`applyCodexGroupResult` at `src/history-adapters.js:890`.
+defined at `src/history-adapters.js:773#classifyCodexOutput`; nested outcomes are handled by
+`applyCodexGroupResult` at `src/history-adapters.js:1152#applyCodexGroupResult`.
 
 **Legacy evidence is rebuilt with an audit trail.** State version 2 records a parser
 revision and per-source counts. Old Codex cursors are reread with the corrected parser;
@@ -1417,7 +1417,7 @@ skip; the Node 20 legs keep the skipping behaviour described next. See the Octob
 section above. The paragraph below is the September record.
 
 The current contract tests skip when no `codex` binary is reachable, with a banner on
-stderr and an inline reason on each skipped test (`test/codex-contract.test.js:38`).
+stderr and an inline reason on each skipped test (`test/codex-contract.test.js:38-50#probe`).
 The recorded off-PATH run produced 1 pass and 6 skips. A run that reaches the binary
 prints `codex --version`; it does not compare that version with a supported range.
 These tests call the local rule checker rather than an authenticated provider session.

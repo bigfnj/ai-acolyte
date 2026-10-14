@@ -94,17 +94,17 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2379`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2396#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:3681`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:3855#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:3439`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:3675#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
-(`src/auto-learn-manager.js:1361`). Codex derived guidance has separate policy and run
-evidence (`src/auto-learn-manager.js:1770`); observed runs are not reported as measured
+(`src/auto-learn-manager.js:1404#codexBackupPath`). Codex derived guidance has separate policy and run
+evidence (`src/auto-learn-manager.js:1813#derivedFor`); observed runs are not reported as measured
 approval prompts. Actual restore and guidance controls now pass in a staged VS Code
 host, with deliberate no-op controls that fail the intended checks. The detailed
 development evidence and supported boundaries remain in the compatibility document.
@@ -283,8 +283,8 @@ the raw bytes. It is the path for changes that cannot be represented as an addit
 delta while still preserving concurrent edits.
 
 Every in-process policy writer takes one advisory lock; instruction files get a separate one per
-target file (`instructionLockPath`, `src/agent-guidance.js:265`), and
-`withInstructionLock` (`src/agent-guidance.js:274`) takes it around the read as well as the write,
+target file (`instructionLockPath`, `src/agent-guidance.js:289#instructionLockPath`), and
+`withInstructionLock` (`src/agent-guidance.js:298#withInstructionLock`) takes it around the read as well as the write,
 since locking the write alone still admits a writer between this one's read and its own write.
 
 ### Auto Learn
@@ -348,7 +348,7 @@ bump, and `_gates_are_stale` catches what `--gates status` cannot by recompiling
 against disk rather than comparing the installed block to the compiled file. A compile finding
 zero gates writes nothing and exits non-zero, and `setGatesAll` refuses an empty block. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2563`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2563#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
@@ -403,7 +403,7 @@ a purpose-built variant with the change removed; numbers without a recorded meth
 repeated. The matcher memo was measured in-process on one real 316-entry allow list at 507 ms and
 192,150 RegExp compilations per pass before and 316 compilations after, the output proven
 identical by hash and a file-level diff rather than assumed. The note at
-`src/permission-match.js:32-38` keeps `ruleMatches` in the past tense on purpose, because the
+`src/permission-match.js:32-38#ruleMatches` keeps `ruleMatches` in the past tense on purpose, because the
 coverage index has since narrowed both passes, taking one pass from 52.7 ms at 423 entries to 8.1
 ms at 430, cold. The hook figure below is an A/B of the `v1.3.0` tag in a throwaway worktree
 against the build nine commits later, 25 real process launches per arm with a Claude Code style
@@ -431,9 +431,9 @@ bare path; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 o
 and any left by a checkout that no longer exists, and names, without removing, one that belongs
 to another checkout still on disk. Cutting a GitHub Release builds and
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:
-`syncVersion`'s `MANIFESTS` list (`scripts/sync-version.mjs:21`) covers both
+`syncVersion`'s `MANIFESTS` list (`scripts/sync-version.mjs:21#MANIFESTS`) covers both
 `vscode-extension/package.json`, which drives the sidebar badge, and the root `package.json`,
-which `wildcard-perms --version` prints. `test/installers.test.js:511` asserts they agree, and the
+which `wildcard-perms --version` prints. `test/installers.test.js:511#manifests` asserts they agree, and the
 workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash

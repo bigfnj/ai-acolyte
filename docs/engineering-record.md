@@ -399,7 +399,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1346`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1469#runAutoLearnWorker`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 
@@ -427,12 +427,14 @@ skipped, so no failure can be silently lost, and the cursor never has to express
 **Three designs were considered and two rejected.**
 
 - A `partial: true` marker on the cursor. **Impossible without a schema change.** `cursor()` at
-  `src/auto-learn-manager.js:443-454` is a strict whitelist with no boolean leg, applied both on
+  `src/auto-learn-manager.js:508-520#cursor` is a strict whitelist with no boolean leg, applied both on
   read and on scan-replace, and it drops unknown fields SILENTLY — the marker would vanish in
-  the same tick it was created. Bumping `VERSION` to carry it resets every existing state file,
-  because `STATE_MIGRATIONS` is empty and `migrateState` returns null for an unregistered step.
+  the same tick it was created. Bumping `VERSION` to carry it reset every existing state file
+  then, because `STATE_MIGRATIONS` was empty and `migrateState` returns null for an unregistered
+  step. (It has since gained the 1→2 and 2→3 steps, so a bump now needs a registered step, not
+  a reset.)
 - A size ceiling that skips the remainder. **Rejected on safety.** `isAutoSafeCandidate`
-  requires `counts.failed === 0` (`src/auto-learn.js:876`), so a skipped byte range containing
+  requires `counts.failed === 0` (`src/auto-learn.js:1033#counts.failed`), so a skipped byte range containing
   the one failure for a family would let that family become auto-safe. Skipping is not a
   performance trade here, it is a permissions trade.
 - Progressive catch-up. **Taken.** Bounded work per tick, honest cursor, nothing lost.
@@ -984,7 +986,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   constant; the only thing that varies with the argument is `detectMcpServers`,
   and at the time no test asserted an `mcp__*` blanket entry leaves the backup.
   One does now: "legacy cleanup preserves MCP blankets for servers introduced
-  after MAX" at `test/policy-backup.test.js:628`, added in answer to this entry
+  after MAX" at `test/policy-backup.test.js:612#blankets`, added in answer to this entry
   and since renamed from "MAX off purges a blanket that arrived WHILE MAX was
   on". Control:
   restoring the top-level `require('../src/permissions')` **is** caught, so that
@@ -1016,7 +1018,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   inert. **A future transform whose side effects are not idempotent must not use
   this writer** — now stated in the code as well.
 - **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
-  but not `settings?.permissions?.allow` at `bin/wildcard-perms:460`,** where the
+  but not `settings?.permissions?.allow` at `bin/wildcard-perms:460#allow`,** where the
   allow array the pass runs on is extracted. Changing *which* field feeds the
   pass would not invalidate existing keys.
 - **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
@@ -1214,23 +1216,24 @@ in this project should be sited.
 ## Whole-object settings.json writers: FIVE sites, not one
 
 The earlier entry called the apply path — built at `const updated = {`, written by
-`atomicWrite(change.path, change.content)`, `src/auto-learn-manager.js:1571-1611` —
+`atomicWrite(change.path, change.content)`, `src/auto-learn-manager.js:2286-2343#updated` —
 "a third unrebased whole-object writer". Right, but incomplete, and the migration
 is harder than it looked.
 
-Sanctioned writers: `function writeAllow` at `src/settings-write.js:145` (rebasing
-merge, written at `:210`) and `function writeTransform` at `:254` (CAS + verbatim,
-written at `:369`).
+Sanctioned writers: `function writeAllow` at `src/settings-write.js:152#writeAllow` (rebasing
+merge, written at `src/settings-write.js:217#writeFileAtomicSync`) and `function writeTransform`
+at `src/settings-write.js:263#writeTransform` (CAS + verbatim, written at
+`src/settings-write.js:371#writeFileAtomicSync`).
 
 Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `const updated = {` at `src/auto-learn-manager.js:1571-1574`, written `:1611` | The apply path. Has an `unchanged()` recheck at `:1606-1610`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:1933-1935`, written `:1968` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:1877` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `:1873`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2853` | `undo()`'s inner rollback, same shape, `:1983` hash guard. |
-| `{ ...local, permissions }` at `src/local-settings.js:266` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `:205` read → `:266` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
+| `const updated = {` at `src/auto-learn-manager.js:2286-2289#updated`, written `src/auto-learn-manager.js:2343#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2340-2342#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2814#next`, written `src/auto-learn-manager.js:2895#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:2062#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2058#change.afterHash`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2914#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:2910#item.restored.hash` hash guard. |
+| `{ ...local, permissions }` at `src/local-settings.js:266#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:205#readFileSync` read → `src/local-settings.js:266#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
 needs a **two-file atomic window**: `updateClaudeClaims` mutates `claims` in
@@ -1244,7 +1247,7 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `:1365` blindly restores `change.before.content`. If the writer
+- `rollback()` at `src/auto-learn-manager.js:2062#change.before.content` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a
@@ -1254,14 +1257,15 @@ Three further blockers for whoever attempts it:
 **Prerequisite, since met:** `grep "Policy changed" test/` returned nothing, so
 the entire "detect and throw" behaviour that justifies this writer's safety was
 unpinned, and swapping it for a retrying writer would have passed the full suite
-silently. The "Policy changed" guard is pinned now: `test/auto-learn-manager.test.js:595-614`
-records why, and the two tests are at `:616` and `:696`.
+silently. The "Policy changed" guard is pinned now: `test/auto-learn-manager.test.js:595-614#Policy`
+records why, and the two tests are at `test/auto-learn-manager.test.js:616#survive` and
+`test/auto-learn-manager.test.js:696#targets`.
 
 ## `runWildcarding`'s lock: the constraint that decides any refactor
 
 Recorded because it is easy to get wrong and the failure is a data loss, not a
 slowdown. `writeAllow` replays a **delta computed against the caller's
-snapshot**, and its own note at `src/settings-write.js:166-172` names this
+snapshot**, and its own note at `src/settings-write.js:173-179#NOTE` names this
 caller: *"WRONG for one whose whole output is a function of the list it read …
 Such a caller must re-read and recompute first."*
 
@@ -1269,11 +1273,13 @@ Today `runWildcarding` satisfies that **by accident of structure** — its
 `readSettings()` happens to sit inside the lock, so the snapshot is nearly
 `latest`. **Moving the read out of the lock without an authoritative in-lock
 re-read and recompute reintroduces the MAX / `Bash(npm test)` deletion bug**
-documented at `bin/wildcard-perms:360-374`.
+that the note above `wildcardUnderLock` (`bin/wildcard-perms:549-554#DISCARDED`) guards
+against. Its worked `Bash(npm test)` example left that note with MAX in `d947565`, so Git
+holds the full text.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`extension.js:2557-2559`);
+  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:2872-2874#rides`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -1296,7 +1302,7 @@ rebuilt, deny-only edits lost, poisoning the memo on a busy-lock-deferred pass
 
 Also worth folding in eventually: activation takes **two** lock acquisitions
 back to back — `runWildcarding()` then `drainLocal()` — which is the shape
-`bin/wildcard-perms:317-335` ("ONE lock acquisition covering both jobs") was
+`bin/wildcard-perms:487-500#ONE` ("ONE lock acquisition covering both jobs") was
 deliberately fixed away from for the hook.
 
 ## `preMax` is misnamed, and the audit's read of it was wrong too
@@ -1432,7 +1438,7 @@ installing an equal version over an existing one is a silent no-op, which presen
 "in-place upgrades do not work". Bumped to 1.4.5 on 2026-09-14.
 
 Bump `vscode-extension/package.json` and the root `package.json` together.
-`test/installers.test.js:511` — "the two package manifests report the same version" —
+`test/installers.test.js:511#manifests` — "the two package manifests report the same version" —
 asserts they agree, and the extension manifest is authoritative because `release.yml`
 defaults its version input to it.
 
@@ -1800,7 +1806,7 @@ and `--selftest`, yet both are imported at module scope. `--lint`, `--lexical-on
 `--gates-compile` and `--list` therefore pay **237 min / 244 p50 ms** of imports they never
 touch, and `--gates-compile` is on the extension's corpus-watcher path.
 
-**That was fixed and this entry did not say so.** `memory/recall.py:104-105` now binds both
+**That was fixed and this entry did not say so.** `memory/recall.py:104-105#_LazyModule` now binds both
 through a `_LazyModule` proxy (`np = _LazyModule("numpy")`, `ort = _LazyModule("onnxruntime")`),
 and the comment at line 51 records the change from the old `import onnxruntime, numpy`.
 Verified 2026-09-27 rather than read off the source: `python -X importtime recall.py --lint`
@@ -1877,7 +1883,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:3949` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:4582#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

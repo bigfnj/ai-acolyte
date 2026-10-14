@@ -9,7 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync, spawn } = require('node:child_process');
 const { resolveCodexHome } = require('./codex-paths');
-const { commandLaunch, endProcessTree, taskkillPath } = require('./exec-resolve');
+const { commandLaunch, endProcessTree, taskkillPath, npmShimLaunch } = require('./exec-resolve');
 const { writeFileAtomicSync } = require('./permissions');
 
 const MODES = new Set(['auto', 'prompt', 'writes', 'approve']);
@@ -534,7 +534,11 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
         deadlineAt = request.deadlineAt;
         if (request.requests.every(item => item.method === 'config/read')) graceMs = 1000;
       }
-      const launch = commandLaunch(request.codexExecutable, ['app-server', '--stdio']);
+      // An npm codex.cmd is run as the node script it names, so the app-server is
+      // this worker's own child and in its job (exec-resolve's npmShimLaunch says
+      // why); any other shape, the .cmd included, launches as before.
+      const launch = npmShimLaunch(request.codexExecutable, ['app-server', '--stdio'])
+        || commandLaunch(request.codexExecutable, ['app-server', '--stdio']);
       // ONE reason on every platform. commandLaunch resolves only on Windows; on
       // POSIX it hands the name back unchanged because spawn walks PATH itself, so
       // a missing executable surfaced as spawn's own ENOENT text instead and every
@@ -595,7 +599,8 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       // app-server through the finally below the way the deadline would, within
       // half a second of the host's death instead of up to 25 s after it. On
       // Windows a Node host's libuv job object ends this worker with it, before
-      // this can run; the residual that leaves is in test/codex-mcp-config.test.js.
+      // this can run, and this worker's job its app-server; what that leaves is in
+      // test/codex-mcp-config.test.js ("a worker whose host dies outright").
       const parent = process.ppid;
       hostWatch = setInterval(() => {
         if (process.ppid === parent && running(parent)) return;

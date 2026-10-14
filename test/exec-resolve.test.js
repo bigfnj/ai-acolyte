@@ -400,3 +400,61 @@ test('a deadline from endTreeAfter ends the program under a launcher, which kill
   const error = await within(fixed.answer, 5000);
   assert.match(String(error?.message), /^Command failed:/, 'the callback reads the kill as execFile reports any failed command');
 });
+
+// npm's own cmd-shim, as bundled with the node running this suite. Generating the
+// shim with it, rather than copying its template here, is what makes the test
+// mean "the shim npm writes", and not "the shim this file thinks npm writes".
+function bundledCmdShim() {
+  try { return require(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'node_modules', 'cmd-shim')); }
+  catch { return null; }
+}
+
+// AN npm SHIM IS RUN AS THE NODE SCRIPT IT NAMES, AND NOTHING ELSE IS (2026-10-14).
+// Through cmd.exe the script's node is in no job object, so a config worker that
+// dies with its host leaves it running (test/codex-mcp-config.test.js has that
+// case). npmShimLaunch reads only cmd-shim's own form and returns null for
+// anything else, which the worker then launches through the command processor.
+test('the shim npm writes is run as the node script it names; every other shape is left alone', { skip: !windows }, async (t) => {
+  const { npmShimLaunch } = require('../src/exec-resolve');
+  const cmdShim = bundledCmdShim();
+  if (!cmdShim) { t.skip('npm\'s bundled cmd-shim is not next to this node'); return; }
+  const dir = scratch('npmshim');
+  const bin = path.join(dir, 'node_modules', '@openai', 'codex', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const script = path.join(bin, 'codex.js');
+  fs.writeFileSync(script, '#!/usr/bin/env node\nprocess.stdout.write("ran " + process.argv.slice(2).join(" "));\n');
+  await cmdShim(script, path.join(dir, 'codex'));
+  const shim = path.join(dir, 'codex.cmd');
+
+  const launch = npmShimLaunch(shim, ['app-server', '--stdio']);
+  // MUTATION: make npmShimLaunch return null outright. This and the host-death test
+  // in test/codex-mcp-config.test.js fail. Confirmed 2026-10-14.
+  assert.ok(launch, 'the shim npm writes was not recognised');
+  assert.equal(launch.resolved, shim);
+  assert.equal(path.basename(launch.file).toLowerCase(), 'node.exe', 'node, from PATH, as the shim itself would pick');
+  assert.deepEqual(launch.args, [script, 'app-server', '--stdio']);
+  const run = spawnSync(launch.file, launch.args, { encoding: 'utf8', windowsHide: true });
+  assert.equal(run.stdout, 'ran app-server --stdio');
+  // A node.exe beside the shim wins, as the shim's own IF EXIST does.
+  fs.writeFileSync(path.join(dir, 'node.exe'), '');
+  assert.equal(npmShimLaunch(shim, []).file, path.join(dir, 'node.exe'));
+  fs.rmSync(path.join(dir, 'node.exe'));
+
+  // Every other shape is null, so the caller launches the .cmd as it always did.
+  const flagged = path.join(bin, 'flagged.js');
+  fs.writeFileSync(flagged, '#!/usr/bin/env node --no-warnings\n');
+  await cmdShim(flagged, path.join(dir, 'flagged'));
+  assert.equal(npmShimLaunch(path.join(dir, 'flagged.cmd'), []), null, 'a shim that passes node flags');
+  fs.writeFileSync(path.join(dir, 'plain.cmd'), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  assert.equal(npmShimLaunch(path.join(dir, 'plain.cmd'), []), null, 'a hand-written two-line shim');
+  const text = fs.readFileSync(shim, 'utf8');
+  fs.writeFileSync(path.join(dir, 'expanded.cmd'), text.replace('node_modules\\@openai', 'node_modules\\%SCOPE%'));
+  assert.equal(npmShimLaunch(path.join(dir, 'expanded.cmd'), []), null, 'a target that would expand a variable');
+  fs.writeFileSync(path.join(dir, 'edited.cmd'), text.replace('SETLOCAL', 'SETLOCAL\r\nSET X=1'));
+  assert.equal(npmShimLaunch(path.join(dir, 'edited.cmd'), []), null, 'a shim with a line added');
+  fs.writeFileSync(path.join(dir, 'moved.cmd'), text.replace('codex.js', 'missing.js'));
+  assert.equal(npmShimLaunch(path.join(dir, 'moved.cmd'), []), null, 'a shim whose script is not there');
+  fs.writeFileSync(path.join(dir, 'batch.bat'), text);
+  assert.equal(npmShimLaunch(path.join(dir, 'batch.bat'), []), null, 'a .bat, which npm never writes');
+  assert.equal(npmShimLaunch(process.execPath, []), null, 'a real executable');
+});

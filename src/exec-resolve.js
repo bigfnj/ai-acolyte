@@ -116,6 +116,53 @@ function commandLaunch(name, args = []) {
   };
 }
 
+// AN npm SHIM, RUN AS THE NODE SCRIPT IT NAMES (2026-10-14). Launched through the
+// command processor, an npm `codex.cmd` is cmd.exe -> node, and that node is in no
+// job object: libuv puts every child a Node process spawns in a kill-on-close job
+// that allows silent breakaway, so cmd.exe is in the spawner's job and its own
+// child is not. A Codex config worker that dies with its host (the host's job ends
+// it) therefore ends cmd.exe, and the node under it keeps running (measured in
+// test/codex-mcp-config.test.js, "a worker whose host dies outright"). Spawned
+// directly, that node is the worker's own child, in the worker's job, and dies
+// with it; the native codex the npm launcher starts is in that node's job in turn.
+//
+// Only cmd-shim's own output is read, byte for byte apart from line endings and
+// the target: the form npm 7 and later write (cmd-shim 4+), which is the form any
+// npm that can install @openai/codex writes. The target must be a relative path
+// with no quote or `%` in it and must exist, and the node must be the shim's own
+// `node.exe` or, as the shim would choose, `node` from PATH, and an .exe. Anything
+// else (another shim generator, an older template, a hand-edited file, a shim that
+// passes node flags) returns null, and the caller launches the .cmd as before.
+// Windows only; POSIX has no .cmd. The cwd lookup cmd.exe would make for `node`
+// is not reproduced, on purpose (see taskkillPath below).
+const CMD_SHIM_HEAD = [
+  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0', '',
+  'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ') ELSE (', '  SET "_prog=node"',
+  '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\',
+].join('\n');
+const CMD_SHIM_TAIL = '" %*';
+function npmShimLaunch(name, args = []) {
+  if (process.platform !== 'win32') return null;
+  const shim = resolveExecutable(name);
+  if (!shim || path.extname(shim).toLowerCase() !== '.cmd') return null;
+  let text;
+  try {
+    if (fs.statSync(shim).size > 4096) return null;
+    text = fs.readFileSync(shim, 'utf8').replace(/\r\n/g, '\n').replace(/\n+$/, '');
+  } catch { return null; }
+  if (!text.startsWith(CMD_SHIM_HEAD) || !text.endsWith(CMD_SHIM_TAIL)) return null;
+  const target = text.slice(CMD_SHIM_HEAD.length, text.length - CMD_SHIM_TAIL.length);
+  if (!target || /["%\n]/.test(target) || path.isAbsolute(target) || /^[\\/]/.test(target)) return null;
+  const dir = path.dirname(shim);
+  const script = path.resolve(dir, target);
+  if (!isFile(script)) return null;
+  const local = path.join(dir, 'node.exe');
+  const node = isFile(local) ? local : resolveExecutable('node');
+  if (!node || path.extname(node).toLowerCase() !== '.exe') return null;
+  return { file: node, args: [script, ...(Array.isArray(args) ? args : []).map(String)], options: {}, resolved: shim };
+}
+
 // taskkill BY ABSOLUTE PATH, never by bare name (2026-10-14). libuv resolves a
 // bare name itself and looks in the CURRENT DIRECTORY before PATH, unless the
 // environment carries NoDefaultCurrentDirectoryInExePath. Measured on the
@@ -249,5 +296,5 @@ function endTreeAfter(child, ms) {
 // less than the tests that already exist.
 module.exports = {
   resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
-  END_TREE,
+  END_TREE, npmShimLaunch,
 };

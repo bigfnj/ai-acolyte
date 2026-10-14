@@ -42,16 +42,9 @@ the cached trust timeout are fixed and recorded under "The v1.6.3 release commit
   Claude-side env-prefixed rules.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
-and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It found:
-
-- **On Windows, an npm `.cmd` codex can outlive an extension host that dies outright.**
-  MEASURED 2026-10-14 with a stand-in that never reads stdin. A Node host killed outright (not
-  deactivated) takes the trust worker with it through libuv's kill-on-close job, and the
-  worker's job takes its `cmd.exe`. The shim's node grandchild breaks away from both jobs and
-  keeps running. Deactivate's `taskkill /T` is unaffected. Unverified against a real build: a
-  real codex that reads stdin should see EOF when the worker dies. Options are to resolve the
-  shim to its node target and spawn node directly, or to accept the residual. Recorded in
-  `test/codex-mcp-config.test.js`, "a worker whose host dies outright".
+and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn
+findings, with the CI run 38535034218 timeout, are fixed or recorded in `docs/engineering-record.md`
+under "Process spawns: the v1.6.3 lifecycle and performance confirmation (2026-10-14)".
 
 Each one moves to the engineering record with its disposition when it is fixed and gated.
 

@@ -29,28 +29,32 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Memory gates: three gaps found on the second workstation (2026-10-14)
+### Memory gates: `agents:` targeting (2026-10-14; two of three gaps closed)
 
 A read-only census of this box found 0 compiled gates and 1 qualifying memory. The 16 gates in
 the repo's comments, from a 119–123-memory corpus, lived on the development machine. Three
-defects surfaced along the way:
+defects surfaced along the way. Two are closed, with their evidence in `docs/engineering-record.md`
+under "Rampage's memory-gates hardening, ported (2026-10-14)":
 
-- **The compiler reads one store and ignores the rest without saying so.** `recall.py`'s
-  discovery and `memoryLint.js`'s `pickPrimary` choose the single `~/.claude/projects/*/memory`
-  folder with the most `.md` files. A `scope: global` gate in any other store never compiles,
-  and neither the lint nor the dashboard reports it. Here, the only real gate sits in the
-  41-file store, and the 48-file store wins.
-- **`agents:` targeting is ignored.** A gate marked `agents: [codex]` is installed into
+- **CLOSED, FIXED by reporting (`a9a2dbf`): the compiler reads one store and ignored the rest
+  without saying so.** By the maintainer's decision the other stores are still never compiled.
+  `recall.py --lint` and the dashboard's gates card now name each other store and its count of
+  gate memories that are not installed.
+- **OPEN: `agents:` targeting is ignored.** A gate marked `agents: [codex]` is installed into
   Claude's `CLAUDE.md` too. Per-agent output (`gates.generated.{claude,codex}.md`) exists only
   in the older `permission-wildcarding-agent-targeted-gates` checkout, which was never merged
-  here. A 2026-09-24 compile on this box came from that branch.
-- **`src/agent-gates.js`'s header still says gates need `type: feedback`.** Selection has keyed
-  on `scope: global` alone since the README's change.
+  here. A 2026-09-24 compile on this box came from that branch. This is the next wave. Extend
+  recall.py's `_gate_body`, which is now the one selection rule that the compiler and both
+  censuses share. Give each per-agent file its own header sha, because `compiledIsWhole` checks
+  one file.
+- **CLOSED, FIXED (`659be23`): `src/agent-gates.js`'s header said gates need `type: feedback`.**
+  It now says selection is on `scope: global` alone.
 
 **Note (user, 2026-10-14):** the private spin-off `bigfnj/rampage` ("a memory manager for Claude
-Code") has feature work on memory gates and on Project-local draining. That work is being mapped
-against this repo for porting, starting with 1.6.5. Check rampage before designing a fix for the
-gaps above.
+Code") has feature work on memory gates and on Project-local draining. Its memory-gates hardening
+(`7139659`) was ported in wave-h1 (the record section above). Rampage's later "retire and restore
+memory gates one at a time" (`e5c0ee7`) and its Project-local drain work are not mapped yet. Check
+them before designing either.
 
 ### For the maintainer to decide: may a workspace raise Auto Learn's mode? (2026-10-14)
 

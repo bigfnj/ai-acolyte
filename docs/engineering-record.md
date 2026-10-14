@@ -1028,7 +1028,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   constant; the only thing that varies with the argument is `detectMcpServers`,
   and at the time no test asserted an `mcp__*` blanket entry leaves the backup.
   One does now: "legacy cleanup preserves MCP blankets for servers introduced
-  after MAX" at `test/policy-backup.test.js:612#blankets`, added in answer to this entry
+  after MAX" at `test/policy-backup.test.js:652#blankets`, added in answer to this entry
   and since renamed from "MAX off purges a blanket that arrived WHILE MAX was
   on". Control:
   restoring the top-level `require('../src/permissions')` **is** caught, so that

@@ -1155,7 +1155,9 @@ test('a same-realm re-activate repeats a once-per-activation warning', TEST_TIME
     { permissions: { allow: ['Bash(rg *)', ...extra], deny: [] } }, null, 2) + '\n');
   const warned = () => messages.filter((message) =>
     /backupMirrorPath "~" is the home directory/.test(message)).length;
-  const app = harness(home, { settings: { backupMirrorPath: '~' } });
+  // A user setting (inspected as `globalValue`): the key is machine-scoped and read from that tier
+  // alone since F7 (2026-10-14).
+  const app = harness(home, { settings: { backupMirrorPath: '~' }, inspected: { backupMirrorPath: { globalValue: '~' } } });
   try {
     grant('Bash(zzfirst *)');
     await app.commands.get('permission-wildcarding.runNow')();

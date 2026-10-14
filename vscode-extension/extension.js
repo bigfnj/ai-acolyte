@@ -222,15 +222,15 @@ const writeAllow = (settings, allow, denyAdditions) =>
 // On-disk shape is { allow, deny }. A bare array is the pre-1.12 allow-only
 // backup and is still read, so an existing file upgrades in place on first write.
 //
-// Read late rather than at module load: a settings change must not need a window
-// reload to take effect, and a config read at require time runs before the
-// mocked workspace exists in tests. Falls back to the default when unset or
-// blank, and `~` is expanded so a hand-typed setting behaves as it reads.
+// Read late rather than at module load: a settings change must not need a window reload to
+// take effect, and a config read at require time runs before the mocked workspace exists in
+// tests. USER settings only (machine-scoped, F7, 2026-10-14): a workspace must not choose where
+// the allow and deny lists are copied. Unset or blank is the default; `~` is expanded.
 function mirrorBackupPath() {
   let configured;
   try {
     configured = vscode.workspace.getConfiguration('permissionWildcarding')
-      .get('backupMirrorPath', '');
+      .inspect('backupMirrorPath')?.globalValue ?? ''; // as codexExecutableSetting reads its key
   } catch { configured = ''; }
   if (typeof configured !== 'string' || !configured.trim()) return MIRROR_BACKUP_DEFAULT;
   const raw = configured.trim();
@@ -623,7 +623,7 @@ function toolboxPython() {
 }
 
 // Absolute path to recall.py, resolved in order:
-//   1. the configured override (permissionWildcarding.memory.recallScript)
+//   1. the configured override (memory.recallScript), from USER settings only: machine-scoped (F7)
 //   2. the copy bundled into the VSIX by scripts/package.mjs — the normal case for an
 //      installed extension, and why a fresh install no longer needs a checkout at all
 //   3. the dev layout — vscode-extension/ sits next to memory/ (running from the repo, e.g. F5)
@@ -634,7 +634,7 @@ function toolboxPython() {
 // Empty string when none resolve — the rebuild button then guides the user to set it, while
 // the passive status probe keeps working regardless.
 function recallScriptPath() {
-  const c = vscode.workspace.getConfiguration('permissionWildcarding').get('memory.recallScript');
+  const c = vscode.workspace.getConfiguration('permissionWildcarding').inspect?.('memory.recallScript')?.globalValue;
   if (typeof c === 'string' && c.trim() && fs.existsSync(c.trim())) return c.trim();
 
   const hit = (p) => (p && fs.existsSync(p) ? p : '');

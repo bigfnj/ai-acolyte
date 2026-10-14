@@ -38,10 +38,12 @@ under "Follow-ups to the v1.6.3 confirmation audit (2026-10-14)". Still in fligh
   - The config worker's grace kill, which checks `exitCode` only.
   - Moving the push benchmark into `scripts/`.
   - Recording the remaining spawn residuals.
-- **wave-f11.**
-  - Codex export's env-led refusal (`PROGRAM_NAMING_ENV`) extended from CC/CXX/MAKE to the
-    other build-program names. This is the lead's decision on G4(b)'s maintainer question.
-  - Whether the listing ignores a user deny on a family's own rule.
+- **wave-f12** (wave-f11's J1 and J2 are fixed and recorded).
+  - Codex export judges environment assignments case-insensitively, because Windows folds
+    environment names.
+  - A user `ask` on a family's rule withholds it like a deny, because ask beats allow.
+  - `CARGO_HOME` is refused as the config-file class. It is still unchecked whether
+    `RUSTUP_TOOLCHAIN` or `RUSTUP_HOME` can name a program by path.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
 and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn

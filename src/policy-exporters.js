@@ -1017,13 +1017,50 @@ const NPX_EXEC = {
 // "SHELL=./x.sh", "test"]`, `["make", ".SHELLFLAGS=-ec", "test"]` and `["make", "X!=cmd", "all"]`
 // rendered (measured against c16728e). No make is installed on the box, so this rests on the
 // manual, not a run.
+//
+// AND THE PROGRAMS make's own rules run (2026-10-14, F6 of the v1.6.3 confirmation audit). The
+// override test above refused CC, CXX and MAKE, by way of envNameIsUnsafe, and let every other
+// program variable through: `["make", "AR=./x", "lib"]`, `["make", "RM=./x", "clean"]` and
+// `["make", "COMPILE.c=./x", "all"]` rendered, and each runs ./x wherever a rule runs that
+// variable, which make's built-in rules do with no line of the makefile naming it. By the
+// principle at the top of this file a variable that names a program makes the prefix broad, so:
+//   * MAKE_PROGRAM_VARIABLES, every program GNU make's built-in variable table defines outside
+//     VMS (src/default.c, `default_variables`, read from the GNU make source mirror at c63a5bc,
+//     2026-10-14): the manual's "Variables Used by Implicit Rules" list (AR AS CC CXX CPP FC M2C
+//     PC CO GET LEX YACC LINT MAKEINFO TEX TEXI2DVI WEAVE CWEAVE TANGLE CTANGLE RM) plus the three
+//     it defines and the manual's list leaves out: LD (`ld`; the manual does not list it, the
+//     table does), OBJC and F77. Then the GNU Coding Standards' program variables ("Utilities in
+//     Makefiles": $(AR) $(BISON) $(CC) $(FLEX) $(INSTALL) $(LD) $(LDCONFIG) $(LEX) $(MAKE)
+//     $(MAKEINFO) $(RANLIB) $(TEXI2PDF) $(YACC); "Variables for Specifying Commands": INSTALL,
+//     INSTALL_PROGRAM, INSTALL_DATA; read from gnulib's doc/make-stds.texi the same day). Those
+//     are conventions, not make's own, and are here because a makefile written to the standard
+//     runs them for exactly the targets a reviewed prefix names (`install`): a convention that
+//     common is a variable that names a program in nearly every makefile that has it.
+//   * MAKE_COMMAND_VARIABLE, the whole command lines the built-in rules run (the same table:
+//     COMPILE.c, LINK.o, PREPROCESS.S, LEX.l, YACC.y, LINT.c, ... and CHECKOUT,v). Overriding one
+//     replaces the command a rule runs outright.
+// Matched exactly, as make's variable names are case-sensitive. Not refused, on purpose: the
+// flags variables (CFLAGS, LDFLAGS, ARFLAGS, ...) and the install locations (PREFIX, DESTDIR,
+// prefix, bindir, ...), which the same table and standard define as data, and any variable a
+// makefile defines for itself, which is the makefile's own code, as a target's recipe is. just
+// gains nothing here: it has no built-in variables and no implicit rules, and an override of a
+// variable the justfile does not declare is an error (MEASURED, just 1.58.0, 2026-10-14: `just
+// PYTHON=python3 build` and `just CC=evil build` both stop with "overridden on the command line
+// but not present in justfile"), so what a justfile's PYTHON runs is the justfile's own code.
 const MAKE_SHELL_VARIABLES = new Set(['SHELL', '.SHELLFLAGS', 'MAKESHELL', 'MAKEFLAGS', 'MFLAGS', 'MAKEFILES']);
+const MAKE_PROGRAM_VARIABLES = new Set([
+  'AR', 'AS', 'CC', 'OBJC', 'CXX', 'CO', 'CPP', 'FC', 'F77', 'GET', 'LD', 'LEX', 'LINT', 'M2C', 'PC', 'YACC',
+  'MAKEINFO', 'TEX', 'TEXI2DVI', 'WEAVE', 'CWEAVE', 'TANGLE', 'CTANGLE', 'RM',
+  'BISON', 'FLEX', 'INSTALL', 'INSTALL_PROGRAM', 'INSTALL_DATA', 'LDCONFIG', 'RANLIB', 'TEXI2PDF',
+]);
+const MAKE_COMMAND_VARIABLE = /^(?:(?:COMPILE|LINK|PREPROCESS|LEX|YACC|LINT)\.[A-Za-z]+|CHECKOUT,v)$/;
 const MAKE = {
   info: DEFAULT_INFO,
   target: {
     // A name holds no whitespace, `:`, `#` or `=`; spaces may surround it (`SHELL := x`).
     assignments: /^\s*([^\s:#=]*?)\s*([:+?!]*)=/,
-    unsafeVariable: (name, operator) => operator.includes('!') || MAKE_SHELL_VARIABLES.has(name) || envNameIsUnsafe(name),
+    unsafeVariable: (name, operator) => operator.includes('!') || MAKE_SHELL_VARIABLES.has(name) ||
+      MAKE_PROGRAM_VARIABLES.has(name) || MAKE_COMMAND_VARIABLE.test(name) || envNameIsUnsafe(name),
     scanAll: true,
     flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
       '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',

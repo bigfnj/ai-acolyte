@@ -88,6 +88,50 @@ test('CLI --gates refresh is quiet and exit-0 when nothing changed', (t) => {
   assert.match(claudeMd(home), /BEGIN permission-wildcarding: memory gates/);
 });
 
+// `refresh` is the unattended verb (a SessionStart hook), so it writes with no in-place
+// fallback: a CLAUDE.md held through every rename attempt is left whole and the next session
+// retries. `on`, run by a person who sees the result, keeps the fallback. The hold is a
+// preload that fails every rename onto CLAUDE.md, as Windows does while another process has
+// it open; TOOLBOX_PYTHON names a file that does not exist, so no Python runs.
+test('CLI --gates refresh never writes a held CLAUDE.md in place; --gates on still does', (t) => {
+  const home = tempHome(t);
+  const file = path.join(home, '.claude', 'CLAUDE.md');
+  const preload = path.join(home, 'hold-claude-md.js');
+  fs.writeFileSync(preload, `const fs = require('fs'), path = require('path');
+const real = fs.renameSync;
+fs.renameSync = (from, to) => {
+  if (path.resolve(String(to)) === ${JSON.stringify(path.resolve(file))}) {
+    throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+  }
+  return real(from, to);
+};
+`);
+  const held = (args) => {
+    const root = path.parse(home).root;
+    return spawnSync(process.execPath, ['--require', preload, CLI, ...args], {
+      cwd: home, encoding: 'utf8', windowsHide: true,
+      env: {
+        ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
+        HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+        TOOLBOX_PYTHON: path.join(home, 'no-such-python.exe'),
+      },
+    });
+  };
+  const refresh = held(['--gates', 'refresh']);
+  assert.equal(claudeMd(home), '# Mine\n', `the held file was written in place: ${refresh.stderr}`);
+  assert.equal(refresh.status, 1);
+  assert.match(refresh.stderr, /stayed held through \d+ rename attempts/);
+  assert.deepEqual(fs.readdirSync(path.join(home, '.claude')).filter((name) => name.endsWith('.tmp')), []);
+
+  const on = held(['--gates', 'on']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(claudeMd(home), /BEGIN permission-wildcarding: memory gates/,
+    'a person running --gates on still gets the in-place fallback');
+
+  // MUTATION: pass `{ inPlaceFallback: true }` (or nothing) to setGatesAll in gates() in
+  // bin/wildcard-perms and the refresh rewrites CLAUDE.md in place: the first assertion fails.
+});
+
 test('CLI --gates with nothing compiled refuses and says which command to run', (t) => {
   const home = tempHome(t, { compiled: null });
   const on = runCli(home, ['--gates', 'on']);

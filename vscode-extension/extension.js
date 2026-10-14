@@ -1376,7 +1376,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5482#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5487#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1631,7 +1631,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5512#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5517#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -3498,7 +3498,9 @@ function ensureGuidance(announce = false) {
     // when it is on, already has the current wording.
     if (states.every((state) => state.on === want &&
         (want ? state.current : !state.shadowedPaths?.length))) return;
-    const changed = setGuidanceAll(want).filter((result) => result.changed);
+    // Unattended, so no in-place fallback (src/agent-guidance.js setGuidance): a file held
+    // through every rename attempt is left whole and the next activation retries.
+    const changed = setGuidanceAll(want, { inPlaceFallback: false }).filter((result) => result.changed);
     if (!changed.length) return;
     if (announce || want) {
       vscode.window.setStatusBarMessage(
@@ -3725,7 +3727,10 @@ function ensureGates(announce = false) {
     if (want && !states.some((state) => state.compiled)) return;
     if (states.every((state) => state.on === want &&
         (want ? state.current : !state.shadowedPaths?.length))) return;
-    const changed = setGatesAll(want).filter((result) => result.changed);
+    // Unattended (activation, the compiled-file watcher, the corpus recompile), so no in-place
+    // fallback: a held CLAUDE.md or AGENTS.md is left whole rather than truncated and refilled
+    // while a session may be loading it, and the next activation or recompile retries.
+    const changed = setGatesAll(want, { inPlaceFallback: false }).filter((result) => result.changed);
     if (!changed.length) return;
     if (announce || want) {
       vscode.window.setStatusBarMessage(

@@ -133,6 +133,105 @@ function escapeMarker(marker) {
   return String(marker).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ── Where a marker counts (ported from rampage 7139659, src/managed-block.js) ──────
+//
+// Patched in here rather than imported: derived-guidance.js and codex-memory-gates.js build
+// their blocks with this module's createManagedBlock, so every block in the user's
+// instruction files gets the same rules.
+
+// A UTF-8 file may open with a byte-order mark (the live ~/.codex/AGENTS.md on the
+// development box does), and a decoded string keeps it as this one character.
+const BYTE_ORDER_MARK = String.fromCharCode(0xfeff);
+
+// A marker counts only as a WHOLE LINE: at the start of the text (after a byte-order mark
+// if the file has one) or right after a newline, and followed by `\r\n`, `\n` or the end
+// of the text. Matched as a substring anywhere, a marker the user quoted in their own
+// prose was a fence: a quoted BEGIN above the block made `on` replace everything from the
+// quote to the real block's end, and `off` delete it, the user's own section with it.
+// Nothing this module writes is affected: it writes every marker on a line of its own,
+// and a body cannot carry one raw (see `fenced` in createManagedBlock).
+function markerLineAt(text, marker, from = 0) {
+  for (let at = text.indexOf(marker, from); at !== -1; at = text.indexOf(marker, at + 1)) {
+    const opensLine = at === 0 || text[at - 1] === '\n' || (at === 1 && text[0] === BYTE_ORDER_MARK);
+    const after = at + marker.length;
+    const closesLine = after === text.length || text[after] === '\n'
+      || (text[after] === '\r' && text[after + 1] === '\n');
+    if (opensLine && closesLine) return at;
+  }
+  return -1;
+}
+
+// Closed code fences, as [start, end) offsets from the opening fence line to the end of
+// the closing one. CommonMark's rule, cut down to what can hold a marker line: up to three
+// spaces, then three or more backticks or tildes; a backtick opener's info string holds no
+// backtick; the closer is the same character, at least as long, with only spaces or tabs
+// after it.
+//
+// One deliberate departure: CommonMark runs an unclosed fence to the end of the file, and
+// here an opener that never closes is plain text. A stray fence line in the user's notes
+// must not be able to hide the real block below it.
+const FENCE_OPENER = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSER = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+function fencedSpans(text) {
+  const lines = [];
+  for (let at = 0; at < text.length;) {
+    const newline = text.indexOf('\n', at);
+    const stop = newline === -1 ? text.length : newline + 1;
+    lines.push({ at, stop, text: text.slice(at, newline === -1 ? stop : newline).replace(/\r$/, '') });
+    at = stop;
+  }
+  if (lines.length && lines[0].text.startsWith(BYTE_ORDER_MARK)) lines[0].text = lines[0].text.slice(1);
+  const spans = [];
+  // The shortest opener of each character already scanned to the end of the file without
+  // a closer. A later opener of that character at least as long cannot close either (its
+  // closer would have closed the first), so it is skipped rather than scanned again.
+  // Without this the scan is quadratic in unclosed openers: rampage measured 5,000 of them
+  // at 487 to 542 ms against 4.5 to 4.9 ms, three fresh interleaved processes each.
+  const unclosed = {};
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = FENCE_OPENER.exec(lines[i].text);
+    if (!open) continue;
+    const [, fence, info] = open;
+    const char = fence[0];
+    if (char === '`' && info.includes('`')) continue;
+    if (fence.length >= (unclosed[char] ?? Infinity)) continue;
+    let close = -1;
+    for (let j = i + 1; j < lines.length && close === -1; j += 1) {
+      const shut = FENCE_CLOSER.exec(lines[j].text);
+      if (shut && shut[1][0] === char && shut[1].length >= fence.length) close = j;
+    }
+    if (close === -1) { unclosed[char] = fence.length; continue; }
+    spans.push([lines[i].at, lines[close].stop]);
+    i = close;
+  }
+  return spans;
+}
+
+// The run of line terminators that ends at `at`, oldest first, and the run that starts at
+// `at`. Each `\r\n` or bare `\n` is ONE terminator: the removal arithmetic in `apply`
+// counts lines, and a CRLF counted as one `\n` and a stray `\r` is how an editor that saved
+// the file as CRLF grew it by two blank lines per on/off cycle.
+function terminatorsBefore(text, at) {
+  const run = [];
+  let from = at;
+  while (from > 0 && text[from - 1] === '\n') {
+    const crlf = from > 1 && text[from - 2] === '\r';
+    run.unshift(crlf ? '\r\n' : '\n');
+    from -= crlf ? 2 : 1;
+  }
+  return { from, run };
+}
+
+function terminatorsAfter(text, at) {
+  const run = [];
+  let to = at;
+  for (;;) {
+    if (text[to] === '\n') { run.push('\n'); to += 1; }
+    else if (text[to] === '\r' && text[to + 1] === '\n') { run.push('\r\n'); to += 2; }
+    else return { to, run };
+  }
+}
+
 // A managed block is a marker pair plus a body. The shell-style text above is one
 // instance; the compiled memory gates in `agent-gates.js` are another. Each closes over
 // its own markers, so adding a block cannot change how an existing one behaves, and an
@@ -151,12 +250,34 @@ function createManagedBlock({ begin, end, body }) {
   // an "off" leaves the rest of the file untouched. Matching is anchored on the
   // markers rather than the body text, which is what lets the wording change
   // between releases without stranding an old copy.
+  //
+  // Markers count only as whole lines (`markerLineAt`). The range runs from the LAST
+  // begin line before the first end line, so a begin line the user left on its own above
+  // the block cannot pull their text between it and the block into the range.
+  //
+  // A pair that sits wholly inside a closed code fence is a documented example and is
+  // skipped. The fence has to enclose BOTH markers: one that closes between them (a gate's
+  // own code fence closing a fence the user left open above) does not hide the block. What
+  // this cannot tell from an example is a fence the user left open above a real block and
+  // closed with a fence line below it; the block then reads as absent and the next `on`
+  // appends a second copy (one only: the copy lands past the fence and is found from then
+  // on). It takes both of those in the user's file, and Markdown renders that block as
+  // code too.
   function blockRange(text) {
-    const start = text.indexOf(begin);
-    if (start === -1) return null;
-    const stop = text.indexOf(end, start);
-    if (stop === -1) return null;
-    return { start, end: stop + end.length };
+    let from = 0;
+    let fences = null;
+    for (;;) {
+      let start = markerLineAt(text, begin, from);
+      if (start === -1) return null;
+      const stop = markerLineAt(text, end, start + begin.length);
+      if (stop === -1) return null;
+      for (let next = markerLineAt(text, begin, start + begin.length); next !== -1 && next < stop;
+        next = markerLineAt(text, begin, next + begin.length)) start = next;
+      fences = fences || fencedSpans(text);
+      const example = fences.find(([open, close]) => open < start && stop + end.length <= close);
+      if (!example) return { start, end: stop + end.length };
+      from = example[1];
+    }
   }
 
   function has(text) {
@@ -191,20 +312,32 @@ function createManagedBlock({ begin, end, body }) {
       // shape `--guidance off` meets on any file that also carries the gates or a
       // derived block. It read as harmless only because a block written at line 1
       // makes the leading sweep a no-op.
-      let above = range.start;
-      while (above > 0 && current[above - 1] === '\n') above -= 1;
-      let below = range.end;
-      while (below < current.length && current[below] === '\n') below += 1;
-      const head = current.slice(0, above);
-      const tail = current.slice(below);
-      // Start of file: nothing above to separate from, and the run below was all
-      // the block's own. End of file: the head is a text file, so exactly one final
-      // newline. Mid-file: the user's line terminator above (their run less the one
-      // blank line an install inserts) plus their own separation below (that run
-      // less the newline that ended the block's last line).
-      const separator = head.length === 0 ? ''
-        : tail.length === 0 ? '\n'
-          : '\n'.repeat(Math.max(1, range.start - above - 1) + Math.max(0, below - range.end - 1));
+      //
+      // The sweeps count whole line terminators, `\r\n` and bare `\n` alike, and what is
+      // kept is the user's own bytes from each run, never a newline this code chose. A
+      // CRLF line keeps both its bytes and an LF line is never turned into CRLF. Sweeping
+      // bare `\n` alone stopped at the `\r` of a CRLF block line, so a file an editor had
+      // saved as CRLF kept the block's own terminator and its blank line as user bytes:
+      // two blank lines more on every on/off cycle (ported from rampage 7139659).
+      const up = terminatorsBefore(current, range.start);
+      const down = terminatorsAfter(current, range.end);
+      const head = current.slice(0, up.from);
+      const tail = current.slice(down.to);
+      // The install writes its blank line with `\n`, like the block's own lines, and an
+      // editor that re-saves the file converts both alike. So the last terminator above
+      // is the install's only when it is spelled like the block's first line ending; a
+      // CRLF blank line right above an LF block is the user's own. Never the only one:
+      // that is the terminator of the user's own last line.
+      const blockEol = current[range.start + begin.length] === '\r' ? '\r\n' : '\n';
+      const inserted = up.run.length > 1 && up.run[up.run.length - 1] === blockEol;
+      // Start of file (a byte-order mark alone counts as nothing above): nothing to
+      // separate from, and the run below was all the block's own. Anywhere else: the
+      // user's run above less the install's blank line, then their run below less the
+      // terminator that ended the block's last line. At the end of the file that leaves
+      // the user's own trailing blank lines where they were; only the install's own blank
+      // line and the block's terminator go.
+      const separator = head === '' || head === BYTE_ORDER_MARK ? ''
+        : up.run.slice(0, up.run.length - (inserted ? 1 : 0)).join('') + down.run.slice(1).join('');
       // End of file is the one branch that is deliberately NOT byte-exact, and it cannot
       // be. The install below adds no separator to a file already ending "\n\n" and one
       // to a file ending "\n", so both reach this point as the SAME two newlines above
@@ -225,8 +358,10 @@ function createManagedBlock({ begin, end, body }) {
     }
 
     // Append rather than prepend: the user's own instructions keep their position
-    // at the top of the file, where they were written to be read first.
-    const separator = current.length === 0 ? '' : current.endsWith('\n\n') ? '' : current.endsWith('\n') ? '\n' : '\n\n';
+    // at the top of the file, where they were written to be read first. A file holding
+    // only a byte-order mark is empty for this purpose: the block goes straight after it.
+    const separator = current.length === 0 || current === BYTE_ORDER_MARK ? ''
+      : current.endsWith('\n\n') ? '' : current.endsWith('\n') ? '\n' : '\n\n';
     return { changed: true, text: `${current}${separator}${block()}` };
   }
 
@@ -242,17 +377,73 @@ const hasGuidance = SHELL_BLOCK.has;
 const isCurrent = SHELL_BLOCK.isCurrent;
 const applyGuidance = SHELL_BLOCK.apply;
 
-function readGuidanceFile(file) {
-  try { return fs.readFileSync(file, 'utf8'); }
-  catch (error) { return error.code === 'ENOENT' ? '' : null; }
+// The bytes of an instruction file and their text, or why it cannot be rewritten. A
+// missing file is empty text with no bytes (`raw: null`): it is created on first write.
+//
+// Read as bytes and decoded once (ported from rampage 7139659). A file whose bytes do not
+// survive the round trip through UTF-8 is refused, because decoding swaps every invalid
+// byte for U+FFFD and writing that text back changed the user's own bytes outside the
+// block. Rampage measured it: a cp1252 "Café" (what Windows PowerShell 5.1's Set-Content
+// writes) came back as "Caf" plus EF BF BD, and a UTF-16LE file (its Out-File default) lost
+// its FF FE byte-order mark the same way, in the file and in the backup both. A NUL byte is
+// refused as well: it is valid UTF-8 but never text, and it is what UTF-16 without a
+// byte-order mark looks like. `lossy` is the decoded text of a refused file, kept only so a
+// status can say whether a block is in it; nothing is ever written from it.
+function readInstructionFile(file) {
+  let raw;
+  try { raw = fs.readFileSync(file); }
+  catch (error) {
+    return error.code === 'ENOENT' ? { raw: null, text: '' } : { raw: null, error: `cannot read ${file}` };
+  }
+  const text = raw.toString('utf8');
+  if (raw.includes(0) || !Buffer.from(text, 'utf8').equals(raw)) {
+    return {
+      raw, lossy: text, error: `${file} is not UTF-8 text (a UTF-16 or ANSI file?), so it will not be `
+        + 'rewritten: save it as UTF-8 and try again',
+    };
+  }
+  return { raw, text };
+}
+
+// The file a write lands in. An instruction file that is itself a symbolic link (a
+// dotfiles checkout is the usual reason) is written THROUGH to its target. Renaming the
+// temp file over the link replaced the link with a regular file: the dotfiles copy kept
+// the old block and the link was gone for good (rampage 7139659). A link further up the
+// path needs nothing, since a rename inside a linked directory already lands in the real one.
+//
+// A hard link is still split by the rename, the other name keeping the old bytes. Only an
+// in-place write would keep it, and that gives up the atomic swap.
+function writablePath(file) {
+  const resolved = path.resolve(file);
+  try {
+    if (fs.lstatSync(resolved).isSymbolicLink()) return fs.realpathSync(resolved);
+  } catch { /* absent, or a link whose target is gone: setGuidance's read says which */ }
+  return resolved;
+}
+
+function isSymbolicLink(file) {
+  try { return fs.lstatSync(file).isSymbolicLink(); } catch { return false; }
 }
 
 // `block` is additive and defaults to the shell-style instance, so every existing caller
 // keeps its behaviour while `agent-gates.js` can drive the same file plumbing.
+//
+// A file that is not UTF-8 text reads as unreadable, with the reason in `error`, because
+// every write to it is refused. Its `on` still says whether a block is in it, so an
+// INACTIVE Codex file of that kind with no block in it needs no cleanup and blocks nothing.
 function guidanceStatus(file = guidancePath(), block = SHELL_BLOCK) {
-  const text = readGuidanceFile(file);
-  if (text === null) return { path: file, readable: false, on: false, current: false };
+  const { text, lossy, error } = readInstructionFile(file);
+  if (error) {
+    const unreadable = { path: file, readable: false, on: false, current: false };
+    return typeof lossy === 'string' ? { ...unreadable, on: block.has(lossy), error } : unreadable;
+  }
   return { path: file, readable: true, on: block.has(text), current: block.isCurrent(text) };
+}
+
+// A status that cannot be acted on: unreadable, unless it is a file refused for its
+// encoding that holds no block (nothing to remove, so nothing to refuse).
+function blocksCleanup(state) {
+  return !state.readable && (state.on || !state.error);
 }
 
 // ── One lock per instruction file, held across the whole read-decide-write ────
@@ -268,9 +459,10 @@ function guidanceStatus(file = guidancePath(), block = SHELL_BLOCK) {
 // Marker fencing does not make that safe, which is the part worth saying out loud. Every
 // writer reads the WHOLE file, computes a whole new file, and writes it back. A write
 // that lands between another writer's read and its own write is not merged into it — it
-// is erased, and the user's own notes go with it. The single-slot backups
-// (`*.pre-guidance`, `*.pre-gates`, `*.pre-derived`) then make it permanent, because the
-// next toggle copies the damaged file over the good copy.
+// is erased, and the user's own notes go with it. A single-slot backup then makes it
+// permanent, because the next toggle copies the damaged file over the good copy. That is
+// why setGuidance keeps two (`*.pre-guidance` and `*.pre-gates` written once, plus a
+// rolling `*-prev`); `*.pre-derived` is still one slot.
 //
 // Keyed on the TARGET FILE rather than one global path: CLAUDE.md and AGENTS.md share no
 // state and `setGuidanceAll` writes them in a loop, so a global lock would serialise two
@@ -290,8 +482,10 @@ const INSTRUCTION_LOCK_SUFFIX = '.wildcarding.lock';
 // by hand (7139659). No real holder of this lock runs for 30 s.
 const INSTRUCTION_LOCK_STALE_MS = 30 * 1000;
 
+// Beside the file a write lands in, so a symlinked instruction file is locked where it is
+// written, whichever name a writer used.
 function instructionLockPath(file) {
-  return `${path.resolve(file)}${INSTRUCTION_LOCK_SUFFIX}`;
+  return `${writablePath(file)}${INSTRUCTION_LOCK_SUFFIX}`;
 }
 
 // Run `write` holding the file's lock; call `onBusy` with the reason if someone else
@@ -317,13 +511,27 @@ function withInstructionLock(file, write, onBusy) {
   }
 }
 
-// Drive the change. Backs the file up on first modification — this is the user's
-// own instruction file, and a managed block that ate someone's notes would be
-// unforgivable even though the marker logic says it cannot.
+// Drive the change. Backs the file up before every change: this is the user's own
+// instruction file, and a managed block that ate someone's notes would be unforgivable
+// even though the marker logic says it cannot. Two slots, both copied from the file's raw
+// bytes rather than from decoded text (ported from rampage 7139659):
+//   - `backupName` holds the file as it was before this block FIRST changed it, and is
+//     never overwritten once written;
+//   - `<backupName>-prev` holds it as it was before this block's most recent change.
+// One slot rewritten on every change made any damage permanent at the next automatic
+// write: the extension's recompile and `--gates refresh` both write unasked, and each one
+// copied the damaged file over the only good copy.
 //
 // The read is INSIDE the lock, not above it. A lock taken around the write alone would
 // still let a second writer land between this one's read and its own write, which is the
 // interleaving itself rather than a smaller version of it.
+//
+// `inPlaceFallback` reaches the instruction file's own write (src/permissions.js
+// writeFileAtomicSync). The unattended writers (the extension's ensureGates and
+// ensureGuidance, and `--gates refresh`) pass false: a file held through every rename
+// attempt then reports an error row and stays byte-identical, and the next activation,
+// recompile or session retries. Written in place instead, the file is truncated and
+// refilled while every new Claude or Codex session may be reading it.
 function setGuidance(on, {
   file = guidancePath(),
   backupDir = path.join(os.homedir(), '.claude', 'backups'),
@@ -332,25 +540,35 @@ function setGuidance(on, {
   backupName = 'CLAUDE.md.pre-guidance',
   block = SHELL_BLOCK,
   validateTarget,
+  inPlaceFallback = true,
 } = {}) {
   return withInstructionLock(file, () => {
     // Selection can change while waiting for this file's lock. In particular an
     // override created after discovery must not be removed as an inactive copy.
     const selectionError = typeof validateTarget === 'function' ? validateTarget() : null;
     if (selectionError) return { changed: false, path: file, on: false, error: selectionError };
-    const text = readGuidanceFile(file);
-    if (text === null) return { changed: false, error: `cannot read ${file}`, path: file, on: false };
+    const real = writablePath(file);
+    const { raw, text, error: unreadable } = readInstructionFile(real);
+    if (unreadable) {
+      return { changed: false, error: unreadable.replace(real, file), path: file, on: false };
+    }
+    if (raw === null && isSymbolicLink(file)) {
+      return { changed: false, path: file, on: false,
+        error: `${file} is a symbolic link to a file that does not exist, so it will not be replaced by a regular file` };
+    }
 
     const result = block.apply(text, on);
     if (!result.changed) return { changed: false, path: file, on: block.has(text), error: null };
 
     try {
-      if (text.length) {
+      if (raw && raw.length) {
         fs.mkdirSync(backupDir, { recursive: true });
-        writeFileAtomicSync(path.join(backupDir, backupName), text);
+        const first = path.join(backupDir, backupName);
+        if (!fs.existsSync(first)) writeFileAtomicSync(first, raw);
+        writeFileAtomicSync(path.join(backupDir, `${backupName}-prev`), raw);
       }
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      writeFileAtomicSync(file, result.text);
+      fs.mkdirSync(path.dirname(real), { recursive: true });
+      writeFileAtomicSync(real, result.text, { inPlaceFallback });
     } catch (error) {
       return { changed: false, path: file, on: block.has(text), error: error.message };
     }
@@ -371,7 +589,7 @@ function guidanceStatusAll(homeOrOptions, block = SHELL_BLOCK) {
     const status = { agent: target.agent, ...guidanceStatus(target.path, block) };
     const shadowed = (target.candidates || []).filter((file) => file !== target.path)
       .map((file) => guidanceStatus(file, block));
-    const unreadable = shadowed.find((state) => !state.readable);
+    const unreadable = shadowed.find(blocksCleanup);
     if (unreadable) return { ...status, readable: false, current: false,
       error: `cannot inspect inactive Codex instruction file ${unreadable.path}` };
     const shadowedPaths = shadowed.filter((state) => state.on).map((state) => state.path);
@@ -384,6 +602,7 @@ function setGuidanceAll(on, options = {}) {
   const backupDir = options.backupDir || path.join(home, '.claude', 'backups');
   const block = options.block || SHELL_BLOCK;
   const backupSuffix = options.backupSuffix || 'pre-guidance';
+  const inPlaceFallback = options.inPlaceFallback !== false;
   return installedGuidanceTargets(options).map((target) => {
     const results = [];
     const validateTarget = () => {
@@ -401,7 +620,7 @@ function setGuidanceAll(on, options = {}) {
     };
     if (target.error) return finish(target.error);
     const write = (file, enabled) => {
-      const result = setGuidance(enabled, { file, backupDir, block, validateTarget,
+      const result = setGuidance(enabled, { file, backupDir, block, validateTarget, inPlaceFallback,
         backupName: `${path.basename(file)}.${backupSuffix}` });
       results.push(result);
       return result;
@@ -423,7 +642,7 @@ function setGuidanceAll(on, options = {}) {
       : [...new Set([target.path, ...(target.candidates || [])])];
     for (const file of cleanup) {
       const state = guidanceStatus(file, block);
-      if (!state.readable) return finish(`cannot read ${file}`);
+      if (blocksCleanup(state)) return finish(state.error || `cannot read ${file}`);
       if (!state.on) continue;
       const removed = write(file, false);
       if (removed.error) return finish(removed.error);

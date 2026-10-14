@@ -135,6 +135,92 @@ test('off settings remove shadowed Codex guidance and gates on activation and co
   }
 });
 
+// The unattended instruction-file writers: activation runs ensureGuidance and ensureGates,
+// and nobody is there to retry a dropped write except the next activation or recompile.
+// So they pass `inPlaceFallback: false` (src/agent-guidance.js setGuidance): a CLAUDE.md
+// held through every rename attempt is left byte-identical and reported, never truncated
+// and refilled while a session may be loading it.
+test('activation never writes a held CLAUDE.md in place', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-held-instructions-'));
+  const home = path.join(root, 'home');
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'gates.generated.md'), '## Standing gates (1 memories, managed)\n- Fixture gate\n');
+  const claudeMd = path.join(home, '.claude', 'CLAUDE.md');
+  fs.writeFileSync(claudeMd, '# Mine\n');
+  const channelLines = [];
+  const vscode = {
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    RelativePattern: class RelativePattern { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
+    StatusBarAlignment: { Right: 2 }, ThemeColor: class ThemeColor {},
+    Uri: { file: (fsPath) => ({ fsPath }) },
+    commands: { registerCommand: disposable, executeCommand() {} },
+    window: {
+      createStatusBarItem: () => ({ hide() {}, show() {}, dispose() {} }),
+      createOutputChannel: () => ({ appendLine: (line) => channelLines.push(line), append() {}, clear() {}, show() {}, dispose() {} }),
+      registerWebviewViewProvider: disposable, setStatusBarMessage() {},
+      showErrorMessage() {}, showInformationMessage() {}, showWarningMessage() {},
+    },
+    workspace: {
+      isTrusted: true, workspaceFolders: [{ uri: { fsPath: path.join(root, 'workspace') } }],
+      createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
+      // Guidance and gates at their defaults (on); Auto Learn off, so no scan runs.
+      getConfiguration: () => ({ get: (key, fallback) => key === 'autoLearn.enabled' ? false : fallback,
+        inspect: () => ({}), update: async () => {} }),
+      onDidChangeConfiguration: disposable, onDidChangeWorkspaceFolders: disposable,
+    },
+  };
+  // Every rename onto CLAUDE.md fails, as it does while another process holds it open.
+  const realRename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (path.resolve(String(to)) === path.resolve(claudeMd)) {
+      throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: 'EPERM' });
+    }
+    return realRename(from, to);
+  });
+  t.mock.method(process, 'emitWarning', () => {});
+  const extensionPath = require.resolve('../vscode-extension/extension');
+  const rootSrc = path.resolve(__dirname, '..', 'src');
+  const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, CODEX_HOME: path.join(root, 'no-codex') });
+  Module._load = function load(request, parent, isMain) {
+    if (request === 'vscode') return vscode;
+    if (request === 'os') return { ...os, homedir: () => home };
+    if (parent?.filename === extensionPath && request.startsWith('./src/')) {
+      return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
+    }
+    if (request === './memoryLint' && parent?.filename === extensionPath) return {
+      MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
+      memoryReport: () => ({ conf: {}, dir: null, report: null }), discoverDirs: () => [],
+      cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
+    };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  let extension;
+  try {
+    purgeProjectModules(extensionPath, rootSrc);
+    assertFreshProjectCache(extensionPath, rootSrc);
+    extension = require(extensionPath);
+    extension.activate({ subscriptions: [] });
+    assert.equal(fs.readFileSync(claudeMd, 'utf8'), '# Mine\n',
+      'WITNESS the held CLAUDE.md keeps every byte: neither the guidance nor the gates write fell back to in place');
+    assert.deepEqual(fs.readdirSync(path.dirname(claudeMd)).filter((name) => name.endsWith('.tmp')), [],
+      'and no temp file was left beside it');
+
+    // MUTATION: drop `{ inPlaceFallback: false }` from ensureGates' setGatesAll call (or
+    // from ensureGuidance's setGuidanceAll call) in vscode-extension/extension.js and the
+    // WITNESS fails: CLAUDE.md is rewritten in place with the block.
+  } finally {
+    try { await extension?.deactivate?.(); } catch { /* always release deferred work */ }
+    Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    purgeProjectModules(extensionPath, rootSrc);
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test('extension activates with mocked VS Code and deactivates without live policy access', async () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-extension-'));
   const commands = new Map();

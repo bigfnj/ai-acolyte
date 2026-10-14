@@ -169,7 +169,9 @@ test('the gates backup name cannot collide with the guidance one', () => {
   });
 
   const saved = fs.readdirSync(backupDir).sort();
-  assert.deepEqual(saved, ['CLAUDE.md.pre-gates', 'CLAUDE.md.pre-guidance']);
+  // Each block keeps its own pair: the first-ever copy and a rolling `-prev`.
+  assert.deepEqual(saved, ['CLAUDE.md.pre-gates', 'CLAUDE.md.pre-gates-prev',
+    'CLAUDE.md.pre-guidance', 'CLAUDE.md.pre-guidance-prev']);
   // The guidance backup holds the original; the gates backup holds it *with* guidance,
   // so neither block's pre-change copy is lost to the other.
   assert.equal(fs.readFileSync(path.join(backupDir, 'CLAUDE.md.pre-guidance'), 'utf8'), USER_TEXT);

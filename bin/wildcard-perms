@@ -922,7 +922,10 @@ function gates(args) {
     process.exit(1);
   }
 
-  const results = setGatesAll(cmd !== 'off');
+  // `refresh` is the unattended one (a SessionStart hook), so it writes with no in-place
+  // fallback: a held instruction file is left whole and the next session retries, where an
+  // in-place write would truncate it while that very session may be loading it.
+  const results = setGatesAll(cmd !== 'off', { inPlaceFallback: cmd !== 'refresh' });
   if (!results.length) {
     process.stderr.write('wildcard-perms --gates: no agent instruction file to write\n');
     process.exit(1);

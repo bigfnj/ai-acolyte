@@ -40,8 +40,7 @@ function compiledPath(home = os.homedir()) {
 }
 
 // Read late, on every call, so a recompile is picked up without reloading the extension.
-// Empty string for "not compiled yet", null for a real read error, matching the
-// convention readGuidanceFile already uses.
+// Empty string for "not compiled yet", null for a real read error.
 function readCompiled(home = os.homedir()) {
   try { return fs.readFileSync(compiledPath(home), 'utf8').trim(); }
   catch (error) { return error.code === 'ENOENT' ? '' : null; }

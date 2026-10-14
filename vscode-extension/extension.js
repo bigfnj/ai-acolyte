@@ -118,7 +118,6 @@ let autoLearnWorkerRunner = null;
 let policyBounce = null;        // debounce for policy-signal / settings-change guard runs
 let localDrainBounce = null;    // debounce for settings.local.json writes
 let localDrainRetries = 0;      // consecutive deferrals while settings.json was unreadable
-let localDrainAt = null;        // timestamp of the last local drain that changed something
 let dashboardBounce = null;     // debounce for dashboard pushes (see refresh())
 
 // ── deactivation ──────────────────────────────────────────────────────────────
@@ -1063,7 +1062,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2546#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2547#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1142,8 +1141,10 @@ function memoryCardData(precomputed = null) {
         broken: report.broken.length,
         unresolved: report.unresolved.length,
         llm: st.state,
-        modelDir: st.modelDir ? st.modelDir.replace(os.homedir(), '~') : null,
-        canRebuild: !!recallScriptPath() && st.venv && st.model,
+        // `modelDir` and `canRebuild` were here until 2026-10-14 and the webview read
+        // neither. `canRebuild` was the costly one: recallScriptPath() probes the
+        // configured path and the candidate recall.py locations with fs checks, on
+        // every push. Rebuild decides for itself when clicked (rebuildRecall).
       };
     }
   } catch { /* memory card is optional — never break the dashboard */ }
@@ -1315,7 +1316,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5231#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5212#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1540,12 +1541,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5251#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5232#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2334#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2335#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -2879,16 +2880,14 @@ function schedule(delay = 400) {
   debounceTimer = setTimeout(() => runWildcarding(), delay);
 }
 
-// The dashboard's badge is processAllowList(<what is on disk>), which this pass
-// has just finished computing. `after` is already generalized, so
-// processAllowList(after) === after — that is the idempotence the watcher-loop
-// guard above relies on — and handing the pair over lets the refresh skip a
-// second quadratic pass over the same list. The dashboard still re-checks that
-// the disk holds `after`, so a write that lands in between costs nothing but the
-// recompute it would have done anyway.
-function wildcardingHint(after) {
-  return Array.isArray(after) ? { allow: after, optimized: after } : null;
-}
+// `wildcardingHint(after)` used to sit here, handing the push an { allow,
+// optimized } pair so it could skip a second processAllowList over the list this
+// pass had just computed. The push only needed that pass for `pendingWildcard`,
+// the "Wildcard Now" badge, and that field lost its last reader in the webview at
+// ee46cf5. Removed 2026-10-14 with the field, the push's own pass, the provider's
+// `hint` slot and `sameList`: the push now runs no wildcarding pass at all, so
+// there is nothing left for a hint to save (test/dashboard-view.test.js, "one
+// push per burst, and the push never runs the wildcarding pass").
 
 // Generalize + prune the allow list. `manual` = invoked via the button/command
 // (surface a status message even when nothing changed).
@@ -2907,7 +2906,7 @@ function runWildcarding(manual = false) {
   const reportAlreadyOptimal = (list, deny) => {
     backupPolicy(list, deny);
     if (manual) vscode.window.setStatusBarMessage('$(shield) ai-acolyte: Claude permissions already optimal', 4000);
-    dashboard?.refresh(wildcardingHint(list));
+    dashboard?.refresh();
   };
 
   // ── the unlocked probe ──────────────────────────────────────────────────────
@@ -3049,7 +3048,7 @@ function runWildcarding(manual = false) {
     }
   }
 
-  dashboard?.refresh(wildcardingHint(written ? written.allow : lockedAfter));
+  dashboard?.refresh();
 }
 
 // ── project-local approvals ─────────────────────────────────────────────────────
@@ -3174,7 +3173,6 @@ function drainLocal(manual = false) {
   const promoted = reports.flatMap((report) => report.promoted);
   const pruned = reports.reduce((sum, report) => sum + report.pruned.length, 0);
   if (promoted.length || pruned) {
-    localDrainAt = Date.now();
     lastRun = Date.now();
     vscode.window.showInformationMessage(
       `ai-acolyte: promoted ${promoted.length} project-local approval${promoted.length !== 1 ? 's' : ''} ` +
@@ -3226,13 +3224,14 @@ function localCardData() {
       kept += report.kept;
     }
   }
+  // No `folders` (the card counts `files`) and no `lastRun` since 2026-10-14: the
+  // webview read neither, and `lastRun` was the only reader of a module-level
+  // `localDrainAt` stamp that every changing drain kept writing.
   return {
-    folders: roots.length,
     files: roots.map((root) => localSettingsPath(root).replace(os.homedir(), '~')),
     promote, prune, kept, blocked,
     trusted,
     enabled: localDrainEnabled(),
-    lastRun: localDrainAt,
   };
 }
 
@@ -3921,18 +3920,12 @@ async function choosePermissionAgent(title, claude, codex) {
 // debounces a render, so it is sized to the burst and nothing more.
 const DASHBOARD_BOUNCE_MS = 60;
 
-// Cheap enough to be worth it: an O(n) compare in front of an O(n²) pass.
-function sameList(a, b) {
-  return a.length === b.length && a.every((entry, index) => entry === b[index]);
-}
-
 class WildcardingViewProvider {
   static viewId = 'permissionWildcarding.dashboard';
 
   constructor(context) {
     this.context = context;
     this.view = null;
-    this.hint = null;  // { allow, optimized } from the caller, consumed by the next _push
   }
 
   resolveWebviewView(view) {
@@ -3955,7 +3948,12 @@ class WildcardingViewProvider {
         case 'drainLocal':   vscode.commands.executeCommand('permission-wildcarding.drainLocal'); break;
         case 'toggleGuidance': vscode.commands.executeCommand('permission-wildcarding.toggleGuidance'); break;
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
-        case 'showWildcards': vscode.commands.executeCommand('permission-wildcarding.showWildcards'); break;
+        // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
+        // c09daab (the shared Saved permissions picker replaced that button), and the
+        // two synthetic test rows posting it directly were all that kept it alive. The
+        // palette command is untouched. test/dashboard-view.test.js now checks the
+        // reverse direction too: every arm here needs a postMessage of its type in the
+        // webview script, so a sender removed without its route fails.
         case 'codexHook': vscode.commands.executeCommand('permission-wildcarding.codexHook'); break;
         case 'reviewCodexMcp': vscode.commands.executeCommand('permission-wildcarding.reviewCodexMcp'); break;
         case 'searchCodexMemory': vscode.commands.executeCommand('permission-wildcarding.searchCodexMemory'); break;
@@ -3991,19 +3989,13 @@ class WildcardingViewProvider {
   // gatesBounce, policyBounce, localDrainBounce, autoLearnBounce): this was the
   // one that ran straight through, and it has ~35 call sites — several of them
   // watcher pairs (onDidChange + onDidCreate, or a delete beside a create) that
-  // fire together, each paying for a full work-up including a quadratic
-  // processAllowList.
-  //
-  // `hint` is an { allow, optimized } pair from a caller that just computed it.
-  // Used only when the list it was computed from is still what is on disk, so a
-  // write that landed in between falls back to a fresh pass rather than
-  // rendering a count against the wrong list.
-  refresh(hint = null) {
+  // fire together, each paying for a full work-up (the push ran a quadratic
+  // processAllowList until 2026-10-14; see the note where wildcardingHint was).
+  refresh() {
     // Before the timer, not inside it: nothing to push means nothing to schedule,
     // and this is the guard that keeps a collapsed sidebar (the view is disposed
     // on hide) from doing the whole work-up on every background event.
     if (!this.view) return;
-    this.hint = hint && Array.isArray(hint.allow) && Array.isArray(hint.optimized) ? hint : null;
     clearTimeout(dashboardBounce);
     dashboardBounce = setTimeout(() => this._push(), DASHBOARD_BOUNCE_MS);
   }
@@ -4038,8 +4030,6 @@ class WildcardingViewProvider {
     // reading a missing property is not a TypeError. Only an explicit `false`
     // means hidden.
     if (deactivated || !this.view || this.view.visible === false) return;
-    const hint = this.hint;
-    this.hint = null;
     // ONE read of settings.json per push, not two. This used to be `readSettings()` — a
     // readFileSync plus a JSON.parse — with `readSettingsState()` taking the same file
     // again for the three-state pill, eleven lines below the note explaining that
@@ -4096,20 +4086,12 @@ class WildcardingViewProvider {
       const broad = overBroadShellGrants(allow);
       overBroadGrants = { count: broad.count, total: broad.total, byReason: broad.byReason };
     } catch { /* keep the empty shape: the line simply does not render */ }
-    const wildcards = allow.filter((p) => p.includes('*')).sort();
-    // What Wildcard Now would actually change. The "specific" tally is not that
-    // number: an entry with no `*` is often one the pass can never generalize
-    // (Edit, Write, WebSearch, an exact mcp__server__tool), so badging the button
-    // with it advertises work that resolves to "already optimal".
-    //
-    // processAllowList is quadratic — ~57ms on the 423-entry list this was built
-    // for — and runWildcarding had just run it over the same input immediately
-    // before calling refresh(), so every settings write paid for it twice on the
-    // extension-host thread.
-    const optimized = hint && sameList(hint.allow, allow) ? hint.optimized : processAllowList(allow);
-    const pendingWildcard = optimized.length === allow.length && optimized.every((p, i) => p === allow[i])
-      ? 0
-      : optimized.filter((p) => !allow.includes(p)).length + allow.filter((p) => !optimized.includes(p)).length;
+    // A count, not the list. The payload used to carry `wildcards`, every wildcard
+    // entry sorted, on every push, and the webview never read it: the only reader
+    // is the Claude total's hover title, which wants this number. `pendingWildcard`
+    // (a processAllowList pass, quadratic, ~57 ms on a 423-entry list) went the same
+    // way on 2026-10-14; its badge left the webview at ee46cf5.
+    const wildcardCount = allow.filter((p) => p.includes('*')).length;
     // The live wildcarding pass watches Claude's settings.json; Auto Learn also
     // reads Codex history (regardless of codexScope, which only gates rule writes).
     // Name Codex in the status card whenever both are true, so the flagship line
@@ -4137,9 +4119,10 @@ class WildcardingViewProvider {
       type: 'data',
       // Three states, not existsSync. A corrupt or mid-write settings.json EXISTS, so the
       // pill read a green "Active" while every writer was throwing SETTINGS_UNREADABLE.
-      // readSettingsState was built for exactly this distinction. `active` stays a boolean for the two
-      // callers that only care whether writes can proceed; settingsState carries the third.
-      active: settingsState === 'present',
+      // readSettingsState was built for exactly this distinction. The boolean `active`
+      // that sat beside it was dropped 2026-10-14: the webview reads settingsState (and
+      // claudePermissionsComplete) and nothing read `active`, so its one test asserted a
+      // field no pixel depended on. That test now asserts the rendered status instead.
       settingsState,
       settingsPath: SETTINGS.replace(os.homedir(), '~'),
       version: extensionVersion(),
@@ -4153,11 +4136,9 @@ class WildcardingViewProvider {
       ],
       deadApprovals,
       overBroadGrants,
-      wildcardCount: wildcards.length,
-      specificCount: allow.length - wildcards.length,
-      pendingWildcard,
+      wildcardCount,
+      specificCount: allow.length - wildcardCount,
       backupCount: backupCount(),
-      wildcards,
       lastRun,
       autoLearn,
       memory: memoryCardData(memory),

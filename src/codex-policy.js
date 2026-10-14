@@ -414,7 +414,7 @@ function codexRuleFileSet(options = {}) {
     }
   }
   // ONE IDENTITY PER FILE, and on Windows that identity ignores case. The target
-  // is a hard-coded lowercase name (`let` at vscode-extension/extension.js:1161#codexRulesPath;
+  // is a hard-coded lowercase name (`let` at vscode-extension/extension.js:1162#codexRulesPath;
   // `const` at bin/wildcard-perms:329-330#codexRulesPath) while readdirSync
   // returns whatever spelling is on disk, and the three comparisons below used
   // raw strings. Measured 2026-10-13 with an on-disk

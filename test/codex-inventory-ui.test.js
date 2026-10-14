@@ -509,10 +509,11 @@ test('dashboard permission route opens the shared command and keeps legacy agent
   listeners.get('permissionsView/click')();
   const selection = { agent: 'codex', path: app.rulesPath, pattern: app.rule.pattern, start: app.rule.start };
   receive({ type: 'viewPermissions', selection });
-  receive({ type: 'showWildcards' });
-  assert.deepEqual(app.executed, ['permission-wildcarding.viewPermissions', 'permission-wildcarding.viewPermissions',
-    'permission-wildcarding.showWildcards'],
-    'WITNESS the dashboard must route to the shared list while the Claude compatibility route remains intact');
+  // No synthetic `showWildcards` post since 2026-10-14: the webview has had no sender
+  // for it since c09daab and its route is gone. The Claude-only picker stays reachable
+  // as a palette command, which the last assertion below still drives.
+  assert.deepEqual(app.executed, ['permission-wildcarding.viewPermissions', 'permission-wildcarding.viewPermissions'],
+    'WITNESS the dashboard must route to the shared list');
   assert.deepEqual(app.executedArgs[1], [selection],
     'WITNESS the sidebar selector must survive the webview-to-command boundary');
   await app.shared();

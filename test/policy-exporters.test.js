@@ -510,7 +510,7 @@ test('make, just and npm value options are modelled: ending right after a value 
   // target, script or a further option (`make -C dir --eval=...`, `npm --prefix dir exec sh`).
   for (const prefix of [
     ['make', '-C', 'dir'], ['make', '-f', 'x.mk'], ['make', '-C', 'dir', '-f', 'x.mk'], ['make', '--directory', 'dir'],
-    ['make', '--directory=dir'], ['make', '-j', '4'], ['make', '-j4'], ['make', 'CC=gcc'], ['make', '-Cdir'],
+    ['make', '--directory=dir'], ['make', '-j', '4'], ['make', '-j4'], ['make', 'CFLAGS=-O2'], ['make', '-Cdir'],
     ['make', '-kC', 'dir'], ['make', '-I', 'inc'], ['make', '--eval', 'x', 'all'], ['make', '-E', 'x', 'all'],
     ['make', '--bogus', 'all'],
     ['just', '-f', 'x'], ['just', '--justfile', 'x'], ['just', '-d', 'dir'], ['just', '--working-directory', 'dir'],
@@ -525,15 +525,19 @@ test('make, just and npm value options are modelled: ending right after a value 
     // renders. Confirmed 2026-10-13.
     // MUTATION: read a value option as a flag (drop `k += 1` on the values line).
     // `["make", "-C", "dir"]` takes `dir` for the target and renders. Confirmed 2026-10-13.
-    // MUTATION: drop the `assignments` continue. `["make", "CC=gcc"]` reads the override
-    // as a target and renders. Confirmed 2026-10-13.
+    // MUTATION: drop the `assignments` continue. `["make", "CFLAGS=-O2"]` reads the override
+    // as a target and renders. Confirmed 2026-10-13 with `CC=gcc`, which is a refused
+    // program-naming override since 2026-10-14 (the next test), so the row is a data one now;
+    // reconfirmed with it 2026-10-14.
     // MUTATION: drop `booleans` from skipRunnerOptions. `["npm", "--json", "false"]` reads
     // `false` as a subcommand and renders. Confirmed 2026-10-13.
     assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} has named no target`);
   }
   for (const prefix of [
     ['make', '-C', 'dir', 'test'], ['make', '-f', 'x.mk', 'all'], ['make', '-j', '4', 'test'], ['make', '-j', 'test'],
-    ['make', '-k', 'test'], ['make', 'CC=gcc', 'all'], ['make', '--directory=dir', 'all'], ['make', '-Cdir', 'test'],
+    // `["make", "CC=gcc", "all"]` stood here until 2026-10-14; CC names the compiler every
+    // recipe runs, so it is refused now, as a decision (src/policy-exporters.js MAKE).
+    ['make', '-k', 'test'], ['make', 'CFLAGS=-O2', 'all'], ['make', '--directory=dir', 'all'], ['make', '-Cdir', 'test'],
     ['make', '--', 'test'], ['make', '--version'], ['make', 'test'],
     ['just', '-f', 'x', 'build'], ['just', '--set', 'a', 'b', 'build'], ['just', '-n', 'build'], ['just', 'a=b', 'build'],
     ['just', 'build'], ['just', '--version'],
@@ -1374,6 +1378,71 @@ test('Invoke-Expression and iex are broad at any depth, in every spelling', () =
   assert.equal(codexRuleCount(['Invoke-ExpressionLint', 'x']), 1);
 });
 
+// Invoke-Command runs a script block, the iex class (measured; src/policy-exporters.js
+// ALWAYS_BROAD_WRAPPERS). Each row's verdict at fd05398 is in the commit that added this test.
+const ICM_PREFIXES = [['icm'], ['Invoke-Command'], ['ICM', '-ScriptBlock'], ['icm', 'x'],
+  ['Invoke-Command', '-FilePath', 'x.ps1'], ['Invoke-Command', '-ComputerName', 'host', '-ScriptBlock'],
+  ['Microsoft.PowerShell.Core\\Invoke-Command', 'x'], ['invoke-command.exe', 'x'], ['timeout', '5', 'icm', 'x']];
+
+test('Invoke-Command and icm are broad at any depth, in every spelling', () => {
+  for (const prefix of ICM_PREFIXES) {
+    // MUTATION: drop 'icm' and 'invoke-command' from ALWAYS_BROAD_WRAPPERS. Their prefixes reach
+    // the generic rule and `["icm", "x"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop them from the learner's SHELL_WRAPPERS (src/auto-learn.js). Nothing here
+    // asks wrapperIsBroad and bare `["icm"]` renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs a script block`);
+  }
+  for (const permission of ['PowerShell(icm *)', 'PowerShell(Invoke-Command -FilePath x.ps1 *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  const { classifyInvocation } = require('../src/auto-learn');
+  // A local form: with `-ComputerName` the learner calls it `network-command` first, rightly.
+  for (const command of ['Invoke-Command -ScriptBlock $sb', 'icm -ScriptBlock $sb']) {
+    const learned = classifyInvocation({ tool: 'PowerShell', command, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${command}: ${JSON.stringify(learned.reasons)}`);
+  }
+  // Control: a different cmdlet of the same verb is judged as before.
+  assert.equal(codexRuleCount(['Invoke-WebLint', 'x']), 1);
+});
+
+// make and just overrides that choose the recipe shell or load a program (src/policy-exporters.js
+// MAKE and JUST). Each row's verdict at c16728e is in the commit that added this test.
+const OVERRIDE_BROAD = [
+  ['make', 'SHELL=./x.sh', 'test'], ['make', '.SHELLFLAGS=-ec', 'test'], ['make', 'MAKESHELL=x', 'all'],
+  ['make', 'SHELL :=x', 'all'], ['make', 'X!=cmd', 'all'], ['make', 'MAKEFLAGS=--eval=x', 'all'],
+  ['make', 'MAKEFILES=x.mk', 'all'], ['make', 'CC=gcc', 'all'], ['make', 'LD_PRELOAD=x', 'all'], ['make', 'PATH=/tmp', 'all'],
+  ['make', 'test', 'SHELL=./x.sh'], ['make', 'test', '--eval=x'], ['make', 'test', '-E', 'x'], ['make', '--', 'SHELL=x', 'all'],
+  ['just', 'NODE_OPTIONS=x', 'build'], ['just', '--set', 'PATH', '/tmp', 'build'], ['just', '--shell', 'sh', 'build'],
+  ['just', '--shell-arg', '-c', 'build'], ['just', '--shell-command', 'build'], ['just', '--dotenv-command', 'x', 'build'],
+  ['just', '--clear-shell-args', 'build'],
+];
+const OVERRIDE_NARROW = [
+  ['make', 'CFLAGS=-O2', 'all'], ['make', 'V=1', 'test'], ['make', 'test', 'CFLAGS=-O2'], ['make', 'test', 'all'],
+  ['make', '-j4', 'test', '-k'], ['make', 'X:=1', 'all'], ['make', 'X::=1', 'all'], ['make', 'X+=1', 'all'], ['make', 'X?=1', 'all'],
+  ['just', 'a=b', 'build'], ['just', '--set', 'a', 'b', 'build'], ['just', 'build', 'SHELL=x'],
+];
+
+test('a make or just override that names the recipe shell or a program is broad, a data override is not', () => {
+  for (const prefix of OVERRIDE_BROAD) {
+    // MUTATION: make MAKE's unsafeVariable return false. `["make", "SHELL=./x.sh", "test"]`
+    // renders. Confirmed 2026-10-14.
+    // MUTATION: drop `operator.includes('!')`. `["make", "X!=cmd", "all"]` renders. Confirmed
+    // 2026-10-14.
+    // MUTATION: drop `scanAll: true` from MAKE. `["make", "test", "SHELL=./x.sh"]` and `["make",
+    // "test", "--eval=x"]` render: the walk stops at the target. Confirmed 2026-10-14.
+    // MUTATION: restore the old `NAME=` pattern for make. `.SHELLFLAGS=-ec` reads as a target
+    // and renders. Confirmed 2026-10-14.
+    // MUTATION: drop the `--set` check. `["just", "--set", "PATH", "/tmp", "build"]` renders.
+    // Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses what runs the recipes`);
+  }
+  for (const prefix of OVERRIDE_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
+  }
+  // `just build SHELL=x` passes SHELL=x to the recipe as an argument (just reads overrides only
+  // before the first recipe), so it is the recipe's business, as `["just", "build", "x"]` is.
+});
+
 // bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each
 // row's verdict at e6d227c is in the commit that added this test.
 const ALIAS_BROAD = [['bunx'], ['bunx', 'sh'], ['bunx', 'node'], ['bunx', '--bun', 'vite'], ['bunx.exe', 'sh'],
@@ -1464,4 +1533,54 @@ test('an environment option that names or loads a program, and any environment f
   }
   // A data-valued assignment does not narrow a broad command either.
   assert.equal(codexRuleCount(['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'sh']), 0);
+});
+
+// node options that name a file deciding what loads (src/policy-exporters.js, node's `broad`).
+// Each row's verdict at 1d66310 is in the commit that added this test.
+const NODE_FILE_BROAD = [
+  ['node', '--openssl-config=x.cnf', 'x.js'], ['node', '--openssl-config', 'x.cnf', 'x.js'],
+  ['node', '--experimental-config-file=node.config.json', 'x.js'], ['node', '--experimental-config-file', 'c.json', 'x.js'],
+  ['node', '--openssl-shared-config', 'x.js'], ['node', '--experimental-default-config-file', 'x.js'],
+  ['nodejs', '--openssl-config=x.cnf', 'x.js'], ['uv', 'run', 'node', '--openssl-config=x', 'x.js'],
+];
+const NODE_FILE_NARROW = [['node', 'x.js'], ['node', '--icu-data-dir', 'icu', 'x.js'], ['node', '--report-dir=r', 'x.js'],
+  ['node', '--title', 't', 'x.js']];
+
+test('a node option naming an OpenSSL or node config file is broad, like --env-file', () => {
+  for (const prefix of NODE_FILE_BROAD) {
+    // MUTATION: drop `openssl-config` from node's `broad`. `["node", "--openssl-config=x.cnf",
+    // "x.js"]` matches the generic fused form and renders. Confirmed 2026-10-14.
+    // MUTATION: drop `experimental-config-file` from it. `["node",
+    // "--experimental-config-file=node.config.json", "x.js"]` renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names a file that decides what loads`);
+  }
+  for (const prefix of NODE_FILE_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} still renders`);
+  }
+});
+
+// `deno x` is deno's npx, and `dx` its alias (src/policy-exporters.js INTERPRETER_GRAMMAR and
+// RUNNER_ALIASES). Each row's verdict at b11038d is in the commit that added this test.
+const DENO_X_BROAD = [['deno', 'x'], ['deno', 'x', 'sh'], ['deno', 'x', 'node'], ['deno', 'x', 'python', '-c', 'x'],
+  ['deno', 'x', 'timeout', '5', 'sh'], ['deno', 'x', '--preload', 'p.js', 'tsc'], ['deno', 'x', '-c', 'deno.json', 'tsc'],
+  ['deno', 'x', '--env-file', 'x', 'tsc'], ['dx'], ['dx', 'sh'], ['dx.exe', 'node'],
+  // deno run is unchanged: any option after `run` is broad (pins).
+  ['deno', 'run', '-A', 'npm:cowsay'], ['deno', 'run']];
+const DENO_X_NARROW = [['deno', 'x', 'tsc'], ['deno', 'x', 'npm:create-vite'], ['deno', 'x', 'jsr:@std/http/file-server'],
+  ['dx', 'tsc'], ['deno', 'run', 'x.ts'], ['deno', 'run', 'npm:cowsay'], ['deno', 'test'], ['deno', 'fmt']];
+
+test('deno x and dx are judged by the command they name, and deno run keeps its pinned target', () => {
+  for (const prefix of DENO_X_BROAD) {
+    // MUTATION: drop `exec: ['x']` from deno's subcommands. Any named target pins `deno x` again
+    // and `["deno", "x", "sh"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop the `dx` entry from RUNNER_ALIASES. `["dx", "sh"]` is a wrapper with no
+    // grammar of its own and renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs any package bin or a broad command`);
+  }
+  for (const prefix of DENO_X_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names a narrow command and still renders`);
+  }
+  for (const permission of ['Bash(dx tsc *)', 'Bash(deno x tsc *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
 });

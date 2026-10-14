@@ -3,6 +3,25 @@
 // Cross-agent policy exporters for Auto Learn. The learner emits a neutral
 // candidate; these exporters are the final safety boundary before it becomes a
 // Claude wildcard or a Codex executable-policy rule.
+//
+// The governing principle (stated 2026-10-14, after the v1.6.2 audit's residuals, so that a new
+// tool, option or variable is judged by it rather than by a new audit): a reviewed prefix is
+// narrow only when it pins the program it runs, a script, module, package or fixed-purpose
+// subcommand named literally, and every option and variable it carries is one a table here
+// models as inert. Anything else makes it broad: an option or variable whose value is code text
+// (`-c`, `-e`, `--eval`, make's `!=`), or names a program, a shell or the shell's arguments
+// (`SHELL=`, `.SHELLFLAGS=`, `--shell`, `GIT_PAGER=`, `-e`/`--rsh`), or names a file that can load
+// code or choose what runs (an env or dotenv file, an init, rc, config or OpenSSL file, a preload),
+// or changes who the program runs as (`-u`, `--privileged`, sudo); an option no table lists, since
+// its arity and effect are unknown; and a prefix that ends before the program is pinned. An exact
+// informational form (`--version`, `--help`) is narrow only where it was MEASURED to print and
+// exit before anything after it runs. The broad verdict is the safe failure, always: a reviewer
+// can narrow a refused prefix, but cannot see what a narrow verdict let through. Two limits are
+// known and recorded rather than closed: tokens after a fixed-purpose subcommand or a task target
+// are that command's own and stay unread (make excepted, which reads them all), so a prefix still
+// admits whatever its continuation adds (`["npm", "test"]` admits `npm test --node-options=...`,
+// ACCEPTED-RECORDED); and the Claude half is stricter than this, refusing a wrapper or runner root
+// at any depth by membership (64b4eaa), whatever the rest of the rule names.
 
 // The one thing taken from the learner, and only to REFUSE more; see SHELL_WRAPPERS
 // below for why that direction, and only that one, is safe to share.
@@ -84,7 +103,8 @@ const OWN_SHELL_WRAPPERS = [
   'zsh', 'zsh.exe',
   // bunx and pnpx, the short names of `bun x` and `pnpm dlx` (2026-10-14, RUNNER_ALIASES). The
   // learner lists them too; they are spelled here as well so the refusal does not hang on it.
-  'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe',
+  // `dx` is `deno x`'s alias, here only (RUNNER_ALIASES says why).
+  'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe', 'dx', 'dx.exe',
   ...['busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice',
     'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser',
     'script', 'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time',
@@ -512,9 +532,20 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
 //     refused bare, and at any depth on the Claude half) and had only the generic rule here,
 //     so `["iex", "Get-Date"]` and `["invoke-expression", "x"]` rendered (measured against
 //     0ecf75b: 9 of the 13 prefixes test/policy-exporters.test.js lists).
+//   * icm and invoke-command (2026-10-14): PowerShell's Invoke-Command and its one alias run
+//     the script block they are handed, locally or on every computer `-ComputerName` names,
+//     and `-FilePath` runs a script file there. MEASURED in a private temp directory with a
+//     marker-file payload: `Invoke-Command -ScriptBlock { ...; Set-Content ic1.txt X }`, `icm {
+//     ... }`, `ICM -ScriptBlock ([scriptblock]::Create("..."))`, the module-qualified
+//     `Microsoft.PowerShell.Core\Invoke-Command { ... }` and `-ArgumentList` each wrote their
+//     marker under PowerShell 7.6.6, and `icm { ... }` under Windows PowerShell 5.1 as well
+//     (`(Get-Alias -Definition Invoke-Command).Name` is `icm`, its only alias). Until then
+//     neither name was on any table, so even a bare `["icm"]` rendered (measured against
+//     fd05398). They join the learner's SHELL_WRAPPERS too, which is how this module's union
+//     reaches wrapperIsBroad for them.
 const ALWAYS_BROAD_WRAPPERS = new Set([
-  'doas', 'eval', 'firejail', 'gdb', 'iex', 'invoke-expression', 'parallel', 'pkexec', 'runas', 'runuser',
-  'script', 'su', 'sudo', 'systemd-run', 'watch',
+  'doas', 'eval', 'firejail', 'gdb', 'icm', 'iex', 'invoke-command', 'invoke-expression', 'parallel', 'pkexec',
+  'runas', 'runuser', 'script', 'su', 'sudo', 'systemd-run', 'watch',
 ]);
 
 // The wrappers whose exact `--version` or `--help` prefix is narrow on the Codex half
@@ -630,7 +661,15 @@ function execWrapperInner(grammar, prefix) {
 // judged by the command it names (`exec` below): `["bun", "x", "tsc"]` renders and `["bun",
 // "x", "sh"]` does not. Until then any named target pinned it, so `["bun", "x", "sh"]` and
 // `["bun", "x", "python", "-c", "x"]` rendered while `["npx", "sh"]` was refused (measured
-// against e6d227c). deno's `x` is left a target: not measured, recorded.
+// against e6d227c).
+//
+// deno's `x` joined it later the same day: deno 2.9.5's own help reads "Execute a binary from npm
+// or jsr, like npx" (`deno x --help`, read on the box; not run, because it fetches packages), so
+// `["deno", "x", "tsc"]` renders and `["deno", "x", "sh"]` does not; until then any named target
+// pinned it (measured against b11038d). Every option deno x takes before the binary
+// (`--preload FILE`, `-c/--config FILE`, `--env-file`, `--allow-scripts`, ...) is unmodelled, so
+// broad, the governing principle in the header. `deno run SCRIPT` is unchanged: the target is
+// the script or `npm:`/`jsr:` specifier it runs, and any option after `run` is broad.
 const DEFAULT_INFO = new Set(['--version', '-V', '--help', '-h']);
 const SHELL_INFO = new Set(['--version', '--help']);
 const POSIX_SHELL_GRAMMAR = {
@@ -661,7 +700,7 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     values: ['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions',
       '--inspect-port', '--title', '--input-type', '--watch-path', '--test-reporter',
       '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--redirect-warnings',
-      '--unhandled-rejections', '--icu-data-dir', '--openssl-config', '--report-dir', '--diagnostic-dir'],
+      '--unhandled-rejections', '--icu-data-dir', '--report-dir', '--diagnostic-dir'],
     // `--import=data:text/javascript,...` and friends carry the code in the option itself,
     // fused or as the next token. `--env-file` and `--env-file-if-exists`, fused or not, are
     // broad too (2026-10-14, the env-file decision at DOCKER_EXEC): node applies a NODE_OPTIONS
@@ -669,7 +708,21 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     // `node --env-file=x.env z.js` and `node --env-file x.env z.js`, x.env holding
     // `NODE_OPTIONS=--require ./y.js`, each ran y.js; `node z.js` did not. Until then both were
     // plain value options, so `["node", "--env-file", "x.env", "x.js"]` rendered.
-    broad: /^(?:--(?:require|import|loader|experimental-loader)=data:|--env-file(?:-if-exists)?(?:=|$))/,
+    //
+    // Two more files that decide what loads, broad the same way since the same day, MEASURED
+    // with Node 24.19.0 in the same directory:
+    //   * `--openssl-config=FILE`: OpenSSL reads it at startup (a malformed file aborted node with
+    //     "OpenSSL configuration error"), and a `providers` section's `module = PATH` is a shared
+    //     library it loads and initialises: with `module = ./missing-provider-module.dll` under
+    //     node's `nodejs_conf` section, node aborted in OpenSSL's initialisation trying to activate
+    //     it. A present module would have run its own init code. It was a value option until then.
+    //   * `--experimental-config-file=FILE`: node.config.json's `nodeOptions` take `require` and
+    //     `import`, so a file holding `{"nodeOptions": {"require": ["./y2.js"]}}` ran y2.js (and
+    //     the `import` form too). It matched the generic fused form and was narrow until then.
+    // `--openssl-shared-config` (node then honours the system `openssl_conf` section, a file the
+    // prefix does not name; measured to abort the same way) and `--experimental-default-config-
+    // file` (reads ./node.config.json) are flags no table lists, so unknown and broad already.
+    broad: /^(?:--(?:require|import|loader|experimental-loader)=data:|--(?:env-file(?:-if-exists)?|openssl-config|experimental-config-file)(?:=|$))/,
     broadValue: /^data:/,
     fused: /^--[a-z0-9-]+=/,
   },
@@ -701,7 +754,7 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     fused: /^--(?:debug|debug-output|features|profile)=/,
   },
   bun: { info: DEFAULT_INFO, subcommands: { target: ['run', 'x', 'create'], exec: ['x'], broad: ['exec', 'repl'] } },
-  deno: { info: DEFAULT_INFO, subcommands: { target: ['run', 'serve', 'compile', 'x'], broad: ['repl', 'eval'] } },
+  deno: { info: DEFAULT_INFO, subcommands: { target: ['run', 'serve', 'compile', 'x'], exec: ['x'], broad: ['repl', 'eval'] } },
 }));
 
 function interpreterIsBroad(base, prefix) {
@@ -945,10 +998,33 @@ const NPX_EXEC = {
 // `-j` and `-l` take an optional number; `NAME=VALUE` overrides a variable and names no
 // target. Absent, so broad: `-E`/`--eval`, which evaluates its argument as makefile text,
 // rules and recipes included.
+//
+// A variable override is judged since 2026-10-14 (`unsafeVariable`). GNU make reads ANY argument
+// holding `=` as a variable definition with the makefile's own operators (`=`, `:=`, `::=`,
+// `:::=`, `+=`, `?=`, `!=`), and a command-line definition overrides the makefile's (GNU make
+// manual, "Overriding Variables"). So a prefix is broad when an override:
+//   * uses `!=`, the shell assignment, which runs its value as a command while the line is read;
+//   * sets the variable that chooses what runs every recipe line: SHELL (the shell program),
+//     .SHELLFLAGS (its arguments, `-c` by default), MAKESHELL (the Windows and MS-DOS
+//     spelling), or what make reads as more options or makefiles: MAKEFLAGS, MFLAGS,
+//     MAKEFILES;
+//   * names a variable that loads or names a program (envNameIsUnsafe: CC, MAKE, PATH,
+//     LD_PRELOAD, ...), because make exports a command-line variable to every recipe's
+//     environment. This makes `["make", "CC=gcc", "all"]` broad, which rendered until then: a
+//     decision, the one 520103d made for `Bash(CC=gcc make *)`.
+// A data override (`CFLAGS=-O2`, `V=1`) stays narrow. Until then the override test matched only
+// `NAME=` with a C identifier, so `.SHELLFLAGS=...` and `X!=...` read as TARGET names: `["make",
+// "SHELL=./x.sh", "test"]`, `["make", ".SHELLFLAGS=-ec", "test"]` and `["make", "X!=cmd", "all"]`
+// rendered (measured against c16728e). No make is installed on the box, so this rests on the
+// manual, not a run.
+const MAKE_SHELL_VARIABLES = new Set(['SHELL', '.SHELLFLAGS', 'MAKESHELL', 'MAKEFLAGS', 'MFLAGS', 'MAKEFILES']);
 const MAKE = {
   info: DEFAULT_INFO,
   target: {
-    assignments: true,
+    // A name holds no whitespace, `:`, `#` or `=`; spaces may surround it (`SHELL := x`).
+    assignments: /^\s*([^\s:#=]*?)\s*([:+?!]*)=/,
+    unsafeVariable: (name, operator) => operator.includes('!') || MAKE_SHELL_VARIABLES.has(name) || envNameIsUnsafe(name),
+    scanAll: true,
     flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
       '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',
       '--no-builtin-variables', '--silent', '--quiet', '--no-silent', '--touch', '--trace', '--print-directory',
@@ -970,10 +1046,20 @@ const MAKE = {
 // env-file decision at DOCKER_EXEC: `--dotenv-filename`, `-E`/`--dotenv-path`, which name the
 // environment file every recipe line runs under. Not measured (the decision is about what a
 // reviewer cannot see, not about one tool's behavior); `--no-dotenv` stays a flag.
+//
+// The shell options stay absent, now MEASURED (just 1.58.0, private temp directory, 2026-10-14):
+// `--shell pwsh --shell-arg ...` ran the recipe under pwsh, and `--dotenv-command "pwsh -File
+// s.ps1"` (1.58's option to load a command's output as the environment) ran s.ps1, which wrote
+// its marker. A variable override, `NAME=VALUE` or `--set NAME VALUE`, is judged by
+// envNameIsUnsafe since the same day: under `set export` it reaches every recipe's environment,
+// and `just NODE_OPTIONS=--require=./y.js build` (NODE_OPTIONS declared in the justfile) ran y.js,
+// measured. just overrides only variables the justfile declares, and no variable chooses the
+// shell, so a data override stays narrow.
 const JUST = {
   info: DEFAULT_INFO,
   target: {
-    assignments: true,
+    assignments: /^([A-Za-z_][A-Za-z0-9_-]*)()=/,
+    unsafeVariable: (name) => envNameIsUnsafe(name),
     flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
       '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
     flagPattern: /^-v+$/,
@@ -1216,7 +1302,12 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
 // named, and `["pnpx", "create-vite"]` is `["pnpm", "dlx", "create-vite"]`, narrow. Both are
 // OWN_SHELL_WRAPPERS too, so the Claude half refuses them at any depth as it refuses bun and
 // pnpm, and the learner lists them as wrappers.
-const RUNNER_ALIASES = new Map([['bunx', ['bun', 'x']], ['pnpx', ['pnpm', 'dlx']]]);
+//
+// `dx` is `deno x` (added later the same day): `deno x --install-alias` "Creates a dx alias so
+// you can run dx <command> instead of deno x <command>" (deno 2.9.5's help). It is an
+// OWN_SHELL_WRAPPERS entry only, not a learner one, because the name is also Android's old
+// dex tool, and on this exporter's side refusing that one too is the safe failure.
+const RUNNER_ALIASES = new Map([['bunx', ['bun', 'x']], ['pnpx', ['pnpm', 'dlx']], ['dx', ['deno', 'x']]]);
 
 // The index of the first token at or after `k` that is not one of `grammar`'s options, or
 // -1 at an option it does not list. `grammar` may be undefined: nothing is modelled, so
@@ -1240,16 +1331,32 @@ function skipRunnerOptions(grammar, tokens, k) {
 
 // A task runner's options, then the target. True (broad) when the prefix ends before one
 // is named, or at an option the grammar does not list.
+//
+// `assignments` (a pattern capturing the variable name and the operator) and `unsafeVariable`
+// judge a variable override (2026-10-14, MAKE and JUST above): one that names a shell or a
+// program makes the prefix broad, a data override is skipped. `scanAll` is make's: GNU make
+// permutes its options and reads overrides anywhere on the line, so the walk does not stop at
+// the first target there but judges every token the prefix carries, and `["make", "test",
+// "SHELL=./x.sh"]` or `["make", "test", "--eval=x"]` is as broad as with the token before the
+// target. Until then the walk returned at the target and both rendered (measured against
+// c16728e). Elsewhere (just, `npm run`, `mise run`, `pnpm run`) the tokens after the target are
+// the recipe's or script's arguments and stay unread.
 function targetIsBroad(grammar, rest) {
   const flags = new Set(grammar.flags || []);
   const values = new Set(grammar.values || []);
   let dashDash = false;
+  let named = false;
   for (let k = 0; k < rest.length; k += 1) {
     const token = rest[k];
     if (!dashDash && token === '--') { dashDash = true; continue; }
     if (dashDash || !token.startsWith('-') || token === '-') {
-      if (grammar.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
-      return false;                                                       // a named target
+      const assignment = grammar.assignments?.exec(token);
+      if (assignment) {
+        if (grammar.unsafeVariable?.(assignment[1], assignment[2])) return true;   // names a shell or a program
+        continue;
+      }
+      if (!grammar.scanAll) return false;                                 // a named target
+      named = true; continue;
     }
     if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
     if (grammar.optionalNumber?.includes(token)) {
@@ -1257,11 +1364,14 @@ function targetIsBroad(grammar, rest) {
       continue;
     }
     if (values.has(token) || grammar.valuePattern?.test(token)) { k += 1; continue; }
-    if (grammar.values2?.includes(token)) { k += 2; continue; }
+    if (grammar.values2?.includes(token)) {
+      if (grammar.unsafeVariable?.(String(rest[k + 1] ?? ''), '')) return true;  // `--set NAME VALUE`
+      k += 2; continue;
+    }
     if (grammar.fused?.test(token)) continue;
     return true;                                                          // an option this table does not know
   }
-  return true;
+  return !named;
 }
 
 function runnerIsBroad(node, rest) {

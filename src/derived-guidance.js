@@ -37,8 +37,8 @@ const RULE_LIMIT = 200;
 // user's own instruction file. The remote-settings cache it arrives in is local and
 // client-refreshed, so any local process that can write it picks that string. Both
 // suppliers of costliestRules now apply clean: the managed-hits side runs
-// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2575#observation.managedRule`,
-// and the inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1757#clean`. But
+// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2633#observation.managedRule`,
+// and the inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1771#clean`. But
 // that only collapses control characters; it knows nothing about a code span. Sanitising HERE,
 // at the interpolation, is what escapes the backtick and the comment opener.
 //
@@ -416,7 +416,7 @@ function derivedStatus(options = {}) {
 //     safety copy into the developer's REAL ~/.claude/backups.
 //
 // The learner's directory wins because the rest of that arrangement is already
-// built around it: `src/auto-learn-manager.js:1183#BACKUP_NAME` anchors the backup pruner on
+// built around it: `src/auto-learn-manager.js:1195#BACKUP_NAME` anchors the backup pruner on
 // the names `backup()` writes precisely so a sweep by age cannot delete the
 // `.pre-derived` copy sitting beside them, and that is this directory.
 function setDerivedGuidance(mitigations, accepted, options = {}) {

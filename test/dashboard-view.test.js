@@ -2041,7 +2041,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:2774-2776#errors records — a file that failed every
+// defect src/auto-learn-manager.js:2856-2858#errors records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which
@@ -2209,7 +2209,7 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
   // the counts that gate an auto-safe apply. That protected set has had a ceiling of its
   // own since 455ab97, but a family carrying a human decision is never evicted to meet
   // it, so the map can still stay over its limit after the prune has done all it can
-  // (src/auto-learn-manager.js:1045-1048#evictable, which also says that residue is all
+  // (src/auto-learn-manager.js:1057-1060#evictable, which also says that residue is all
   // `retainedObservations` reports now; before 455ab97 the set had no bound at all).
   //
   // It was reported to the state file and to the CLI. The panel, which is the only UI
@@ -2420,6 +2420,28 @@ test('a rebuild held open by a missing Codex root names the folder on the scan-h
     assert.ok(!title.includes(env.tempHome) && !title.includes(codex), `a path reached the hover: ${title}`);
     assert.match(rendered.node('alsub').textContent, /rebuilding older Codex evidence: 1 transcripts still need a complete read/,
       'precondition: the card already said the rebuild is open, only not why');
+
+    // G3 (2026-10-14): and the LINE says it. It read "✓ last scan read 1 file cleanly" while the
+    // rebuild it hovers over blocked every family with Codex evidence. It blocks something, so it
+    // is trouble, by folder name, with what to do; the hover above says how.
+    // MUTATION: drop the codexRebuildWaitingFor branch from the webview's scanTrouble, or the
+    // field from autoLearnScanHealth. The line reads "cleanly" and this fails. Confirmed 2026-10-14.
+    assert.deepEqual(data.autoLearn.scan.codexRebuildWaitingFor, [{ name: 'sessions', link: false }]);
+    assert.match(rendered.alScanHealth,
+      /^⚠ last scan: Codex rebuild waiting for a missing history folder \(sessions\) — reconnect or recreate it/,
+      `the scan-health line said "${rendered.alScanHealth}"`);
+    assert.doesNotMatch(rendered.alScanHealth, /cleanly/);
+    assert.match(rendered.stAutoLearn, /scan degraded/, 'the collapsed row agrees with the card');
+    assert.ok(!rendered.alScanHealth.includes(env.tempHome) && !rendered.alScanHealth.includes(codex));
+    // A link, and more than one folder, each in its own words.
+    const linked = structuredClone(data);
+    linked.autoLearn.scan.codexRebuildWaitingFor = [{ name: 'sessions', link: false }, { name: 'archived_sessions', link: true }];
+    assert.match(renderDashboard(app.provider, linked).alScanHealth,
+      /missing history folders \(sessions; archived_sessions, a link to a missing target\) — reconnect or recreate them/);
+    // The control: with nothing waited for, the line is clean again.
+    const cleared = structuredClone(data);
+    cleared.autoLearn.scan.codexRebuildWaitingFor = [];
+    assert.match(renderDashboard(app.provider, cleared).alScanHealth, /^✓ last scan read/);
   } finally {
     await app.dispose();
   }

@@ -627,10 +627,10 @@ function toolboxPython() {
 //   2. the copy bundled into the VSIX by scripts/package.mjs — the normal case for an
 //      installed extension, and why a fresh install no longer needs a checkout at all
 //   3. the dev layout — vscode-extension/ sits next to memory/ (running from the repo, e.g. F5)
-//   4. an open workspace folder that IS or CONTAINS the permission-wildcarding repo — it can
-//      live on any drive, so probe the usual layouts (folder = repo | a projects/ dir |
-//      a .claude/ root) rather than a fixed path
-//   5. the ~/.claude/projects/permission-wildcarding convention
+// and nowhere else. Never an open workspace folder, so no repository can supply the script
+// the extension runs: why is at the end of the function. A checkout anywhere else is named
+// through the setting, which only the user tier can set.
+//
 // Empty string when none resolve — the rebuild button then guides the user to set it, while
 // the passive status probe keeps working regardless.
 function recallScriptPath() {
@@ -645,15 +645,15 @@ function recallScriptPath() {
   const dev = hit(path.join(__dirname, '..', 'memory', 'recall.py'));
   if (dev) return dev;
 
-  for (const f of vscode.workspace.workspaceFolders || []) {
-    const root = f.uri.fsPath;
-    const found = hit(path.join(root, 'memory', 'recall.py'))                           // folder is the repo root
-      || hit(path.join(root, 'permission-wildcarding', 'memory', 'recall.py'))              // folder is a projects/ dir
-      || hit(path.join(root, 'projects', 'permission-wildcarding', 'memory', 'recall.py')); // folder is a .claude/ root
-    if (found) return found;
-  }
+  // Nothing after these two (2026-10-14, G1). Three legs used to follow, probing each open
+  // workspace folder as the repo root, a projects/ dir and a .claude/ root, and then a fourth,
+  // ~/.claude/projects/permission-wildcarding: the project's pre-rename name. They ran only
+  // with the bundled copy missing, and then a repository's own memory/recall.py was the script
+  // the extension ran, the hole F7 closed for the setting left open one layer down. The
+  // caller's own "not found" path covers the rest: it offers the setting, at the user tier.
+  // test/recall-script-path.test.js holds it shut, and holds the VSIX to shipping the copy.
 
-  return hit(path.join(PROJECTS_DIR, 'permission-wildcarding', 'memory', 'recall.py'));
+  return '';
 }
 
 // Stable home for the 32MB model, deliberately outside both the extension dir and any
@@ -1093,7 +1093,7 @@ function autoSyncRecallIfStale() {
 async function setRecallPath() {
   const val = await vscode.window.showInputBox({
     title: 'ai-acolyte: path to recall.py',
-    prompt: "Absolute path to your permission-wildcarding repo's memory/recall.py",
+    prompt: "Absolute path to an ai-acolyte checkout's memory/recall.py (saved to user settings)",
     value: recallScriptPath(),
     ignoreFocusOut: true,
   });
@@ -1432,7 +1432,7 @@ function autoLearnEvidence(cfg) {
 // that DID return, reporting that part of the corpus was unreadable, and they
 // were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
 // every one of them. That is the exact shape of the defect that sat unnoticed for
-// eight days (src/auto-learn-manager.js:2774-2776#errors: "`errors` was computed here
+// eight days (src/auto-learn-manager.js:2856-2858#errors: "`errors` was computed here
 // all along and then not returned, so a file that failed every scan for eight
 // days was invisible"). Surfacing it in the CLI and not in the panel most users
 // live in only moves where it hides.
@@ -1452,7 +1452,7 @@ function autoLearnScanHealth(stats) {
     // NOT part of that sum, and the reason it is its own field: the other four say
     // housekeeping ran. This one says housekeeping could not finish. The observation
     // cap evicts whole below-threshold families once they alone exceed it, but never
-    // one carrying a human decision (src/auto-learn-manager.js:1008-1048#CEILING), so
+    // one carrying a human decision (src/auto-learn-manager.js:1020-1060#CEILING), so
     // that residue can still hold the map past its limit (until 2026-09-25 the whole
     // protected set could). This is the only number that says it happened, and
     // it had no reader at all: computed, persisted in lastScanStats, printed by the
@@ -1480,13 +1480,13 @@ function autoLearnScanHealth(stats) {
     // one case anyone actually hit: four archived threads, nothing moved.
     codexHistoryFindings: stats.codexHistoryFindings && typeof stats.codexHistoryFindings === 'object'
       ? stats.codexHistoryFindings : null,
-    // Three, because it is a hover title and not a report; the output channel
-    // gets every one.
+    // Three: it is a hover title, not a report. The output channel gets every one.
     codexHistoryReasons: (Array.isArray(stats.codexHistoryReasons) ? stats.codexHistoryReasons : []).slice(0, 3),
-    // Budget deferral is catch-up and is drawn as such, beside the count of what
-    // is left. A skipped unreadable stretch is the lost-bytes case, and trouble.
-    deferredBytes: count(stats.deferredBytes),
-    unreadable: count(stats.unreadable),
+    // The folders a held Codex rebuild waits for, which the line calls trouble (G3). Names only.
+    codexRebuildWaitingFor: (Array.isArray(stats.codexRebuildWaitingFor) ? stats.codexRebuildWaitingFor : []).filter((f) =>
+      f && typeof f.name === 'string' && f.name && !/[\\/]/.test(f.name)).map((f) => ({ name: f.name, link: f.link === true })),
+    // Budget deferral is catch-up, drawn beside what is left; a skipped stretch is lost bytes, and trouble.
+    deferredBytes: count(stats.deferredBytes), unreadable: count(stats.unreadable),
   };
 }
 
@@ -4918,22 +4918,22 @@ class WildcardingViewProvider {
     // statement as "a root errored", and on the numbers alone it is
     // indistinguishable from an ordinary quiet scan.
     if (s.blindScan) trouble.push('nothing enumerated — cursor map preserved');
-    // Second, for the same reason: a scan of a directory Codex has stopped
-    // writing to looks healthy on every other number here.
+    // A Codex rebuild a missing folder holds open blocks every family with Codex evidence, so
+    // it is trouble (G3), where it used to sit under a check mark. Names only; the hover says how.
+    const waiting = s.codexRebuildWaitingFor || [];
+    if (waiting.length) {
+      trouble.push('Codex rebuild waiting for a missing history folder' + (waiting.length === 1 ? '' : 's') + ' ('
+        + waiting.map((f) => f.name + (f.link ? ', a link to a missing target' : '')).join('; ') + ')'
+        + ' — reconnect or recreate ' + (waiting.length === 1 ? 'it' : 'them'));
+    }
+    // Next: a scan of a directory Codex has stopped writing to looks healthy on every other number.
     if (s.codexHistoryStale) trouble.push(codexStalePhrase(s));
-    // 'partial' ONLY, and 'unavailable' deliberately absent. That state means the
-    // probe cannot run on this runtime at all: readThreadStoreIds needs
-    // node:sqlite, and on a host that cannot load it this branch used to fire on
-    // every scan, for ever. VS Code 1.141.1 (Node 24.21.0) loads it; hosts within
-    // the ^1.80 engine floor may not, so the unavailable tier stays (measured
-    // 2026-10-13). A check that is inapplicable is not a degraded check, and
-    // reporting it as one cost the user the actionable count in the row badge
-    // above. The half that is real, codexHistoryStale, is computed from the
-    // session index against the rollout folders without sqlite and still fires
-    // on the line above.
-    //
-    // No backtick in this comment on purpose, same as the one further down: this
-    // function lives inside the webview template literal.
+    // 'partial' ONLY, and 'unavailable' deliberately absent: the probe cannot run on this runtime
+    // at all (readThreadStoreIds needs node:sqlite; VS Code 1.141.1 loads it, hosts within the
+    // ^1.80 engine floor may not, measured 2026-10-13), and an inapplicable check reported as
+    // degraded cost the row badge its actionable count. codexHistoryStale needs no sqlite and
+    // still fires above.
+    // No backtick in these comments on purpose: this function lives inside the webview template.
     else if (s.codexHistoryInspected === 'partial') trouble.push('Codex history-store check ran degraded');
     if (s.errors) trouble.push(s.errors + ' unreadable file' + (s.errors === 1 ? '' : 's'));
     // Bytes that had no record boundary at all and were STEPPED OVER, so they

@@ -322,7 +322,10 @@ Separately, the gate compiler spawns
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
-dev/source layout is auto-detected. The status probe works regardless of the path. It is
+dev/source layout is auto-detected. Nothing else is probed. An open workspace folder's own
+`memory/recall.py` is never used, in any layout, because that would let a repository choose the
+script the extension runs; a checkout elsewhere is named through this setting. The status probe
+works regardless of the path. It is
 **machine-scoped**, like `backupMirrorPath`: the extension runs that script, and writes the
 mirror of your allow and deny lists where that path says, so both are read from user settings
 only and a repository's `.vscode/settings.json` cannot set either.

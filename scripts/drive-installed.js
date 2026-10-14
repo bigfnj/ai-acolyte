@@ -186,6 +186,10 @@ const vscode = {
     workspaceFolders: [{ uri: { fsPath: home } }],
     getConfiguration: () => ({
       get: (k, d) => config.has(k) ? config.get(k) : d,
+      // `config` is the USER tier. Since wave-f15, the machine-scoped keys (gates.enabled,
+      // guidance.enabled, memory.dir and the rest) are read through inspect().globalValue,
+      // so a stub without it handed the extension its defaults and the toggles never landed.
+      inspect: (k) => ({ globalValue: config.has(k) ? config.get(k) : undefined }),
       update: async (k, v) => { config.set(k, v); },
     }),
     onDidChangeConfiguration: () => ({ dispose() {} }),

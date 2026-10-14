@@ -689,7 +689,7 @@ test('the in-place fallback names the cause it gave the atomic guarantee up for'
 //
 // What that leaves behind is `settings.json.<pid>.<rand>.wc.tmp` holding a
 // partial copy of the user's permission policy, next to settings.json, with no
-// code anywhere that ever removes it. src/auto-learn-manager.js:133-162 is the
+// code anywhere that ever removes it. src/auto-learn-manager.js:171-199#atomicWrite is the
 // shape this now copies: every exit unlinks.
 test('a temp file is not orphaned when the write into it fails part-way', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-orphan-'));

@@ -89,8 +89,8 @@ test('enabling a target never makes a candidate eligible for it', () => {
   // Claude enabled, is pending for Claude alone.
   const both = { key: 'tokei\0.', eligibleTargets: ['claude', 'codex'] };
   assert.deepEqual(candidateEligibleTargets(both, ['claude']), ['claude']);
-  // An empty eligibility list is a real manager output (auto-learn-manager.test.js:888)
-  // and means "nowhere", not "anywhere".
+  // An empty eligibility list is a real manager output
+  // (auto-learn-manager.test.js:888#kept.eligibleTargets) and means "nowhere", not "anywhere".
   assert.deepEqual(candidateEligibleTargets({ key: 'x', eligibleTargets: [] }, ['claude', 'codex']), []);
 });
 

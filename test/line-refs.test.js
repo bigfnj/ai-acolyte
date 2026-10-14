@@ -18,7 +18,7 @@
 // The checker's richer STALE verdict is NOT asserted, on purpose. That verdict
 // depends on recovering the right anchor from surrounding prose, and it picks a
 // neighbouring symbol often enough that asserting it would fail the suite on
-// references that are perfectly correct — `bin/wildcard-perms:11-26` is the
+// references that are perfectly correct — `bin/wildcard-perms:7-29#NOTE` was the
 // standing example. A gate that cries wolf gets suppressed, and then the real
 // signal goes with it. So the imprecise half stays a report you run by hand, and
 // only the half that cannot false-positive is a test.

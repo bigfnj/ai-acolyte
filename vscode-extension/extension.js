@@ -153,7 +153,7 @@ function trackChild(child) {
   if (!child || typeof child.on !== 'function') return child;
   liveChildren.add(child);
   const forget = () => liveChildren.delete(child);
-  // Both, because a spawn failure emits 'error' and never 'close'.
+  // Both. A spawn that fails emits 'error' and then 'close' (measured; exec-resolve's endTreeAfter).
   child.on('close', forget);
   child.on('error', forget);
   return child;

@@ -337,9 +337,20 @@ function endProcessTree(child) {
 // afterwards, because endProcessTree finds a tree by its root and the root is gone.
 // This is the version probe's pattern (src/codex-version.js, "ITS OWN TIMER"): a
 // timer that tree-kills the root while it is still alive. Returns the child, so a
-// call site reads `endTreeAfter(trackChild(execFile(...)), ms)`. Cleared on 'exit';
-// endProcessTree's own guard refuses an exited child as well. Unref'd, because the
-// child is what keeps a process alive while it runs, exactly as before.
+// call site reads `endTreeAfter(trackChild(execFile(...)), ms)`. Cleared on 'exit',
+// 'close' and a spawn's 'error'; endProcessTree's own guard refuses an exited child as
+// well. Unref'd, because the child is what keeps a process alive while it runs,
+// exactly as before.
+//
+// NOT ON 'exit' ALONE (2026-10-14, S3 of the final pre-tag audit). A program that
+// cannot be started emits 'error' and then 'close', and never 'exit' (measured with
+// Node 24.19.0: a missing absolute path, a missing bare name and spawn() alike). The
+// timer was then held, with the ChildProcess it closes over, for the full deadline
+// (30-180 s at the extension's sites). 'close' always follows that 'error', so it is
+// the clear that matters. 'error' alone clears only a child that never started or has
+// ended: Node also emits 'error' when a kill fails, and a child still running then
+// must keep its deadline. Every caller hands an execFile child, which listens for
+// 'error' itself, so the listener here gives no error a handling it lacked.
 //
 // The callback sees the kill as the child's exit: on Windows taskkill /F leaves exit
 // code 1, on POSIX the SIGTERM. Either way execFile's error reads "Command failed:
@@ -357,7 +368,14 @@ function endTreeAfter(child, ms) {
   const timer = setTimeout(() => { endProcessTree(child); }, deadline);
   if (typeof timer.unref === 'function') timer.unref();
   const listen = typeof child.once === 'function' ? 'once' : typeof child.on === 'function' ? 'on' : null;
-  if (listen) child[listen]('exit', () => clearTimeout(timer));
+  if (listen) {
+    const clear = () => clearTimeout(timer);
+    child[listen]('exit', clear);
+    child[listen]('close', clear);
+    child[listen]('error', () => {
+      if (!Number.isInteger(child.pid) || child.exitCode != null || child.signalCode != null) clear();
+    });
+  }
   return child;
 }
 

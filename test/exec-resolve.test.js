@@ -401,6 +401,71 @@ test('a deadline from endTreeAfter ends the program under a launcher, which kill
   assert.match(String(error?.message), /^Command failed:/, 'the callback reads the kill as execFile reports any failed command');
 });
 
+// A SPAWN THAT FAILS LEAVES NO DEADLINE ARMED (2026-10-14, S3 of the final pre-tag audit).
+// endTreeAfter cleared its timer on 'exit' alone, and a program that cannot be started
+// emits 'error' and then 'close', never 'exit', so the unref'd timer held the ChildProcess
+// for the full deadline. Which handles are cleared is recorded by wrapping clearTimeout;
+// setTimeout is wrapped only for the endTreeAfter call, to learn the handle it armed.
+test('a spawn that fails clears its endTreeAfter deadline, and a running child keeps its own until it exits', async (t) => {
+  const { endTreeAfter } = require('../src/exec-resolve');
+  const { execFile, spawn } = require('node:child_process');
+  const { EventEmitter } = require('node:events');
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const cleared = new Set();
+  global.clearTimeout = (handle) => { cleared.add(handle); return realClearTimeout(handle); };
+  t.after(() => { global.clearTimeout = realClearTimeout; });
+  const arm = (child) => {
+    let handle = null;
+    global.setTimeout = (fn, ms, ...rest) => (handle = realSetTimeout(fn, ms, ...rest));
+    try { endTreeAfter(child, 30000); } finally { global.setTimeout = realSetTimeout; }
+    assert.ok(handle, 'precondition: a deadline was armed');
+    return handle;
+  };
+
+  const missing = path.join(scratch('deadline-missing'), windows ? 'no-such-program.exe' : 'no-such-program');
+  const failed = execFile(missing, ['x'], () => {});
+  const seen = [];
+  for (const event of ['exit', 'error', 'close']) failed.on(event, () => seen.push(event));
+  const deadline = arm(failed);
+  await new Promise((resolve) => failed.once('close', resolve));
+  assert.deepEqual(seen, ['error', 'close'], 'precondition: a spawn that fails emits error and close, and never exit');
+  // MUTATION: listen for 'exit' alone again, as before. The deadline is never cleared, and
+  // stays armed for its 30 s. Confirmed 2026-10-14.
+  assert.ok(cleared.has(deadline), 'the deadline of a spawn that failed is still armed');
+
+  // An 'error' alone clears it only for a child that never started: a test double with no pid.
+  const never = new EventEmitter();
+  never.on('error', () => {}); // execFile's own listener, so an emit never throws here
+  const doubleDeadline = arm(never);
+  never.emit('error', new Error('spawn x ENOENT'));
+  // MUTATION: drop the 'error' listener. This fails. Confirmed 2026-10-14.
+  assert.ok(cleared.has(doubleDeadline), 'an error from a child that never started left its deadline armed');
+  // 'close' is the one clear left for a child armed after its 'exit' had already fired.
+  const late = Object.assign(new EventEmitter(), { pid: 4242, exitCode: 0 });
+  const lateDeadline = arm(late);
+  late.emit('close', 0, null);
+  // MUTATION: drop the 'close' listener. This fails (the failed spawn above is still cleared,
+  // by its 'error'). Confirmed 2026-10-14.
+  assert.ok(cleared.has(lateDeadline), 'the close of a child armed after its exit left its deadline armed');
+
+  // The control: a running child keeps its deadline through an 'error' (Node also emits one
+  // when a kill fails), and its exit clears it.
+  const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  t.after(() => { try { live.kill('SIGKILL'); } catch {} });
+  live.on('error', () => {});
+  await new Promise((resolve) => live.once('spawn', resolve));
+  const running = arm(live);
+  live.emit('error', new Error('kill EPERM'));
+  // MUTATION: clear on any 'error'. A running child loses its deadline and this fails.
+  // Confirmed 2026-10-14.
+  assert.equal(cleared.has(running), false, 'an error on a running child dropped its deadline');
+  const exited = new Promise((resolve) => live.once('exit', resolve));
+  live.kill();
+  await exited;
+  assert.ok(cleared.has(running), 'the exit of a running child did not clear its deadline');
+});
+
 // npm's own cmd-shim, as bundled with the node running this suite. Generating the
 // shim with it, rather than copying its template here, is what makes the test
 // mean "the shim npm writes", and not "the shim this file thinks npm writes".

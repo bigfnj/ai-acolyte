@@ -231,20 +231,41 @@ function nativeRpcAsync(requests, options, context) {
     // open a console; the tree kill there is taskkill /T and needs no group.
     const child = spawn(launch.file, launch.args, { ...launch.options, windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    // THE ANSWER IS THE LINE, NOT THE EXIT (2026-10-14). The worker ends its answer with a
+    // newline (JSON.stringify never emits a raw one), then spends its grace and its kill
+    // ending its codex before it exits. This side used to read the answer only on 'close',
+    // so that cleanup came out of the 3 s margin too. On Node 20 / windows-latest (CI run
+    // 38600144147, 9.8 s against an 8 s budget) the backstop fired first and a timeout
+    // the worker had already reported read as "unavailable". The answer now settles the
+    // call when its line arrives. The backstop stays armed until the worker closes, so a
+    // worker that never exits is still tree-killed; it just no longer decides the answer.
+    const answer = (line) => {
+      if (settled) return;
+      settled = true;
+      let output;
+      try { output = JSON.parse(line); } catch { reject(new Error('Codex config RPC returned unreadable data')); return; }
+      if (output.error) { reject(new Error('Codex config RPC refused: ' + String(output.error).slice(0, 600))); return; }
+      if (!Array.isArray(output.results) || output.results.length !== requests.length) {
+        reject(new Error('Codex config RPC returned incomplete data'));
+        return;
+      }
+      resolve(output.results);
+    };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
       if (overflow) return;
       stdout += chunk;
-      if (stdout.length > WORKER_OUTPUT_LIMIT) { overflow = true; endProcessTree(child); }
+      if (stdout.length > WORKER_OUTPUT_LIMIT) { overflow = true; endProcessTree(child); return; }
+      if (!timedOut && chunk.includes('\n')) answer(stdout.slice(0, stdout.indexOf('\n')));
     });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => { if (stderr.length < 4096) stderr += chunk; });
     // A launch failure emits 'error' and may never emit 'close'; `settled` keeps
     // whichever comes second from answering twice.
     child.once('error', finish);
-    child.once('close', (code, signal) => finish(code === 0 && !overflow ? null
+    child.once('close', (code, signal) => { clearTimeout(backstop); finish(code === 0 && !overflow ? null
       : new Error(overflow ? `worker output passed ${WORKER_OUTPUT_LIMIT} bytes`
-        : `Command failed: the worker exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)));
+        : `Command failed: the worker exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)); });
     backstop = setTimeout(() => { timedOut = true; endProcessTree(child); }, timeoutMs);
     child.stdin?.on('error', () => {});
     child.stdin?.end(JSON.stringify({ requests, home: context.home, codexHome: context.codexHome,
@@ -618,9 +639,9 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       send({ method: 'initialized', params: {} });
       const results = [];
       for (const item of request.requests) results.push(await call(item.method, item.params));
-      process.stdout.write(JSON.stringify({ results }));
+      process.stdout.write(JSON.stringify({ results }) + '\n');
     } catch (error) {
-      process.stdout.write(JSON.stringify({ error: String(error.message).slice(0, 600) }));
+      process.stdout.write(JSON.stringify({ error: String(error.message).slice(0, 600) }) + '\n');
       process.exitCode = 1;
     } finally {
       closing = true; clearTimeout(timeout); clearInterval(hostWatch);

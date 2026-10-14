@@ -981,7 +981,7 @@ function changeOutcome(item, before, after, source) {
 // deduped by `observationHashes`, so it cannot inflate a count", and for the
 // files it evicts that was false. A cursor-less file takes `mode: 'full'`
 // (`safeContinuation` returns false with no prior), a full read emits every
-// observation in the file wholesale (`src/history-adapters.js:2244#selected`), and each
+// observation in the file wholesale (`src/history-adapters.js:2262#selected`), and each
 // one whose hash is gone is counted again -- into `counts.success`, which is
 // what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
 // on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with

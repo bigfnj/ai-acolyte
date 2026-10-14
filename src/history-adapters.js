@@ -1792,23 +1792,41 @@ function continuedFingerprint(prior, size) {
 // toward the `counts.success` that gates auto-safe apply.
 //
 // So the seed is the in-order state AFTER the head: records are applied in
-// order up to the first record that is not `session_meta`, and blank or
+// order up to the first record that sets no session state, and blank or
 // unparseable lines are skipped exactly as `parseJsonlRecords` skips them.
 // Identity is deliberately NOT re-keyed to the thread id instead: that would
 // move every observation hash already recorded and re-count the whole corpus.
+//
+// "SETS SESSION STATE", NOT "IS session_meta" (2026-10-14). The in-order parse
+// runs applyCodexSessionState on every record, and that takes a top-level
+// `sessionId`, `session_id` or `cwd` from a record of ANY type. The fork fix
+// above ended the head at the first non-`session_meta` record, so such a record
+// in the head -- the first line, or after a `session_meta` -- set the full
+// read's session and not the seed's: the append-slice id diverged from the
+// full-read id, the double count the fork fix was written to stop. The head is
+// now every consecutive record applyCodexSessionState would take something from
+// (any `session_meta`, which it always reads, or a record carrying one of those
+// three as a non-empty string or finite number, `stringValue`'s test), each
+// applied by that same function. No real rollout is known to have the shape:
+// the 13 on the development box and the five sanitized fixtures carry no
+// top-level session field at all. What the seed still cannot see is such a
+// record AFTER the head, between it and the slice start; reaching that would
+// mean reading the whole file the append exists to skip, and no Codex build
+// measured here writes one.
 const SEED_CHUNK_BYTES = 64 * 1024;
 const SEED_MAX_BYTES = 1024 * 1024;
 
 // 'skip' for a line the in-order parse would never hand to its callback, the
-// record itself for a head `session_meta`, and null for the first record past
-// the head.
+// record itself for a head record (one that sets session state), and null for
+// the first record past the head.
 function headRecord(line) {
   const text = line.toString('utf8').replace(/\r$/, '');
   if (!text.trim()) return 'skip';
   let record;
   try { record = JSON.parse(text); } catch { return 'skip'; }
   if (!isObject(record)) return 'skip';
-  return record.type === 'session_meta' ? record : null;
+  if (record.type === 'session_meta') return record;
+  return ['sessionId', 'session_id', 'cwd'].some((name) => stringValue(record[name]) !== undefined) ? record : null;
 }
 
 function codexHeadSeed(file) {

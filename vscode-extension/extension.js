@@ -288,7 +288,7 @@ function readBackup() {
 // code path reads first.
 function writeBackupCopies(payload) {
   // writeFileAtomicSync, not a hand-rolled `target + '.tmp'`. That shared name
-  // is exactly the collision src/permissions.js:38-39 exists to prevent —
+  // is exactly the collision src/permissions.js:30-31#Unique exists to prevent —
   // "Unique per-writer temp name so the hook and the VS Code extension (or two
   // extension hosts) never collide on one shared *.wc.tmp" — and this file has
   // seen four extension copies running at once. Two hosts racing on one .tmp can
@@ -1063,9 +1063,9 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: :1981's timer is one-shot, but memBounce re-enters here on every
-    // MEMORY.md write, so a deterministic throw fires again on every trigger and a broken
-    // run logged identically to a working one.
+    // It also recurs: the startup timer (extension.js:2546#recallSyncTimer) is one-shot, but
+    // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
+    // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
   }
 }
@@ -1108,14 +1108,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:352-360 registers the command
-    // UNCONDITIONALLY, above the enabled check, showReport() answers for the disabled
-    // case itself (memoryLint.js:649-655), and test/memory-lint-watchers.test.js:394
+    // outlived its truth: memoryLint.js:352-360#activate registers the command UNCONDITIONALLY,
+    // above the enabled check, showReport() answers for the disabled case itself
+    // (memoryLint.js:651-655#conf.enabled), and test/memory-lint-watchers.test.js:422#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:580) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:580#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1314,9 +1314,9 @@ function runAutoLearnWorker(operation, ...args) {
 // decided nothing. Removed 2026-09-25, together with the aliases themselves; the
 // manager now refuses to carry two names for one function and a test says so.
 //
-// The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is
-// nulled for the whole of deactivate() (:4220), so a refresh racing a teardown
-// really can arrive here with nothing.
+// The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
+// for the whole of deactivate() (extension.js:5231#autoLearnManager), so a refresh
+// racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
 }
@@ -1381,7 +1381,7 @@ function autoLearnEvidence(cfg) {
 // that DID return, reporting that part of the corpus was unreadable, and they
 // were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
 // every one of them. That is the exact shape of the defect that sat unnoticed for
-// eight days (src/auto-learn-manager.js:2214-2216: "`errors` was computed here
+// eight days (src/auto-learn-manager.js:2772-2774#errors: "`errors` was computed here
 // all along and then not returned, so a file that failed every scan for eight
 // days was invisible"). Surfacing it in the CLI and not in the panel most users
 // live in only moves where it hides.
@@ -1400,10 +1400,10 @@ function autoLearnScanHealth(stats) {
       + count(stats.prunedCandidates) + count(stats.prunedGrants),
     // NOT part of that sum, and the reason it is its own field: the other four say
     // housekeeping ran. This one says housekeeping could not finish. The observation
-    // cap holds every entry for a family below the success threshold, on purpose
-    // (src/auto-learn-manager.js:790-793) — the protected set is not itself bounded,
-    // so a high `threshold` can hold more entries than the cap allows and the map
-    // grows past its limit anyway. This is the only number that says it happened, and
+    // cap evicts whole below-threshold families once they alone exceed it, but never
+    // one carrying a human decision (src/auto-learn-manager.js:1008-1048#CEILING), so
+    // that residue can still hold the map past its limit (until 2026-09-25 the whole
+    // protected set could). This is the only number that says it happened, and
     // it had no reader at all: computed, persisted in lastScanStats, printed by the
     // CLI, and never once shown in the panel.
     retainedObservations: count(stats.retainedObservations),
@@ -1540,13 +1540,13 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (:4240) and that guard was UNFALSIFIABLE until this one existed —
-    // deleting it left the suite green, because this line cleared the latch for it
-    // on every path. Both halves are needed and the pair is one rule.
+    // same way (extension.js:5251#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // this one existed — deleting it left the suite green, because this line cleared the
+    // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (:2058). One
-    // boolean cannot track two, so whichever settles FIRST used to clear it, and a
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2334#autoLearnBusy).
+    // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
     if (generation === activationGeneration) autoLearnBusy = false;
@@ -2914,7 +2914,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:293-302 — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:463-472#NEGATIVE — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -2958,7 +2958,7 @@ function runWildcarding(manual = false) {
   // The probe's snapshot is DISCARDED and everything recomputed from a read taken
   // inside the lock. This is not defensive tidiness, it is required:
   // `writeAllow` replays a delta computed against the CALLER's snapshot, and its
-  // own note (src/settings-write.js:166-172) names this caller — "WRONG for one
+  // own note (src/settings-write.js:173-179#NOTE) names this caller — "WRONG for one
   // whose whole output is a function of the list it read … Such a caller must
   // re-read and recompute first, so `settings` IS `latest` and this degenerates
   // to identity."
@@ -3076,12 +3076,12 @@ function localDrainEnabled() {
 // promoting them into user scope from a parent window is the same trust problem the
 // gate below exists for. A Claude session running in a subfolder is covered anyway:
 // the CLI hook drains each session's own cwd on every tool call
-// (bin/wildcard-perms:507-515, `hookCwd(input)`).
+// (bin/wildcard-perms:507-516#hookCwd, `hookCwd(input)`).
 //
 // A folder on another file system (a virtual workspace, or a non-file scheme mixed
 // into a multi-root workspace) has an fsPath that names no file on this disk, so
 // reading it would report, and draining it would rewrite, whatever local file sits
-// at the same path. The same `uri.scheme` test codexMemoryLint.js:51 applies. A
+// at the same path. The same `uri.scheme` test codexMemoryLint.js:51#uri.scheme applies. A
 // folder with no scheme at all is kept, as there.
 function localRoots() {
   return (vscode.workspace.workspaceFolders || [])

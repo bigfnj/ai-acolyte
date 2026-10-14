@@ -39,7 +39,7 @@ function writeFileAtomicSync(target, content) {
   // forever, with a name nothing ever cleans up and a shape that looks like the
   // user's own settings to anything globbing the directory.
   //
-  // src/auto-learn-manager.js:133-162 is the shape being copied: every exit
+  // src/auto-learn-manager.js:171-199#atomicWrite is the shape being copied: every exit
   // unlinks. The throw still propagates unchanged — this is a cleanup, not a
   // swallow, and the caller's error handling is the contract.
   try {
@@ -623,7 +623,7 @@ function coverLookupKeysUncached(specific) {
 // it writes the converged list back, and every pass after it is the case above.
 //
 // Bounded, and evicted by wholesale clear rather than LRU, for the reasons
-// written out at permission-match.js:38-57 and not re-argued here: the hook
+// written out at permission-match.js:40-60#Capped and not re-argued here: the hook
 // process exits after one pass but the VS Code extension host holds this module
 // for a whole session, so an unbounded map keyed on rule strings is a slow leak,
 // and an LRU's bookkeeping would cost more than the walk it saves. The six-line
@@ -663,7 +663,7 @@ function coverLookupKeys(specific) {
 }
 
 // Introspection, so the cap can be asserted rather than assumed — the same
-// reason permission-match.js:131-136 exposes matchCacheStats. A bound nothing
+// reason permission-match.js:134-139#Introspection exposes matchCacheStats. A bound nothing
 // observes is not a bound: a test without this can only show that results
 // survive an eviction, which stays true when the cap is deleted.
 function coverIndexKeyCacheStats() {
@@ -683,10 +683,10 @@ function createCoverIndex(pool) {
   const exact = new Map();
   for (const rule of pool) {
     // A rule with no `*` cannot cover anything, so it belongs in neither the
-    // buckets nor the fallback. escapeLiteral (permission-match.js:59-61)
-    // escapes every regex metacharacter INCLUDING `?` and excluding `*`, and
-    // the only `*` -> `.*` expansion is at :94 — so a star-free rule compiles
-    // to a fully anchored literal that matches nothing but itself, and
+    // buckets nor the fallback. escapeLiteral (permission-match.js:62-64#escapeLiteral)
+    // escapes every regex metacharacter INCLUDING `?` and excluding `*`, and the only
+    // `*` -> `.*` expansion is at permission-match.js:97#replace — so a star-free rule
+    // compiles to a fully anchored literal that matches nothing but itself, and
     // isCoveredBy already excludes identity via sameRule.
     //
     // This is not a micro-optimisation. On the live 424-entry list 20 of the 23
@@ -844,16 +844,16 @@ function applyBypass(settings, on) {
 }
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
-// Both are internal to the four bypass functions below them, and so is
-// prunePermissions, whose only caller is processAllowList at :775.
+// Both are internal to the four bypass functions below them, and so is prunePermissions,
+// whose only caller is processAllowList at src/permissions.js:775#prunePermissions.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
-// extension and the tests have always reached the behaviour" through. Nothing
-// reached it, in any of the three: it is called at :841 and nowhere else in the
-// repository. The claim then argued AGAINST its own test — "applyBypass's own
-// round trip does not already pin" was false, because no test ever turned bypass
-// OFF. Mutating this function to `return {}` left all 696 tests green. It is
+// extension and the tests have always reached the behaviour" through. Nothing reached
+// it, in any of the three: it is called at src/permissions.js:841#readBypassState and
+// nowhere else in the repository. The claim then argued AGAINST its own test —
+// "applyBypass's own round trip does not already pin" was false, because no test ever
+// turned bypass OFF. Mutating this function to `return {}` left all 696 tests green. It is
 // exported for test/bypass-round-trip.test.js, which is what makes that mutation
 // fail now.
 //

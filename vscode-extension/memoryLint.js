@@ -17,12 +17,12 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-// recall.py's EXCLUDE (recall.py:214): the index is just hooks, so it is never a search
+// recall.py's EXCLUDE (recall.py:214#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:248-249), and the pattern _compile_gates_text
-// actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
+// recall.py's gate markers (recall.py:248-249#GATE_BEGIN), and the pattern
+// _compile_gates_text actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one
 // counted a gate source recall.py does not compile, and on the live corpus that is not
@@ -82,8 +82,8 @@ function cfg() {
 // so honouring `enabled` here would switch automatic gate recompilation off whenever
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
-// record from the pinned-`memory.dir` bug, which is why
-// `memoryStoreDirs` (extension.js:2611-2612) overrides `dir` before it calls this.
+// record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
+// (extension.js:2611-2612#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive
@@ -303,7 +303,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:959 excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1053#EXCLUDE excludes it.
   let gateSources = 0;
   for (const f of files) {
     let raw;

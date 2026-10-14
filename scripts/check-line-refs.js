@@ -100,9 +100,9 @@ const REF_RE_TEST = new RegExp(REF_RE.source);
 //
 // The cost was false STALE and UNVERIFIABLE verdicts on references that were correct.
 // Two agents hit it independently, on different files, during one correction pass:
-// `src/history-adapters.js:959` queues `entry.isSymbolicLink()` children reported STALE
-// on the anchor "point", and it only resolved when the symbol was moved AHEAD of the
-// citation. Writing the anchor first was a workaround for this bug, not a convention.
+// `src/history-adapters.js:1656#entry.isSymbolicLink` queues `entry.isSymbolicLink()` children
+// reported STALE on the anchor "point", and it only resolved when the symbol was moved AHEAD
+// of the citation. Writing the anchor first was a workaround for this bug, not a convention.
 //
 // The optional backticks sit OUTSIDE REF_RE's own lookaround, which still sees the
 // backtick as the neighbouring character and still passes, so the token match is

@@ -552,7 +552,7 @@ function findShellProperties(source, objectStart) {
 // variables, concatenation, interpolation, and computed properties are rejected.
 //
 // Codex has shipped two names for the nested shell entry point, and
-// `src/auto-learn.js` already knows both (COMMAND_TOOLS, :8-11). This module
+// `src/auto-learn.js:8-11#COMMAND_TOOLS` already knows both. This module
 // knew only the older one, so a 0.153.x rollout — whose generated body calls
 // `tools.exec_command({ cmd: "..." })` — extracted nothing, and since the
 // extractor is the only way a `custom_tool_call` becomes an observation, the
@@ -568,7 +568,7 @@ const NESTED_SHELL_METHODS = new Set(['shell_command', 'exec_command']);
 const NESTED_COMMAND_KEYS = new Set(['command', 'cmd']);
 // The same two names again, for the NON-nested shape: a plain `function_call`
 // carrying the command in its arguments rather than a generated script that
-// calls `tools.exec_command(...)`. `src/auto-learn.js:8-11` has known both
+// calls `tools.exec_command(...)`. `src/auto-learn.js:8-11#COMMAND_TOOLS` has known both
 // names for as long as the nested extractor has; this reader knew only
 // `shell_command`, so a rollout emitting `exec_command` directly yielded no
 // observation at all and looked exactly like a session that ran no shell.
@@ -1692,7 +1692,7 @@ function readRange(file, start, length, chunk = READ_CHUNK_BYTES) {
     // failure (EBADF after an interrupted read, EIO on a disconnected share)
     // would land there instead of the EACCES or ERR_OUT_OF_RANGE that says what
     // actually went wrong, and the descriptor is already unusable either way.
-    // `src/policy-lock.js:143` and `atomicWrite` in auto-learn-manager.js wrap
+    // `src/policy-lock.js:143#closeSync` and `atomicWrite` in auto-learn-manager.js wrap
     // theirs for the same reason; this was the one that did not.
     try { fs.closeSync(descriptor); } catch {}
   }
@@ -1735,10 +1735,10 @@ function continuedFingerprint(prior, size) {
 // `session_meta` line. An append slice starts at `prior.size - overlapBytes`,
 // so the head is absent, both stay undefined, and the manager then drops the
 // observation outright when a workspace root is configured
-// (`src/auto-learn-manager.js:2337`, `within(root, undefined) === false`) --
-// or keeps it under a SECOND identity, because `session` is part of
-// `identityParts` (:75-77). Two ids for one call defeat the `observationHashes`
-// dedupe and inflate `counts.success`, which is what gates auto-safe apply.
+// (`src/auto-learn-manager.js:2526#within`, `within(root, undefined) === false`) --
+// or keeps it under a SECOND identity, because `session` is part of `identityParts`
+// (`src/history-adapters.js:95-97#identityParts`). Two ids for one call defeat the
+// `observationHashes` dedupe and inflate `counts.success`, which is what gates auto-safe apply.
 //
 // So the head line is re-read, and deliberately NOT cached on the cursor: a
 // cwd is a user path and no path may reach persisted state. One extra read per

@@ -333,6 +333,24 @@ function reviewableCandidates(candidates, status = {}, requiredTargets = ['claud
   return { ready, covered, candidates: ready.filter((candidate) => !isCovered(candidate)) };
 }
 
+// Rows for Review's read-only "Show covered" list: `covered` from the function above,
+// each with the allow rule(s) that cover it. Every family in that list was judged
+// 'allow' by claudePermissionDecision on these same settings, so `matches.allow` is
+// never empty here and is the answer to "covered by what?". The rule goes in the
+// description, which is matched when filtering and truncated after the label.
+function coveredFamilyItems(covered, settings) {
+  return (Array.isArray(covered) ? covered : []).map((candidate) => {
+    const rules = claudePermissionDecision(settings, candidate.claudePermission).matches.allow;
+    const runs = candidate.counts?.success ?? candidate.successfulRuns ?? 0;
+    return {
+      label: candidate.claudePermission,
+      description: `covered by ${rules.join(', ')}`,
+      detail: [`${runs} successful ${runs === 1 ? 'run' : 'runs'}`, candidate.risk,
+        candidate.autoSafe ? 'safe' : null].filter(Boolean).join(' · '),
+    };
+  });
+}
+
 // What Review has to say about the families it cannot offer at all. A managed
 // ask outranks any grant written from here, so such a family is withheld from
 // the picker; withholding it *silently* was the defect. The prompts keep
@@ -464,6 +482,7 @@ module.exports = {
   managedBlockedDetail,
   managedPromptExplanation,
   reviewableCandidates,
+  coveredFamilyItems,
   candidateEligibleTargets,
   candidatePendingTargets,
   claudeDecisionExplanation,

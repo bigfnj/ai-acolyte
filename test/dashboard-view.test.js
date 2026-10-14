@@ -776,7 +776,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3104#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3201#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2537,10 +2537,14 @@ test('a degraded scan qualifies the review count instead of replacing it', async
     assert.equal(renderDashboard(app.provider, withReview).stAutoLearn, '3 to review · scan degraded',
       'witness:review-count -- the actionable count was dropped rather than qualified');
 
-    // `safe` is the same rule one rank down, and it had the same bug.
+    // `safe` had a rank of its own here, "N safe to apply", until 2026-10-14. It is
+    // the auto-safe part of what Review shows now, never above `review`, so the
+    // rank could no longer fire and was removed; when it could, it fired for
+    // covered families Review hides (the counts test below). Safe families are
+    // review families, so the same qualified count names them.
     const withSafe = structuredClone(base);
-    withSafe.autoLearn.counts = { ...withSafe.autoLearn.counts, review: 0, safe: 2 };
-    assert.equal(renderDashboard(app.provider, withSafe).stAutoLearn, '2 safe to apply · scan degraded');
+    withSafe.autoLearn.counts = { ...withSafe.autoLearn.counts, review: 2, safe: 2 };
+    assert.equal(renderDashboard(app.provider, withSafe).stAutoLearn, '2 to review · scan degraded');
 
     // The control: with nothing to review and nothing wrong, the row is neither
     // of those and says what mode it is in.
@@ -2548,6 +2552,76 @@ test('a degraded scan qualifies the review count instead of replacing it', async
     clean.autoLearn.scan = { ...clean.autoLearn.scan, blindScan: false };
     clean.autoLearn.counts = { ...clean.autoLearn.counts, review: 0, safe: 0 };
     assert.equal(renderDashboard(app.provider, clean).stAutoLearn, 'recommend');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The reported card (2026-10-14): "2 safe to apply", SAFE 2, REVIEW 0, "23 already
+// covered", and a Review button that opened nothing. Both safe families were auto-safe
+// and pending, and an allow rule already in settings.json covered each, so Review hid
+// them as covered while the tile and the row counted them. Applying one changes no
+// prompt: settings.json is left byte-identical and only the claims registry records
+// the covering rule. So the card counts them where Review does, as covered.
+//
+// Through the real payload, so it is countAutoLearnCandidates that is under test and
+// not a hand-written `counts` object. Codex off: `claude` was the only pending target.
+function seedReportedFamilies(tempHome, extra = []) {
+  const family = (tool, tokens, runs, autoSafe) => ({
+    key: `${tool.toLowerCase()}:${tokens.join(' ')}`, tool, kind: 'shell', shell: tool.toLowerCase(),
+    root: tokens[0], prefix: tokens, claudePermission: `${tool}(${tokens.join(' ')} *)`,
+    risk: 'read-only', baseAutoSafe: autoSafe, complex: false,
+    reasons: ['known-read-only-command'], sources: ['claude'],
+    counts: { success: runs, failed: 0, unknown: 0, total: runs },
+  });
+  const families = [
+    family('Bash', ['git', 'status'], 9, true), family('PowerShell', ['git', 'status'], 7, true),
+    family('Bash', ['git', 'log'], 5, false), family('Bash', ['rg'], 4, false),
+    family('Bash', ['jq'], 1, false),
+    ...extra.map((tokens) => family('Bash', tokens, 6, true)),
+  ];
+  seedAutoLearnState(tempHome, { ...SCAN_SEED },
+    { candidates: Object.fromEntries(families.map((item) => [item.key, item])) });
+}
+
+test('a covered auto-safe family is not counted safe to apply, and an uncovered one still is', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git *)', 'PowerShell(git *)', 'Bash(rg *)'], deny: [] } });
+  const app = harness(env.tempHome, {
+    settings: { 'autoLearn.enabled': true, 'autoLearn.codexScope': 'off' },
+  });
+  try {
+    seedReportedFamilies(env.tempHome);
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const reported = ui.posted.at(-1);
+    // MUTATION: count `safe` from every pending auto-safe family again, as before
+    // 2026-10-14. This reads 2, the tile reads 2, and the first assertion fails.
+    // Confirmed 2026-10-14.
+    assert.deepEqual(
+      { safe: reported.autoLearn.counts.safe, review: reported.autoLearn.counts.review,
+        covered: reported.autoLearn.counts.covered, observe: reported.autoLearn.counts.observe },
+      { safe: 0, review: 0, covered: 4, observe: 1 },
+      'the card counts what Review shows: both safe families are covered, so neither is safe to apply');
+    const card = renderDashboard(app.provider, reported);
+    assert.equal(card.node('alsafe').textContent, 0);
+    assert.doesNotMatch(card.stAutoLearn, /safe to apply/);
+    assert.equal(card.stAutoLearn, 'recommend', 'nothing for Review to show, so the row names the mode');
+    assert.match(card.node('alsub').textContent, /4 already covered/,
+      'the covered families are still counted, where they belong');
+
+    // The control: an auto-safe family no rule covers is still safe, and Review has it.
+    seedReportedFamilies(env.tempHome, [['ls']]);
+    app.provider.refresh();
+    await settle();
+    const uncovered = ui.posted.at(-1);
+    assert.equal(uncovered.autoLearn.counts.safe, 1, 'an uncovered auto-safe family still counts');
+    assert.equal(uncovered.autoLearn.counts.review, 1, 'and it is in what Review shows');
+    const shown = renderDashboard(app.provider, uncovered);
+    assert.equal(shown.node('alsafe').textContent, 1);
+    assert.equal(shown.stAutoLearn, '1 to review');
   } finally {
     await app.dispose();
   }

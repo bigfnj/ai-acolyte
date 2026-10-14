@@ -72,7 +72,29 @@ class WedgedWorker extends EventEmitter {
     this.emit('exit', 0);
   }
 
+  // The same wedge, settled as a FAILURE: a scan that someone else is waiting on and
+  // that then throws. Reached by the Review tests below.
+  fail(message) {
+    this.emit('message', { ok: false, error: { message } });
+    this.emit('exit', 0);
+  }
+
   terminate() { this.terminated = true; return Promise.resolve(0); }
+}
+
+// A worker that answers at once with a failure, the shape the runner turns into a
+// rejected scan (autoLearnWorkerRunner.js, the `!message?.ok` leg). `failWorkers: N`
+// makes the first N Auto Learn workers this; the rest are FakeWorkers.
+class FailingWorker extends EventEmitter {
+  constructor() {
+    super();
+    setImmediate(() => {
+      this.emit('message', { ok: false, error: { message: 'history unreadable' } });
+      this.emit('exit', 0);
+    });
+  }
+
+  terminate() { return Promise.resolve(0); }
 }
 
 // A stand-in for node:https that starts no socket. Every request is recorded and the test
@@ -159,7 +181,11 @@ function harness(tempHome, options = {}) {
   // built. "Did it refuse" is not observable from the error message alone:
   // the runner's own guard produces the same text.
   const workers = [];
+  let failuresLeft = options.failWorkers || 0;
   const statuses = [];
+  // Each status-bar message with whether its Disposable was disposed: a message held
+  // "until the scan settles" is only observable through that.
+  const statusMessages = [];
   const errors = [];
   const infos = [];
   const warnings = [];
@@ -171,6 +197,8 @@ function harness(tempHome, options = {}) {
   const informationCalls = [];
   const quickPickAnswers = [];
   const quickPickCalls = [];
+  // The options object beside each entry in quickPickCalls, same index.
+  const quickPickOptions = [];
   const outputChannels = [];
   // Every https.get the extension made, newest last, and every withProgress run with the
   // cancellation callbacks its task registered. Both exist for the model download: the
@@ -238,7 +266,14 @@ function harness(tempHome, options = {}) {
       // that `dashboard` still points at the live provider — the other
       // observable effects of a refresh happen with or without it.
       registerWebviewViewProvider(_id, instance) { provider = instance; return disposable(); },
-      setStatusBarMessage(message) { statuses.push(String(message)); },
+      setStatusBarMessage(message) {
+        statuses.push(String(message));
+        const entry = { message: String(message), disposed: false };
+        statusMessages.push(entry);
+        // The real API returns a Disposable, and a message held for as long as a scan
+        // runs is taken down through it.
+        return { dispose() { entry.disposed = true; } };
+      },
       showErrorMessage(message) { errors.push(String(message)); },
       showInformationMessage(message, config, ...actions) {
         infos.push(String(message));
@@ -259,8 +294,9 @@ function harness(tempHome, options = {}) {
       // Answers are matched by label / value / id against whatever the caller
       // offered, so a test names the choice a user would click rather than an
       // index into a list it does not build.
-      showQuickPick(items) {
+      showQuickPick(items, pickOptions) {
         quickPickCalls.push(items);
+        quickPickOptions.push(pickOptions);
         if (!quickPickAnswers.length) return Promise.resolve(undefined);
         const want = quickPickAnswers.shift();
         const offered = Array.isArray(items) ? items : [];
@@ -363,7 +399,13 @@ function harness(tempHome, options = {}) {
             // leave the scan queued behind a worker the fixture never releases.
             if (['codexNativeGates', 'setCodexNativeGates', 'refreshCodexNativeGates']
               .includes(workerOptions.workerData.operation)) return new FakeWorker();
-            const worker = options.wedgeWorker ? new WedgedWorker() : new FakeWorker();
+            let worker;
+            if (options.wedgeWorker) worker = new WedgedWorker();
+            else if (failuresLeft > 0) { failuresLeft -= 1; worker = new FailingWorker(); }
+            else worker = new FakeWorker();
+            // Which operation it was built for, so a test can tell a second scan from
+            // the apply that follows one.
+            worker.operation = workerOptions.workerData.operation;
             workers.push(worker);
             return worker;
           },
@@ -477,6 +519,7 @@ function harness(tempHome, options = {}) {
     outputChannels,
     quickPickAnswers,
     quickPickCalls,
+    quickPickOptions,
     reconcilers,
     settings,
     statusBarItems,
@@ -503,6 +546,7 @@ function harness(tempHome, options = {}) {
     get provider() { return provider; },
     spawns,
     statuses,
+    statusMessages,
     workers,
     // Fire a configuration change the way VS Code does, so the handlers behind
     // it are reachable.
@@ -1604,6 +1648,259 @@ test('a wedged predecessor does not release the successor\u2019s busy latch', TE
     await Promise.allSettled([second, third]);
   } finally {
     for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
+// ── Review says something, every time (2026-10-14) ─────────────────────────────
+//
+// Reported: Review on the Auto Learn card, and nothing visible happened. Its prerequisite
+// scan was runAutoLearnScan(false), which returns null IN SILENCE when another scan holds
+// the latch, when the background failure backoff is armed, and when the worker throws
+// (console.error only), and Review returned on that null. When the scan did run and left
+// nothing reviewable, the answer was a corner toast, which Do Not Disturb hides. The
+// counts half of the same report is in test/dashboard-view.test.js.
+
+// Codex off, so `claude` is the only pending target, as it was in the reported state.
+const REVIEW_SETTINGS = { 'autoLearn.enabled': true, 'autoLearn.codexScope': 'off' };
+
+// The reported shape in the manager's own persisted form: two auto-safe and two review
+// families that an existing allow rule covers, and one still under the threshold. Written
+// BEFORE harness(), whose activation runs the wildcarding pass over settings.json (a fixed
+// point here) and whose purge drops the manager module this requires.
+function seedCoveredFamilies(home) {
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+    permissions: { allow: ['Bash(git *)', 'PowerShell(git *)', 'Bash(rg *)'], deny: [] },
+  }, null, 2) + '\n');
+  const { createAutoLearnManager } = require('../src/auto-learn-manager');
+  const statePath = createAutoLearnManager({
+    home, workspaceRoot: path.join(home, 'workspace'), codexRulesPath: null,
+  }).status().paths.state;
+  const family = (tool, tokens, runs, autoSafe) => ({
+    key: `${tool.toLowerCase()}:${tokens.join(' ')}`, tool, kind: 'shell', shell: tool.toLowerCase(),
+    root: tokens[0], prefix: tokens, claudePermission: `${tool}(${tokens.join(' ')} *)`,
+    risk: 'read-only', baseAutoSafe: autoSafe, complex: false,
+    reasons: ['known-read-only-command'], sources: ['claude'],
+    counts: { success: runs, failed: 0, unknown: 0, total: runs },
+  });
+  const families = [
+    family('Bash', ['git', 'status'], 9, true), family('PowerShell', ['git', 'status'], 7, true),
+    family('Bash', ['git', 'log'], 5, false), family('Bash', ['rg'], 4, false),
+    family('Bash', ['jq'], 1, false),
+  ];
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 1, mode: 'recommend', threshold: 3,
+    candidates: Object.fromEntries(families.map((item) => [item.key, item])),
+    observationHashes: {}, cursors: {},
+    applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
+    codexTargets: {}, managedClaude: {}, lastScanAt: null, lastScanStats: null, lastApplication: null,
+  }, null, 2) + '\n');
+}
+
+const modalOf = (app) => app.informationCalls.find((call) => call.config?.modal);
+
+test('Review clicked while a scan is running waits for it, then answers, on one worker', TEST_TIMEOUT, async (t) => {
+  const home = tempHome(t);
+  seedCoveredFamilies(home);
+  // wedgeWorker, so the scan Review finds really is unfinished until this test says so.
+  const app = harness(home, { settings: REVIEW_SETTINGS, wedgeWorker: true });
+  try {
+    // A BACKGROUND scan holds the latch: the configuration listener's debounced rescan.
+    app.fireConfigChange('permissionWildcarding.autoLearn');
+    await tick(300);
+    assert.equal(app.workers.length, 1, 'precondition: a background scan is really in flight');
+
+    // Fired, NOT awaited: it is waiting on a scan that has not settled.
+    //
+    // MUTATION: restore the old prerequisite, `runAutoLearnScan(false, true)` and return
+    // on its null. No progress is shown and the first assertion below fails. MUTATION:
+    // keep the progress but skip the wait in scanBeforeUserAction (`if (false)` for the
+    // in-flight test). Review is refused by the latch and returns before the scan
+    // settles, so "keeps showing it while it waits" fails. Both confirmed 2026-10-14.
+    const review = app.commands.get('permission-wildcarding.autoLearnReview')();
+    const progress = app.statusMessages.find((entry) => /scanning history before review/.test(entry.message));
+    assert.ok(progress, 'Review shows progress the instant it is clicked');
+    await tick(200);
+    assert.equal(progress.disposed, false, 'and keeps showing it while it waits');
+    assert.equal(modalOf(app), undefined, 'precondition: nothing has answered yet');
+
+    app.workers[0].release();
+    await review;
+
+    const modal = modalOf(app);
+    assert.ok(modal, 'Review answered once the scan it waited on settled');
+    assert.match(modal.message, /no candidates are ready for review/);
+    assert.equal(app.workers.length, 1, 'it waited on that scan rather than dispatching a second worker');
+    assert.equal(progress.disposed, true, 'and the progress message comes down when the scan settles');
+  } finally {
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
+test('Review during the background failure backoff still scans and answers', TEST_TIMEOUT, async (t) => {
+  const logged = captureConsoleError(t);
+  const home = tempHome(t);
+  seedCoveredFamilies(home);
+  const app = harness(home, { settings: REVIEW_SETTINGS, failWorkers: 1 });
+  try {
+    app.fireConfigChange('permissionWildcarding.autoLearn');
+    await tick(400);
+    assert.equal(app.workers.length, 1, 'precondition: a background scan ran');
+    assert.ok(logged.some((message) => /Auto Learn scan failed/.test(message)),
+      'precondition: and failed, which arms the backoff');
+
+    await app.commands.get('permission-wildcarding.autoLearnReview')();
+
+    // MUTATION: drop `!userInitiated` from the backoff test in runAutoLearnScan. Review's
+    // scan is refused by the backoff, nothing is dispatched and nothing answers.
+    // Confirmed 2026-10-14.
+    assert.equal(app.workers.length, 2, 'a click is not a watcher event: Review scanned anyway');
+    assert.ok(modalOf(app), 'and answered');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a Review whose own scan fails says so', TEST_TIMEOUT, async (t) => {
+  captureConsoleError(t);
+  const home = tempHome(t);
+  seedCoveredFamilies(home);
+  const app = harness(home, { settings: REVIEW_SETTINGS, failWorkers: 1 });
+  try {
+    await app.commands.get('permission-wildcarding.autoLearnReview')();
+    assert.equal(app.workers.length, 1, 'precondition: Review dispatched its own scan');
+    // MUTATION: reduce the catch's toast condition to `if (manual)`. The failure goes to
+    // console.error alone, as it did for Review before 2026-10-14. Confirmed 2026-10-14.
+    assert.deepEqual(app.errors, ['Auto Learn scan failed: history unreadable'],
+      'a scan the user asked for that fails is shown, not only logged');
+    assert.equal(modalOf(app), undefined, 'and nothing is offered as if the scan had worked');
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('a Review waiting on a scan that then fails says so', TEST_TIMEOUT, async (t) => {
+  const logged = captureConsoleError(t);
+  const home = tempHome(t);
+  seedCoveredFamilies(home);
+  const app = harness(home, { settings: REVIEW_SETTINGS, wedgeWorker: true });
+  try {
+    app.fireConfigChange('permissionWildcarding.autoLearn');
+    await tick(300);
+    assert.equal(app.workers.length, 1, 'precondition: a background scan is really in flight');
+    const review = app.commands.get('permission-wildcarding.autoLearnReview')();
+    await tick(100);
+    app.workers[0].fail('history unreadable');
+    await review;
+
+    // MUTATION: drop the error branch of scanBeforeUserAction's wait. The joined scan's
+    // failure is then logged by its background owner and nothing else. Confirmed 2026-10-14.
+    assert.deepEqual(app.errors, ['Auto Learn scan failed: history unreadable'],
+      'the waiting Review reports the failure of the scan it waited on');
+    assert.ok(logged.some((message) => /Auto Learn scan failed/.test(message)),
+      'and the background scan that owned it still logs, exactly as before');
+    assert.equal(app.workers.length, 1, 'still one worker');
+  } finally {
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
+test('an empty Review is a modal with the covered count, and Show covered lists them read-only',
+  TEST_TIMEOUT, async (t) => {
+    const home = tempHome(t);
+    seedCoveredFamilies(home);
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    const app = harness(home, { settings: REVIEW_SETTINGS, informationChoice: 'Show covered' });
+    try {
+      const before = fs.readFileSync(settingsPath, 'utf8');
+      await app.commands.get('permission-wildcarding.autoLearnReview')();
+
+      // MUTATION: restore the toast, `showInformationMessage(message)` with no options.
+      // No modal is found and the first assertion fails. Confirmed 2026-10-14.
+      const modal = modalOf(app);
+      assert.ok(modal, 'the empty answer is modal: a toast is easy to miss and hidden under Do Not Disturb');
+      assert.equal(modal.message,
+        'Auto Learn: no candidates are ready for review (4 already covered by existing allow rules — hidden).');
+      assert.match(modal.config.detail, /4 command families are already covered by an allow rule/);
+      assert.match(modal.config.detail, /1 command family is still being observed/);
+      assert.deepEqual(modal.actions, ['Show covered'], 'no managed policy here, so no Show blocked');
+
+      assert.equal(app.quickPickCalls.length, 1, 'Show covered opened a list');
+      assert.deepEqual(app.quickPickCalls[0].map((item) => [item.label, item.description]).sort(), [
+        ['Bash(git log *)', 'covered by Bash(git *)'],
+        ['Bash(git status *)', 'covered by Bash(git *)'],
+        ['Bash(rg *)', 'covered by Bash(rg *)'],
+        ['PowerShell(git status *)', 'covered by PowerShell(git *)'],
+      ], 'every hidden family, each with the allow rule that covers it');
+      const pickOptions = app.quickPickOptions[0];
+      assert.ok(!pickOptions.canPickMany, 'read-only: no checkboxes');
+      assert.match(pickOptions.title, /4 already covered .*read-only/);
+      assert.equal(app.workers.length, 1, 'nothing was applied: the scan is the only worker');
+      assert.equal(fs.readFileSync(settingsPath, 'utf8'), before, 'and settings.json is untouched');
+    } finally {
+      await app.dispose();
+    }
+  });
+
+// Apply safe ran the same prerequisite and returned on the same null.
+test('Apply safe clicked while a scan is running waits for it, then applies', TEST_TIMEOUT, async (t) => {
+  const home = tempHome(t);
+  seedCoveredFamilies(home);
+  const app = harness(home, { settings: REVIEW_SETTINGS, wedgeWorker: true });
+  try {
+    app.fireConfigChange('permissionWildcarding.autoLearn');
+    await tick(300);
+    assert.equal(app.workers.length, 1, 'precondition: a background scan is really in flight');
+
+    // MUTATION: restore `runAutoLearnScan(false, true)` and its null return in
+    // applyAutoLearnSafe. No progress is shown, so the first assertion fails; past it,
+    // the latch refuses the scan and no apply is ever dispatched. Confirmed 2026-10-14.
+    const apply = app.commands.get('permission-wildcarding.autoLearnApplySafe')();
+    assert.ok(app.statusMessages.some((entry) => /scanning history before applying/.test(entry.message)),
+      'Apply safe shows progress the instant it is clicked');
+    await tick(200);
+    app.workers[0].release();
+    await tick(200);
+    assert.deepEqual(app.workers.map((worker) => worker.operation), ['scan', 'apply'],
+      'it waited on the running scan, then applied: no second scan, and no silent return');
+    app.workers[1].release();
+    await apply;
+    assert.ok(app.infos.includes('Auto Learn: no unapplied safe candidates meet the threshold.'),
+      'and reported the outcome');
+  } finally {
+    for (const worker of app.workers) if (typeof worker.release === 'function') worker.release();
+    await app.dispose();
+  }
+});
+
+// The control for the five above: everything they changed is the user-initiated path,
+// and a background scan must behave exactly as it did. It passes with or without them.
+// MUTATION: make the debounced rescan user-initiated (`runAutoLearnScan(false, true)` in
+// scheduleAutoLearn). The failure is toasted instead of logged and the backoff no longer
+// refuses the next scan, so this fails. Confirmed 2026-10-14.
+test('a background scan that fails stays silent and keeps its backoff', TEST_TIMEOUT, async (t) => {
+  const logged = captureConsoleError(t);
+  const home = tempHome(t);
+  seedCoveredFamilies(home);
+  const app = harness(home, { settings: REVIEW_SETTINGS, failWorkers: 1 });
+  try {
+    app.fireConfigChange('permissionWildcarding.autoLearn');
+    await tick(400);
+    assert.equal(app.workers.length, 1, 'precondition: a background scan ran');
+    assert.ok(logged.some((message) => /Auto Learn scan failed — .*history unreadable/.test(message)),
+      'its failure is logged, as before');
+    assert.deepEqual(app.errors, [], 'and not toasted: nobody asked for this scan');
+    assert.deepEqual(app.statuses.filter((message) => /Auto Learn/.test(message)), [],
+      'no status-bar message either');
+    assert.equal(app.informationCalls.length, 0);
+
+    app.fireConfigChange('permissionWildcarding.autoLearn');
+    await tick(400);
+    assert.equal(app.workers.length, 1, 'the backoff still refuses the next background scan');
+  } finally {
     await app.dispose();
   }
 });

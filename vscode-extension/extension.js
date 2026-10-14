@@ -49,7 +49,7 @@ const {
   applicationSummary, backupPruneSuffix, candidatePendingTargets, claudeDecisionExplanation,
   claudePermissionDecision, codexCheckVariants, codexExecpolicyArgs, codexRestartSuffix,
   codexInventoryItems, codexInventoryDetail, codexRemovalExplanation, codexRemovalNote,
-  derivedGuidanceItems, derivedGuidanceSummary,
+  coveredFamilyItems, derivedGuidanceItems, derivedGuidanceSummary,
   isCandidateComplete, managedBlockedDetail, managedBlockedNote, managedPromptExplanation,
   policyTargetLabel, reviewableCandidates, selectionsNeedingConfirmation,
   uniqueTargets,
@@ -109,6 +109,11 @@ let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gat
 let autoLearnBounce = null;  // debounce for Claude/Codex transcript writes
 let autoLearnTimer = null;   // periodic reconciliation timer
 let autoLearnBusy = false;
+// The scan holding that latch, as a promise of its outcome ({ result } or { error }; it
+// never rejects). Set and cleared beside the latch. Review and Apply safe WAIT on it: a
+// button that bails because some other scan got there first did nothing visible at all
+// (2026-10-14). Background and manual scans still refuse on the latch, as before.
+let autoLearnScanInFlight = null;
 let autoLearnLastError = null;
 let autoLearnFailureCount = 0;
 let autoLearnNextRetryAt = 0;
@@ -1083,7 +1088,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2681#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2778#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1371,7 +1376,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5380#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5482#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1395,7 +1400,14 @@ function countAutoLearnCandidates(candidates, status = {}, requiredTargets = ['c
   const reviewable = reviewableCandidates(candidates, status, requiredTargets, settings);
   return {
     total: candidates.length,
-    safe: pending.filter((candidate) => candidate.autoSafe || candidate.disposition === 'auto-safe').length,
+    // The auto-safe part of what Review SHOWS, not of every pending family
+    // (2026-10-14). Counted from `pending` it included families an existing allow
+    // rule already covers, which Review hides, so the card read "2 safe to apply"
+    // over a Review that opened nothing. Applying one of those changes no prompt
+    // (settings.json is left byte-identical; only the claims registry records the
+    // covering rule), so it belongs in `covered`, where it is already counted.
+    safe: reviewable.candidates.filter((candidate) =>
+      candidate.autoSafe || candidate.disposition === 'auto-safe').length,
     review: reviewable.candidates.length,
     covered: reviewable.covered.length,
     observe: pending.filter((candidate) => candidate.disposition === 'observe').length,
@@ -1544,20 +1556,33 @@ function autoLearnApplicationMessage(summary, verb = 'applied') {
     codexRestartSuffix(targets) + housekeeping;
 }
 
-async function runAutoLearnScan(manual = false, suppressApplicationNotice = false) {
+// `userInitiated` is the prerequisite scan Review and Apply safe run for a person who
+// just clicked, and it differs from a background scan in three ways only: the failure
+// backoff does not apply to it (that exists so a bad history record is not re-read on
+// every watcher event, and a click is not one), a failure is SHOWN rather than logged,
+// and the application report is left to the caller, which folds it into its own.
+// Those callers reach it through scanBeforeUserAction(), which waits on a scan that
+// is already running instead of arriving here to be refused by the latch.
+async function runAutoLearnScan(manual = false, userInitiated = false) {
   // Which activation owns this scan. Read BEFORE the first await, for the same
   // reason deactivate() reads it before its drain: everything after the await is
   // racing a possible re-activate. See the `finally` at the bottom of this function.
   const generation = activationGeneration;
   const cfg = autoLearnConfig();
   if (!cfg.enabled && !manual) return null;
-  if (!manual && Date.now() < autoLearnNextRetryAt) return null;
+  if (!manual && !userInitiated && Date.now() < autoLearnNextRetryAt) return null;
   if (autoLearnBusy) {
     if (manual) vscode.window.setStatusBarMessage('$(sync~spin) Auto Learn scan already running', 3000);
     return null;
   }
   autoLearnBusy = true;
   autoLearnLastError = null;
+  // Published with the latch, synchronously, so a Review clicked during the yield
+  // below already finds it. Settled in the `finally`, after the latch is released.
+  let outcome = null;
+  let settle;
+  const inFlight = new Promise((resolve) => { settle = resolve; });
+  autoLearnScanInFlight = inFlight;
   dashboard?.refresh();
   if (manual) vscode.window.setStatusBarMessage('$(sync~spin) Auto Learn: scanning Claude + Codex history…', 4000);
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1586,35 +1611,73 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
       vscode.window.showInformationMessage(
         message + '.' + codexRestartSuffix(summary.changedTargets) + backupPruneSuffix(summary)
       );
-    } else if ((applied || summary.changedTargets.length) && !suppressApplicationNotice) {
+    } else if ((applied || summary.changedTargets.length) && !userInitiated) {
       vscode.window.showInformationMessage(autoLearnApplicationMessage(summary, 'safely applied'));
     }
+    outcome = { result };
     return result;
   } catch (error) {
+    outcome = { error };
     autoLearnLastError = error.message;
-    if (!manual) {
+    if (!manual && !userInitiated) {
       autoLearnFailureCount += 1;
       // Retry transient failures, without hammering a deterministic bad history
       // record on every watcher event. A successful scan resets this backoff.
       const delayMinutes = Math.min(60, 2 ** Math.min(autoLearnFailureCount - 1, 6));
       autoLearnNextRetryAt = Date.now() + delayMinutes * 60 * 1000;
     }
-    if (manual) vscode.window.showErrorMessage(`Auto Learn scan failed: ${error.message}`);
+    if (manual || userInitiated) vscode.window.showErrorMessage(`Auto Learn scan failed: ${error.message}`);
     else console.error('ai-acolyte: Auto Learn scan failed —', error);
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5410#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5512#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2469#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2563#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
     if (generation === activationGeneration) autoLearnBusy = false;
+    // The slot by IDENTITY rather than by generation: same rule, and it also keeps a
+    // predecessor from emptying a slot the successor's own scan now holds. activate()
+    // empties it with the latch, so nothing waits on a scan a teardown abandoned.
+    if (autoLearnScanInFlight === inFlight) autoLearnScanInFlight = null;
+    settle(outcome);
     dashboard?.refresh();
+  }
+}
+
+// The prerequisite scan behind Review and Apply safe, for a person who just clicked
+// and, until 2026-10-14, often saw nothing happen at all. Every one of
+// runAutoLearnScan's three silent nulls was reachable from those buttons: another
+// scan holding the latch, the background failure backoff, and a worker that threw,
+// which reached console.error and nothing else. And for the seconds a scan takes
+// there was no sign that anything had started.
+//
+// So: a status-bar message from the first instant until the scan settles; a scan
+// already in flight is WAITED ON, never duplicated (one worker, and its latch and
+// generation rules untouched); the backoff and the failure toast are runAutoLearnScan's
+// `userInitiated` leg. Returns { result, joined } or null after saying why. A joined
+// scan's application was reported by its owner, so `joined` tells the caller not to
+// report it a second time.
+async function scanBeforeUserAction(purpose) {
+  const progress = vscode.window.setStatusBarMessage(`$(sync~spin) Auto Learn: scanning history before ${purpose}…`);
+  try {
+    if (autoLearnScanInFlight) {
+      const { result, error } = await autoLearnScanInFlight;
+      if (error) {
+        vscode.window.showErrorMessage(`Auto Learn scan failed: ${error.message}`);
+        return null;
+      }
+      return { result, joined: true };
+    }
+    const result = await runAutoLearnScan(false, true);
+    return result === null ? null : { result, joined: false };
+  } finally {
+    progress.dispose();
   }
 }
 
@@ -1628,8 +1691,10 @@ async function applyAutoLearnSafe() {
     vscode.window.showWarningMessage('Auto Learn is in observe mode. Switch to recommend or auto-safe before applying policy.');
     return;
   }
-  const scanResult = await runAutoLearnScan(false, true);
-  if (scanResult === null) return;
+  const scan = await scanBeforeUserAction('applying');
+  if (!scan) return;
+  // A joined scan's application was already reported by the scan that made it.
+  const scanResult = scan.joined ? null : scan.result;
   const scanSummary = applicationSummary(scanResult);
   try {
     const result = await runAutoLearnWorker('apply', { includeReviewed: false });
@@ -1651,6 +1716,18 @@ async function applyAutoLearnSafe() {
   dashboard?.refresh();
 }
 
+// What Review hid as covered, and which rule covers each. READ-ONLY on purpose: no
+// checkboxes and nothing applied, because granting a covered family changes no
+// prompt. It exists so that "23 already covered" can be checked, not taken on trust.
+async function showCoveredAutoLearnFamilies(covered, settings) {
+  if (deactivated) return;   // the host went while the modal was up
+  await vscode.window.showQuickPick(coveredFamilyItems(covered, settings), {
+    title: `Auto Learn: ${covered.length} already covered by allow rules (read-only)`,
+    placeHolder: 'Nothing here is granted or changed. Each row names the allow rule that covers it.',
+    matchOnDescription: true,
+  });
+}
+
 async function reviewAutoLearnCandidates() {
   const cfg = autoLearnConfig();
   if (!cfg.enabled) {
@@ -1661,15 +1738,15 @@ async function reviewAutoLearnCandidates() {
     vscode.window.showWarningMessage('Auto Learn is in observe mode. Switch to recommend to review candidates.');
     return;
   }
-  const scanResult = await runAutoLearnScan(false, true);
-  if (scanResult === null) return;
+  const scan = await scanBeforeUserAction('review');
+  if (!scan) return;
+  // A joined scan's application was already reported by the scan that made it.
+  const scanResult = scan.joined ? null : scan.result;
   const scanSummary = applicationSummary(scanResult);
+  const scanApplication = scanSummary.appliedCount || scanSummary.changedTargets.length
+    ? autoLearnApplicationMessage(scanSummary, 'safely applied during the review scan') : null;
   const notifyScanApplication = () => {
-    if (scanSummary.appliedCount || scanSummary.changedTargets.length) {
-      vscode.window.showInformationMessage(
-        autoLearnApplicationMessage(scanSummary, 'safely applied during the review scan')
-      );
-    }
+    if (scanApplication) vscode.window.showInformationMessage(scanApplication);
   };
   const manager = getAutoLearnManager();
   const status = managerStatus(manager);
@@ -1698,17 +1775,34 @@ async function reviewAutoLearnCandidates() {
     channel.show(true);
   };
   if (!candidates.length) {
-    if (scanSummary.appliedCount || scanSummary.changedTargets.length) notifyScanApplication();
-    else if (blockedCount || managed.degraded) {
-      vscode.window.showInformationMessage(
-        `Auto Learn: no candidates are ready for review${coveredNote}${blockedNote}${removalNote}.`,
-        'Show blocked'
-      ).then((choice) => { if (choice === 'Show blocked') showBlockedDetail(); });
-    } else {
-      vscode.window.showInformationMessage(
-        `Auto Learn: no candidates are ready for review${coveredNote}${removalNote}.`
-      );
+    // MODAL since 2026-10-14. This was a toast, at the one moment a toast fails: the
+    // user has just clicked Review and is waiting for a list. A corner notification is
+    // easy to miss and is not shown at all under Do Not Disturb, so the button read as
+    // dead. It is now the single report for this outcome, the review scan's own
+    // application included, rather than that application replacing it.
+    const counts = countAutoLearnCandidates(allCandidates, status, requiredTargets, cfg.mode, settingsNow);
+    const families = (count, singular, plural) =>
+      `${count} command ${count === 1 ? `family ${singular}` : `families ${plural}`}`;
+    const them = covered.length === 1 ? 'it' : 'them';
+    const detail = [
+      scanApplication,
+      covered.length ? `${families(covered.length, 'is', 'are')} already covered by an allow rule in your ` +
+        `settings. Granting ${them} would change no prompt, so Review hides ${them}.` : null,
+      counts.observe ? `${families(counts.observe, 'is', 'are')} still being observed: each is offered ` +
+        `here once it reaches ${cfg.threshold} successful runs.` : null,
+    ].filter(Boolean);
+    if (!detail.length) {
+      detail.push(counts.total ? 'Every learned command family is already granted or withheld.'
+        : 'Auto Learn has not learned a command family from Claude or Codex history yet.');
     }
+    const choice = await vscode.window.showInformationMessage(
+      `Auto Learn: no candidates are ready for review${coveredNote}${blockedNote}${removalNote}.`,
+      { modal: true, detail: detail.join('\n\n') },
+      ...(covered.length ? ['Show covered'] : []),
+      ...(blockedCount || managed.degraded ? ['Show blocked'] : []),
+    );
+    if (choice === 'Show covered') await showCoveredAutoLearnFamilies(covered, settingsNow);
+    else if (choice === 'Show blocked') showBlockedDetail();
     return;
   }
   // A deny or ask rule beats a user allow entry, and managed policy can supply
@@ -2467,6 +2561,9 @@ function activate(context) {
   // because activate() runs synchronously up to scheduleAutoLearn's 750 ms
   // timer, so at this instant no successor scan can exist to own the latch.
   autoLearnBusy = false;
+  // And the scan that held it: a Review in this activation must not wait on a
+  // predecessor's scan that may never settle.
+  autoLearnScanInFlight = null;
   // And the runner slot, for the same reason and with a worse symptom. It is
   // nulled at the END of deactivate(), after the awaited drain, deliberately —
   // nothing may shorten that drain. But when the drain never completes, the
@@ -4698,12 +4795,17 @@ class WildcardingViewProvider {
       // No backtick anywhere in this comment, for the reason stated in
       // scanTrouble below: this whole block lives inside the webview template
       // literal and one backtick would end the string.
+      //
+      // No "N safe to apply" rank (2026-10-14). It fired for auto-safe families an
+      // allow rule already covers, which Review hides and no button on this card can
+      // act on, so the row promised work the Review button then could not show. The
+      // safe count is now the auto-safe part of what Review shows, never above the
+      // review count, so "N to review" already says it.
       const degraded = scanTrouble(a.scan).length ? 'scan degraded' : '';
       const headline = counts.review ? counts.review + ' to review'
-        : counts.safe ? counts.safe + ' safe to apply'
-          : degraded ? '' : String(a.mode || 'recommend');
+        : degraded ? '' : String(a.mode || 'recommend');
       const text = [headline, degraded].filter(Boolean).join(' · ');
-      setState('stAutoLearn', text, (degraded || counts.review || counts.safe) ? 'warn' : null);
+      setState('stAutoLearn', text, (degraded || counts.review) ? 'warn' : null);
     }
 
     const g = d.guidance || {};

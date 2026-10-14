@@ -121,12 +121,15 @@ test('the Review command names families a managed rule blocks, and offers the de
         };
       },
       registerWebviewViewProvider() { return disposable(); },
-      setStatusBarMessage() {},
+      // A Disposable, as the real API returns: Review holds its progress message
+      // until its scan settles and takes it down through this.
+      setStatusBarMessage() { return disposable(); },
       showErrorMessage() {},
-      // The handler chains .then on this, so it must be thenable. Answering
-      // with the action label is what exercises the detail path.
-      showInformationMessage(message, ...actions) {
-        infos.push({ message, actions });
+      // Review awaits this, so it must be thenable. Answering with the action
+      // label is what exercises the detail path. The options object comes
+      // first: since 2026-10-14 the empty answer is a modal, `{ modal, detail }`.
+      showInformationMessage(message, options, ...actions) {
+        infos.push({ message, options, actions });
         return Promise.resolve(actions.includes('Show blocked') ? 'Show blocked' : undefined);
       },
       showWarningMessage() {},
@@ -186,6 +189,11 @@ test('the Review command names families a managed rule blocks, and offers the de
     const last = infos.at(-1);
     assert.ok(last, 'the Review command reported something');
     assert.match(last.message, /2 blocked by managed policy/);
+    assert.equal(last.options?.modal, true,
+      'modal, so it cannot be missed or hidden by Do Not Disturb');
+    // Nothing is covered here (both families are inert, so neither is pending), so
+    // the one action is still Show blocked; Show covered joins it only when the
+    // allow list covers something.
     assert.deepEqual(last.actions, ['Show blocked'],
       'the detail has to be reachable, not just counted');
 

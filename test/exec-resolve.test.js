@@ -467,37 +467,40 @@ test('the shim npm writes is run as the node script it names; every other shape 
 // process's cwd, with the variable removed from this process, answers a bare spawn.
 // resolvedLaunch refuses the same name with the error spawn raises when there is nothing
 // to find at all, word for word.
-test('a name nothing on PATH holds is refused before spawn, so a copy planted in the current directory never runs', { skip: !windows }, (t) => {
+// The cwd is put back in a `finally`, not a hook: scratch()'s removal is a hook registered
+// first, and Windows will not remove a directory a process is standing in.
+test('a name nothing on PATH holds is refused before spawn, so a copy planted in the current directory never runs', { skip: !windows }, () => {
   const { resolvedLaunch } = require('../src/exec-resolve');
   const dir = scratch('bare');
   const name = 'wc-planted-probe';
   fs.copyFileSync(process.execPath, path.join(dir, `${name}.exe`));
   const saved = { cwd: process.cwd(), noCwd: process.env.NoDefaultCurrentDirectoryInExePath };
-  t.after(() => {
+  delete process.env.NoDefaultCurrentDirectoryInExePath;
+  process.chdir(dir);
+  try {
+    const bare = commandLaunch(name, ['--version']);
+    assert.equal(bare.resolved, null, 'precondition: nothing on PATH is called this');
+    // Endpoint scanning can hold the first run of a freshly copied executable for seconds.
+    const ran = spawnSync(bare.file, bare.args, { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    assert.equal(String(ran.stdout).trim(), process.version, 'precondition: a bare spawn ran the copy in the current directory');
+
+    // MUTATION: make resolvedLaunch return commandLaunch(name, args) whether or not it
+    // resolved. Both throws fail, and a caller spawns the bare name above. Confirmed 2026-10-14.
+    assert.throws(() => resolvedLaunch(name, ['--version']),
+      (error) => error.code === 'ENOENT' && error.message === `spawn ${name} ENOENT` && error.path === name);
+    const absent = 'wc-absent-probe-xyz';
+    const nowhere = spawnSync(absent, ['x']).error;
+    assert.equal(nowhere?.code, 'ENOENT', 'precondition: the name is nowhere at all');
+    assert.throws(() => resolvedLaunch(absent, ['x'], 'spawnSync'),
+      (error) => error.message === nowhere.message && error.code === nowhere.code && error.syscall === nowhere.syscall,
+      'the words of spawn\'s own ENOENT');
+    // A name PATH does hold is launched exactly as commandLaunch would.
+    assert.deepEqual(resolvedLaunch(process.execPath, ['--version']), commandLaunch(process.execPath, ['--version']));
+  } finally {
     process.chdir(saved.cwd);
     if (saved.noCwd === undefined) delete process.env.NoDefaultCurrentDirectoryInExePath;
     else process.env.NoDefaultCurrentDirectoryInExePath = saved.noCwd;
-  });
-  delete process.env.NoDefaultCurrentDirectoryInExePath;
-  process.chdir(dir);
-  const bare = commandLaunch(name, ['--version']);
-  assert.equal(bare.resolved, null, 'precondition: nothing on PATH is called this');
-  // Endpoint scanning can hold the first run of a freshly copied executable for seconds.
-  const ran = spawnSync(bare.file, bare.args, { encoding: 'utf8', windowsHide: true, timeout: 60000 });
-  assert.equal(String(ran.stdout).trim(), process.version, 'precondition: a bare spawn ran the copy in the current directory');
-
-  // MUTATION: make resolvedLaunch return commandLaunch(name, args) whether or not it
-  // resolved. Both throws fail, and a caller spawns the bare name above. Confirmed 2026-10-14.
-  assert.throws(() => resolvedLaunch(name, ['--version']),
-    (error) => error.code === 'ENOENT' && error.message === `spawn ${name} ENOENT` && error.path === name);
-  const absent = 'wc-absent-probe-xyz';
-  const nowhere = spawnSync(absent, ['x']).error;
-  assert.equal(nowhere?.code, 'ENOENT', 'precondition: the name is nowhere at all');
-  assert.throws(() => resolvedLaunch(absent, ['x'], 'spawnSync'),
-    (error) => error.message === nowhere.message && error.code === nowhere.code && error.syscall === nowhere.syscall,
-    'the words of spawn\'s own ENOENT');
-  // A name PATH does hold is launched exactly as commandLaunch would.
-  assert.deepEqual(resolvedLaunch(process.execPath, ['--version']), commandLaunch(process.execPath, ['--version']));
+  }
 });
 
 test('POSIX hands resolvedLaunch\'s name to spawn unchanged, because execvp walks PATH alone', { skip: windows }, () => {
@@ -509,7 +512,7 @@ test('POSIX hands resolvedLaunch\'s name to spawn unchanged, because execvp walk
 // one, and so is an entry whose variable was never expanded, which a REG_SZ PATH value
 // leaves literal: a repository can ship a folder called `%TOOLS%`. Each holds a shim
 // here, and only the absolute entry may answer.
-test('a relative PATH entry is never searched, so "." and an unexpanded %VAR% entry cannot supply a program', { skip: !windows }, (t) => {
+test('a relative PATH entry is never searched, so "." and an unexpanded %VAR% entry cannot supply a program', { skip: !windows }, () => {
   const dir = scratch('relative');
   const elsewhere = path.join(dir, 'elsewhere');
   const unexpanded = path.join('%ACOLYTE_NEVER_EXPANDED%', 'bin');
@@ -518,15 +521,19 @@ test('a relative PATH entry is never searched, so "." and an unexpanded %VAR% en
     fs.writeFileSync(path.join(folder, 'wcrelprobe.cmd'), '@echo probe-ok\r\n');
   }
   const saved = { cwd: process.cwd(), PATH: process.env.PATH };
-  t.after(() => { process.chdir(saved.cwd); process.env.PATH = saved.PATH; });
   process.chdir(dir);
-  // MUTATION: drop the isAbsolute filter from resolveExecutable's PATH walk. The first
-  // relative entry answers, with a path relative to this cwd. Confirmed 2026-10-14.
-  process.env.PATH = [unexpanded, '.', elsewhere].join(path.delimiter);
-  // PATHEXT supplies the extension, so its casing is whatever the box uses.
-  assert.equal(String(resolveExecutable('wcrelprobe')).toLowerCase(), path.join(elsewhere, 'wcrelprobe.cmd').toLowerCase());
-  process.env.PATH = [unexpanded, '.'].join(path.delimiter);
-  assert.equal(resolveExecutable('wcrelprobe'), null, 'relative entries alone find nothing');
+  try {
+    // MUTATION: drop the isAbsolute filter from resolveExecutable's PATH walk. The first
+    // relative entry answers, with a path relative to this cwd. Confirmed 2026-10-14.
+    process.env.PATH = [unexpanded, '.', elsewhere].join(path.delimiter);
+    // PATHEXT supplies the extension, so its casing is whatever the box uses.
+    assert.equal(String(resolveExecutable('wcrelprobe')).toLowerCase(), path.join(elsewhere, 'wcrelprobe.cmd').toLowerCase());
+    process.env.PATH = [unexpanded, '.'].join(path.delimiter);
+    assert.equal(resolveExecutable('wcrelprobe'), null, 'relative entries alone find nothing');
+  } finally {
+    process.chdir(saved.cwd);
+    process.env.PATH = saved.PATH;
+  }
 });
 
 // cmd.exe BY ABSOLUTE PATH TOO (2026-10-14). A batch shim was launched through

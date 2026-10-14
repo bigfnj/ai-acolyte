@@ -621,6 +621,13 @@ test('the config worker\'s own kill runs System32\'s taskkill, not one planted i
 // the exit is a real one by a signal. The stand-in is cmd.exe -> node, and the node holds
 // the stdout cmd.exe handed it for 3 s more, so 'close' comes after the 1 s grace and the
 // grace kill has to decide. The preload records every taskkill and runs none.
+//
+// THE KILL WAITS FOR THE NODE TO RUN. The first version's finally came at a 1.5 s deadline,
+// and once, under two suites at once, cmd.exe was killed while still inside CreateProcess
+// for the node: that node was left with one thread and no CPU time ten minutes later, never
+// resumed, holding the stdout pipe, so 'close' never came and the suite hung (recorded under
+// "Process-spawn residuals"). Now the stand-in refuses `initialize`, so the worker reaches its
+// finally only once the node is running, and each run is bounded.
 test('the config worker\'s grace kill skips an app-server that exited by a signal, and still ends a live one', { skip: process.platform !== 'win32' }, async t => {
   const { spawn } = require('node:child_process');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-grace-'));
@@ -635,7 +642,9 @@ test('the config worker\'s grace kill skips an app-server that exited by a signa
   const script = path.join(root, 'linger.js');
   fs.writeFileSync(script, [
     "require('fs').writeFileSync(process.env.ACOLYTE_TEST_LOG + '.pid', String(process.pid));",
-    'process.stdin.resume();',
+    "require('readline').createInterface({ input: process.stdin }).once('line', (line) => {",
+    "  process.stdout.write(JSON.stringify({ id: JSON.parse(line).id, error: { message: 'the stand-in refuses' } }) + '\\n');",
+    '});',
     "process.stdin.on('end', () => setTimeout(() => process.exit(0), 3000));",
     'setTimeout(() => process.exit(0), 30000);',
   ].join('\n') + '\n');
@@ -686,20 +695,29 @@ if (process.argv.includes('--rpc-worker')) {
       stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
     pids.push(child.pid);
     let output = '';
+    let bounded = false;
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', chunk => { output += chunk; });
+    // A run that never ends fails here, with its log, rather than holding the suite open.
+    const bound = setTimeout(() => {
+      bounded = true;
+      try { require('node:child_process').execFileSync(path.join(process.env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch {}
+    }, 30000);
     child.once('close', () => {
+      clearTimeout(bound);
       if (fs.existsSync(`${log}.pid`)) pids.push(Number(fs.readFileSync(`${log}.pid`, 'utf8')));
       const entries = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
-      resolve({ output, entries });
+      resolve({ output, entries, bounded });
     });
+    // The deadline is only there to make the grace the read-only 1 s; the refusal comes first.
     child.stdin.end(JSON.stringify({ requests: [{ method: 'config/read', params: { cwd: null, includeLayers: true } }],
-      home, codexHome, codexExecutable: shim, deadlineAt: Date.now() + 1500 }));
+      home, codexHome, codexExecutable: shim, deadlineAt: Date.now() + 20000 }));
   });
   const at = (entries, event) => entries.find(entry => entry.event === event)?.at;
 
   const signal = await run(true);
   const said = `the worker said ${signal.output}; it logged ${JSON.stringify(signal.entries)}`;
+  assert.equal(signal.bounded, false, `the worker did not finish within 30 s; ${said}`);
   assert.ok(at(signal.entries, 'spawn') && at(signal.entries, 'finally'), `precondition: the worker reached its finally; ${said}`);
   const exit = signal.entries.find(entry => entry.event === 'exit');
   assert.deepEqual([exit?.code, exit?.signal], [null, 'SIGTERM'], `precondition: the app-server exited by a signal; ${said}`);
@@ -710,11 +728,12 @@ if (process.argv.includes('--rpc-worker')) {
   // signalled app-server's PID and this lists it. Confirmed 2026-10-14.
   assert.deepEqual(signal.entries.filter(entry => entry.kill), [],
     `a tree kill was aimed at an app-server that had already exited by a signal; ${said}`);
-  assert.match(signal.output, /Codex config operation timed out/);
+  assert.match(signal.output, /the stand-in refuses/, 'the finally came from the running stand-in\'s answer');
 
   // The control: a live app-server at the end of the grace gets the tree kill, so the
   // preload sees one when one is sent.
   const live = await run(false);
+  assert.equal(live.bounded, false, `the control did not finish within 30 s; it logged ${JSON.stringify(live.entries)}`);
   const spawned = live.entries.find(entry => entry.event === 'spawn');
   assert.deepEqual(live.entries.filter(entry => entry.kill).map(entry => entry.args), [['/PID', String(spawned?.pid), '/T', '/F']],
     `the control: the live app-server got no tree kill; it logged ${JSON.stringify(live.entries)}`);

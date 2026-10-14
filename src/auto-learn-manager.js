@@ -800,16 +800,16 @@ function scanStats(value) {
     prunedCandidates: count('prunedCandidates'),
     prunedGrants: count('prunedGrants'),
     blindScan: value.blindScan === true,
-    codexEvidence: object(value.codexEvidence) ? {
-      revision: Math.max(0, Number(value.codexEvidence.revision) || 0), pending: value.codexEvidence.pending === true,
-      legacyCandidates: Math.max(0, Number(value.codexEvidence.legacyCandidates) || 0),
-      uncertainCandidates: Math.max(0, Number(value.codexEvidence.uncertainCandidates) || 0),
-      quarantinedRuns: Math.max(0, Number(value.codexEvidence.quarantinedRuns) || 0),
-      remainingFiles: Math.max(0, Number(value.codexEvidence.remainingFiles) || 0),
-      untimedFailureRuns: Math.max(0, Number(value.codexEvidence.untimedFailureRuns) || 0),
-      reasons: (Array.isArray(value.codexEvidence.reasons) ? value.codexEvidence.reasons : [])
-        .filter((reason) => ['unfinished-transcripts', 'history-unavailable', 'untimed-failures-preserved'].includes(reason)),
-    } : null,
+    // NO `codexEvidence` HERE (dropped 2026-10-14). It was a second saved copy of
+    // the rebuild status, written by every scan and whitelisted here, and nothing
+    // in production read it: the extension's card and notes, the CLI and the
+    // measuring script all take `codexEvidence` from `status()` or the scan's
+    // return, which compute it live from the state (`codexEvidenceStatus`). One
+    // test read the copy. A snapshot is also the weaker answer: it says what the
+    // last scan saw, and a migration on load changes the status before any scan
+    // runs. An older state file's copy is simply not rebuilt on the next load.
+    // Its sibling `codexHistoryNotes` below stays: it is the probe's own output,
+    // with no live equivalent, and the extension may surface it.
     // "The Codex rollout directory this scan read may no longer be where Codex
     // writes." Persisted with the rest of the scan stats, because a stale
     // directory is exactly as invisible as a blind scan and the numbers beside
@@ -2790,7 +2790,7 @@ function createAutoLearnManager(options = {}) {
         // ordinary quiet scan. The signal is in the data -- walk failures carry
         // `scope: 'root'` -- so this only surfaces it.
         blindScan,
-        codexEvidence: codexEvidenceStatus(state),
+        // No `codexEvidence` copy: `status()` and the return below compute it live (see `scanStats`).
         codexHistoryStale: codexHistory.stale === true,
         codexHistoryInspected: codexHistory.inspected,
         codexHistoryReasons: codexHistory.reasons,

@@ -201,7 +201,13 @@ test('partial mixed provenance is archived while only proven Claude counts remai
   assert.deepEqual(state.applied, f.legacy.applied);
   assert.deepEqual(state.reviewed, f.legacy.reviewed);
   assert.deepEqual(state.codexTargets, f.legacy.codexTargets);
-  assert.equal(createAutoLearnManager(f.options).status().lastScanStats.codexEvidence.quarantinedRuns, 2);
+  // Survives a reload, from the LIVE status. `lastScanStats.codexEvidence`, a
+  // saved copy only this line ever read, was dropped 2026-10-14.
+  const reloaded = createAutoLearnManager(f.options).status();
+  assert.equal(reloaded.codexEvidence.quarantinedRuns, 2);
+  assert.equal(Object.hasOwn(reloaded.lastScanStats, 'codexEvidence'), false,
+    'witness:evidence-snapshot -- the scan stats still carry a second copy of the rebuild status');
+  assert.equal(Object.hasOwn(f.read().lastScanStats, 'codexEvidence'), false, 'and the state file does not hold one');
 });
 
 test('pure Codex evidence resets exactly even after its hashes were pruned', (t) => {

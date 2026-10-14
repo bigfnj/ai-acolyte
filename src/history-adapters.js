@@ -1564,7 +1564,7 @@ function normalizeRootEntries(options) {
   return entries;
 }
 
-function findJsonlFiles(root, source, output, failures) {
+function findJsonlFiles(root, source, output, failures, missing) {
   // Transcript roots can contain Windows junctions or symlinked directories.
   // Walking them recursively can revisit the same directory forever and crash
   // the worker with "Maximum call stack size exceeded". Use a real-path set
@@ -1582,7 +1582,33 @@ function findJsonlFiles(root, source, output, failures) {
   // every other root's progress with it, which is the failure mode the per-file
   // try in `scanHistoryFiles` exists to prevent.
   const note = (target, error) => {
-    if (error && error.code === 'ENOENT') return;
+    if (error && error.code === 'ENOENT') {
+      // NOT an error, and still not nothing (2026-10-14). A CONFIGURED ROOT that
+      // is not there is reported on `missing`, a list of its own, so the one
+      // caller that must not read "not enumerated" as "gone" can tell this walk
+      // could not look. The Codex rebuild drops a pending transcript id that a
+      // clean walk no longer finds (auto-learn-manager.js, `scan`), and a
+      // vanished root used to count as clean: its ids were dropped, the rebuild
+      // finished without its history, and auto-safe granted past a failure that
+      // was sitting in the missing folder (the v1.6.2 audit, reproduced in
+      // test/codex-evidence-migration.test.js). Not a `failures` entry, because
+      // everything that reads `files[]` counts it -- the error total, the
+      // blind-scan guard, the Stop hook's warning -- and an absent folder on a
+      // machine without Codex is none of those.
+      //
+      // `link: true` is a root whose own entry exists as a link to a target that
+      // does not: a junction to an unplugged drive, the one way a folder is
+      // absent for a while and then comes back with its files. The caller never
+      // treats that as benign absence. Roots only: below the root, ENOENT is a
+      // directory deleted between `readdirSync` and the `statSync` here, and a
+      // deletion is exactly what the drop is for.
+      if (target === root && Array.isArray(missing)) {
+        let link = false;
+        try { link = fs.lstatSync(target).isSymbolicLink(); } catch { /* not there at all */ }
+        missing.push({ path: path.resolve(target), source, link });
+      }
+      return;
+    }
     if (!Array.isArray(failures)) return;
     const message = (error && error.message) || String(error);
     // `scope: 'root'` distinguishes "could not enumerate this directory" from
@@ -1986,8 +2012,11 @@ function scanHistoryFiles(options = {}) {
   // an empty corpus. The manager reads this to decide whether the scan has
   // earned the right to replace the cursor map at all.
   const walkFailures = [];
+  // Configured roots that do not exist (`findJsonlFiles` says why they are not
+  // walk failures). Returned beside `files`, never inside it.
+  const missingRoots = [];
   for (const root of normalizeRootEntries(options)) {
-    findJsonlFiles(root.path, root.source, found, walkFailures);
+    findJsonlFiles(root.path, root.source, found, walkFailures, missingRoots);
   }
   const unique = new Map();
   for (const entry of found) {
@@ -2252,7 +2281,7 @@ function scanHistoryFiles(options = {}) {
       });
     }
   }
-  return { observations, cursors, files };
+  return { observations, cursors, files, missingRoots };
 }
 
 // ── Codex history-store staleness ─────────────────────────────────────────────

@@ -981,7 +981,7 @@ function changeOutcome(item, before, after, source) {
 // deduped by `observationHashes`, so it cannot inflate a count", and for the
 // files it evicts that was false. A cursor-less file takes `mode: 'full'`
 // (`safeContinuation` returns false with no prior), a full read emits every
-// observation in the file wholesale (`src/history-adapters.js:2215#selected`), and each
+// observation in the file wholesale (`src/history-adapters.js:2244#selected`), and each
 // one whose hash is gone is counted again -- into `counts.success`, which is
 // what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
 // on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with
@@ -2686,7 +2686,41 @@ function createAutoLearnManager(options = {}) {
         // ONLY on a clean walk. A Codex root or subtree that could not be listed
         // (`scope: 'root'`) may still hold the file, and "not enumerated" from a
         // walk that could not look is not "gone".
-        if (!codexFiles.some((entry) => entry.scope === 'root')) {
+        //
+        // NOR CAN A ROOT THAT IS NOT THERE (2026-10-14). The walk skips a missing
+        // root silently, so a vanished root read as clean, and its ids were
+        // dropped: the v1.6.2 audit had success in root A, `git status` exit 1
+        // in root B, B absent for two scans, and auto-safe wrote
+        // `PowerShell(git status *)` on scan 2 and revoked it on scan 3 when B
+        // came back. So a missing configured Codex root (`missingRoots`, see
+        // findJsonlFiles) blocks the drop too, and the pending ids wait for it.
+        //
+        // WHY NOT "A ROOT THAT EXISTED AND VANISHED" instead. Nothing can tell
+        // which root a pending id came from -- it is a path hash -- and the
+        // migration runs on the load just before the first rebuilding scan, so
+        // existence recorded then is the same observation that scan makes: the
+        // audit's root B was already gone. Persisting it would not have caught
+        // the reproduced case.
+        //
+        // THE ONE BENIGN ABSENCE is this Codex home's `archived_sessions/` with
+        // nothing at all at its path. Codex creates it on the first archive (on
+        // the development box it is dated 2026-09-30 14:58, six hours after
+        // `sessions/`), so a box that never archived lacks it for good, and
+        // blocking on it would bring back, on every such box, the rebuild held
+        // open forever by a deleted transcript. Its absence cannot hide a pending
+        // file: never created, nothing was archived into it; deleted, its files
+        // went with it, and a deletion is what the drop exists for. A LINK at
+        // that path whose target is missing (a junction to an unplugged drive)
+        // is the exception: that folder comes back with its files. `sessions/`
+        // is not exempt, because Codex writes every live rollout there and makes
+        // it again on its next run, so blocking costs a scan or two at most. A
+        // root the user configured and then deleted holds the rebuild until it
+        // returns or leaves the configuration: gone and unplugged look alike, and
+        // guessing "gone" is how the audit's grant-then-revoke happened.
+        const benignAbsence = normalizedPath(path.join(codexHome, 'archived_sessions'));
+        const missingCodexRoot = (Array.isArray(result.missingRoots) ? result.missingRoots : []).some((entry) =>
+          entry?.source === 'codex' && (entry.link === true || normalizedPath(entry.path) !== benignAbsence));
+        if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoot) {
           for (const id of [...pendingFiles]) if (!enumerated.has(id)) pendingFiles.delete(id);
         }
         state.codexEvidencePendingFiles = [...pendingFiles].sort();

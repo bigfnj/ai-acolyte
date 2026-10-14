@@ -294,6 +294,147 @@ test('a pending transcript a clean walk no longer finds stops holding the rebuil
   assert.deepEqual(f.read().lastApplication, f.legacy.lastApplication);
 });
 
+// A CONFIGURED ROOT THAT IS MISSING IS A WALK THAT COULD NOT LOOK (2026-10-14).
+// The drop above trusted any walk with no `scope: 'root'` failure, and
+// `findJsonlFiles` skips a root that does not exist without a word, so a root
+// that had vanished counted as a clean walk: its pending ids were dropped, the
+// rebuild finished without its history, and auto-safe granted on what was left.
+// The v1.6.2 audit reproduced it exactly as below -- success in root A,
+// `git status` exit 1 in root B, root B absent for two scans -- and the code then
+// wrote `PowerShell(git status *)` on scan 2 and revoked it on scan 3, when B came
+// back and its failure was finally read.
+function twoRoots(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-evidence-missing-root-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const rootA = path.join(home, 'history-a');
+  const rootB = path.join(home, 'history-b');
+  const write = (root, thread, callId, exit) => {
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, `rollout-${thread}.jsonl`), [
+      { type: 'session_meta', payload: { id: thread, cwd: home } },
+      { type: 'response_item', timestamp: '2026-01-01T00:00:00Z', payload: { type: 'function_call', name: 'exec_command',
+        call_id: callId, arguments: JSON.stringify({ cmd: 'git status' }) } },
+      { type: 'response_item', payload: { type: 'function_call_output', call_id: callId,
+        output: `Process exited with code ${exit}\nOutput:\nfixture` } },
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+  };
+  write(rootA, 'thread-a', 'call-a', 0);
+  write(rootB, 'thread-b', 'call-b', 1);
+  const options = { home, claudeRoots: [], codexRoots: [rootA, rootB], threshold: 1, mode: 'auto-safe',
+    codexValidator: () => ({ valid: true, decision: 'allow' }),
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }) };
+  const learn = () => createAutoLearnManager(options);
+  learn().scan({ platform: 'win32' });
+  const statePath = learn().paths.state;
+  const settingsPath = learn().paths.claudeSettings;
+  const read = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const state = read();
+  assert.deepEqual(state.candidates['powershell:git status'].counts, { success: 1, failed: 1, unknown: 0, total: 2 },
+    'precondition: one success in A, one failure in B');
+  state.codexEvidenceRevision = CURRENT_REVISION - 1;
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+  const granted = () => fs.existsSync(settingsPath)
+    && (JSON.parse(fs.readFileSync(settingsPath, 'utf8')).permissions?.allow || []).includes('PowerShell(git status *)');
+  return { home, rootA, rootB, learn, read, granted };
+}
+
+test('a configured Codex root that is missing keeps the rebuild open, so auto-safe cannot grant past its failure', (t) => {
+  const f = twoRoots(t);
+  assert.equal(f.granted(), false, 'precondition: a family with a failure was never granted');
+  const offline = `${f.rootB}-offline`;
+  fs.renameSync(f.rootB, offline);
+
+  const first = f.learn().scan({ platform: 'win32' });
+  assert.equal(first.application, null, 'the rebuilding scan applies nothing');
+  assert.equal(first.codexEvidence.pending, true,
+    'witness:missing-root -- a root that is not there was read as a clean walk and the rebuild finished without it');
+  assert.equal(first.codexEvidence.remainingFiles, 1, 'B\'s transcript is still owed a complete read');
+  assert.equal(first.errors, 0, 'a missing root is not a read error: nothing failed, nothing was there to read');
+  assert.equal(f.read().candidates['powershell:git status'].counts.success, 1, 'A was rebuilt meanwhile');
+
+  f.learn().scan({ platform: 'win32' });
+  assert.equal(f.granted(), false,
+    'witness:missing-root -- auto-safe granted `PowerShell(git status *)` while the failure that forbids it sat in the missing root');
+
+  // B comes back: its transcript is read from byte 0, the failure is counted, and
+  // only now is the rebuild complete -- with nothing granted at any point.
+  fs.renameSync(offline, f.rootB);
+  const back = f.learn().scan({ platform: 'win32' });
+  assert.equal(back.codexEvidence.pending, false);
+  assert.equal(back.codexEvidence.remainingFiles, 0);
+  assert.deepEqual(f.read().candidates['powershell:git status'].counts, { success: 1, failed: 1, unknown: 0, total: 2 });
+  f.learn().scan({ platform: 'win32' });
+  assert.equal(f.granted(), false, 'no grant, and so no revocation either');
+});
+
+// The 9abc330 behaviour, through the REAL walk: a pending transcript archived
+// mid-rebuild is enumerated under its new path, and its old id is dropped. And the
+// one default root whose absence is benign: `archived_sessions/` on a box that
+// never archived (Codex creates it on the first archive) does not hold a pending
+// id open -- here, a pending transcript that was deleted.
+test('control: a clean real walk still drops a moved or deleted transcript\'s pending id', (t) => {
+  for (const [label, act] of [
+    ['moved', (f) => {
+      const archive = path.join(f.home, '.codex', 'archived_sessions');
+      fs.mkdirSync(archive, { recursive: true });
+      fs.renameSync(f.transcript, path.join(archive, path.basename(f.transcript)));
+    }],
+    ['deleted, no archive folder ever', (f) => {
+      assert.equal(fs.existsSync(path.join(f.home, '.codex', 'archived_sessions')), false,
+        'precondition: the default archive root has never existed');
+      fs.rmSync(f.transcript);
+      // Another transcript, so the walk enumerates something: a Codex walk that
+      // finds no file at all keeps the rebuild open as `history-unavailable`.
+      fs.writeFileSync(path.join(path.dirname(f.transcript), 'other.jsonl'),
+        JSON.stringify({ type: 'session_meta', payload: { id: 'other-thread', cwd: f.home } }) + '\n');
+    }],
+  ]) {
+    const f = fixture(t);
+    createAutoLearnManager({ ...f.options, historyScanner: () => ({ ...f.current,
+      files: f.current.files.map((entry) => ({ ...entry, mode: 'partial' })),
+    }) }).scan();
+    assert.equal(createAutoLearnManager(f.options).status().codexEvidence.remainingFiles, 1,
+      `${label}: precondition: the capped read left the transcript pending`);
+    act(f);
+    const clean = createAutoLearnManager(f.options).scan({ platform: 'win32' });
+    assert.equal(clean.codexEvidence.pending, false, `${label}: a clean walk no longer holds a gone path pending`);
+    assert.equal(clean.codexEvidence.remainingFiles, 0, label);
+  }
+});
+
+// The exception to the benign absence: an `archived_sessions` that is a LINK to a
+// folder that is not there right now -- a junction to an unplugged drive -- comes
+// back with its files, so its absence is a walk that could not look.
+test('an archive folder that is a link to a missing target still holds a pending transcript open', (t) => {
+  const f = fixture(t);
+  createAutoLearnManager({ ...f.options, historyScanner: () => ({ ...f.current,
+    files: f.current.files.map((entry) => ({ ...entry, mode: 'partial' })),
+  }) }).scan();
+  const external = path.join(f.home, 'external-drive', 'archive');
+  fs.mkdirSync(external, { recursive: true });
+  const archive = path.join(f.home, '.codex', 'archived_sessions');
+  fs.symlinkSync(external, archive, process.platform === 'win32' ? 'junction' : 'dir');
+  fs.renameSync(f.transcript, path.join(archive, path.basename(f.transcript)));
+  fs.writeFileSync(path.join(path.dirname(f.transcript), 'other.jsonl'),
+    JSON.stringify({ type: 'session_meta', payload: { id: 'other-thread', cwd: f.home } }) + '\n');
+  const unplugged = `${path.dirname(external)}-unplugged`;
+  fs.renameSync(path.dirname(external), unplugged);
+
+  // What the walk reports: the archive is missing, as a link, and it is not an error.
+  const walked = scanHistoryFiles({ codexRoots: [path.join(f.home, '.codex', 'sessions'), archive], platform: 'win32' });
+  assert.deepEqual(walked.missingRoots, [{ path: archive, source: 'codex', link: true }]);
+  assert.equal(walked.files.filter((entry) => entry.mode === 'error').length, 0);
+
+  const blocked = createAutoLearnManager(f.options).scan({ platform: 'win32' });
+  assert.equal(blocked.codexEvidence.pending, true,
+    'witness:missing-root-link -- an archive behind an unplugged junction was read as never having existed');
+  assert.equal(blocked.errors, 0);
+
+  fs.renameSync(unplugged, path.dirname(external));
+  const back = createAutoLearnManager(f.options).scan({ platform: 'win32' });
+  assert.equal(back.codexEvidence.pending, false, 'the archived transcript is read under its new path and the old id is dropped');
+});
+
 test('new failed evidence revokes an automatic grant after its rebuild has finished', (t) => {
   const f = fixture(t);
   createAutoLearnManager(f.options).scan({ platform: 'win32' });

@@ -1534,3 +1534,27 @@ test('an environment option that names or loads a program, and any environment f
   // A data-valued assignment does not narrow a broad command either.
   assert.equal(codexRuleCount(['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'sh']), 0);
 });
+
+// node options that name a file deciding what loads (src/policy-exporters.js, node's `broad`).
+// Each row's verdict at 1d66310 is in the commit that added this test.
+const NODE_FILE_BROAD = [
+  ['node', '--openssl-config=x.cnf', 'x.js'], ['node', '--openssl-config', 'x.cnf', 'x.js'],
+  ['node', '--experimental-config-file=node.config.json', 'x.js'], ['node', '--experimental-config-file', 'c.json', 'x.js'],
+  ['node', '--openssl-shared-config', 'x.js'], ['node', '--experimental-default-config-file', 'x.js'],
+  ['nodejs', '--openssl-config=x.cnf', 'x.js'], ['uv', 'run', 'node', '--openssl-config=x', 'x.js'],
+];
+const NODE_FILE_NARROW = [['node', 'x.js'], ['node', '--icu-data-dir', 'icu', 'x.js'], ['node', '--report-dir=r', 'x.js'],
+  ['node', '--title', 't', 'x.js']];
+
+test('a node option naming an OpenSSL or node config file is broad, like --env-file', () => {
+  for (const prefix of NODE_FILE_BROAD) {
+    // MUTATION: drop `openssl-config` from node's `broad`. `["node", "--openssl-config=x.cnf",
+    // "x.js"]` matches the generic fused form and renders. Confirmed 2026-10-14.
+    // MUTATION: drop `experimental-config-file` from it. `["node",
+    // "--experimental-config-file=node.config.json", "x.js"]` renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names a file that decides what loads`);
+  }
+  for (const prefix of NODE_FILE_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} still renders`);
+  }
+});

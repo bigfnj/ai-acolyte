@@ -672,7 +672,7 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     values: ['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions',
       '--inspect-port', '--title', '--input-type', '--watch-path', '--test-reporter',
       '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--redirect-warnings',
-      '--unhandled-rejections', '--icu-data-dir', '--openssl-config', '--report-dir', '--diagnostic-dir'],
+      '--unhandled-rejections', '--icu-data-dir', '--report-dir', '--diagnostic-dir'],
     // `--import=data:text/javascript,...` and friends carry the code in the option itself,
     // fused or as the next token. `--env-file` and `--env-file-if-exists`, fused or not, are
     // broad too (2026-10-14, the env-file decision at DOCKER_EXEC): node applies a NODE_OPTIONS
@@ -680,7 +680,21 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     // `node --env-file=x.env z.js` and `node --env-file x.env z.js`, x.env holding
     // `NODE_OPTIONS=--require ./y.js`, each ran y.js; `node z.js` did not. Until then both were
     // plain value options, so `["node", "--env-file", "x.env", "x.js"]` rendered.
-    broad: /^(?:--(?:require|import|loader|experimental-loader)=data:|--env-file(?:-if-exists)?(?:=|$))/,
+    //
+    // Two more files that decide what loads, broad the same way since the same day, MEASURED
+    // with Node 24.19.0 in the same directory:
+    //   * `--openssl-config=FILE`: OpenSSL reads it at startup (a malformed file aborted node with
+    //     "OpenSSL configuration error"), and a `providers` section's `module = PATH` is a shared
+    //     library it loads and initialises: with `module = ./missing-provider-module.dll` under
+    //     node's `nodejs_conf` section, node aborted in OpenSSL's initialisation trying to activate
+    //     it. A present module would have run its own init code. It was a value option until then.
+    //   * `--experimental-config-file=FILE`: node.config.json's `nodeOptions` take `require` and
+    //     `import`, so a file holding `{"nodeOptions": {"require": ["./y2.js"]}}` ran y2.js (and
+    //     the `import` form too). It matched the generic fused form and was narrow until then.
+    // `--openssl-shared-config` (node then honours the system `openssl_conf` section, a file the
+    // prefix does not name; measured to abort the same way) and `--experimental-default-config-
+    // file` (reads ./node.config.json) are flags no table lists, so unknown and broad already.
+    broad: /^(?:--(?:require|import|loader|experimental-loader)=data:|--(?:env-file(?:-if-exists)?|openssl-config|experimental-config-file)(?:=|$))/,
     broadValue: /^data:/,
     fused: /^--[a-z0-9-]+=/,
   },

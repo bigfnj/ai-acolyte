@@ -558,6 +558,13 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       // group, which nativeRpcAsync makes a group of its own on POSIX, so the
       // host's group signal (endProcessTree) ends it with the worker. A detached
       // app-server would lead a group of its own and escape that signal.
+      // PAST ITS DEADLINE BEFORE IT STARTS ANYTHING (2026-10-14). Suppose this worker's own
+      // start ran past `deadlineAt`, on a slow or busy machine. It used to spawn the
+      // app-server anyway and fail the call the moment it armed the deadline. That put the
+      // spawn, the app-server's start, the grace and the kill all inside the 3 s the host
+      // leaves for the grace and the kill alone. Under load the backstop won: the masked
+      // suite took 8.9 s of an 8 s budget, once. Now nothing is spawned only to be killed.
+      if (deadlineAt !== null && Date.now() >= deadlineAt) throw new Error('Codex config operation timed out');
       child = spawn(launch.file, launch.args, { ...launch.options, windowsHide: true, cwd: request.home,
         env, stdio: ['pipe', 'pipe', 'pipe'] });
       closed = new Promise(resolve => child.once('close', resolve));

@@ -357,9 +357,11 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
 // first ("unavailable: the worker timed out"). Here the start is slow on purpose: a
 // --require preload, active only in the process that runs --rpc-worker, holds it
 // for 5.5 s, past the 5 s deadline an 8 s budget sets. The deadline is a time now,
-// so the worker fails the call as soon as it arms it, and its 1 s grace and its
-// kill fit inside the 3 s that are left.
-test('a worker that starts after its deadline still ends its own codex before the host\'s backstop', async t => {
+// and a worker already past it fails the call before it spawns anything, so no grace
+// and no kill are needed at all. Until 2026-10-14 it still spawned the app-server
+// first, and under load the spawn, the start, the grace and the kill overran the 3 s
+// left (the masked suite, 8.9 s, once).
+test('a worker that starts after its deadline answers before the host\'s backstop', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-late-'));
   t.after(async () => {
     await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
@@ -388,12 +390,15 @@ test('a worker that starts after its deadline still ends its own codex before th
   // start, the 8 s backstop fires first, and this reads "unavailable: the worker
   // timed out". Confirmed 2026-10-14.
   assert.match(outcome, /refused: Codex config operation timed out/, 'the worker\'s deadline, not the host\'s backstop');
-  // The stand-in may not have got as far as writing its pid before the kill.
-  if (fs.existsSync(codex.pidFile)) {
+  // MUTATION: drop the worker's deadline check before its spawn. The app-server starts and,
+  // within the 1 s grace, writes its pid, so this fails. Confirmed 2026-10-14.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const codexStarted = fs.existsSync(codex.pidFile);
+  if (codexStarted) {
     const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
     t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
-    assert.equal(await waitFor(() => gone(pid), 3000), true, 'the worker tree-killed the codex it started');
   }
+  assert.equal(codexStarted, false, 'a worker already past its deadline starts no codex');
 });
 
 const gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };

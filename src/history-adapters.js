@@ -924,6 +924,10 @@ function applyCodexProcessResults(directCalls, waitCalls, outputs, observations,
 //   - the runtime's own "exec cell N not found" (codeModeMissingCell below)
 //     closes every open cell with that key and applies nothing: the wait
 //     reached no cell at all;
+//   - a refusal of the cell's nested command (codeModeRefused below) is
+//     terminal and carries no status: the command never ran, so the cell
+//     closes on whatever its other parts said, which for a refused cell is
+//     nothing (2026-10-13);
 //   - two open cells with one key (a fork's copied history, a resume that
 //     restarts allocation, a hand-edited file) make every wait for that key
 //     ambiguous, and it is withheld; so is a wait whose own definitions disagree,
@@ -1016,16 +1020,68 @@ function codeModeYieldId(output) {
 // written exactly as the runtime's own answer, so a script that throws those
 // words, naming the very cell it runs in, is read as stopped -- its verdict
 // withheld, never credited.
-const CODE_MODE_MISSING_HEAD_RE = /^Script failed\n(?:Wall time [^\n]*\n)?Output:\n?$/;
-const CODE_MODE_MISSING_RE = /^Script error:\nexec cell ([A-Za-z0-9_-]{1,64}) not found$/;
+const CODE_MODE_ERROR_HEAD_RE = /^Script failed\n(?:Wall time [^\n]*\n)?Output:\n?$/;
+const CODE_MODE_ERROR_PREFIX = 'Script error:\n';
+const CODE_MODE_MISSING_RE = /^exec cell ([A-Za-z0-9_-]{1,64}) not found$/;
 
-function codeModeMissingCell(output) {
+// The runtime's report of a script that failed by an error ALONE, the shape the
+// not-found answer above and the refusals below share: exactly two text parts,
+// a "Script failed" head with nothing under Output:, and "Script error:\n" plus
+// the message, which is returned (else null).
+function codeModeScriptError(output) {
   if (!Array.isArray(output) || output.length !== 2) return null;
   if (!output.every((part) => isObject(part) && typeof part.text === 'string')) return null;
   const [head, error] = output.map((part) => part.text.replace(/\r\n/g, '\n'));
-  if (!CODE_MODE_MISSING_HEAD_RE.test(head)) return null;
-  const match = CODE_MODE_MISSING_RE.exec(error);
+  if (!CODE_MODE_ERROR_HEAD_RE.test(head) || !error.startsWith(CODE_MODE_ERROR_PREFIX)) return null;
+  return error.slice(CODE_MODE_ERROR_PREFIX.length);
+}
+
+function codeModeMissingCell(output) {
+  const match = CODE_MODE_MISSING_RE.exec(codeModeScriptError(output) ?? '');
   return match ? match[1] : null;
+}
+
+// A NESTED COMMAND REFUSED BEFORE IT RAN IS NO EVIDENCE. MEASURED 2026-10-13 on
+// codex-cli 0.161.0, Windows (scripts/check-codex-code-mode-runtime.js, the
+// refusal cases; the sanitized rollouts are
+// test/fixtures/codex-code-mode-refusal-sanitized.jsonl). When Codex's approval
+// layer refuses a cell's nested `tools.exec_command(...)`, the nested call fails
+// with exactly the message a DIRECT exec_command call returns as its whole
+// output, and the script dies of it:
+//   [{text: "Script failed\nWall time 0.0 seconds\nOutput:\n"},
+//    {text: "Script error:\n" + message}]
+// Two refusals were measured, each with a marker file proving the command never
+// ran (and that a neighbouring accepted one did):
+//   - `codex exec` (approval never) and an escalation request: no prompt, the
+//     message "approval policy is Never; reject command — you cannot ask for
+//     escalated permissions if the approval policy is Never";
+//   - an app-server prompt answered `decline`, the message
+//       exec_command failed: CreateProcess { message: "Rejected(\"rejected by user\")" }
+//     in the cell's own result, and through a wait when the cell had yielded
+//     before the decline arrived.
+// The "Script failed" head made both read `failed`: a refusal counted as the
+// command's failure. Auto Learn's rule is that a confirmed failure is negative
+// evidence and a requested call that never ran is no evidence at all, and the
+// parser already keeps it for the direct shape: the same two messages as a
+// direct call's output carry no exit code and no script wording, so the call
+// reads `unknown` (measured beside each cell in the same session). A refused
+// cell is now read the same way: its result is applied as `unknown`, with no
+// nested status, so it is withheld exactly as the declined direct call is,
+// while a cell whose command RAN and exited nonzero stays `failed` (measured
+// beside it). Only this exact shape and these exact messages count. A command's
+// stdout cannot write it (it lands below "Output:" or in a part of its own);
+// only the cell's own script can, by throwing one of these messages as a bare
+// string (as `thrown-string` measured for not-found), and that reads withheld,
+// never credited. A cell whose script ran another nested command first and
+// printed nothing of it has no outcome for that command in its result either
+// way: the only failure the result reports is the refusal's.
+const CODE_MODE_REFUSALS = new Set([
+  'approval policy is Never; reject command \u2014 you cannot ask for escalated permissions if the approval policy is Never',
+  'exec_command failed: CreateProcess { message: "Rejected(\\"rejected by user\\")" }',
+]);
+
+function codeModeRefused(output) {
+  return CODE_MODE_REFUSALS.has(codeModeScriptError(output));
 }
 
 // `terminate` is read wide: any value other than absent or false stops the
@@ -1356,10 +1412,16 @@ function parseCodexJsonl(text, options = {}) {
         // A cell's own "Script running with cell ID N" is a yield: pending, so
         // nothing its stdout says can credit it, and the cell opens for a wait.
         const yieldId = item.type === 'custom_tool_call_output' ? codeModeYieldId(item.output) : null;
+        // A nested command Codex refused before it ran (codeModeRefused): the
+        // result is applied as `unknown` with no nested status, which is how the
+        // same refusal as a direct call's output already reads. Only a cell's own
+        // result here; a wait's is neutralised the same way for the join below.
+        const refused = codeModeRefused(item.output);
+        const cellRefused = refused && item.type === 'custom_tool_call_output';
         const result = {
-          status: processResult?.pending ? 'unknown' : classifyCodexOutput(item), offset: location.offset, end: location.end,
+          status: processResult?.pending || cellRefused ? 'unknown' : classifyCodexOutput(item), offset: location.offset, end: location.end,
           pending: yieldId !== null || pendingShellResult(item.output),
-          nestedStatuses: item.type === 'custom_tool_call_output'
+          nestedStatuses: item.type === 'custom_tool_call_output' && !cellRefused
             ? nestedShellStatuses(item.output) : [],
         };
         const resultKey = callKey(outerCallId);
@@ -1375,8 +1437,11 @@ function parseCodexJsonl(text, options = {}) {
         applyCodexGroupResult(callGroups.get(resultKey), result);
         if (yieldId !== null) cellJoin.yielded(state.session || '', yieldId, outerCallId);
         if (item.type === 'function_call_output') {
+          // A refusal reaching a yielded cell through its wait still closes the
+          // cell (it is terminal) and binds no failure: the joined result is only
+          // what the cell's other parts say, and for a refused cell that is nothing.
           const bound = cellJoin.waitOutput(state.session || '', outerCallId, {
-            status: classifyCodexOutput(item), nestedStatuses: nestedShellStatuses(item.output),
+            status: refused ? 'unknown' : classifyCodexOutput(item), nestedStatuses: refused ? [] : nestedShellStatuses(item.output),
             pending: pendingShellResult(item.output), offset: location.offset, end: location.end,
             missing: codeModeMissingCell(item.output),
           }, codeModeHeader(item.output), location);

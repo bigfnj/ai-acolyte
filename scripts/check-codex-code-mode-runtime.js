@@ -5,7 +5,7 @@
 // using a scripted loopback provider. No inference or provider credentials.
 //
 //   node scripts/check-codex-code-mode-runtime.js --extension-dir <source-or-staged-root>
-//     [--write-fixture <path>] [--write-continuity-fixture <path>] [--case <name>]...
+//     [--write-fixture <path>] [--write-continuity-fixture <path>] [--write-refusal-fixture <path>] [--case <name>]...
 //
 // WHY THIS EXISTS (2026-10-13). The history parser reads a custom
 // `functions.exec` cell whose body calls `tools.exec_command(...)`, and the
@@ -34,6 +34,10 @@
 // `codex exec resume` -- and assert what each measured (see CONTINUITY_CASES).
 // `--write-continuity-fixture` writes their rollouts, sanitized the same way,
 // for test/codex-code-mode-continuity.test.js; it needs every continuity case.
+// The REFUSAL cases (2026-10-13) put a nested command Codex refused before it ran
+// beside one that ran and failed, in a cell and as a direct call (REFUSAL_CASES);
+// `--write-refusal-fixture` writes their rollouts the same way, for
+// test/codex-code-mode-refusal.test.js, and needs every refusal case.
 // `--case <name>` (repeatable) runs only the named cases.
 //
 // code_mode is enabled ONLY in this fixture's temporary CODEX_HOME. Nothing
@@ -52,9 +56,9 @@ const SECRET_ENV = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OP
 const WITNESS = 'acolyte-code-mode-witness';
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i += 2) {
-  assert.ok(['--extension-dir', '--write-fixture', '--write-continuity-fixture', '--case'].includes(args[i]) && args[i + 1],
+  assert.ok(['--extension-dir', '--write-fixture', '--write-continuity-fixture', '--write-refusal-fixture', '--case'].includes(args[i]) && args[i + 1],
     'usage: check-codex-code-mode-runtime.js --extension-dir <source-or-staged-root> [--write-fixture <path>]'
-    + ' [--write-continuity-fixture <path>] [--case <name>]...');
+    + ' [--write-continuity-fixture <path>] [--write-refusal-fixture <path>] [--case <name>]...');
 }
 const option = (name) => { const at = args.indexOf(name); return at < 0 ? null : args[at + 1]; };
 // `--case` (repeatable) runs only the named cases; without it, every case runs.
@@ -210,6 +214,52 @@ const CONTINUITY_CASES = [
     { allocated: ['1'] }],
 ];
 
+// REFUSAL CASES (2026-10-13). A nested command that Codex's approval layer
+// refused never ran, so it is no evidence either way; one that ran and exited
+// nonzero is a failure. Each case puts the two side by side, in a cell and as
+// a direct exec_command call, because the parser's rule for a refused CELL is
+// to mirror what it already does with a refused DIRECT call (it withholds it).
+// Two refusals are measured:
+//   never     `codex exec` (approval never, full access) with an escalation
+//             request: refused outright, with no prompt at all
+//   declined  an app-server prompt, answered `decline`
+// `declined-after-yield` answers the prompt late, so the cell yields first and
+// the refusal reaches the rollout as a wait's result, not the cell's own.
+// Each cell's `refused` names the refusal it gets (null: its command runs), and
+// the harness asserts the measured text exactly (REFUSALS below), that a refused
+// command never ran and every other did (`marker`), and the parser's verdict.
+const call = (exitCode, expected, extra = {}) => ({ exitCode, delayMs: 10, cellYieldMs: 25000, expected, continued: false,
+  marker: true, refused: null, ...extra });
+const REFUSAL_CASES = [
+  ['refused-never', [{ exec: 'A', cells: [
+    call(0, 'unknown', { escalate: true, refused: 'never' }),
+    call(7, 'failed'),
+    call(0, 'unknown', { escalate: true, direct: true, refused: 'never' }),
+    call(7, 'failed', { direct: true }),
+  ] }]],
+  ['declined', [{ start: 'A' }, { turn: 'A', cells: [
+    call(0, 'unknown', { decline: true, refused: 'declined' }),
+    call(7, 'failed'),
+    call(0, 'unknown', { direct: true, decline: true, refused: 'declined' }),
+    call(7, 'failed', { direct: true }),
+  ] }]],
+  ['declined-after-yield', [{ start: 'A' }, { turn: 'A', cells: [
+    call(0, 'unknown', { cellYieldMs: 500, continued: true, decline: true, approvalDelayMs: 3000, refused: 'declined' }),
+    call(7, 'failed', { delayMs: 4000, cellYieldMs: 500, continued: true }),
+  ] }]],
+];
+// What each refusal was measured to write, codex-cli 0.161.0, 2026-10-13. One
+// text per refusal: a direct call's whole output is it, and a cell's result is a
+// "Script failed" head with nothing under Output: beside "Script error:\n" plus
+// the SAME text -- the nested tool call fails with the message the direct call
+// returns. The parser recognises a refused cell by exactly these
+// (src/history-adapters.js, CODE_MODE_REFUSALS); a build that rewords one fails
+// here before it can quietly turn a refusal back into a failure.
+const REFUSALS = {
+  never: 'approval policy is Never; reject command \u2014 you cannot ask for escalated permissions if the approval policy is Never',
+  declined: 'exec_command failed: CreateProcess { message: "Rejected(\\"rejected by user\\")" }',
+};
+
 function sse(res, item, id) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   for (const event of [
@@ -260,18 +310,30 @@ async function run(name, steps) {
   const schedule = steps.map((step) => (!turnOf(step) ? step : { ...step, plan: (step.cells || []).map((cell) => {
     const index = plan.length;
     const script = path.join(workspace, `cell-${index + 1}.cjs`);
-    fs.writeFileSync(script, `setTimeout(() => { console.log('${WITNESS}'); process.exit(${cell.exitCode}); }, ${cell.delayMs});\n`);
+    // `marker` (the refusal cases): the script's first act is to create a file,
+    // so whether the command RAN is read from disk afterwards, not inferred from
+    // what Codex reported about it. Other cases keep their original script.
+    const ranMarker = cell.marker ? path.join(workspace, `cell-${index + 1}.ran`) : null;
+    fs.writeFileSync(script, `${ranMarker ? `require('node:fs').writeFileSync(${JSON.stringify(ranMarker)}, '');\n` : ''}`
+      + `setTimeout(() => { console.log('${WITNESS}'); process.exit(${cell.exitCode}); }, ${cell.delayMs});\n`);
     // A plain string literal with forward slashes, so the parser's lexer, which
     // refuses variables, concatenation and escapes it cannot prove, can read it.
     const command = `node "${script.replace(/\\/g, '/')}"`;
     // Under `codex exec` (approval never, full access) an escalation request is
     // refused outright -- "you cannot ask for escalated permissions if the
-    // approval policy is Never", measured 2026-10-13 -- and none is needed.
-    const escalation = step.turn ? 'sandbox_permissions: "require_escalated", justification: "Harmless isolated code-mode canary.", ' : '';
+    // approval policy is Never", measured 2026-10-13 -- and none is needed. A
+    // refusal case's `escalate` cell asks anyway: that refusal is its subject.
+    const escalate = !!step.turn || !!cell.escalate;
+    const escalation = escalate ? 'sandbox_permissions: "require_escalated", justification: "Harmless isolated code-mode canary.", ' : '';
     const source = `// @exec: {"yield_time_ms": ${cell.cellYieldMs}, "max_output_tokens": 400}\n`
       + `const result = await tools.exec_command({ cmd: ${JSON.stringify(command)}, ${escalation}yield_time_ms: 30000 });\n`
       + `${cell.tail ?? 'text(result);'}\n`;
-    const entry = { ...cell, callId: `call_cell_${index + 1}`, command, source, thread: turnOf(step), via: step.turn ? 'app-server' : 'exec' };
+    // `direct` (the refusal cases): the same command as a plain exec_command
+    // function call, outside any cell -- the shape whose declined outcome the
+    // parser already withholds, measured beside the cell for parity.
+    const direct = !cell.direct ? undefined : JSON.stringify({ cmd: command, ...(escalate
+      ? { sandbox_permissions: 'require_escalated', justification: 'Harmless isolated code-mode canary.' } : {}), yield_time_ms: 10000 });
+    const entry = { ...cell, callId: `call_cell_${index + 1}`, command, source, direct, ranMarker, thread: turnOf(step), via: step.turn ? 'app-server' : 'exec' };
     plan.push(entry);
     return entry;
   }) }));
@@ -279,9 +341,10 @@ async function run(name, steps) {
   const byCall = new Map(plan.map((cell) => [cell.callId, cell]));
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome };
   for (const key of SECRET_ENV) delete env[key];
-  const observed = { name, cells: plan.map(({ callId, expected, continued, rewaited, terminate, leaveOpen, thread, via }) =>
-      ({ callId, thread, via, expected, continued, rewaited: !!rewaited, terminate: !!terminate, leaveOpen: !!leaveOpen })),
-    requests: 0, approvals: [], calls: [], waits: [], events: [], steps: [], processes: 0 };
+  const observed = { name, cells: plan.map(({ callId, expected, continued, rewaited, terminate, leaveOpen, thread, via, direct, decline, refused }) =>
+      ({ callId, thread, via, expected, continued, rewaited: !!rewaited, terminate: !!terminate, leaveOpen: !!leaveOpen,
+        ...(direct || decline || refused ? { direct: !!direct, decline: !!decline, refused: refused ?? null } : {}) })),
+    requests: 0, approvals: [], decisions: [], calls: [], waits: [], events: [], steps: [], processes: 0 };
   evidence.cases.push(observed);
   const record = (callId) => observed.cells.find((entry) => entry.callId === callId);
   // `active` is the turn in progress; a provider request outside one is a failure.
@@ -356,7 +419,8 @@ async function run(name, steps) {
         } else if (turn.next < turn.plan.length) {
           const cell = turn.plan[turn.next++];
           turn.waiting = null;
-          item = { type: 'custom_tool_call', name: 'exec', call_id: cell.callId, input: cell.source };
+          item = cell.direct ? { type: 'function_call', name: 'exec_command', call_id: cell.callId, arguments: cell.direct }
+            : { type: 'custom_tool_call', name: 'exec', call_id: cell.callId, input: cell.source };
         } else if (turn.waitAfter && !turn.waitedAfter) {
           // After this turn's own cells: a wait for the ID an earlier cell was
           // allocated (or `waitAfterId`, for a cell that never revealed its ID),
@@ -402,9 +466,18 @@ async function run(name, steps) {
           if (message.error) item.reject(new Error(JSON.stringify(message.error))); else item.resolve(message.result);
         } else if (message.id != null && message.method) {
           // Per-call acceptance of a nested command only; never a policy amendment.
+          // A refusal case's `decline` cell is declined instead (2026-10-13), and
+          // `approvalDelayMs` answers late, as a person deciding would, so the
+          // cell yields before its nested call is refused. The request names the
+          // cell by its script, the only per-cell detail it carries.
           assert.equal(message.method, 'item/commandExecution/requestApproval', 'unexpected server request');
           observed.approvals.push(message.method);
-          send({ id: message.id, result: { decision: 'accept' } });
+          const named = /cell-(\d+)\.cjs/.exec(JSON.stringify(message.params ?? {}));
+          const cell = named ? plan[Number(named[1]) - 1] : null;
+          const decision = cell?.decline ? 'decline' : 'accept';
+          observed.decisions.push({ cell: cell?.callId ?? null, decision });
+          const answer = () => send({ id: message.id, result: { decision } });
+          if (cell?.approvalDelayMs) setTimeout(answer, cell.approvalDelayMs); else answer();
         } else if (message.method === 'item/completed' && message.params?.item?.type === 'commandExecution') {
           observed.events.push({ status: message.params.item.status, exitCode: message.params.item.exitCode ?? null });
         } else if (message.method === 'turn/completed') {
@@ -515,6 +588,8 @@ async function run(name, steps) {
     await close();
     server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
     observed.threads = threads;
+    // Whether each marked command ran, read from disk after every process ended.
+    for (const cell of plan) if (cell.ranMarker) record(cell.callId).ran = fs.existsSync(cell.ranMarker);
     const verdictsIn = (file) => parseCodexJsonl(fs.readFileSync(file, 'utf8'), { file });
     const cellVerdicts = (observations) => Object.fromEntries(plan.map((cell) => {
       const matches = observations.filter((item) => item.callId === cell.callId && item.command === cell.command);
@@ -574,7 +649,10 @@ function sanitizedOutput(output, scrub) {
   return Array.isArray(output)
     ? output.map((part) => ({ ...part, text: scrub(part.text).replace(/"chunk_id":"[0-9a-f]+"/, '"chunk_id":"c0ffee"')
       .replace(/Wall time [0-9.]+ seconds/, 'Wall time 1.0 seconds').replace(/"wall_time_seconds":[0-9.]+/, '"wall_time_seconds":1.0') }))
-    : scrub(output).replace(/Wall time [0-9.]+ seconds/, 'Wall time 1.0 seconds');
+    : scrub(output).replace(/Wall time [0-9.]+ seconds/, 'Wall time 1.0 seconds')
+      // A direct exec_command's own header spells both differently (the refusal
+      // cases, 2026-10-13). Neither form occurs in the older fixtures' outputs.
+      .replace(/^Chunk ID: [0-9a-f]+$/m, 'Chunk ID: c0ffee').replace(/^Wall time: [0-9.]+ seconds$/m, 'Wall time: 1.0 seconds');
 }
 
 const TOOL_RECORDS = ['custom_tool_call', 'custom_tool_call_output', 'function_call', 'function_call_output'];
@@ -627,7 +705,8 @@ function sanitizedFixture(rolloutPath, workspace) {
 // only: its settings name the cwd) and every task_complete. Each segment gets
 // its own synthetic session id; a fork keeps `forked_from_id`, renamed to its
 // parent segment's id; `fixture_case` names the case and thread it came from.
-function sanitizedContinuityFixture(segments) {
+// `ids` keeps another fixture's synthetic ids apart (the refusal fixture's).
+function sanitizedContinuityFixture(segments, ids = { session: '0192eeee-5555', item: 'ee' }) {
   const lines = [];
   const sessions = new Map();
   let clock = 0;
@@ -638,11 +717,11 @@ function sanitizedContinuityFixture(segments) {
     const scrub = workspaceScrubber(workspace);
     const n = String(index + 1).padStart(2, '0');
     const meta = records.find((record) => record.type === 'session_meta')?.payload || {};
-    const session = `0192eeee-5555-7000-8000-0000000000${n}`;
+    const session = `${ids.session}-7000-8000-0000000000${n}`;
     sessions.set(meta.id, session);
     const turns = new Map();
     const turnId = (real) => {
-      if (!turns.has(real)) turns.set(real, `0192eeee-5555-7000-9000-00${n}000000${String(turns.size + 1).padStart(2, '0')}`);
+      if (!turns.has(real)) turns.set(real, `${ids.session}-7000-9000-00${n}000000${String(turns.size + 1).padStart(2, '0')}`);
       return turns.get(real);
     };
     let ordinal = 0, number = 0;
@@ -663,7 +742,7 @@ function sanitizedContinuityFixture(segments) {
         push('event_msg', { type: 'task_complete', turn_id: turnId(payload.turn_id) });
       } else if (record.type === 'response_item' && TOOL_RECORDS.includes(payload.type)) {
         number += 1;
-        const copy = { type: payload.type, id: `${payload.type.endsWith('_output') ? 'out' : 'fc'}_ee${n}${String(number).padStart(4, '0')}`,
+        const copy = { type: payload.type, id: `${payload.type.endsWith('_output') ? 'out' : 'fc'}_${ids.item}${n}${String(number).padStart(4, '0')}`,
           call_id: payload.call_id };
         if (payload.name !== undefined) copy.name = payload.name;
         if (payload.input !== undefined) copy.input = scrub(payload.input);
@@ -706,6 +785,42 @@ function assertContinuity(name, observed, expect) {
   }
 }
 
+// The measured facts each refusal case states (REFUSAL_CASES): who was asked,
+// what was refused and in which words, that a refused command never ran and
+// every other one did, and the parser's exact verdict on every call. Each
+// call's TERMINAL output is read from the rollout -- the cell's own, the last
+// wait's for a continued cell, or a direct call's -- and recorded.
+function assertRefusal(name, observed) {
+  const rolloutPath = observed.rolloutPath ?? observed.rollouts?.A?.[0]?.path;
+  assert.ok(rolloutPath, `${name}: WITNESS one rollout`);
+  if (observed.rollouts) assert.equal(observed.rollouts.A.length, 1, `${name}: WITNESS one rollout file`);
+  const outputs = fs.readFileSync(rolloutPath, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse)
+    .filter((entry) => entry.type === 'response_item' && ['custom_tool_call_output', 'function_call_output'].includes(entry.payload?.type))
+    .map((entry) => entry.payload);
+  const prompted = observed.cells.filter((cell) => cell.via === 'app-server');
+  assert.deepEqual(observed.decisions, prompted.map((cell) => ({ cell: cell.callId, decision: cell.decline ? 'decline' : 'accept' })),
+    `${name}: WITNESS one approval request per app-server call, each answered as the case says, and none under codex exec`);
+  for (const cell of observed.cells) {
+    const waits = observed.waits.filter((wait) => wait.cell === cell.callId);
+    assert.equal(waits.length > 0, cell.continued, `${name}/${cell.callId}: WITNESS ${cell.continued ? 'the cell yielded and a wait finished it' : 'no wait'}`);
+    const terminalId = waits.length ? waits.at(-1).callId : cell.callId;
+    const terminal = outputs.filter((output) => output.call_id === terminalId);
+    assert.equal(terminal.length, 1, `${name}/${cell.callId}: WITNESS one terminal output`);
+    cell.terminal = { type: terminal[0].type, output: terminal[0].output };
+    assert.equal(cell.ran, !cell.refused, `${name}/${cell.callId}: WITNESS the command ${cell.refused ? 'never ran' : 'ran'}`);
+    if (cell.refused && cell.direct) {
+      assert.equal(cell.terminal.output, REFUSALS[cell.refused], `${name}/${cell.callId}: WITNESS the ${cell.refused} refusal, as a direct call`);
+    } else if (cell.refused) {
+      const parts = Array.isArray(cell.terminal.output) ? cell.terminal.output.map((part) => part?.text) : [cell.terminal.output];
+      assert.equal(parts.length, 2, `${name}/${cell.callId}: WITNESS a two-part result`);
+      assert.match(parts[0], /^Script failed\nWall time [0-9.]+ seconds\nOutput:\n$/, `${name}/${cell.callId}: WITNESS a "Script failed" head, nothing under Output:`);
+      assert.equal(parts[1], `Script error:\n${REFUSALS[cell.refused]}`, `${name}/${cell.callId}: WITNESS the ${cell.refused} refusal, in a cell`);
+    }
+    assert.equal(cell.observations, 1, `${name}/${cell.callId}: WITNESS exactly one observation`);
+    assert.equal(cell.status, cell.expected, `${name}/${cell.callId}: the parser's verdict`);
+  }
+}
+
 (async () => {
   evidence.subject = subject;
   evidence.parserHash = digest(path.join(subject, 'src/history-adapters.js'));
@@ -713,7 +828,7 @@ function assertContinuity(name, observed, expect) {
   const version = commandLaunch('codex', ['--version']);
   evidence.codexVersion = String(spawnSync(version.file, version.args, { ...version.options, encoding: 'utf8', windowsHide: true, timeout: 10000 }).stdout || '').trim();
   const failures = [];
-  const known = [...CASES, ...CONTINUITY_CASES].map(([name]) => name);
+  const known = [...CASES, ...CONTINUITY_CASES, ...REFUSAL_CASES].map(([name]) => name);
   for (const name of selectedCases) assert.ok(known.includes(name), `--case ${name}: no such case (${known.join(', ')})`);
   const chosen = (list) => list.filter(([name]) => !selectedCases.length || selectedCases.includes(name));
   for (const [name, steps, expect] of chosen(CONTINUITY_CASES)) {
@@ -748,16 +863,26 @@ function assertContinuity(name, observed, expect) {
       observed.passed = true;
     } catch (error) { failures.push(error.message); }
   }
+  for (const [name, steps] of chosen(REFUSAL_CASES)) {
+    try { await run(name, steps); }
+    catch (error) { failures.push(`${name}: ${error.message}`); continue; }
+    const observed = evidence.cases[evidence.cases.length - 1];
+    try { assertRefusal(name, observed); observed.passed = true; }
+    catch (error) { failures.push(error.message); }
+  }
   const sequence = evidence.cases.find((item) => item.name === 'sequence');
   if (option('--write-fixture') && sequence?.rolloutPath) {
     const target = path.resolve(option('--write-fixture'));
     fs.writeFileSync(target, sanitizedFixture(sequence.rolloutPath, path.join(root, 'sequence', 'workspace')));
     evidence.fixture = { path: target, sha256: digest(target) };
   }
-  if (option('--write-continuity-fixture')) {
-    const ran = CONTINUITY_CASES.map(([name]) => evidence.cases.find((item) => item.name === name && item.completed));
-    const missing = CONTINUITY_CASES.filter((_, index) => !ran[index]).map(([name]) => name);
-    if (missing.length) failures.push(`--write-continuity-fixture needs every continuity case to have run; missing: ${missing.join(', ')}`);
+  // A multi-case fixture: every case of its list must have run, one segment per
+  // thread rollout in case order.
+  const writeSegments = (flag, list, ids, key) => {
+    if (!option(flag)) return;
+    const ran = list.map(([name]) => evidence.cases.find((item) => item.name === name && item.completed));
+    const missing = list.filter((_, index) => !ran[index]).map(([name]) => name);
+    if (missing.length) failures.push(`${flag} needs every case of its list to have run; missing: ${missing.join(', ')}`);
     else {
       const segments = ran.flatMap((observed) => {
         const workspace = path.join(root, observed.name, 'workspace');
@@ -765,18 +890,21 @@ function assertContinuity(name, observed, expect) {
           ? Object.entries(observed.rollouts).map(([label, files]) => ({ name: observed.name, label, rolloutPath: files[0].path, workspace }))
           : [{ name: observed.name, label: 'A', rolloutPath: observed.rolloutPath, workspace }];
       });
-      const target = path.resolve(option('--write-continuity-fixture'));
-      fs.writeFileSync(target, sanitizedContinuityFixture(segments));
-      evidence.continuityFixture = { path: target, sha256: digest(target), segments: segments.length };
+      const target = path.resolve(option(flag));
+      fs.writeFileSync(target, sanitizedContinuityFixture(segments, ids));
+      evidence[key] = { path: target, sha256: digest(target), segments: segments.length };
     }
-  }
+  };
+  writeSegments('--write-continuity-fixture', CONTINUITY_CASES, undefined, 'continuityFixture');
+  writeSegments('--write-refusal-fixture', REFUSAL_CASES, { session: '0192ffff-6666', item: 'ff' }, 'refusalFixture');
   evidence.status = failures.length ? 'failed' : 'passed';
   evidence.failures = failures;
   fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ status: evidence.status, evidence: path.join(root, 'evidence.json'), codexVersion: evidence.codexVersion,
     cases: evidence.cases.map(({ name, approvals, waits, cells }) => ({ name, approvals: approvals.length, waits: waits.length,
-      cells: cells.map(({ callId, continued, rewaited, terminate, leaveOpen, expected, status, allocated, thread }) =>
-        `${callId}:${!continued ? 'complete' : terminate ? 'terminated' : rewaited ? 'rewaited' : leaveOpen ? 'left-open' : 'continued'}:${expected}->${status}`
+      cells: cells.map(({ callId, continued, rewaited, terminate, leaveOpen, expected, status, allocated, thread, direct, refused }) =>
+        `${callId}:${direct ? 'direct' : !continued ? 'complete' : terminate ? 'terminated' : rewaited ? 'rewaited' : leaveOpen ? 'left-open' : 'continued'}`
+        + `${refused ? ` refused (${refused})` : ''}:${expected}->${status}`
         + (allocated !== undefined ? ` (thread ${thread}, cell ID ${allocated})` : '')),
       ...(waits.some((wait) => wait.crossTurn) ? { crossTurnWaits: waits.filter((wait) => wait.crossTurn)
         .map((wait) => `${wait.cell} as cell ID ${wait.cellId}: ${wait.resultHeader ?? '(no result)'}`) } : {}) })),

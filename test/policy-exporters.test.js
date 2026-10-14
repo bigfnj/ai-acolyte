@@ -1374,6 +1374,33 @@ test('Invoke-Expression and iex are broad at any depth, in every spelling', () =
   assert.equal(codexRuleCount(['Invoke-ExpressionLint', 'x']), 1);
 });
 
+// Invoke-Command runs a script block, the iex class (measured; src/policy-exporters.js
+// ALWAYS_BROAD_WRAPPERS). Each row's verdict at fd05398 is in the commit that added this test.
+const ICM_PREFIXES = [['icm'], ['Invoke-Command'], ['ICM', '-ScriptBlock'], ['icm', 'x'],
+  ['Invoke-Command', '-FilePath', 'x.ps1'], ['Invoke-Command', '-ComputerName', 'host', '-ScriptBlock'],
+  ['Microsoft.PowerShell.Core\\Invoke-Command', 'x'], ['invoke-command.exe', 'x'], ['timeout', '5', 'icm', 'x']];
+
+test('Invoke-Command and icm are broad at any depth, in every spelling', () => {
+  for (const prefix of ICM_PREFIXES) {
+    // MUTATION: drop 'icm' and 'invoke-command' from ALWAYS_BROAD_WRAPPERS. Their prefixes reach
+    // the generic rule and `["icm", "x"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop them from the learner's SHELL_WRAPPERS (src/auto-learn.js). Nothing here
+    // asks wrapperIsBroad and bare `["icm"]` renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs a script block`);
+  }
+  for (const permission of ['PowerShell(icm *)', 'PowerShell(Invoke-Command -FilePath x.ps1 *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  const { classifyInvocation } = require('../src/auto-learn');
+  // A local form: with `-ComputerName` the learner calls it `network-command` first, rightly.
+  for (const command of ['Invoke-Command -ScriptBlock $sb', 'icm -ScriptBlock $sb']) {
+    const learned = classifyInvocation({ tool: 'PowerShell', command, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${command}: ${JSON.stringify(learned.reasons)}`);
+  }
+  // Control: a different cmdlet of the same verb is judged as before.
+  assert.equal(codexRuleCount(['Invoke-WebLint', 'x']), 1);
+});
+
 // bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each
 // row's verdict at e6d227c is in the commit that added this test.
 const ALIAS_BROAD = [['bunx'], ['bunx', 'sh'], ['bunx', 'node'], ['bunx', '--bun', 'vite'], ['bunx.exe', 'sh'],

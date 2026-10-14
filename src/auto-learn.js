@@ -89,7 +89,7 @@ const CREDENTIAL_ROOTS = new Set([
 // per-project, so there is no fixed subcommand set to narrow to.
 const SHELL_WRAPPERS = new Set([
   '.', 'bash', 'bun', 'bunx', 'cmd', 'cmd.exe', 'command', 'dash', 'deno', 'duckdb',
-  'env', 'eval', 'exec', 'fish', 'hyperfine', 'iex', 'invoke-expression',
+  'env', 'eval', 'exec', 'fish', 'hyperfine', 'icm', 'iex', 'invoke-command', 'invoke-expression',
   'java', 'just', 'ksh', 'make', 'mshta', 'node', 'npm', 'npx', 'parallel',
   'perl', 'php', 'pnpm', 'pnpx', 'powershell', 'powershell.exe', 'pwsh', 'py', 'python',
   'python3', 'ruby', 'rundll32', 'sh', 'source', 'uvx', 'wsl', 'xargs', 'yarn',
@@ -1175,6 +1175,11 @@ const INFO_PREFIX_FLAGS = new Set(['--help', '--version', '-h', '-V']);
 // Until then `bunx tsc` and `pnpx create-vite` classified as `unknown-command` while `bun x
 // tsc` was `shell-wrapper`. The exporter refuses them on both halves the way it refuses their
 // long forms (src/policy-exporters.js RUNNER_ALIASES).
+//
+// `icm` and `invoke-command` joined the same way, the same day: PowerShell's Invoke-Command runs
+// the script block it is handed (measured; src/policy-exporters.js ALWAYS_BROAD_WRAPPERS has the
+// evidence), the iex class. Until then `Invoke-Command -ScriptBlock $sb` and `icm -ScriptBlock
+// $sb` were `unknown-command`, and the exporter's refusal never ran for them.
 //
 // The interpreter a versioned or distribution name runs, for the SHELL_WRAPPERS lookup in
 // classifyInvocation (2026-10-14). That lookup compared the normalized root by exact name, so

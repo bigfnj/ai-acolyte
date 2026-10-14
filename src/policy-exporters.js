@@ -512,9 +512,20 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
 //     refused bare, and at any depth on the Claude half) and had only the generic rule here,
 //     so `["iex", "Get-Date"]` and `["invoke-expression", "x"]` rendered (measured against
 //     0ecf75b: 9 of the 13 prefixes test/policy-exporters.test.js lists).
+//   * icm and invoke-command (2026-10-14): PowerShell's Invoke-Command and its one alias run
+//     the script block they are handed, locally or on every computer `-ComputerName` names,
+//     and `-FilePath` runs a script file there. MEASURED in a private temp directory with a
+//     marker-file payload: `Invoke-Command -ScriptBlock { ...; Set-Content ic1.txt X }`, `icm {
+//     ... }`, `ICM -ScriptBlock ([scriptblock]::Create("..."))`, the module-qualified
+//     `Microsoft.PowerShell.Core\Invoke-Command { ... }` and `-ArgumentList` each wrote their
+//     marker under PowerShell 7.6.6, and `icm { ... }` under Windows PowerShell 5.1 as well
+//     (`(Get-Alias -Definition Invoke-Command).Name` is `icm`, its only alias). Until then
+//     neither name was on any table, so even a bare `["icm"]` rendered (measured against
+//     fd05398). They join the learner's SHELL_WRAPPERS too, which is how this module's union
+//     reaches wrapperIsBroad for them.
 const ALWAYS_BROAD_WRAPPERS = new Set([
-  'doas', 'eval', 'firejail', 'gdb', 'iex', 'invoke-expression', 'parallel', 'pkexec', 'runas', 'runuser',
-  'script', 'su', 'sudo', 'systemd-run', 'watch',
+  'doas', 'eval', 'firejail', 'gdb', 'icm', 'iex', 'invoke-command', 'invoke-expression', 'parallel', 'pkexec',
+  'runas', 'runuser', 'script', 'su', 'sudo', 'systemd-run', 'watch',
 ]);
 
 // The wrappers whose exact `--version` or `--help` prefix is narrow on the Codex half

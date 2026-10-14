@@ -231,7 +231,7 @@ test('install.sh registers the hook command bare, with no shell wrapper', (t) =>
   //           +17.6 ms, `powershell.exe -Command node ...` +1059 ms, which is 18x
   //           the whole hook.
   //   undo  — both uninstallers recover the hook path by unwrapping
-  //           `^node\s+(.+)$` (uninstall.ps1:30#match, uninstall.sh:54#wrapped) and otherwise
+  //           `^node\s+(.+)$` (uninstall.ps1:30#match, uninstall.sh:65#wrapped) and otherwise
   //           compare the command verbatim against the bare path. A wrapped
   //           registration matches NEITHER branch, so it is never recognised as
   //           ours: the hook becomes UN-UNINSTALLABLE, `./uninstall.sh` reports
@@ -351,7 +351,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   // Banned: `cmd /c node ...` (+17.6 ms per tool call) and
   // `powershell.exe -Command node ...` (+1059 ms, 18x the whole hook). The
   // stronger reason is undo, not speed: both uninstallers recover the hook path
-  // with `^node\s+(.+)$` (uninstall.ps1:30#match, uninstall.sh:54#wrapped), a wrapped command
+  // with `^node\s+(.+)$` (uninstall.ps1:30#match, uninstall.sh:65#wrapped), a wrapped command
   // matches neither that nor the bare-path comparison, and the hook would become
   // UN-UNINSTALLABLE while still firing on every tool call.
   //
@@ -415,7 +415,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   //
   // Case-insensitive, deliberately, and this is where the two halves of the guard
   // used to disagree with each other and with the contract they cite. The
-  // uninstallers are the contract: uninstall.sh:54#wrapped matches `/^node\s+(.+)$/i` and
+  // uninstallers are the contract: uninstall.sh:65#wrapped matches `/^node\s+(.+)$/i` and
   // uninstall.ps1:30#match uses `-match`, which is case-insensitive in PowerShell. Both
   // recover the hook path from `NODE "…"` perfectly well. The twin case in
   // scripts/verify-installers.ps1 has always matched case-insensitively for that
@@ -1394,3 +1394,55 @@ test('install.sh end to end: from a checkout under a path with a space, the regi
       assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
     }
   });
+
+// ── uninstall.sh folds case only on Windows ──────────────────────────────────
+//
+// Found by the v1.6.2 audit, and true of every uninstall.sh before 2026-10-14: its
+// hookPath lowercased, turned `\` into `/` and folded /c/ to c:/ on EVERY platform,
+// while install.sh's comparable does all three only on Windows. On Linux, and on a
+// case-sensitive macOS volume, /src/Acolyte and /src/acolyte are two checkouts,
+// and an uninstall run from one removed the other's LIVE registration as its own.
+// The Linux half runs on CI's ubuntu legs (and was run in node:20-slim under
+// podman on 2026-10-14); the Windows half pins that the fold is still there.
+test('uninstall: a sibling checkout differing only by case is another checkout where the file system says so', (t) => {
+  const settingsPath = sandbox(t);
+  const dir = path.dirname(path.dirname(settingsPath));
+  const make = (name) => {
+    const file = path.join(dir, name, 'bin', 'wildcard-perms');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '');
+    return fwd(fs.realpathSync.native(file));
+  };
+  const mine = make('acolyte');
+
+  if (process.platform === 'win32') {
+    // One checkout in any casing: removed as this checkout, never named another.
+    const shouted = mine.replace('/acolyte/bin/', '/ACOLYTE/BIN/');
+    assert.notEqual(shouted, mine, 'the fixture must really differ in case');
+    fs.writeFileSync(settingsPath, settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${shouted}"`)] }]));
+    const run = runInstaller(settingsPath, embeddedUninstaller(), mine);
+    assert.equal(run.code, 0, run.stderr);
+    assert.match(run.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+    assert.doesNotMatch(run.stdout, /another checkout|no longer exists/);
+    return;
+  }
+  if (fs.existsSync(path.join(dir, 'ACOLYTE'))) {
+    return t.skip('this volume folds case (the macOS default), so the sibling cannot exist');
+  }
+
+  const sibling = make('Acolyte');
+  assert.notEqual(sibling, mine, 'precondition: two directories, not one');
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(sibling)] }]);
+  fs.writeFileSync(settingsPath, before);
+  const run = runInstaller(settingsPath, embeddedUninstaller(), mine);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, "the sibling's live hook is not this checkout's to remove");
+  assert.match(run.stdout, /nothing removed/);
+  assert.ok(run.stdout.includes(`left ${sibling} registered`), run.stdout);
+
+  // And this checkout's own registration beside it still goes.
+  fs.writeFileSync(settingsPath, settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(mine), hook(sibling)] }]));
+  const both = runInstaller(settingsPath, embeddedUninstaller(), mine);
+  assert.equal(both.code, 0, both.stderr);
+  assert.deepEqual(JSON.parse(both.after).hooks.PostToolUse, [{ matcher: 'Bash|PowerShell', hooks: [hook(sibling)] }]);
+});

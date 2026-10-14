@@ -38,12 +38,15 @@ under "Follow-ups to the v1.6.3 confirmation audit (2026-10-14)". Still in fligh
   - The config worker's grace kill, which checks `exitCode` only.
   - Moving the push benchmark into `scripts/`.
   - Recording the remaining spawn residuals.
-- **wave-f12** (wave-f11's J1 and J2 are fixed and recorded).
-  - Codex export judges environment assignments case-insensitively, because Windows folds
-    environment names.
-  - A user `ask` on a family's rule withholds it like a deny, because ask beats allow.
-  - `CARGO_HOME` is refused as the config-file class. It is still unchecked whether
-    `RUSTUP_TOOLCHAIN` or `RUSTUP_HOME` can name a program by path.
+- **wave-f13.** wave-f11's J1–J2 and wave-f12's K1–K3 are fixed and recorded. The remaining
+  items:
+  - make and just overrides fold case too. They are environment assignments for recipe lines;
+    this reverses F6's `make cc=x` pin.
+  - The Claude half folds the env-name sets it already refuses.
+  - strace's `-E`/`--env` is judged like a container's `-e`.
+  - rustup's dist and update servers are refused, where they choose the toolchain that runs.
+- **After wave-f10 merges:** `bin/wildcard-perms` should print K2's new `asked` list from the
+  drain. Until it does, a withheld entry shows only in the "kept" count.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
 and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn

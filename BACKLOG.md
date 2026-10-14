@@ -32,17 +32,22 @@ the cached trust timeout are fixed and recorded under "The v1.6.3 release commit
 "The v1.6.3 confirmation audit (2026-10-14)". Its follow-ups (G1–G4) are fixed or recorded
 under "Follow-ups to the v1.6.3 confirmation audit (2026-10-14)". Still in flight:
 
-- **wave-f13.** Already fixed and recorded:
-  - wave-f10's bare-name census, grace kill, push bench and spawn residuals;
-  - wave-f11's J1–J2;
-  - wave-f12's K1–K3, plus the drain's `asked` report (`fb8aac3`).
+- **wave-f14, the converging wave.** Already fixed and recorded:
+  - wave-f10's spawn census;
+  - J1–J2, K1–K3 and L1–L4;
+  - the drain's `asked` report (`fb8aac3`);
+  - the trust ask's 25 s budget (`efeb0c1`).
 
   The remaining items:
-  - make and just overrides fold case too. They are environment assignments for recipe lines;
-    this reverses F6's `make cc=x` pin.
-  - The Claude half folds the env-name sets it already refuses.
-  - strace's `-E`/`--env` is judged like a container's `-e`.
-  - rustup's dist and update servers are refused, where they choose the toolchain that runs.
+  - a bounded census of exec wrappers no table names, bwrap first;
+  - `strace -o '|cmd'`;
+  - identity options in the wrappers already modelled;
+  - `valgrind --tool=<path>`;
+  - a test pinning the case-exact strip;
+  - two accuracy items.
+
+  The exporter header will then record a third standing limit: a runner that no table names
+  is judged as an ordinary program.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
 and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn

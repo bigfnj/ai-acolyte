@@ -13,6 +13,13 @@
 // one candidate list was, which means the bundle changed shape and the read has to be redone
 // by hand. Read-only: the binary is opened for reading and nothing is written anywhere.
 //
+// It also reports, ADVISORILY (M5, 2026-10-14; `lookupCase` in `--json`, a line otherwise), whether
+// the membership lookup converts the name's case before testing it. `claudeStripsAssignment`
+// (src/permission-match.js) models the strip case-exact, which is what makes `LANG=C` strip and
+// `lang=C` keep its assignment; this reads that back from the binary (`<set>.has(<name>)` with a bare
+// identifier is exact, one wrapped in `.toUpperCase()`/`.toLowerCase()` is folded) when the minified
+// shapes allow, and says nothing rather than guess when they do not. It never changes the exit code.
+//
 // WHY. Claude Code strips a leading `NAME=VALUE` before an allow rule is consulted only for
 // "certain known-safe environment variables" (code.claude.com/docs/en/permissions, "Wrappers",
 // read 2026-10-13), and the page does not name them. The wildcarding pass, the learner and the
@@ -114,6 +121,41 @@ function nameArrays(file, chunk = CHUNK) {
   }
 }
 
+// Advisory read of whether the allow-path's membership test CONVERTS the name's case before the
+// lookup (M5, 2026-10-14). src/permission-match.js models the strip as case-exact (`IG.has(V)`, no
+// conversion; 2.1.296 re-read at the L2/J1 offset), which is what makes `LANG=C` strip and `lang=C`
+// keep its assignment. This confirms that read from the binary when it can, and says so when it
+// can't, rather than guess. Best-effort and NOT wired into the exit code: the Set-name and
+// lookup-call shapes are minified and may change, so it reports 'exact' | 'folded' | null. Finds the
+// Set's variable name just before the array, then reads the `<var>.has(...)` calls near it; a bare
+// identifier argument is case-exact, one wrapped in `.toUpperCase()`/`.toLowerCase()` (locale forms
+// too) is case-folded. The window reaches past the array to the strip function a few hundred bytes on.
+const CASEFOLD_WINDOW = 16 * 1024;
+function detectLookupCaseConversion(file, offset, chunk = CHUNK) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const start = Math.max(0, offset - 256);
+    const size = fs.fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(CASEFOLD_WINDOW, Math.max(size - start, 1)));
+    const length = fs.readSync(fd, buffer, 0, buffer.length, start);
+    const text = buffer.toString('latin1', 0, length);
+    const head = text.slice(0, offset - start);
+    const name = /([A-Za-z_$][\w$]*)\s*=\s*new Set\s*\(\s*\[?$/.exec(head);
+    if (!name) return null;
+    const escaped = name[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const calls = new RegExp(`${escaped}\\.has\\(([^)]*)\\)`, 'g');
+    let folded = false;
+    let exact = false;
+    for (let m = calls.exec(text); m; m = calls.exec(text)) {
+      if (/\.to(?:Locale)?(?:Upper|Lower)Case\s*\(/.test(m[1])) folded = true;
+      else if (/^[A-Za-z_$][\w$]*$/.test(m[1].trim())) exact = true;
+    }
+    return folded ? 'folded' : exact ? 'exact' : null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function check(file, known = CLAUDE_SAFE_ENV_VARS, chunk = CHUNK) {
   const { size, arrays } = nameArrays(file, chunk);
   const floor = Math.max(10, Math.ceil(known.size / 2));
@@ -126,7 +168,8 @@ function check(file, known = CLAUDE_SAFE_ENV_VARS, chunk = CHUNK) {
   const theirs = new Set(found.names);
   const added = [...theirs].filter((name) => !known.has(name)).sort();
   const dropped = [...known].filter((name) => !theirs.has(name)).sort();
-  return { ...result, status: added.length || dropped.length ? 'drift' : 'same', count: theirs.size, added, dropped };
+  const lookupCase = detectLookupCaseConversion(file, found.offset, chunk);
+  return { ...result, status: added.length || dropped.length ? 'drift' : 'same', count: theirs.size, added, dropped, lookupCase };
 }
 
 function main(argv) {
@@ -158,6 +201,12 @@ function main(argv) {
       if (result.dropped.length) console.log(`This repo strips, Claude Code no longer does: ${result.dropped.join(' ')}`);
       console.log('Update CLAUDE_SAFE_ENV_VARS (src/permission-match.js), the literal in test/permissions-env.test.js,'
         + ' and docs/claude-code-permissions.md section 3, on this evidence.');
+    }
+    // Advisory, not part of the verdict (M5): whether the membership lookup converts case.
+    if (result.lookupCase === 'exact') {
+      console.log('The membership lookup is case-exact (claudeStripsAssignment models that: LANG=C strips, lang=C keeps).');
+    } else if (result.lookupCase === 'folded') {
+      console.log('The membership lookup converts case; claudeStripsAssignment (src/permission-match.js) models it case-exact — re-read by hand.');
     }
   }
   return { same: 0, drift: 1 }[result.status] ?? 2;

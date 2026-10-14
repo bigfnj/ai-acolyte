@@ -1028,6 +1028,79 @@ the older builds whose rollouts open with two `session_meta` records (the archiv
 section), where the fork's own cells share the parent's scope and a collision with a
 parent cell left open would be withheld by the same rule.
 
+## Codex 0.161.0 follow-up, October 13, 2026: a refused nested command is not a cell's failure
+
+Added after the section above; it amends none of it. Same machine, `codex-cli` 0.161.0,
+Windows, isolated temp homes, scripted loopback responder, no credentials.
+
+**A code-mode cell whose nested command Codex refused is withheld, as the same refusal on a
+direct call already is.** Found while the continuity cases were written: under `codex exec`
+(approval never), a cell whose nested `tools.exec_command` asked for escalation read
+`failed`, though its command never ran. Auto Learn's rule is that a confirmed failure is
+negative evidence and a requested call that never ran is no evidence at all, so the verdict
+was conservative but not true. The direct-call treatment was checked first, because it is
+the one to mirror: on 0.161.0 a declined direct `exec_command` writes
+`exec_command failed: CreateProcess { message: "Rejected(\"rejected by user\")" }` as its
+whole output (the project-rules harness's declined cases, `acolyte-codex-project-rules-ar7WsG`),
+which carries no exit code and no script wording, so the parser reads it `unknown`. Declined
+direct calls are not counted as failures; nothing pinned that reading until this change. The
+code-mode harness gained three refusal cases. Each puts a refused call beside one that ran
+and exited nonzero, as a cell and as a direct `exec_command` call, and each script's first
+act creates a marker file, so which commands ran is read from disk:
+
+- `refused-never`: `codex exec`, approval never, an escalation request. No prompt; the
+  refusal is `approval policy is Never; reject command — you cannot ask for escalated
+  permissions if the approval policy is Never`.
+- `declined`: an app-server prompt answered `decline`; the refusal is the declined direct
+  call's message above.
+- `declined-after-yield`: the decline answered 3 s late, so the cell yields first and the
+  refusal arrives as its `wait`'s result.
+
+A direct call's whole output is the message. A cell's result is `Script failed` with nothing
+under `Output:` beside `Script error:` plus the same message, word for word: the nested call
+fails with the direct call's own words, and the script dies of it. `codeModeRefused` in
+`src/history-adapters.js` recognises exactly that two-part shape (it shares
+`codeModeScriptError` with the not-found answer) carrying exactly one of the two measured
+messages, and the parser applies such a result as `unknown` with no nested status, in the
+cell's own result and in a `wait`'s result, where it still closes the cell. That is the
+declined direct call's reading, and the direct shape itself is untouched. A cell whose
+command ran and exited nonzero stays `failed`; it sits beside the refused one in every
+session. A command's stdout cannot write the shape. A script that throws one of the
+messages as a bare string can, as `thrown-string` measured for not-found, and that cell
+reads withheld, never credited.
+
+`test/fixtures/codex-code-mode-refusal-sanitized.jsonl` holds the three rollouts, sanitized
+as the continuity fixture is (a direct call's `Chunk ID` and `Wall time:` are normalised
+too; neither occurs in the older fixtures), and two runs wrote byte-identical files.
+`test/codex-code-mode-refusal.test.js` pins the measured texts and shapes, every call's
+verdict alone and in one file, parity between each refused cell and its refused direct
+call, the never-the-opposite property on these records, the exact-shape refusals (a thrown
+`Error`'s spelling, leading or trailing text, a third part, stdout below `Output:`, one
+string, no `Script error:` prefix, another policy named, another rejection reason), the
+refusal through a wait closing the cell, the direct shape unchanged, append-slice identity
+across the refused cell's wait, and a sanitization gate. Against the parser before this
+change, five of its seven tests fail. Harness on 0.161.0: all 26 sessions pass, every
+verdict exact, and the sequence and continuity fixtures regenerate byte-identical to the
+committed ones, in two full runs (`acolyte-code-mode-7jTzKY`, `-J7BWuv`, the second
+against the committed parser and harness bytes); those two and a run of the refusal cases
+alone wrote the same refusal fixture (`acolyte-code-mode-PC4DDT`). Against the parser before this change,
+exactly the three refused cells fail, each read `failed`, and both refused direct calls
+read `unknown` (`acolyte-code-mode-y1hnyf`). Mutation: fourteen parser mutants were each
+killed (the refusal unrecognised; the cell's own result, or a wait's, not neutralised, or
+keeping its nested status; any script error, or /reject/i, accepted; any head after
+`Script failed`; more parts; no prefix needed; either measured message dropped; the
+neutralisation widened to direct outputs; a refusal through a wait leaving the cell open).
+
+**Not changed, and inconsistent with that rule: a declined MCP call counts as failed.**
+The MCP reader maps a declined call (`status: failed` with `error`, the old `Err`) to
+`failed` (the MCP section above; `codexMcpStatus` reads `Err` the same way). A declined
+MCP call never ran either. It is a different record with its own consequences for reviewed
+MCP approvals, so it is left for a change of its own rather than altered beside this one.
+Not measured here: other refusal sources (an execpolicy `forbidden` rule, a Guardian or
+auto-review denial, an approval aborted rather than declined, and a nested
+`tools.shell_command`), whose messages this parser does not know and so still reads, in a
+cell, as the script's failure.
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,
@@ -1113,7 +1186,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1670#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1735#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

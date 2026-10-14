@@ -2115,4 +2115,7 @@ module.exports = {
   AUTO_SUFFIX_CLOSED_ROOTS,
   AUTO_SAFE_GIT_SUBCOMMANDS,
   normalizePermissionSpelling,
+  // Consumed by src/auto-learn-manager.js (revivesNullRule, 2026-10-14), so the merge restores a
+  // stored null rule under exactly the condition this module re-derives one: one set, not two.
+  CLAUDE_WITHHOLDING_REASONS,
 };

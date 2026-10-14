@@ -1356,11 +1356,11 @@ function defaultCodexValidator(text, context) {
 }
 function createAutoLearnManager(options = {}) {
   const aliases = object(options.paths) ? options.paths : {};
-  // One spelling each. The `homeDir` and `successThreshold` legs were removed
-  // 2026-10-13: the extension set both spellings to the same values on one
-  // literal, so each leg was shadowed whenever it was supplied, and no other
-  // caller (CLI, scripts, tests) used them. test/codex-inventory-ui.test.js now
-  // fails if the extension supplies a key this factory does not read.
+  // One spelling each. `homeDir` and `successThreshold` went 2026-10-13: the extension set both spellings
+  // to one value, so each leg was shadowed (test/codex-inventory-ui.test.js now fails on a supplied key this
+  // factory does not read). `claudeHistoryPath`, `codexHistoryPath`, `validateCodexRules` and `codexBundlePath`
+  // went 2026-10-14 with no supplier at all in src, bin, vscode-extension, scripts or test, and
+  // test/auto-learn-manager.test.js pins each as ignored and the spelling that remains as read.
   const home = path.resolve(options.home || os.homedir());
   const codexHome = resolveCodexHome({ codexHome: options.codexHome,
     ...(options.home !== undefined ? { home } : {}) });
@@ -1404,13 +1404,13 @@ function createAutoLearnManager(options = {}) {
   const codexBackupPath = path.join(home, '.ai-acolyte', 'backups',
     `codex-policy.${hash(Buffer.from(normalizedPath(codexHome))).slice(0, 16)}.json`);
   const claudeRoots = configuredRoots(home,
-    options.claudeRoots ?? options.claudeHistoryPath ?? aliases.claudeHistory,
+    options.claudeRoots ?? aliases.claudeHistory,
     [path.join(home, '.claude', 'projects')]);
   // BOTH folders Codex writes transcripts to: archiving a thread MOVES its rollout
   // from `sessions/YYYY/MM/DD/` to a flat `archived_sessions/` (measured 2026-10-13),
   // and a default of `sessions/` alone dropped its calls from the corpus on the spot.
   const codexRoots = configuredRoots(home,
-    options.codexRoots ?? options.codexHistoryPath ?? aliases.codexHistory,
+    options.codexRoots ?? aliases.codexHistory,
     [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')]);
   const historyScanner = typeof options.historyScanner === 'function' ? options.historyScanner : scanHistoryFiles;
   // Injectable for the fixtures that have to make the two stores disagree, and
@@ -1470,7 +1470,7 @@ function createAutoLearnManager(options = {}) {
     return { stale, inspected, reasons, notes, findings };
   }
   const codexValidator = typeof options.codexValidator === 'function' ? options.codexValidator
-    : typeof options.validateCodexRules === 'function' ? options.validateCodexRules : defaultCodexValidator;
+    : defaultCodexValidator;
   const codexExecutable = options.codexExecutable || 'codex';
   const afterPolicyWrite = typeof options.testHooks?.afterPolicyWrite === 'function'
     ? options.testHooks.afterPolicyWrite : null;
@@ -1814,7 +1814,7 @@ function createAutoLearnManager(options = {}) {
     const current = statusFrom(state);
     const codexManaged = { policy: 'absent', degraded: false, entries: [] };
     try {
-      const bundle = JSON.parse(fs.readFileSync(options.codexBundlePath || path.join(codexHome, 'cloud-config-bundle-cache.json'), 'utf8'));
+      const bundle = JSON.parse(fs.readFileSync(path.join(codexHome, 'cloud-config-bundle-cache.json'), 'utf8'));
       if (!Array.isArray(bundle?.signed_payload?.bundle?.requirements_toml?.enterprise_managed)) throw new Error('Unsupported Codex managed bundle');
       const health = enterprisePrefixRuleHealth(bundle);
       codexManaged.policy = health.degraded ? 'unreadable' : 'present';

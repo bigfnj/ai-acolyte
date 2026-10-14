@@ -786,7 +786,7 @@ function classifyInvocation(invocation) {
     risk = maxRisk(risk, 'destructive'); reasons.add('destructive-command');
   } else if (NETWORK_ROOTS.has(normalized) || hasRemoteArgument(raw, argv)) {
     risk = maxRisk(risk, 'network'); reasons.add('network-command');
-  } else if (SHELL_WRAPPERS.has(normalized) || /\.(?:bat|cmd|ps1|sh)$/i.test(String(result.executable || root || ''))) {
+  } else if (SHELL_WRAPPERS.has(interpreterAlias(normalized)) || /\.(?:bat|cmd|ps1|sh)$/i.test(String(result.executable || root || ''))) {
     risk = maxRisk(risk, 'shell'); reasons.add('shell-wrapper');
   } else if (WRITE_ROOTS.has(normalized)) {
     risk = maxRisk(risk, 'write'); reasons.add('write-command');
@@ -1168,6 +1168,33 @@ function aggregateObservations(observations, options = {}) {
 // modes, which always took this word), and there `Bash(uname --version *)` is a strict subset
 // of the `Bash(uname *)` that path already grants.
 const INFO_PREFIX_FLAGS = new Set(['--help', '--version', '-h', '-V']);
+
+// The interpreter a versioned or distribution name runs, for the SHELL_WRAPPERS lookup in
+// classifyInvocation (2026-10-14). That lookup compared the normalized root by exact name, so
+// `python3.12 x.py`, `nodejs x.js`, `ruby3.2 x.rb`, `perl5.36 x.pl`, `php8.2 x.php` and
+// `pwsh-preview -File x.ps1` classified as `unknown-command` while `python`, `node`, `ruby`,
+// `perl`, `php` and `pwsh` are `shell-wrapper`. An independent copy of the exporter's
+// COMMAND_ALIASES (src/policy-exporters.js, which has the per-name reasons), kept apart for the
+// same reason as the auto-safe tables: test/policy-exporters.test.js asserts the two agree on
+// every spelling it lists. A name that is none of these comes back unchanged, so the lookup is
+// exactly the old one for it. `.exe` is already gone (normalizeRoot); `.cmd` and `.bat` are
+// stripped here too, though for this lookup the `.bat`/`.cmd` executable test beside it
+// already made such a root `shell-wrapper`. Defined below its consumer for the reason given
+// above INFO_PREFIX_FLAGS.
+const INTERPRETER_ALIASES = [
+  [/^(?:python\d*(?:\.\d+)*[dmtw]*(?:-dbg)?|pypy\d*(?:\.\d+)*|pyw?)$/, 'python'],
+  [/^node(?:js)?\d*(?:\.\d+)*$/, 'node'],
+  [/^ruby\d+(?:\.\d+)*$/, 'ruby'],
+  [/^perl\d+(?:\.\d+)*$/, 'perl'],
+  [/^php\d+(?:\.\d+)*$/, 'php'],
+  [/^pwsh-(?:preview|lts)$/, 'pwsh'],
+  [/^yarnpkg$/, 'yarn'],
+];
+function interpreterAlias(normalized) {
+  const name = String(normalized || '').replace(/\.(?:exe|cmd|bat)$/i, '');
+  const alias = INTERPRETER_ALIASES.find(([pattern]) => pattern.test(name));
+  return alias ? alias[1] : name;
+}
 
 module.exports = {
   isLearnableTool,

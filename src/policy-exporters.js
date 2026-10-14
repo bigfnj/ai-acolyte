@@ -205,6 +205,53 @@ function canonicalRoot(token) {
   return (normalized.split('/').pop() || '').toLowerCase();
 }
 
+// The program a command root names, for the lookups that REFUSE (2026-10-14). canonicalRoot
+// keeps the spelling, so each refusal table was keyed by the spellings someone thought to list,
+// and a name nobody listed was an ordinary unknown command: "two tokens, so narrower" on the
+// Codex half, "not on any risky list" on the Claude half. MEASURED that day against 3417398:
+// `["python3.12", "-c", "x"]`, `["nodejs", "-e", "x"]`, `["python.bat", "-c", "x"]`,
+// `["sudo.cmd", "rm"]` and `["pwsh.cmd", "-Command", "x"]` each rendered as a reviewed
+// prefix_rule while `python`, `node`, `sudo` and `pwsh` were refused, and `Bash(python3.12 x.py
+// *)` rendered as a reviewed Claude rule where `Bash(python x.py *)` is refused by membership.
+//
+// Two normalizations, both toward the base the tables already hold:
+//   * the Windows launch suffixes `.exe`, `.cmd` and `.bat`. A bare name resolves through
+//     PATHEXT to any of them, and npm, npx, pnpm and yarn install as `.cmd`, pyenv-win's
+//     shims as `.bat`. `.com` is deliberately not stripped: `command.com` is the DOS shell,
+//     not the `command` exec wrapper, and has its own entry.
+//   * versioned and distribution names of one interpreter, which take its switches: CPython's
+//     `python3.12`, `python2.7`, `python3.13t` (free-threaded), `pythonw`, the `-dbg` builds,
+//     PyPy, and the `py`/`pyw` launchers; Debian's `nodejs` and versioned `node20`; `ruby3.2`;
+//     `perl5.36`; `php8.2` and `php82`; `pwsh-preview` and `pwsh-lts`; Debian's `yarnpkg`. Each
+//     pattern needs the base name followed only by digits, dots or those exact suffixes, so a
+//     tool that merely starts with one (`python3-config`, `nodemon`, `node-gyp`, `perldoc`,
+//     `phpunit`, `pytest`) is untouched.
+//
+// Only refusal lookups use this: the wrapper, interpreter, runner and risk tables, the
+// validator's bare-prefix bans. The allow tables (CLAUDE_SAFE_*, CLAUDE_REVIEWABLE_ROOTS,
+// AUTO_SUFFIX_CLOSED_ROOTS, the git and rg read sets) keep the exact spelling, because `cat.cmd`
+// is a batch file that happens to be called cat, and trusting it as cat would widen a gate.
+// Normalizing toward a base can make a prefix NARROWER than the generic rule judged it (the
+// generic rule calls `["python3.12", "-m", "pytest", "-x"]` broad for ending in an option; the
+// python grammar calls it pinned), and that is the base's own verdict: `["python", "-m",
+// "pytest", "-x"]` already renders. src/auto-learn.js keeps an independent copy for its
+// wrapper lookup (interpreterAlias); test/policy-exporters.test.js holds the two to the same
+// spellings.
+const COMMAND_ALIASES = [
+  [/^(?:python\d*(?:\.\d+)*[dmtw]*(?:-dbg)?|pypy\d*(?:\.\d+)*|pyw?)$/, 'python'],
+  [/^node(?:js)?\d*(?:\.\d+)*$/, 'node'],
+  [/^ruby\d+(?:\.\d+)*$/, 'ruby'],
+  [/^perl\d+(?:\.\d+)*$/, 'perl'],
+  [/^php\d+(?:\.\d+)*$/, 'php'],
+  [/^pwsh-(?:preview|lts)$/, 'pwsh'],
+  [/^yarnpkg$/, 'yarn'],
+];
+function commandBase(token) {
+  const name = canonicalRoot(token).replace(/\.(?:exe|cmd|bat)$/, '');
+  const alias = COMMAND_ALIASES.find(([pattern]) => pattern.test(name));
+  return alias ? alias[1] : name;
+}
+
 function cleanOneLine(value, maxLength = 240) {
   return String(value == null ? '' : value)
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
@@ -311,8 +358,8 @@ const INLINE_CODE_FLAGS = new Map(Object.entries({
   php: (token) => /^-[rRBE]/.test(token) || /^--(?:run|process-(?:code|begin|end))(?:=|$)/.test(token),
   npx: (token) => token === '-c' || token === '--call' || token.startsWith('--call='),
 }));
-INLINE_CODE_FLAGS.set('python3', INLINE_CODE_FLAGS.get('python'));
-INLINE_CODE_FLAGS.set('py', INLINE_CODE_FLAGS.get('python'));
+// `python3` and `py` had their own rows here until 2026-10-14; commandBase now hands every
+// CPython, PyPy and launcher spelling over as `python`, so one row serves them all.
 
 // `env` and `xargs` run whatever command follows their own options, so a prefix is
 // only as narrow as the command it names. Returns that inner prefix (possibly empty),
@@ -539,7 +586,7 @@ const PYTHON_GRAMMAR = {
   pin: ['-m'], pinFused: /^-m./,
 };
 const INTERPRETER_GRAMMAR = new Map(Object.entries({
-  python: PYTHON_GRAMMAR, python3: PYTHON_GRAMMAR, py: PYTHON_GRAMMAR,
+  python: PYTHON_GRAMMAR,                             // every CPython/PyPy/py spelling (commandBase)
   node: {
     info: new Set([...DEFAULT_INFO, '-v']),
     flags: ['-i', '--interactive', '-c', '--check', '--inspect', '--inspect-brk', '--inspect-wait', '--no-warnings',
@@ -1099,7 +1146,7 @@ function reachesRunnerExec(node, rest) {
   return node.fallback === 'exec';
 }
 function claudeRuleRunsAnyCommand(tokens) {
-  const node = RUNNER_GRAMMAR.get(canonicalRoot(tokens[0]).replace(/\.(?:exe|cmd)$/, ''));
+  const node = RUNNER_GRAMMAR.get(commandBase(tokens[0]));
   if (!node) return false;
   const rest = tokens.slice(1).map(String);
   return reachesRunnerExec(node, rest) || runnerIsBroad(node, rest);
@@ -1107,13 +1154,13 @@ function claudeRuleRunsAnyCommand(tokens) {
 
 function wrapperIsBroad(prefix) {
   const root = canonicalRoot(prefix?.[0]);
-  const base = root.replace(/\.(?:exe|cmd)$/, '');
+  const base = commandBase(prefix?.[0]);
   const runner = RUNNER_GRAMMAR.get(base);
   // git's global options (GIT above): reached here directly and through every wrapper's
   // recursion, so `["xargs", "git"]` and `["timeout", "5", "git", "-c", "x=y", "status"]` are
   // as broad as the git prefix they name.
   if (base === 'git') return runnerIsBroad(GIT, prefix.slice(1).map(String));
-  if (!SHELL_WRAPPERS.has(root) && !runner) return false;
+  if (!SHELL_WRAPPERS.has(root) && !SHELL_WRAPPERS.has(base) && !runner) return false;
   if (prefix.length === 1) return true;
   if (INLINE_CODE_FLAGS.has(base) && prefix.slice(1).some((token) => INLINE_CODE_FLAGS.get(base)(String(token)))) {
     return true;
@@ -1142,7 +1189,7 @@ function wrapperIsBroad(prefix) {
   // that already holds a fixed command after `/c`, and that was refused before too, so
   // every cmd prefix is broad (2026-10-13).
   if (['cmd', 'command.com'].includes(base)) return true;
-  if (['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(root)) {
+  if (base === 'powershell' || base === 'pwsh') {
     if (['-c', '-command', '-encodedcommand', '-enc'].includes(second)) return true;
     return !['-file', '-f'].includes(second) || prefix.length < 3;
   }
@@ -1167,7 +1214,7 @@ function wrapperIsBroad(prefix) {
 
 function candidateIsWrapper(candidate, prefix) {
   return Boolean(candidate?.wrapper || candidate?.isWrapper || candidate?.is_wrapper ||
-    SHELL_WRAPPERS.has(canonicalRoot(prefix?.[0])));
+    SHELL_WRAPPERS.has(canonicalRoot(prefix?.[0])) || SHELL_WRAPPERS.has(commandBase(prefix?.[0])));
 }
 
 function prefixIsAutoSuffixClosed(prefix) {
@@ -1192,11 +1239,7 @@ function prefixIsKnownRisky(prefix) {
   if (root === 'rg' || root === 'rg.exe') {
     return prefix.length < 2 || !SAFE_RG_PREFIXES.has(String(prefix[1]));
   }
-  if (prefix.length === 1 && [
-    'docker', 'docker.exe', 'node', 'node.exe', 'perl', 'perl.exe', 'py',
-    'py.exe', 'python', 'python.exe', 'python3', 'python3.exe', 'ruby',
-    'ruby.exe',
-  ].includes(root)) return true;
+  if (prefix.length === 1 && ['docker', 'node', 'perl', 'python', 'ruby'].includes(commandBase(prefix[0]))) return true;
   return false;
 }
 
@@ -1208,7 +1251,7 @@ function candidateEligibleForCodex(candidate, options) {
   // A runner root (RUNNER_GRAMMAR) is judged like a wrapper here and only here: it is not a
   // SHELL_WRAPPERS member, because membership there would also refuse `Bash(docker ps *)`
   // on the Claude side, at any depth (claudeRuleRunsAnyCommand draws that line instead).
-  const base = canonicalRoot(prefix[0]).replace(/\.(?:exe|cmd)$/, '');
+  const base = commandBase(prefix[0]);
   if (candidateIsWrapper(candidate, prefix) || RUNNER_GRAMMAR.has(base)) {
     if (!reviewed || wrapperIsBroad(prefix)) return null;
   }
@@ -1464,11 +1507,11 @@ function patternSafetyErrors(pattern, number) {
   const second = pattern.length > 1
     ? (Array.isArray(pattern[1]) ? pattern[1] : [pattern[1]]).map((value) => String(value).toLowerCase())
     : [];
-  if (['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(root) &&
+  if (['powershell', 'pwsh'].includes(commandBase(pattern[0])) &&
       (pattern.length === 1 || (pattern.length === 2 && second.some((value) => ['-c', '-command'].includes(value))))) {
     errors.push(`Rule ${number}: broad PowerShell command prefix is forbidden`);
   }
-  if (pattern.length === 1 && ['curl', 'curl.exe', 'py', 'py.exe', 'python', 'python.exe', 'python3', 'python3.exe'].includes(root)) {
+  if (pattern.length === 1 && (['curl', 'curl.exe'].includes(root) || commandBase(pattern[0]) === 'python')) {
     errors.push(`Rule ${number}: bare ${root} prefix is too broad`);
   }
   if ((root === 'git' || root === 'git.exe') && pattern.length === 1) errors.push(`Rule ${number}: bare git prefix is too broad`);
@@ -1599,7 +1642,7 @@ function claudePermissionIsSafe(parsed, options) {
   }
   const root = parsed.root.toLowerCase();
   if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
-      STATE_MUTATING_ROOTS.has(root) || SHELL_WRAPPERS.has(root)) return false;
+      STATE_MUTATING_ROOTS.has(root) || SHELL_WRAPPERS.has(root) || SHELL_WRAPPERS.has(commandBase(root))) return false;
   if (claudeRuleRunsAnyCommand(parsed.tokens)) return false;
   if (!reviewed && !prefixIsAutoSuffixClosed(parsed.tokens)) return false;
   if (parsed.tokens.length === 1) {

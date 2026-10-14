@@ -1085,3 +1085,90 @@ test('a reviewable root is grantable by hand and never automatically', () => {
       `${permission} must stay refused under review`);
   }
 });
+
+// Versioned and distribution interpreter names, and the Windows launch suffixes (2026-10-14,
+// commandBase in src/policy-exporters.js). MEASURED that day against 3417398 with a 136-probe
+// over these rows and the two tests below: 87 verdicts changed, 70 from rendered to refused (20
+// bare spellings, 21 code forms, 20 reviewed Claude rules, 9 `.cmd`/`.bat` wrapper prefixes)
+// and 17 learner families from `unknown-command` to `shell-wrapper`; none the other way, and no
+// pinned form or control moved. The rest were refused already, through the learner union's
+// `.cmd` spellings (`python3.cmd`, bare `pwsh.cmd`, `timeout.cmd`, `nice.cmd`) or the old
+// `.exe|.cmd` strip (`uv.cmd`). Each row is [spelling, a form that hands over code, a form that
+// pins the program].
+const INTERPRETER_SPELLINGS = [
+  ['python3.12', ['-c', 'x'], ['x.py']], ['python2.7', ['-c', 'x'], ['x.py']],
+  ['python3.13t', ['-Ic', 'x'], ['-m', 'pytest']], ['pythonw', ['-c', 'x'], ['x.pyw']],
+  ['python3-dbg', ['-c', 'x'], ['x.py']], ['pypy3', ['-c', 'x'], ['x.py']], ['pyw', ['-c', 'x'], ['x.py']],
+  ['python.bat', ['-c', 'x'], ['x.py']], ['python3.cmd', ['-c', 'x'], ['x.py']],
+  ['Python3.12.EXE', ['-c', 'x'], ['x.py']],
+  ['nodejs', ['-e', 'x'], ['x.js']], ['node20', ['-e', 'x'], ['x.js']], ['node.bat', ['-p', 'x'], ['x.js']],
+  ['ruby3.2', ['-e', 'x'], ['x.rb']], ['perl5.36', ['-e', 'x'], ['x.pl']], ['php8.2', ['-r', 'x'], ['x.php']],
+  ['php82', ['-r', 'x'], ['x.php']],
+  ['pwsh-preview', ['-Command', 'x'], ['-File', 'x.ps1']], ['pwsh-lts', ['-c', 'x'], ['-File', 'x.ps1']],
+  ['pwsh.cmd', ['-Command', 'x'], ['-File', 'x.ps1']], ['powershell.bat', ['-enc', 'x'], ['-File', 'x.ps1']],
+  ['yarnpkg', ['node'], ['build']],
+];
+// Tools whose names merely START with an interpreter's. Not aliases, so judged as before.
+const NOT_INTERPRETERS = ['python3-config', 'python-config', 'nodemon', 'node-gyp', 'perldoc', 'phpunit',
+  'pytest', 'pyright', 'rubocop', 'pwsh-x'];
+
+test('a versioned, distribution or .cmd/.bat interpreter name is refused exactly as its base is', () => {
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const [spelling, code, pinned] of INTERPRETER_SPELLINGS) {
+    // MUTATION: drop the python row from COMMAND_ALIASES (src/policy-exporters.js).
+    // `["python3.12"]` renders a bare rule and this fails. Confirmed 2026-10-14.
+    // MUTATION: strip only `.exe|.cmd` in commandBase (the old suffix set). `["python.bat"]`
+    // renders. Confirmed 2026-10-14.
+    // MUTATION: drop `&& !SHELL_WRAPPERS.has(base)` in wrapperIsBroad. The root is on no
+    // table, so `["python3.12"]` renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount([spelling]), 0, `${spelling} is an interpreter and must not become a bare rule`);
+    assert.equal(codexRuleCount([spelling, ...code]), 0, `${JSON.stringify([spelling, ...code])} hands over code`);
+    // Control: the base's grammar judges it, so a pinned program still renders.
+    assert.equal(codexRuleCount([spelling, ...pinned]), 1, `${JSON.stringify([spelling, ...pinned])} pins its program`);
+    // The Claude half refuses an interpreter root at any depth, by membership (64b4eaa).
+    // MUTATION: drop `|| SHELL_WRAPPERS.has(commandBase(root))` from claudePermissionIsSafe.
+    // `Bash(python3.12 x.py *)` renders. Confirmed 2026-10-14.
+    const rule = `Bash(${spelling} ${pinned.join(' ')} *)`;
+    assert.deepEqual(renderClaudePermissions([rule], { includeReviewed: true }), [], rule);
+    // The learner's own lookup agrees (its independent copy, interpreterAlias).
+    // MUTATION: make interpreterAlias return its argument unchanged (src/auto-learn.js).
+    // `python3.12 x.py` is `unknown-command` and this fails. Confirmed 2026-10-14.
+    const learned = classifyInvocation({ tool: 'Bash', command: `${spelling} ${pinned.join(' ')}`, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${spelling}: ${JSON.stringify(learned.reasons)}`);
+  }
+  // The two copies agree on what is NOT an alias, too.
+  for (const name of NOT_INTERPRETERS) {
+    assert.equal(codexRuleCount([name]), 1, `${name} is not an interpreter alias and is judged as before`);
+    const learned = classifyInvocation({ tool: 'Bash', command: `${name} x`, source: 'claude' });
+    assert.ok(!learned.reasons.includes('shell-wrapper'), `${name}: ${JSON.stringify(learned.reasons)}`);
+  }
+});
+
+test('the .cmd and .bat spellings of a wrapper are judged as the wrapper', () => {
+  // MEASURED 2026-10-14 against 3417398: 9 of these 12 rendered, because the wrapper rows were
+  // spelled bare and `.exe` only; `timeout.cmd` and `nice.cmd` were refused through the learner
+  // union's `.cmd` spellings, and `uv.cmd` by the old `.exe|.cmd` strip.
+  for (const prefix of [['sudo.cmd', 'rm'], ['sudo.bat', 'ls'], ['doas.cmd', 'ls'], ['timeout.cmd', '5'],
+    ['nohup.bat', 'sh'], ['nice.cmd', '-n', '5'], ['watch.cmd', 'ls'], ['cmd.bat', '/c'], ['npx.bat', 'sh'],
+    ['env.bat', 'FOO=1'], ['uv.cmd', 'run'], ['docker.bat', 'exec', 'ctr', 'sh']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  // Controls: the same wrappers once they name a narrow command, as their bare spelling does.
+  for (const prefix of [['timeout.cmd', '5', 'rg'], ['nohup.bat', 'rg'], ['uv.cmd', 'run', 'pytest'],
+    ['docker.bat', 'ps']]) {
+    assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
+  }
+});
+
+test('the validator bans a bare interpreter or a broad PowerShell prefix in every spelling', () => {
+  // The second line behind wrapperIsBroad: a generated rules file is refused at merge time.
+  // MUTATION: restore the exact-name list in patternSafetyErrors' python check.
+  // `["python3.12"]` validates and this fails. Confirmed 2026-10-14.
+  for (const pattern of [['python3.12'], ['pypy3'], ['pyw'], ['python.bat'], ['pwsh-preview'],
+    ['pwsh.cmd', '-Command'], ['powershell.bat', '-c']]) {
+    assert.equal(validateCodexRulesText(manualRule(pattern)).valid, false, JSON.stringify(pattern));
+  }
+  for (const pattern of [['python3-config'], ['pwsh.cmd', '-File', 'x.ps1'], ['python3.12', 'x.py']]) {
+    assert.equal(validateCodexRulesText(manualRule(pattern)).valid, true, JSON.stringify(pattern));
+  }
+});

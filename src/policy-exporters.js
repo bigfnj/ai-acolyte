@@ -16,12 +16,15 @@
 // its arity and effect are unknown; and a prefix that ends before the program is pinned. An exact
 // informational form (`--version`, `--help`) is narrow only where it was MEASURED to print and
 // exit before anything after it runs. The broad verdict is the safe failure, always: a reviewer
-// can narrow a refused prefix, but cannot see what a narrow verdict let through. Two limits are
+// can narrow a refused prefix, but cannot see what a narrow verdict let through. Three limits are
 // known and recorded rather than closed: tokens after a fixed-purpose subcommand or a task target
 // are that command's own and stay unread (make excepted, which reads them all), so a prefix still
 // admits whatever its continuation adds (`["npm", "test"]` admits `npm test --node-options=...`,
-// ACCEPTED-RECORDED); and the Claude half is stricter than this, refusing a wrapper or runner root
-// at any depth by membership (64b4eaa), whatever the rest of the rule names.
+// ACCEPTED-RECORDED); the tables enumerate runners, so a runner no table here names is judged by the
+// generic rule as an ordinary program, which leaves a new exec-style tool narrow until a table names
+// it (ACCEPTED-RECORDED; the remedy is adding it here, as the M1 census did on 2026-10-14); and the
+// Claude half is stricter than this, refusing a wrapper or runner root at any depth by membership
+// (64b4eaa), whatever the rest of the rule names.
 
 // The one thing taken from the learner, and only to REFUSE more; see SHELL_WRAPPERS
 // below for why that direction, and only that one, is safe to share.
@@ -95,6 +98,19 @@ const CODEX_END_MARKER = '# END permission-wildcarding generated rules';
 // `command` and `xargs` were already refused bare through the learner's table and are
 // not repeated here; their depth rules live in the same two places. Each root is
 // spelled bare and with `.exe`, as above (`sudo.exe` is a real Windows 11 binary).
+//
+// The M1 census (2026-10-14) adds more programs whose whole job is to run another, found missing from
+// every table. Each was checked against its man page or official docs and placed like its closest
+// modelled sibling, and listed as a literal in test/policy-exporters.test.js (M1) so a drop fails by
+// name. The identity changers and ungoverned sandboxes (`bwrap`, `proot`, `setpriv`, `sg`,
+// `systemd-nspawn`) join ALWAYS_BROAD_WRAPPERS, broad at any depth like sudo, with their reasons there.
+// The pure exec wrappers that exec their trailing argv directly (`caffeinate`, `cgexec`, `numactl`,
+// `prlimit`, `sandbox-exec`, `unbuffer`, `xvfb-run`) get an EXEC_WRAPPER_GRAMMAR entry each, so a
+// reviewed prefix is as narrow as the command it names, as for `nice` and `timeout`. `flatpak` is a
+// RUNNER_GRAMMAR dispatcher whose `run` is broad. All are in this own table, not the learner's,
+// because Claude Code does not strip them, which is where busybox, chroot and strace already sit. The
+// census is bounded by the header's third limit; the further candidates are docs/engineering-record.md
+// (M1), ACCEPTED-RECORDED and narrow until a table names them.
 const OWN_SHELL_WRAPPERS = [
   'bash', 'bash.exe', 'cmd', 'cmd.exe', 'command.com', 'dash', 'dash.exe',
   'duckdb', 'duckdb.exe', 'fish', 'fish.exe', 'hyperfine', 'hyperfine.exe',
@@ -105,10 +121,11 @@ const OWN_SHELL_WRAPPERS = [
   // learner lists them too; they are spelled here as well so the refusal does not hang on it.
   // `dx` is `deno x`'s alias, here only (RUNNER_ALIASES says why).
   'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe', 'dx', 'dx.exe',
-  ...['busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice',
-    'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser',
-    'script', 'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time',
-    'timeout', 'unshare', 'valgrind', 'watch'].flatMap((root) => [root, `${root}.exe`]),
+  ...['builtin', 'busybox', 'bwrap', 'caffeinate', 'cgexec', 'chroot', 'chrt', 'doas', 'firejail',
+    'flock', 'gdb', 'ionice', 'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'numactl',
+    'pkexec', 'prlimit', 'proot', 'runas', 'runuser', 'sandbox-exec', 'script', 'setpriv', 'setsid',
+    'sg', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-nspawn', 'systemd-run', 'taskset', 'time',
+    'timeout', 'unbuffer', 'unshare', 'valgrind', 'watch', 'xvfb-run'].flatMap((root) => [root, `${root}.exe`]),
 ];
 // The learner normalizes `.exe` away (src/auto-learn.js normalizeRoot) and this
 // module does not (canonicalRoot keeps the suffix), so each learner root is added in
@@ -498,7 +515,36 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
     values: ['-a', '-A', '-e', '-l', '-n', '-o', '-p', '-s', '-u', '-x', '-D', '-F', '-w', '--align', '--config',
       '--indent', '--library', '--output', '--where'],
     fused: /^(?:-[aAelnopsuxDFw].|--[a-z-]+=)/ },
-  valgrind: { flagPattern: /^(?:-[vqd]+|--[a-z0-9-]+(?:=.*)?)$/ },
+  valgrind: { flagPattern: /^(?:-[vqd]+|--tool=[a-z][a-z0-9-]*|--(?!tool=)[a-z0-9-]+(?:=.*)?)$/ },
+  // The M1 pure exec wrappers (2026-10-14), each documented to exec its trailing argv directly, so
+  // judged recursively like nice and timeout. Options from each tool's man page (cited beside it); an
+  // option no table lists is broad, as everywhere here.
+  numactl: {  // numactl(8), "runs processes with a specific NUMA scheduling or memory placement policy"
+    flags: ['-a', '--all', '-l', '--localalloc', '-b', '--balancing', '-s', '--show', '-H', '--hardware'],
+    values: ['-i', '--interleave', '-w', '--weighted-interleave', '-m', '--membind', '-N', '--cpunodebind',
+      '-C', '--physcpubind', '-p', '--preferred', '-P', '--preferred-many', '-c', '--cpubind'],
+    fused: /^(?:-[iwmNCpP].|--(?:interleave|weighted-interleave|membind|cpunodebind|physcpubind|preferred|preferred-many|cpubind)=)/ },
+  // prlimit(1), "prlimit will run this command with the given arguments". Each resource option takes an
+  // OPTIONAL value, which getopt accepts only fused, so a bare resource option is a flag (a query) and a
+  // fused one carries its numeric limit; -p/--pid operate on an existing process and name no command.
+  prlimit: { flags: ['--noheadings', '--raw', '--verbose', '--core', '--data', '--nice', '--fsize',
+    '--sigpending', '--memlock', '--rss', '--nofile', '--msgqueue', '--rtprio', '--stack', '--cpu',
+    '--nproc', '--as', '--locks', '--rttime'], flagPattern: /^-[cdefilmnqrstuvxy]+$/,
+  values: ['-o', '--output', '-p', '--pid'],
+  fused: /^(?:-[cdefilmnqrstuvxy][0-9:]|--(?:core|data|nice|fsize|sigpending|memlock|rss|nofile|msgqueue|rtprio|stack|cpu|nproc|as|locks|rttime|output|pid)=)/ },
+  cgexec: { flags: ['--sticky'], values: ['-g'], fused: /^-g./ },     // cgexec(1), "executes the task command ... in the given control groups"
+  unbuffer: { flags: ['-p'] },                                        // unbuffer(1) (expect), runs `program [ args ]`; -p for a pipeline
+  // xvfb-run(1), "The specified command is then run using the X display" of the Xvfb server it starts.
+  'xvfb-run': { flags: ['-a', '--auto-servernum', '-l', '--listen-tcp', '-h', '--help'],
+    values: ['-e', '--error-file', '-f', '--auth-file', '-n', '--server-num', '-p', '--xauth-protocol',
+      '-s', '--server-args', '-w', '--wait'],
+    fused: /^(?:-[efnpsw].|--(?:error-file|auth-file|server-num|xauth-protocol|server-args|wait)=)/ },
+  // caffeinate(8) (macOS), `caffeinate [-disu] [-t timeout] [-w pid] [utility arguments...]`; it forks
+  // and runs the utility while holding a sleep assertion.
+  caffeinate: { flags: ['-d', '-i', '-m', '-s', '-u'], flagPattern: /^-[dimsu]+$/, values: ['-t', '-w'], fused: /^-[tw]./ },
+  // sandbox-exec(1) (macOS), `sandbox-exec [-f file] [-n name] [-p string] [-D key=value ...] command`;
+  // it enters a sandbox and then executes the command. The profile is a sandbox DSL, not a program.
+  'sandbox-exec': { values: ['-f', '-n', '-p', '-D'], fused: /^-[fnpD]./ },
   builtin: {},
   noglob: {},
   nocorrect: {},
@@ -555,9 +601,24 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
 //     neither name was on any table, so even a bare `["icm"]` rendered (measured against
 //     fd05398). They join the learner's SHELL_WRAPPERS too, which is how this module's union
 //     reaches wrapperIsBroad for them.
+//   * setpriv, sg (M1, 2026-10-14): identity changers like sudo. setpriv "Sets or queries various
+//     Linux privilege settings" and sets the real/effective UID and GID (--reuid, --regid,
+//     --init-groups; util-linux setpriv(1)); sg runs its command "with the /bin/sh shell" under a
+//     different group (sg(1)), so it is shell text as well.
+//   * bwrap, systemd-nspawn, proot (M1, 2026-10-14): namespace and container builders with ungoverned
+//     options this module keeps no table of, so the command cannot be located reliably, as for
+//     systemd-run. bwrap's `--setenv VAR VALUE` sets the command's environment (LD_PRELOAD),
+//     `--uid`/`--gid` change its identity and `--cap-add` grants capabilities (bwrap(1)), so
+//     `["bwrap", "--bind", "/", "/", "sh", "-c", "x"]` and `["bwrap", "--setenv", "LD_PRELOAD",
+//     "./x.so", "cat"]`, which rendered by the generic rule until now (L3 recorded the second), are
+//     broad; systemd-nspawn's `--bind`, `--setenv`, `-u`/`--uid` and `--capability` do the same
+//     (systemd-nspawn(1)); proot's `-0`/`--root-id` "Make current user appear as root", `-q`/`--qemu`
+//     "Execute guest programs through QEMU as specified by command" names an emulator, and `-b`/`--bind`
+//     maps host paths (proot(1)).
 const ALWAYS_BROAD_WRAPPERS = new Set([
-  'doas', 'eval', 'firejail', 'gdb', 'icm', 'iex', 'invoke-command', 'invoke-expression', 'parallel', 'pkexec',
-  'runas', 'runuser', 'script', 'su', 'sudo', 'systemd-run', 'watch',
+  'bwrap', 'doas', 'eval', 'firejail', 'gdb', 'icm', 'iex', 'invoke-command', 'invoke-expression', 'parallel',
+  'pkexec', 'proot', 'runas', 'runuser', 'script', 'setpriv', 'sg', 'su', 'sudo', 'systemd-nspawn',
+  'systemd-run', 'watch',
 ]);
 
 // The wrappers whose exact `--version` or `--help` prefix is narrow on the Codex half
@@ -1293,6 +1354,13 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
   // binaries (COMPOSE above).
   nerdctl: DOCKER, 'docker-compose': COMPOSE, 'podman-compose': COMPOSE,
   kubectl: KUBECTL,
+  // flatpak (M1, 2026-10-14): `flatpak run APP` runs a sandboxed application, where `--command=COMMAND`
+  // picks the binary to run instead of the app's own and `--filesystem=host` escapes the sandbox
+  // (docs.flatpak.org, flatpak run, read 2026-10-14), so `run` is broad at any depth; a fixed
+  // subcommand such as `flatpak list` or `flatpak info` is narrow, and the exact `--version`/`--help`
+  // forms render. (flatpak-spawn, which runs a command in another sandbox, is a further candidate,
+  // recorded not implemented: docs/engineering-record.md, M1.)
+  flatpak: { info: DEFAULT_INFO, sub: { run: RUNS_ANY_COMMAND } },
   make: MAKE, just: JUST,
   // Tools whose option VALUE is a program to run, read anywhere on the line, so no prefix of
   // them can be narrow (added 2026-10-13). A prefix rule admits every continuation, and each

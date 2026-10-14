@@ -864,6 +864,80 @@ test('the Claude side refuses the same wrappers at any depth, by membership', ()
   assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
 });
 
+// M1 census (2026-10-14): more programs whose whole job is to run another, placed like their
+// closest modelled sibling (src/policy-exporters.js, the M1 comments). Each root is a LITERAL here,
+// so a drop from its table fails by name (the header's "names every newly covered root" rule). Each
+// rendered as a reviewed prefix_rule against the base source (M1_ALWAYS_BROAD bare and named,
+// M1_EXEC_WRAPPERS bare).
+const M1_ALWAYS_BROAD = ['bwrap', 'setpriv', 'sg', 'systemd-nspawn', 'proot'];
+const M1_EXEC_WRAPPERS = ['numactl', 'prlimit', 'cgexec', 'unbuffer', 'xvfb-run', 'caffeinate', 'sandbox-exec'];
+
+test('M1: a newly covered exec wrapper or identity changer is refused bare, in both spellings', () => {
+  for (const root of [...M1_ALWAYS_BROAD, ...M1_EXEC_WRAPPERS]) {
+    for (const spelling of [root, `${root}.exe`]) {
+      // MUTATION: drop the root from OWN_SHELL_WRAPPERS. The guard in wrapperIsBroad returns
+      // false (not a wrapper), the reviewed branch keeps the prefix, and a one-token rule renders.
+      assert.equal(codexRuleCount([spelling]), 0, `${JSON.stringify([spelling])} runs whatever follows it`);
+    }
+  }
+});
+
+test('M1: an identity changer or sandbox is broad at any depth, like sudo', () => {
+  for (const prefix of [
+    ['bwrap', '--bind', '/', '/', 'sh', '-c', 'x'], ['bwrap', '--setenv', 'LD_PRELOAD', './x.so', 'cat'],
+    ['bwrap', '--bind', '/', '/', 'ls'], ['setpriv', '--reuid=0', 'ls'], ['setpriv', 'ls'],
+    ['sg', 'grp', 'ls'], ['sg', 'grp', '-c', 'cmd'], ['systemd-nspawn', '-D', '/srv', 'ls'],
+    ['systemd-nspawn', 'ls'], ['proot', '-0', 'ls'], ['proot', '-r', '/srv', 'bash'],
+  ]) {
+    // MUTATION: drop the root from ALWAYS_BROAD_WRAPPERS. The named-command rows fall to the
+    // generic/exec rule and render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} is broad at any depth`);
+  }
+});
+
+test('M1: a pure exec wrapper is exactly as narrow as the command it names', () => {
+  for (const prefix of [   // option-only, or names a broad command: broad
+    ['numactl', '-i', 'all'], ['numactl', '-i', 'all', 'sh'], ['prlimit', '--nofile=1024'],
+    ['prlimit', '--nofile=1024', 'sh'], ['cgexec', '-g', 'cpu:/x'], ['cgexec', '-g', 'cpu:/x', 'env', 'FOO=1'],
+    ['unbuffer', '-p'], ['unbuffer', 'sh'], ['xvfb-run', '-a'], ['xvfb-run', '-s', '-screen 0', 'sh'],
+    ['caffeinate', '-i'], ['caffeinate', 'bash', '-c'], ['sandbox-exec', '-f', 'p.sb'], ['sandbox-exec', '-f', 'p.sb', 'sh'],
+  ]) {
+    // MUTATION: drop the root's EXEC_WRAPPER_GRAMMAR entry. Each falls to "two tokens, narrower"
+    // or lets a value option swallow the command, and renders.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names no command, or a broad one`);
+  }
+  for (const prefix of [   // names a concrete narrow command: renders
+    ['numactl', '-N', '0', 'ls'], ['numactl', 'ls'], ['prlimit', '--nofile=1024', 'ls'], ['prlimit', 'ls'],
+    ['cgexec', '-g', 'cpu:/x', 'ls'], ['unbuffer', '-p', 'grep'], ['unbuffer', 'rg'],
+    ['xvfb-run', '-a', 'rg'], ['caffeinate', '-i', 'ls'], ['caffeinate', '-t', '10', 'rg'],
+    ['sandbox-exec', '-f', 'p.sb', 'ls'], ['sandbox-exec', '-D', 'k=v', 'rg'],
+  ]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
+  }
+});
+
+test('M1: flatpak run is broad at any depth, flatpak list and a version are narrow', () => {
+  for (const prefix of [['flatpak', 'run', 'org.x.App'], ['flatpak', 'run', 'org.x.App', 'sh'], ['flatpak']]) {
+    // MUTATION: drop the flatpak RUNNER_GRAMMAR entry. `["flatpak", "run", "org.x.App"]` is a
+    // wrapperless root and renders.
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  for (const prefix of [['flatpak', 'list'], ['flatpak', '--version']]) {
+    assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
+  }
+  // Claude half: `flatpak run` refused at any depth, `flatpak list` not.
+  assert.deepEqual(renderClaudePermissions(['Bash(flatpak run org.x.App *)'], { includeReviewed: true }), []);
+  assert.deepEqual(renderClaudePermissions(['Bash(flatpak list *)'], { includeReviewed: true }), ['Bash(flatpak list *)']);
+});
+
+test('M1: the Claude side refuses the new wrappers at any depth, by membership', () => {
+  for (const permission of ['Bash(bwrap ls *)', 'Bash(numactl ls *)', 'Bash(proot -0 ls *)',
+    'Bash(sandbox-exec -f p.sb ls *)', 'Bash(setpriv ls *)', 'Bash(caffeinate -i ls *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  assert.deepEqual(renderClaudePermissions(['Bash(git diff *)'], { includeReviewed: true }), ['Bash(git diff *)']);
+});
+
 test('every reviewed cmd prefix is broad: the code switch may follow other switches', () => {
   // cmd.exe takes its command from the first /c or /k after any other switches (/r is
   // an old alias of /c). Checking the second token alone let these three render.

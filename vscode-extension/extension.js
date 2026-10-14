@@ -21,7 +21,7 @@ const {
 } = require('./src/policy-lock');
 const {
   readEnterpriseBundle, allowedApprovalPolicies, enterprisePolicyAssessment,
-  codexRuleFileSet,
+  codexRuleFileSet, refreshProjectTrust, abandonProjectTrustRefreshes,
 } = require('./src/codex-policy');
 const {
   CODEX_CONFIG, LEGACY_CLAUDE_STATE_FILE, LEGACY_CODEX_STATE_FILE,
@@ -34,7 +34,8 @@ const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
-const { commandLaunch } = require('./src/exec-resolve');
+const { commandLaunch, endProcessTree } = require('./src/exec-resolve');
+const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
 const { CodexMemoryLint } = require('./codexMemoryLint');
@@ -118,7 +119,6 @@ let autoLearnWorkerRunner = null;
 let policyBounce = null;        // debounce for policy-signal / settings-change guard runs
 let localDrainBounce = null;    // debounce for settings.local.json writes
 let localDrainRetries = 0;      // consecutive deferrals while settings.json was unreadable
-let localDrainAt = null;        // timestamp of the last local drain that changed something
 let dashboardBounce = null;     // debounce for dashboard pushes (see refresh())
 
 // ── deactivation ──────────────────────────────────────────────────────────────
@@ -159,11 +159,19 @@ function trackChild(child) {
   return child;
 }
 
+// The whole TREE under each child, not the child alone (2026-10-14). On Windows
+// child.kill() ends one PID, and the children here are routinely not the program
+// that matters: an npm `codex.cmd` runs as cmd.exe -> node, and the Codex trust
+// worker is node -> (cmd.exe ->) codex. Measured: deactivate's child.kill() on a
+// trust worker whose stand-in codex never answered left that codex running,
+// orphaned, after the extension was gone. endProcessTree (src/exec-resolve.js)
+// runs taskkill /T /F and then child.kill(); POSIX keeps the plain kill. Returns
+// a promise for the reaping, which deactivate awaits, bounded, after it has
+// dropped its retainers.
 function killLiveChildren() {
-  for (const child of [...liveChildren]) {
-    try { child.kill(); } catch { /* already gone */ }
-  }
+  const reaped = [...liveChildren].map((child) => endProcessTree(child));
   liveChildren.clear();
+  return Promise.all(reaped);
 }
 
 // ── settings.json helpers ─────────────────────────────────────────────────────
@@ -178,10 +186,10 @@ function readSettings() {
 // The state constants, the "why is there no value" read, and the rebasing writer
 // all moved to src/settings-write.js so the CLI — whose hook is the highest-
 // frequency writer of this file — uses the same one instead of a naive spread.
-// Re-exported as locals here so every existing call site is untouched.
+// Re-exported as locals; SETTINGS_ABSENT, read nowhere in this file, dropped 2026-10-14.
 const {
   createSettingsWriter,
-  SETTINGS_ABSENT, SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
+  SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
 } = require('./src/settings-write');
 
 // backupPolicy is INJECTED rather than imported by the writer: it reaches
@@ -812,6 +820,16 @@ function downloadRecallModel() {
   // (sweepStaleModelTemps above), so the per-writer name no longer trades the fixed name's
   // self-overwrite for an unbounded pile of abandoned partials.
   const tmp = `${dest}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  // Which activation owns this download (2026-10-14). `deactivated` alone is not
+  // enough after a FAST same-realm re-activate: activate() clears it, so a retry
+  // timer armed by the old host (MODEL_RENAME_HELD) that fires afterwards sees a
+  // live host. Measured with the lifecycle harness: the rename was still stopped,
+  // but only by the transfer's `cancelled` flag that deactivate's abort sets, and
+  // the failure toast ("download failed — cancelled") landed in the successor's
+  // window. publish and fail now both ask whether this activation is still the
+  // current one, so neither depends on the transfer having been registered when
+  // the host went. Read here, before any await, like every other generation check.
+  const generation = activationGeneration;
   const vocabSource = recallVocabSource();
   const vocabTarget = path.join(modelDir, RECALL_VOCAB_FILE);
 
@@ -874,8 +892,9 @@ function downloadRecallModel() {
         // Silent when the host is going down: a toast raised from a torn-down
         // extension either lands on the successor's window or on nothing, and
         // "the download you did not cancel failed" is not a thing to tell
-        // somebody who just reloaded. The cleanup still runs.
-        if (!deactivated) {
+        // somebody who just reloaded. The cleanup still runs. A predecessor's
+        // download is silent in the successor's window for the same reason.
+        if (!deactivated && generation === activationGeneration) {
           vscode.window.showErrorMessage(`ai-acolyte: recall model download failed — ${err.message || err}`);
         }
         // Unlink INSIDE close()'s callback and resolve only after it: close() is async, so
@@ -908,8 +927,9 @@ function downloadRecallModel() {
         // A reload that landed during the transfer must not be finished off
         // by its own completion. This is the last moment before the file
         // becomes real, and renaming it here would publish a model into
-        // ~/.claude on behalf of a host that no longer exists.
-        if (deactivated) { fail(new Error('extension deactivated')); return; }
+        // ~/.claude on behalf of a host that no longer exists, including one a
+        // fast re-activate has already replaced (`generation` above).
+        if (deactivated || generation !== activationGeneration) { fail(new Error('extension deactivated')); return; }
         if (attempt > 1 && transfer?.cancelled) { fail(new Error('cancelled')); return; }
         // try/catch, because this runs inside out.close()'s callback or a timer
         // — long after the Promise executor returned. A throw here is not a
@@ -1063,7 +1083,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2546#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2666#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1142,12 +1162,40 @@ function memoryCardData(precomputed = null) {
         broken: report.broken.length,
         unresolved: report.unresolved.length,
         llm: st.state,
-        modelDir: st.modelDir ? st.modelDir.replace(os.homedir(), '~') : null,
-        canRebuild: !!recallScriptPath() && st.venv && st.model,
+        // `modelDir` and `canRebuild` were here until 2026-10-14 and the webview read
+        // neither. `canRebuild` was the costly one: recallScriptPath() probes the
+        // configured path and the candidate recall.py locations with fs checks, on
+        // every push. Rebuild decides for itself when clicked (rebuildRecall).
       };
     }
   } catch { /* memory card is optional — never break the dashboard */ }
   return out;
+}
+
+// `autoLearn.codexExecutable`, from the USER tier only (2026-10-14).
+//
+// This value is a program the extension RUNS, with no prompt: `--version` on a
+// dashboard push (src/codex-version.js), `app-server` for the project-trust ask,
+// `execpolicy check` for Auto Learn and "Why did this prompt?". Window-scoped, as
+// it was, a repository's .vscode/settings.json could point it at a binary inside
+// the repository, and opening the folder ran it. VS Code's own gate does not cover
+// that: the manifest declares no `untrustedWorkspaces` capability, and the Workspace
+// Trust guide says an extension that declares nothing "will be treated as not
+// supporting Workspace Trust", so this extension is disabled in Restricted Mode and
+// never runs in an untrusted folder at all (checked against
+// code.visualstudio.com/api/extension-guides/workspace-trust, 2026-10-14). But
+// trusting a folder is routinely done to read it, and trust is a statement about
+// the editor, not about every binary path the folder names.
+//
+// So the key is `"scope": "machine"` in the manifest, which the contribution-points
+// reference defines as settable "only in user settings or only in remote
+// settings", and it is read here from inspect().globalValue, so a workspace or
+// folder value is ignored even if one reaches inspect(): the same rule
+// autoLearnWorkerTimeoutMs applies to the worker deadline, for the same reason.
+// The CLI keeps its explicit --codex-executable flag.
+function codexExecutableSetting(cfg) {
+  const value = typeof cfg.inspect === 'function' ? cfg.inspect('autoLearn.codexExecutable')?.globalValue : undefined;
+  return typeof value === 'string' && value ? value : 'codex';
 }
 
 // ── activation ────────────────────────────────────────────────────────────────
@@ -1184,7 +1232,7 @@ function autoLearnConfig() {
     debounceSeconds: Math.max(1, Number(cfg.get('autoLearn.debounceSeconds', 20)) || 20),
     codexScope,
     codexRulesPath,
-    codexExecutable: cfg.get('autoLearn.codexExecutable', 'codex') || 'codex',
+    codexExecutable: codexExecutableSetting(cfg),
     scopeWarning,
     // Evidence/state is still partitioned and cwd-filtered by the open
     // workspace. That is independent of scope: it decides which observations
@@ -1315,7 +1363,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5231#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5359#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1354,19 +1402,22 @@ function autoLearnStateStamp(manager) {
   } catch { return 'absent'; }
 }
 
+// One overview() call, which answers status and candidates from a single state
+// read. There was a second leg here for a manager WITHOUT overview(), building
+// the pair from status() and listCandidates(). It could not run: the manager is
+// always createAutoLearnManager()'s, whose export list carries overview, and no
+// harness in test/ replaces the manager module. Removed 2026-10-14 (finding 9).
+// A manager that somehow lacked it now throws, which autoLearnCardData already
+// catches and reports on the card, rather than quietly reading state twice.
 function autoLearnEvidence(cfg) {
   const manager = getAutoLearnManager();
   const key = `${autoLearnManagerKey}|${autoLearnStateStamp(manager)}`;
   if (autoLearnCardCache?.key === key) return autoLearnCardCache.data;
-  const data = typeof manager?.overview === 'function'
-    ? (() => {
-      const view = manager.overview();
-      return {
-        status: view?.status || {},
-        candidates: Array.isArray(view?.candidates) ? view.candidates : [],
-      };
-    })()
-    : { status: managerStatus(manager) || {}, candidates: managerCandidates(manager) };
+  const view = manager.overview();
+  const data = {
+    status: view?.status || {},
+    candidates: Array.isArray(view?.candidates) ? view.candidates : [],
+  };
   autoLearnCardCache = { key, data };
   return data;
 }
@@ -1452,14 +1503,19 @@ function autoLearnCardData() {
     enabled: cfg.enabled, mode: cfg.mode, threshold: cfg.threshold,
     codexScope: cfg.codexScope, scopeWarning: cfg.scopeWarning,
     busy: autoLearnBusy, error: autoLearnLastError,
-    lastScanAt: status.lastScanAt || status.lastScan || null,
-    lastApplyAt: status.lastApplyAt || status.lastApplicationAt || null,
+    // No `lastScanAt` / `lastApplyAt` since 2026-10-14 (finding 9). Each carried a
+    // second leg (`|| status.lastScan`, `|| status.lastApplicationAt`) that could
+    // never decide anything, because the manager's status sets both spellings
+    // from the same value; and the webview read neither field at all, so the
+    // census in test/dashboard-view.test.js now holds this card to the same rule
+    // as the payload: every field posted has a reader. `canUndo` lost the same
+    // kind of leg: status.canUndo IS Boolean(state.lastApplication).
     counts: countAutoLearnCandidates(
       candidates, status, cfg.codexRulesPath ? ['claude', 'codex'] : ['claude'], cfg.mode, readSettings(),
     ),
     scan: autoLearnScanHealth(status.lastScanStats),
     codexEvidence: status.codexEvidence || null,
-    canUndo: Boolean(status.canUndo || status.lastApplication),
+    canUndo: status.canUndo === true,
   };
 }
 
@@ -1540,12 +1596,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5251#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5389#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2334#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2454#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -1783,12 +1839,51 @@ function execFileCaptured(executable, args) {
   });
 }
 
+// The one spelling of "which rule set this window describes", for the dashboard
+// count, its trust refresh and "Why did this prompt?". One function, because the
+// trust cache is keyed on these fields: a push and a refresh that spelled them
+// differently would settle one entry and keep reading the other.
+function codexRuleSetOptions(cfg) {
+  return { home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null,
+    workspaceRoot: cfg.workspaceRoot, codexExecutable: cfg.codexExecutable };
+}
+
 // One definition of "the set Codex evaluates", shared with the pre-write validator
 // (src/codex-policy.js), so "Why did this prompt?" cannot name a cause the write never
 // checked. The workspace root adds the trusted project folders, which that check omits.
-function codexRuleFileSetFor(cfg) {
-  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null,
-    workspaceRoot: cfg.workspaceRoot, codexExecutable: cfg.codexExecutable });
+//
+// ASYNC since 2026-10-14. It was a synchronous codexRuleFileSet, which on a trust
+// cache miss spawnSync'd `codex app-server` on the extension host with a 40 s
+// ceiling (src/codex-policy.js, "THE ASK NEVER RUNS ON THE EXTENSION HOST THREAD").
+// The trust verdict is now settled off-thread and awaited, and the set is read
+// from the cache. If the refresh could not settle it (torn down mid-ask), the set
+// says the project folders are still being checked rather than guessing them.
+async function codexRuleFileSetFor(cfg) {
+  const options = codexRuleSetOptions(cfg);
+  await refreshProjectTrust({ ...options, track: trackChild });
+  return codexRuleFileSet({ ...options, projectTrust: 'cached' });
+}
+
+// The dashboard's half: one refresh at a time, and a push when it lands, so a
+// cold panel shows the project rules a second later without waiting for some
+// unrelated event. Bounded by construction: a refresh that lands makes the next
+// read fresh, so the push it causes finds nothing pending and starts nothing.
+// The generation check keeps a predecessor's late answer from pushing to, or
+// clearing the latch of, a same-realm successor.
+let projectTrustRefreshing = false;
+// A late continuation's push, for this activation only.
+const settledFor = (generation) => () => {
+  if (!deactivated && generation === activationGeneration) dashboard?.refresh();
+};
+function refreshProjectTrustForDashboard(cfg) {
+  if (projectTrustRefreshing || deactivated) return;
+  projectTrustRefreshing = true;
+  const generation = activationGeneration;
+  refreshProjectTrust({ ...codexRuleSetOptions(cfg), track: trackChild }).then((landed) => {
+    if (generation !== activationGeneration) return;
+    projectTrustRefreshing = false;
+    if (landed) dashboard?.refresh();
+  });
 }
 
 // `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
@@ -2042,7 +2137,10 @@ async function explainAutoLearnPrompt() {
     return;
   }
 
-  const ruleSet = codexRuleFileSetFor(cfg);
+  const ruleSet = await codexRuleFileSetFor(cfg);
+  // The await can outlive the host: deactivate kills the trust worker, and a
+  // modal raised after that lands on the successor's window or on nothing.
+  if (deactivated) return;
   const rules = ruleSet.files;
   const unreadable = ruleSet.failures.length
     ? `\n\nDEGRADED: ${ruleSet.failures.map((f) => `${f.path} (${f.code})`).join(', ')} could not be ` +
@@ -2248,35 +2346,54 @@ function registerLocalWatchers(context) {
 // Never allowed to throw into the scan: the channel API is absent from some test
 // hosts, and a logging failure must not turn a scan that returned into one the
 // card reports as failed.
+//
+// THE SET IS OF KINDS, NOT OF LINES (2026-10-14). The signature was the joined
+// text, counts included, so "3 files could not be read" and then "4 files could
+// not be read" were two sets, and a corpus whose unreadable count moved by one
+// file per scan appended a line per scan: the very flood the dedupe is for. Each
+// line now carries a kind (its text with every number replaced), and only a
+// change in kinds logs again. The counts in the channel are the first sighting's;
+// the card shows the current ones.
+//
+// AND THE HISTORY NOTES ARE LOGGED TOO, as notes. `codexHistoryNotes` (migrations
+// recorded, archived threads with no transcript, a degraded or unavailable
+// cross-check) were computed by every scan and reached only the CLI's JSON; the
+// panel's hover shows reasons alone. They are information, not trouble, so they
+// carry their own label and are never what makes the card say "degraded".
 let lastScanTroubleLog = '';
 function logScanTrouble(result) {
   try {
     if (!result || typeof result !== 'object') return;
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const lines = [];
-    if (result.blindScan) lines.push('nothing was enumerated, so the cursor map was preserved');
+    const add = (label, text) => lines.push({ label, text, kind: `${label}\0${String(text).replace(/\d+/g, '#')}` });
+    const trouble = (text) => add('Auto Learn scan', text);
+    if (result.blindScan) trouble('nothing was enumerated, so the cursor map was preserved');
     for (const reason of Array.isArray(result.codexHistoryReasons) ? result.codexHistoryReasons : []) {
-      lines.push(`Codex history: ${reason}`);
+      trouble(`Codex history: ${reason}`);
     }
-    if (result.codexHistoryInspected === 'partial') lines.push('the Codex history-store check ran degraded');
-    if (result.errors) lines.push(`${plural(result.errors, 'file', 'files')} could not be read`);
+    if (result.codexHistoryInspected === 'partial') trouble('the Codex history-store check ran degraded');
+    if (result.errors) trouble(`${plural(result.errors, 'file', 'files')} could not be read`);
     if (result.unreadable) {
-      lines.push(`${plural(result.unreadable, 'file', 'files')} had an unreadable stretch that was skipped`);
+      trouble(`${plural(result.unreadable, 'file', 'files')} had an unreadable stretch that was skipped`);
     }
     if (result.retainedObservations) {
-      lines.push(`${plural(result.retainedObservations, 'observation hash', 'observation hashes')} held over the cap`);
+      trouble(`${plural(result.retainedObservations, 'observation hash', 'observation hashes')} held over the cap`);
     }
     if (result.unmatchedResults) {
-      lines.push(`${plural(result.unmatchedResults, 'result', 'results')} could not be matched to a call`);
+      trouble(`${plural(result.unmatchedResults, 'result', 'results')} could not be matched to a call`);
     }
-    const signature = lines.join('\n');
+    for (const note of Array.isArray(result.codexHistoryNotes) ? result.codexHistoryNotes : []) {
+      add('Auto Learn scan note', `Codex history: ${note}`);
+    }
+    const signature = lines.map((line) => line.kind).join('\n');
     if (signature === lastScanTroubleLog) return;
     lastScanTroubleLog = signature;
     if (!lines.length) return;
     const channel = sharedChannel();
     if (!channel) return;
     const stamp = new Date().toISOString();
-    for (const line of lines) channel.appendLine(`[${stamp}] Auto Learn scan: ${line}`);
+    for (const line of lines) channel.appendLine(`[${stamp}] ${line.label}: ${line.text}`);
   } catch (error) {
     console.error('ai-acolyte: could not log Auto Learn scan trouble —', error);
   }
@@ -2318,6 +2435,9 @@ function activate(context) {
   activationGeneration += 1;
   // A re-activate logs to a fresh channel, so current trouble is not "seen" yet.
   lastScanTroubleLog = '';
+  // A predecessor's trust refresh was abandoned by its deactivate and will never
+  // release this latch (its continuation checks the generation), so release it.
+  projectTrustRefreshing = false;
   // The busy latch, released unconditionally here. deactivate() only clears it
   // when it is still the current generation — correctly, because a successor's
   // in-flight scan must not have its latch cleared by a predecessor's
@@ -2879,16 +2999,14 @@ function schedule(delay = 400) {
   debounceTimer = setTimeout(() => runWildcarding(), delay);
 }
 
-// The dashboard's badge is processAllowList(<what is on disk>), which this pass
-// has just finished computing. `after` is already generalized, so
-// processAllowList(after) === after — that is the idempotence the watcher-loop
-// guard above relies on — and handing the pair over lets the refresh skip a
-// second quadratic pass over the same list. The dashboard still re-checks that
-// the disk holds `after`, so a write that lands in between costs nothing but the
-// recompute it would have done anyway.
-function wildcardingHint(after) {
-  return Array.isArray(after) ? { allow: after, optimized: after } : null;
-}
+// `wildcardingHint(after)` used to sit here, handing the push an { allow,
+// optimized } pair so it could skip a second processAllowList over the list this
+// pass had just computed. The push only needed that pass for `pendingWildcard`,
+// the "Wildcard Now" badge, and that field lost its last reader in the webview at
+// ee46cf5. Removed 2026-10-14 with the field, the push's own pass, the provider's
+// `hint` slot and `sameList`: the push now runs no wildcarding pass at all, so
+// there is nothing left for a hint to save (test/dashboard-view.test.js, "one
+// push per burst, and the push never runs the wildcarding pass").
 
 // Generalize + prune the allow list. `manual` = invoked via the button/command
 // (surface a status message even when nothing changed).
@@ -2907,7 +3025,7 @@ function runWildcarding(manual = false) {
   const reportAlreadyOptimal = (list, deny) => {
     backupPolicy(list, deny);
     if (manual) vscode.window.setStatusBarMessage('$(shield) ai-acolyte: Claude permissions already optimal', 4000);
-    dashboard?.refresh(wildcardingHint(list));
+    dashboard?.refresh();
   };
 
   // ── the unlocked probe ──────────────────────────────────────────────────────
@@ -3049,7 +3167,7 @@ function runWildcarding(manual = false) {
     }
   }
 
-  dashboard?.refresh(wildcardingHint(written ? written.allow : lockedAfter));
+  dashboard?.refresh();
 }
 
 // ── project-local approvals ─────────────────────────────────────────────────────
@@ -3174,7 +3292,6 @@ function drainLocal(manual = false) {
   const promoted = reports.flatMap((report) => report.promoted);
   const pruned = reports.reduce((sum, report) => sum + report.pruned.length, 0);
   if (promoted.length || pruned) {
-    localDrainAt = Date.now();
     lastRun = Date.now();
     vscode.window.showInformationMessage(
       `ai-acolyte: promoted ${promoted.length} project-local approval${promoted.length !== 1 ? 's' : ''} ` +
@@ -3226,13 +3343,14 @@ function localCardData() {
       kept += report.kept;
     }
   }
+  // No `folders` (the card counts `files`) and no `lastRun` since 2026-10-14: the
+  // webview read neither, and `lastRun` was the only reader of a module-level
+  // `localDrainAt` stamp that every changing drain kept writing.
   return {
-    folders: roots.length,
     files: roots.map((root) => localSettingsPath(root).replace(os.homedir(), '~')),
     promote, prune, kept, blocked,
     trusted,
     enabled: localDrainEnabled(),
-    lastRun: localDrainAt,
   };
 }
 
@@ -3921,18 +4039,12 @@ async function choosePermissionAgent(title, claude, codex) {
 // debounces a render, so it is sized to the burst and nothing more.
 const DASHBOARD_BOUNCE_MS = 60;
 
-// Cheap enough to be worth it: an O(n) compare in front of an O(n²) pass.
-function sameList(a, b) {
-  return a.length === b.length && a.every((entry, index) => entry === b[index]);
-}
-
 class WildcardingViewProvider {
   static viewId = 'permissionWildcarding.dashboard';
 
   constructor(context) {
     this.context = context;
     this.view = null;
-    this.hint = null;  // { allow, optimized } from the caller, consumed by the next _push
   }
 
   resolveWebviewView(view) {
@@ -3955,7 +4067,12 @@ class WildcardingViewProvider {
         case 'drainLocal':   vscode.commands.executeCommand('permission-wildcarding.drainLocal'); break;
         case 'toggleGuidance': vscode.commands.executeCommand('permission-wildcarding.toggleGuidance'); break;
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
-        case 'showWildcards': vscode.commands.executeCommand('permission-wildcarding.showWildcards'); break;
+        // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
+        // c09daab (the shared Saved permissions picker replaced that button), and the
+        // two synthetic test rows posting it directly were all that kept it alive. The
+        // palette command is untouched. test/dashboard-view.test.js now checks the
+        // reverse direction too: every arm here needs a postMessage of its type in the
+        // webview script, so a sender removed without its route fails.
         case 'codexHook': vscode.commands.executeCommand('permission-wildcarding.codexHook'); break;
         case 'reviewCodexMcp': vscode.commands.executeCommand('permission-wildcarding.reviewCodexMcp'); break;
         case 'searchCodexMemory': vscode.commands.executeCommand('permission-wildcarding.searchCodexMemory'); break;
@@ -3991,19 +4108,13 @@ class WildcardingViewProvider {
   // gatesBounce, policyBounce, localDrainBounce, autoLearnBounce): this was the
   // one that ran straight through, and it has ~35 call sites — several of them
   // watcher pairs (onDidChange + onDidCreate, or a delete beside a create) that
-  // fire together, each paying for a full work-up including a quadratic
-  // processAllowList.
-  //
-  // `hint` is an { allow, optimized } pair from a caller that just computed it.
-  // Used only when the list it was computed from is still what is on disk, so a
-  // write that landed in between falls back to a fresh pass rather than
-  // rendering a count against the wrong list.
-  refresh(hint = null) {
+  // fire together, each paying for a full work-up (the push ran a quadratic
+  // processAllowList until 2026-10-14; see the note where wildcardingHint was).
+  refresh() {
     // Before the timer, not inside it: nothing to push means nothing to schedule,
     // and this is the guard that keeps a collapsed sidebar (the view is disposed
     // on hide) from doing the whole work-up on every background event.
     if (!this.view) return;
-    this.hint = hint && Array.isArray(hint.allow) && Array.isArray(hint.optimized) ? hint : null;
     clearTimeout(dashboardBounce);
     dashboardBounce = setTimeout(() => this._push(), DASHBOARD_BOUNCE_MS);
   }
@@ -4038,8 +4149,6 @@ class WildcardingViewProvider {
     // reading a missing property is not a TypeError. Only an explicit `false`
     // means hidden.
     if (deactivated || !this.view || this.view.visible === false) return;
-    const hint = this.hint;
-    this.hint = null;
     // ONE read of settings.json per push, not two. This used to be `readSettings()` — a
     // readFileSync plus a JSON.parse — with `readSettingsState()` taking the same file
     // again for the three-state pill, eleven lines below the note explaining that
@@ -4072,11 +4181,16 @@ class WildcardingViewProvider {
       const entries = settings?.permissions?.[key];
       return entries === undefined || (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'));
     });
-    // Counts trusted project rules too: given a .codex folder, one cached ~1 s Codex config/read per config edit.
+    // Counts trusted project rules too, from the CACHED trust verdict only: this
+    // read never spawns (2026-10-14). Measured on v1.6.2, where it asked Codex
+    // synchronously: a cold push blocked the host 1,106 ms, one after a config.toml
+    // touch 980 ms, and one against a codex that never answers 31,331 ms. A miss now
+    // posts the user-scope count marked `pending`, starts one off-thread refresh,
+    // and the refresh's own push brings the project rules in.
     const codexSummaryConfig = autoLearnConfig();
-    const codexPermissions = readCodexPermissionSummary({ home: os.homedir(), codexHome: CODEX_HOME_DIR,
-      target: codexSummaryConfig.codexRulesPath, workspaceRoot: codexSummaryConfig.workspaceRoot,
-      codexExecutable: codexSummaryConfig.codexExecutable });
+    const codexPermissions = readCodexPermissionSummary({ ...codexRuleSetOptions(codexSummaryConfig),
+      projectTrust: 'cached' });
+    if (codexPermissions.pending) refreshProjectTrustForDashboard(codexSummaryConfig);
     // Saved shell approvals that are one-off scripts (src/permission-summary.js says what
     // counts and why). Off the SAME `allow` this push already read, per the note above:
     // a second readSettings() here would bring back the duplicate read it removed.
@@ -4096,20 +4210,12 @@ class WildcardingViewProvider {
       const broad = overBroadShellGrants(allow);
       overBroadGrants = { count: broad.count, total: broad.total, byReason: broad.byReason };
     } catch { /* keep the empty shape: the line simply does not render */ }
-    const wildcards = allow.filter((p) => p.includes('*')).sort();
-    // What Wildcard Now would actually change. The "specific" tally is not that
-    // number: an entry with no `*` is often one the pass can never generalize
-    // (Edit, Write, WebSearch, an exact mcp__server__tool), so badging the button
-    // with it advertises work that resolves to "already optimal".
-    //
-    // processAllowList is quadratic — ~57ms on the 423-entry list this was built
-    // for — and runWildcarding had just run it over the same input immediately
-    // before calling refresh(), so every settings write paid for it twice on the
-    // extension-host thread.
-    const optimized = hint && sameList(hint.allow, allow) ? hint.optimized : processAllowList(allow);
-    const pendingWildcard = optimized.length === allow.length && optimized.every((p, i) => p === allow[i])
-      ? 0
-      : optimized.filter((p) => !allow.includes(p)).length + allow.filter((p) => !optimized.includes(p)).length;
+    // A count, not the list. The payload used to carry `wildcards`, every wildcard
+    // entry sorted, on every push, and the webview never read it: the only reader
+    // is the Claude total's hover title, which wants this number. `pendingWildcard`
+    // (a processAllowList pass, quadratic, ~57 ms on a 423-entry list) went the same
+    // way on 2026-10-14; its badge left the webview at ee46cf5.
+    const wildcardCount = allow.filter((p) => p.includes('*')).length;
     // The live wildcarding pass watches Claude's settings.json; Auto Learn also
     // reads Codex history (regardless of codexScope, which only gates rule writes).
     // Name Codex in the status card whenever both are true, so the flagship line
@@ -4137,9 +4243,10 @@ class WildcardingViewProvider {
       type: 'data',
       // Three states, not existsSync. A corrupt or mid-write settings.json EXISTS, so the
       // pill read a green "Active" while every writer was throwing SETTINGS_UNREADABLE.
-      // readSettingsState was built for exactly this distinction. `active` stays a boolean for the two
-      // callers that only care whether writes can proceed; settingsState carries the third.
-      active: settingsState === 'present',
+      // readSettingsState was built for exactly this distinction. The boolean `active`
+      // that sat beside it was dropped 2026-10-14: the webview reads settingsState (and
+      // claudePermissionsComplete) and nothing read `active`, so its one test asserted a
+      // field no pixel depended on. That test now asserts the rendered status instead.
       settingsState,
       settingsPath: SETTINGS.replace(os.homedir(), '~'),
       version: extensionVersion(),
@@ -4153,11 +4260,9 @@ class WildcardingViewProvider {
       ],
       deadApprovals,
       overBroadGrants,
-      wildcardCount: wildcards.length,
-      specificCount: allow.length - wildcards.length,
-      pendingWildcard,
+      wildcardCount,
+      specificCount: allow.length - wildcardCount,
       backupCount: backupCount(),
-      wildcards,
       lastRun,
       autoLearn,
       memory: memoryCardData(memory),
@@ -4171,9 +4276,13 @@ class WildcardingViewProvider {
         // window. INFORMATION ONLY (src/codex-version.js): cached per binary,
         // probed in the background, never a reason for a warning badge. No
         // Codex home, no probe: a Claude-only machine gets no Codex line and
-        // spawns nothing. Required here, not at the top, so no line above moved.
-        cli: fs.existsSync(CODEX_HOME_DIR) ? require('./src/codex-version')
-          .dashboardCodexVersion({ executable: autoLearnConfig().codexExecutable, track: trackChild }) : null,
+        // spawns nothing.
+        // `onSettled` (2026-10-14): the probe this push started asks for one push
+        // when it has an answer, so a quiet window does not show a blank line until
+        // something unrelated refreshes it. Generation-checked, like every late
+        // continuation here, so a predecessor's probe cannot push to a successor.
+        cli: fs.existsSync(CODEX_HOME_DIR) ? dashboardCodexVersion({ executable: codexSummaryConfig.codexExecutable,
+          track: trackChild, onSettled: settledFor(activationGeneration) }) : null,
       },
       local: localCardData(),
       guidance: guidanceCardData(),
@@ -4617,12 +4726,21 @@ class WildcardingViewProvider {
     else setState('stLocal', 'drained');
 
     const complete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable'
-      && d.codexPermissions?.complete === true;
+      && codexCounted(d.codexPermissions);
     const known = (d.savedPermissions || []).length;
     // No tone for the one-off count: it is a note, not a warning (see oneOffApprovals).
     const oneOff = oneOffApprovals(d);
     setState('wcount', (complete ? known + ' total' : (known ? known + '+' : '?') + ' known')
       + (oneOff ? ' · ' + oneOff + ' one-off' : ''));
+  }
+
+  // The Codex count is whole only when every file was read AND the trusted-project
+  // folders have been settled. While Codex is still being asked which project
+  // folders it trusts (codexPermissions.pending, 2026-10-14), the user-scope count
+  // is a lower bound and renders as one ('N+'). The status pill keeps reading
+  // .complete alone: a check in progress is not a read that failed.
+  function codexCounted(codex) {
+    return !!codex && codex.complete === true && codex.pending !== true;
   }
 
   // Shared by the Saved permissions badge above and the line in its body below, the way
@@ -5062,8 +5180,8 @@ class WildcardingViewProvider {
     const claudeComplete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable';
     const countText = (count, complete) => complete ? String(count) : count ? count + '+' : '?';
     $('claudeTotal').textContent = countText(d.total, claudeComplete);
-    $('codexTotal').textContent = countText(codex.allow, codex.complete);
-    $('total').textContent = countText(d.total + codex.allow, claudeComplete && codex.complete);
+    $('codexTotal').textContent = countText(codex.allow, codexCounted(codex));
+    $('total').textContent = countText(d.total + codex.allow, claudeComplete && codexCounted(codex));
     $('total').title = 'Saved Claude allow entries plus local Codex shell allow declarations; not a count of commands or effective access.';
     $('claudeTotal').title = d.wildcardCount + ' wildcards; ' + d.specificCount + ' specific entries';
     $('codexTotal').title = (codex.prompt || 0) + ' prompt and ' + (codex.forbidden || 0)
@@ -5071,6 +5189,7 @@ class WildcardingViewProvider {
     $('permissionCoverage').textContent = [
       !claudeComplete ? 'Claude count incomplete.' : '',
       !codex.complete ? 'Codex count incomplete.' : '',
+      codex.pending ? 'Checking which project rule folders Codex trusts…' : '',
     ].filter(Boolean).join(' ');
     $('permissionCoverage').title = (codex.issues || []).map((issue) => issue.reason).join(' · ');
     const list = $('list');
@@ -5194,7 +5313,16 @@ async function deactivate() {
   // A cleared timer only stops a spawn that had not started. These four had, and
   // nothing retained them, so a reload left up to a 180s python child running
   // against a torn-down host — and the gate compile's callback wrote policy.
-  killLiveChildren();
+  // Started here, before anything is awaited; awaited (bounded) below, after the
+  // retainers are dropped, so a slow taskkill never holds a slot a successor needs.
+  const reaped = killLiveChildren();
+  // The trust worker among those children was just killed, and its refresh will
+  // settle with "the worker failed". Abandoned, so that answer is never cached as
+  // the verdict a same-realm re-activate reads (src/codex-policy.js).
+  abandonProjectTrustRefreshes();
+  // The same for a Codex version probe the kill just ended: abandoned, so it is not
+  // cached as a 60 s "timed out" that a same-realm re-activate would show first.
+  abandonCodexVersionProbes();
   // The fifth in-flight job, and the one this pair of calls used to miss: the
   // 32MB recall-model download is not a ChildProcess, so `liveChildren` never
   // held it and nothing here could stop it. It ran to completion and renamed a
@@ -5232,7 +5360,17 @@ async function deactivate() {
   autoLearnManagerKey = null;
   autoLearnCardCache = null;
 
-  if (autoLearnWorkerRunner) await autoLearnWorkerRunner.deactivate();
+  // The drain is STARTED here, synchronously, exactly where it always was: a
+  // same-realm activate() can run during the first await below, and it decides
+  // whether to drop a stranded runner by whether this one is already deactivating.
+  // Awaiting anything before this call let the successor keep the runner the old
+  // teardown then drained (test/extension-lifecycle-async.test.js, "a re-activate
+  // during the drain keeps its own dashboard and memory lint").
+  const drained = autoLearnWorkerRunner ? autoLearnWorkerRunner.deactivate() : null;
+  // The tree kills started above. Bounded: taskkill has its own 5 s ceiling, and a
+  // teardown must not wait longer than that on a process that refuses to die.
+  await Promise.race([reaped, new Promise((resolve) => setTimeout(resolve, 6000).unref?.())]);
+  if (drained) await drained;
   // This one DOES have to come after the drain, so nothing shortens it.
   // `deactivating` inside the runner is sticky and its public API has no reset,
   // while getAutoLearnWorkerRunner() only builds one when the slot is empty — so

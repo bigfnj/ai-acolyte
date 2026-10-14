@@ -21,6 +21,13 @@ const Module = require('node:module');
 
 function disposable() { return { dispose() {} }; }
 
+// The Codex executable every harness here is configured with unless a test names
+// one: a name nothing resolves (2026-10-14). The default `codex` resolved on PATH
+// on any machine with Codex installed, so every push with a Codex home spawned the
+// real `codex --version`, and since the probe now pushes once when it lands, that
+// push would arrive at a moment no test chose.
+const NO_CODEX = 'acolyte-no-such-codex-dashboard';
+
 // Captured at module load, BEFORE any harness installs its unref'ing override of
 // global.setTimeout. Without this, `settle()` schedules through that override, its
 // timer is unref'd, and nothing is left holding the event loop open while a test
@@ -152,9 +159,13 @@ function harness(tempHome, opts = {}) {
           // populated; empty for every other, so the default below is unchanged.
           get: (key, fallback) => {
             if (opts.settings && key in opts.settings) return opts.settings[key];
+            if (key === 'autoLearn.codexExecutable') return NO_CODEX;
             return key === 'autoLearn.enabled' ? false : fallback;
           },
-          inspect: () => ({}),
+          // The Codex executable answers on this door too, so the value is the same
+          // whichever one the extension reads it through.
+          inspect: (key) => (key === 'autoLearn.codexExecutable'
+            ? { globalValue: opts.settings && key in opts.settings ? opts.settings[key] : NO_CODEX } : {}),
           update: async () => {},
         };
       },
@@ -278,7 +289,7 @@ function harness(tempHome, opts = {}) {
   // local-drain-extension.test.js already does this, for the same reason.
   //
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:55#autoLearnUi,
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:56#autoLearnUi,
   // extension.js:10#createAutoLearnWorkerRunner), so leaving them cached leaves a second
   // harness holding the first one's instances.
   const extensionDir = path.dirname(extensionPath) + path.sep;
@@ -399,19 +410,38 @@ test('resolveWebviewView wires the webview and pushes one debounced payload', as
     assert.equal(ui.posted.length, 1);
     const data = ui.posted[0];
     assert.equal(data.type, 'data');
-    assert.equal(data.active, true);
+    assert.equal(data.settingsState, 'present');
     assert.equal(data.total, 1);
-    assert.deepEqual(data.wildcards, ['Bash(git status *)']);
     assert.deepEqual(data.savedPermissions, [
       { agent: 'claude', label: 'Bash(git status *)', value: 'Bash(git status *)' },
     ]);
     assert.equal(data.wildcardCount, 1);
     assert.equal(data.specificCount, 0);
-    assert.equal(data.pendingWildcard, 0, 'an already-optimal list badges no pending work');
     // The two helpers that need real bytes on disk; the other thirteen collapse
     // to null/0 under this harness, which is why it can stay this small.
     assert.equal(data.backupCount, 1, 'activation captured the live list into the backup');
     assert.ok(data.settingsPath.endsWith(path.join('.claude', 'settings.json')));
+
+    // EVERY TOP-LEVEL FIELD HAS A READER in the webview script (2026-10-14). The
+    // payload had grown five that nothing rendered -- `active`, `wildcards` (every
+    // wildcard, sorted, each push), `pendingWildcard` (a quadratic processAllowList
+    // per push), and inside the cards `memory.canRebuild` (fs probes per push) and
+    // `local.folders`/`local.lastRun` -- because a field nobody reads fails nothing.
+    // The render reads the payload as `d`, so a top-level key with no `d.<key>` in
+    // the script is one no pixel depends on.
+    // MUTATION: put `active: settingsState === 'present',` back in the payload. This
+    // fails naming `active`. Confirmed 2026-10-14.
+    const script = ui.view.webview.html.slice(ui.view.webview.html.indexOf('<script nonce='));
+    const unread = Object.keys(data).filter((key) => key !== 'type'
+      && !new RegExp(String.raw`\bd\.${key}\b|\bd\?\.${key}\b`).test(script));
+    assert.deepEqual(unread, [], `payload fields the webview never reads: ${unread.join(', ')}`);
+    // The Auto Learn card under the same rule (renderAutoLearn reads it as `a`):
+    // `lastScanAt` and `lastApplyAt` were posted on every push and read by nothing.
+    // MUTATION: put `lastScanAt: status.lastScanAt || null,` back in
+    // autoLearnCardData. This fails naming it. Confirmed 2026-10-14.
+    assert.ok(data.autoLearn && Object.keys(data.autoLearn).length > 5, 'precondition: the card was posted');
+    const unreadCard = Object.keys(data.autoLearn).filter((key) => !new RegExp(String.raw`\ba\.${key}\b`).test(script));
+    assert.deepEqual(unreadCard, [], `Auto Learn card fields the webview never reads: ${unreadCard.join(', ')}`);
   } finally {
     await app.dispose();
   }
@@ -445,7 +475,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['drainLocal', 'permission-wildcarding.drainLocal'],
       ['toggleGuidance', 'permission-wildcarding.toggleGuidance'],
       ['toggleGates', 'permission-wildcarding.toggleGates'],
-      ['showWildcards', 'permission-wildcarding.showWildcards'],
+      // showWildcards left with its switch arm on 2026-10-14 (no sender since c09daab):
+      // the reverse census at the bottom of this test is what would have caught it.
       ['codexHook', 'permission-wildcarding.codexHook'],
       ['reviewCodexMcp', 'permission-wildcarding.reviewCodexMcp'],
       ['searchCodexMemory', 'permission-wildcarding.searchCodexMemory'],
@@ -509,6 +540,22 @@ test('every dashboard message reaches its command, and nothing else does', async
       routes.map(([type]) => type).concat(['refresh', 'remove']).sort(),
       'the dashboard switch handles a message type this test does not exercise, or has '
       + 'stopped handling one it does');
+
+    // THE REVERSE DIRECTION (2026-10-14): every arm needs a SENDER in the webview
+    // script. The census above reconciles the switch against this file's own table,
+    // and posting each type directly cannot tell a live route from a dead one, so
+    // `showWildcards` outlived its button by two weeks (c09daab removed the sender)
+    // and autoLearnApply/autoLearnMode before it by three audits. A sender is a
+    // `postMessage({ type: '<label>'` in the panel's script; `refresh` is posted by
+    // the script itself on load, and `remove` by the per-row prune button.
+    // MUTATION: restore `case 'showWildcards': ...` and its row above. This fails
+    // naming showWildcards. Confirmed 2026-10-14.
+    const panelScript = source.slice(source.indexOf('<script nonce='));
+    const senders = new Set((panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [])
+      .map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
+    assert.ok(senders.size > 10, `precondition: the sender scan found only ${senders.size} senders`);
+    const unsent = labels.filter((label) => !senders.has(label));
+    assert.deepEqual(unsent, [], `dashboard routes with no sender in the webview: ${unsent.join(', ')}`);
 
     // The two that are handled in-process rather than dispatched.
     app.executed.length = 0;
@@ -658,31 +705,34 @@ test('with no live view there is no push and no work-up', async (t) => {
   env.write({ permissions: { allow: FIFTEEN, deny: [] } });
   const app = harness(env.tempHome);
   try {
-    // Never resolved: refresh() must not even reach processAllowList, because
-    // ~35 call sites — several of them file-watcher callbacks — fire while the
-    // sidebar is collapsed.
-    const before = app.passes.count;
+    // Never resolved: refresh() must not even reach the work-up, because ~35 call
+    // sites — several of them file-watcher callbacks — fire while the sidebar is
+    // collapsed. Counted on memoryReport, which every push calls exactly once: the
+    // push stopped running processAllowList on 2026-10-14, so the pass counter this
+    // used to watch would now stay still whether or not the work-up ran.
+    const before = app.memoryReports.count;
     app.provider.refresh();
     await settle();
-    assert.equal(app.passes.count, before, 'the whole work-up is skipped, not just the post');
+    assert.equal(app.memoryReports.count, before, 'the whole work-up is skipped, not just the post');
 
     const ui = fakeView();
     app.provider.resolveWebviewView(ui.view);
     await settle();
     assert.equal(ui.posted.length, 1);
+    assert.equal(app.memoryReports.count, before + 1, 'precondition: the counter does count a push');
 
     ui.on.dispose();
-    const after = app.passes.count;
+    const after = app.memoryReports.count;
     app.provider.refresh();
     await settle();
     assert.equal(ui.posted.length, 1, 'postMessage is not called once the view is gone');
-    assert.equal(app.passes.count, after);
+    assert.equal(app.memoryReports.count, after);
   } finally {
     await app.dispose();
   }
 });
 
-test('one push per burst, and the wildcarding pass is not repeated for it', async (t) => {
+test('one push per burst, and the push never runs the wildcarding pass', async (t) => {
   const env = setup(t);
   env.write({ permissions: { allow: FIFTEEN, deny: [] } });
   const app = harness(env.tempHome);
@@ -691,40 +741,33 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
     app.provider.resolveWebviewView(ui.view);
     await settle();
 
-    // runWildcarding computes processAllowList and hands the result over; the
-    // refresh that follows must not compute the identical value a second time.
+    // runWildcarding computes processAllowList; the refresh that follows must not
+    // compute it again. Until 2026-10-14 the push ran its own pass for the
+    // `pendingWildcard` badge and a hint from runWildcarding let it skip that once;
+    // the badge had no reader, so the push's pass, the hint and the badge are gone.
     ui.posted.length = 0;
     let before = app.passes.count;
     await app.commands.get('permission-wildcarding.runNow')();
     await settle();
-    // "one pass per settings write" is what this line USED to claim, and the fixture
-    // cannot reach that case: FIFTEEN is already fully generalized, so runNow finds a
-    // fixed point and NO settings write happens. The property actually under test is
-    // the optimal path — the refresh that follows must not recompute the value
-    // runWildcarding just handed it. The write path is covered by the test below,
-    // which expects a different number for a documented reason.
+    // FIFTEEN is already fully generalized, so runNow finds a fixed point and NO
+    // settings write happens: its one unlocked probe is the only pass. The write path
+    // is covered by the test below, which expects a different number for a
+    // documented reason.
     assert.equal(app.passes.count - before, 1,
       'one pass on the already-optimal path: the refresh must not recompute it');
     assert.equal(ui.posted.length, 1);
-    assert.equal(ui.posted[0].pendingWildcard, 0);
     assert.equal(ui.posted[0].wildcardCount, FIFTEEN.length);
 
     // A watcher pair (onDidChange + onDidCreate) fires together, and several
     // call sites refresh twice for one event. One push.
     ui.posted.length = 0;
+    before = app.passes.count;
     for (let i = 0; i < 5; i += 1) app.provider.refresh();
     await settle();
     assert.equal(ui.posted.length, 1, 'the burst coalesces into a single push');
-
-    // A hint is only a shortcut while it still describes the file. If something
-    // wrote settings.json in between, the pass runs for real rather than
-    // rendering a badge against a list that is no longer there.
-    ui.posted.length = 0;
-    before = app.passes.count;
-    app.provider.refresh({ allow: ['Bash(stale *)'], optimized: ['Bash(stale *)'] });
-    await settle();
-    assert.equal(app.passes.count - before, 1, 'a stale hint is recomputed, not trusted');
-    assert.deepEqual(ui.posted[0].wildcards, [...FIFTEEN].sort());
+    // MUTATION: put `processAllowList(allow)` back in _push. This counts 1. Confirmed
+    // 2026-10-14.
+    assert.equal(app.passes.count - before, 0, 'a push alone runs no wildcarding pass');
   } finally {
     await app.dispose();
   }
@@ -733,7 +776,7 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:2971#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3089#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -1006,8 +1049,13 @@ test('a corrupt settings.json is not reported as Active', async (t) => {
     app.provider.resolveWebviewView(ui.view);
     await settle();
     const healthy = ui.posted[ui.posted.length - 1];
-    assert.equal(healthy.active, true, 'precondition: a readable file is Active');
     assert.equal(healthy.settingsState, 'present');
+    // The RENDERED pill, not a payload boolean. This asserted `active` until
+    // 2026-10-14, a field the webview never read: the pill is drawn from
+    // settingsState and claudePermissionsComplete, so that is what is checked.
+    const shown = renderDashboard(app.provider, healthy);
+    assert.equal(shown.node('dot').className, 'dot', 'precondition: a readable file draws the live pill');
+    assert.equal(shown.node('statusText').textContent, 'Permissions');
 
     // Every read of settings.json from here on returns unparseable bytes.
     app.arm(Array(12).fill('corrupt'));
@@ -1017,8 +1065,10 @@ test('a corrupt settings.json is not reported as Active', async (t) => {
     const broken = ui.posted[ui.posted.length - 1];
     assert.equal(broken.settingsState, 'unreadable',
       'a present-but-unparseable file is its own state, not absent and not fine');
-    assert.equal(broken.active, false,
+    const refused = renderDashboard(app.provider, broken);
+    assert.equal(refused.node('dot').className, 'dot idle',
       'the green pill must not claim Active while every writer is refusing');
+    assert.equal(refused.node('statusText').textContent, 'Permissions · count incomplete');
   } finally { app.dispose(); }
 });
 
@@ -1045,6 +1095,9 @@ test('the card payload carries the line count, not just the byte count', async (
     assert.equal(m.lines, 84, 'the line count must reach the webview or the stat is a dash');
     assert.equal(m.maxLines, 200, 'the cap travels with the count, or the card invents one');
     assert.equal(m.linesOver, false);
+    // Gone 2026-10-14, unread by the webview: `canRebuild` cost recallScriptPath()'s fs
+    // probes on every push. MUTATION: restore it; this fails. Confirmed 2026-10-14.
+    assert.equal('canRebuild' in m || 'modelDir' in m, false, 'unread recall fields are not built per push');
   } finally { await app.dispose(); }
 });
 
@@ -1995,7 +2048,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // depends on a hash of the workspace root. Required lazily and INSIDE the
 // harness's Module._load hook rather than at the top of this file, so the copy it
 // resolves is the one the extension is already using, bound to the mocked `os`.
-function seedAutoLearnState(tempHome, lastScanStats) {
+function seedAutoLearnState(tempHome, lastScanStats, extra = {}) {
   // eslint-disable-next-line global-require
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
   const statePath = createAutoLearnManager({
@@ -2009,10 +2062,42 @@ function seedAutoLearnState(tempHome, lastScanStats) {
     applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
     codexTargets: {}, managedClaude: {}, managedHits: {}, managedHitsAt: null,
     derivedGuidance: { accepted: [], declined: [] }, prunedCandidates: {},
-    lastScanAt: Date.now(), lastScanStats, lastApplication: null,
+    lastScanAt: Date.now(), lastScanStats, lastApplication: null, ...extra,
   }, null, 2) + '\n');
   return statePath;
 }
+
+// `canUndo` drives the Undo button and had no test at all: replacing it with
+// `false` left the suite green (2026-10-14, while removing its redundant second
+// leg). One recorded application, in the shape the manager's own validator keeps.
+test('the Auto Learn Undo button is enabled exactly when an application is recorded', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, null, { lastApplication: { at: new Date().toISOString(), targets: [{
+      kind: 'claude', path: path.join(env.tempHome, '.claude', 'settings.json'),
+      backupPath: path.join(env.tempHome, '.claude', 'backups', 'auto-learn.json'),
+      beforeHash: 'a'.repeat(64), afterHash: 'b'.repeat(64), existed: true,
+    }] } });
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const recorded = ui.posted.at(-1).autoLearn;
+    // MUTATION: post `canUndo: false`. This fails. Confirmed 2026-10-14.
+    assert.equal(recorded.canUndo, true, 'a recorded application can be undone');
+    assert.equal(renderDashboard(app.provider, ui.posted.at(-1)).node('alUndo').disabled, false);
+
+    seedAutoLearnState(env.tempHome, null);
+    app.provider.refresh();
+    await settle();
+    const none = ui.posted.at(-1).autoLearn;
+    assert.equal(none.canUndo, false, 'nothing recorded, nothing to undo');
+    assert.equal(renderDashboard(app.provider, ui.posted.at(-1)).node('alUndo').disabled, true);
+  } finally {
+    await app.dispose();
+  }
+});
 
 test('the dashboard reports what the last scan could not read', async (t) => {
   const env = setup(t);
@@ -2660,7 +2745,9 @@ test('with two folders open the Project-local card names both files, not the bar
     const { local, rendered } = await localCard(app);
     const shown = files.map((file) => tilde(env.tempHome, file));
     assert.deepEqual(local.files, shown, 'one home-relative path per folder inspected');
-    assert.equal(local.folders, 2);
+    // No `local.folders` since 2026-10-14: the card counts `files`, and the subtitle
+    // below ("2 folders") is the assertion on that count that a reader depends on.
+    assert.equal('folders' in local, false, 'the unread folder count is not posted');
     assert.equal(local.promote, 2, 'precondition: both folders were dry-run, trusted');
 
     const sub = rendered.node('locsub');

@@ -8,6 +8,11 @@ The saved-rule total combines Claude allow entries and local Codex shell allow
 declarations, with a per-agent breakdown. It excludes Codex prompt/forbidden rules
 and native MCP settings; it does not measure effective command access. Unreadable
 or unsupported inputs produce an incomplete count instead of a false zero.
+A trusted project's `.codex/rules` count too, once Codex has said which project folders
+it trusts. The panel never waits for that answer: it asks in the background, shows the
+Codex count as a lower bound (`1+`) with "Checking which project rule folders Codex
+trusts…" meanwhile, and redraws when the answer lands. A `.codex` folder with no `rules`
+folder is not asked about at all.
 
 **Permission tools** starts collapsed. View/remove opens one searchable list for Claude
 and Codex; restore and project import ask which agent to manage. Codex hook and native MCP configuration
@@ -143,7 +148,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:3944#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4056#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -206,10 +211,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:3887#showWarningMessage`).
+`vscode-extension/extension.js:4005#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:3707#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:3825#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -228,11 +233,19 @@ and fresh-runtime evidence in the compatibility document.
 The other Auto Learn settings are `permissionWildcarding.autoLearn.enabled` (default
 **true**), `permissionWildcarding.autoLearn.intervalMinutes` (default **5**),
 `permissionWildcarding.autoLearn.debounceSeconds` (default **20** — the quiet window a
-watcher-driven scan waits out, so a burst of transcript writes coalesces into one scan), and
+watcher-driven scan waits out, so a burst of transcript writes coalesces into one scan),
 `permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
 `permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
 how long one worker operation may run before the extension stops waiting). The full list of
 all 18 settings is at the end of this file.
+
+`autoLearn.codexExecutable` is **machine-scoped**: set it in user settings. The extension
+runs that program without asking (`--version` for the dashboard's version line, `app-server`
+to ask which project rule folders Codex trusts, `execpolicy check` for Auto Learn), so a
+value in a repository's `.vscode/settings.json` is ignored rather than run. The extension is
+also disabled in Restricted Mode: it declares no `untrustedWorkspaces` capability, which
+VS Code treats as not supporting Workspace Trust. Trusting a folder still does not let the
+folder choose the binary.
 
 ### Future local CPU assistance
 
@@ -264,12 +277,12 @@ works under a managed policy.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:628#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:636#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:883#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:902#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -282,7 +295,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:705#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:713#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -297,7 +310,7 @@ the model asset and the venv, and never runs Python.
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1035#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1055#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -476,7 +489,7 @@ set, the setting wins. An edit applies to the next scan, with no reload.
 | `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |
 | `autoLearn.debounceSeconds` | `20` | Quiet window a watcher-driven scan waits out |
 | `autoLearn.codexScope` | `"user"` | `user` / `off` — where generated Codex rules land. `workspace` was withdrawn |
-| `autoLearn.codexExecutable` | `"codex"` | Binary used for `codex execpolicy check` |
+| `autoLearn.codexExecutable` | `"codex"` | Codex CLI the extension runs (`execpolicy check`, `--version`, `app-server`). Machine-scoped: a workspace value is ignored |
 | `autoLearn.workerTimeoutSeconds` | `300` | Seconds one worker operation may run before the extension stops waiting; `0` disables. Machine-scoped: a workspace value is ignored |
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation |

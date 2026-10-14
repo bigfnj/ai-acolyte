@@ -820,6 +820,16 @@ function downloadRecallModel() {
   // (sweepStaleModelTemps above), so the per-writer name no longer trades the fixed name's
   // self-overwrite for an unbounded pile of abandoned partials.
   const tmp = `${dest}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  // Which activation owns this download (2026-10-14). `deactivated` alone is not
+  // enough after a FAST same-realm re-activate: activate() clears it, so a retry
+  // timer armed by the old host (MODEL_RENAME_HELD) that fires afterwards sees a
+  // live host. Measured with the lifecycle harness: the rename was still stopped,
+  // but only by the transfer's `cancelled` flag that deactivate's abort sets, and
+  // the failure toast ("download failed — cancelled") landed in the successor's
+  // window. publish and fail now both ask whether this activation is still the
+  // current one, so neither depends on the transfer having been registered when
+  // the host went. Read here, before any await, like every other generation check.
+  const generation = activationGeneration;
   const vocabSource = recallVocabSource();
   const vocabTarget = path.join(modelDir, RECALL_VOCAB_FILE);
 
@@ -882,8 +892,9 @@ function downloadRecallModel() {
         // Silent when the host is going down: a toast raised from a torn-down
         // extension either lands on the successor's window or on nothing, and
         // "the download you did not cancel failed" is not a thing to tell
-        // somebody who just reloaded. The cleanup still runs.
-        if (!deactivated) {
+        // somebody who just reloaded. The cleanup still runs. A predecessor's
+        // download is silent in the successor's window for the same reason.
+        if (!deactivated && generation === activationGeneration) {
           vscode.window.showErrorMessage(`ai-acolyte: recall model download failed — ${err.message || err}`);
         }
         // Unlink INSIDE close()'s callback and resolve only after it: close() is async, so
@@ -916,8 +927,9 @@ function downloadRecallModel() {
         // A reload that landed during the transfer must not be finished off
         // by its own completion. This is the last moment before the file
         // becomes real, and renaming it here would publish a model into
-        // ~/.claude on behalf of a host that no longer exists.
-        if (deactivated) { fail(new Error('extension deactivated')); return; }
+        // ~/.claude on behalf of a host that no longer exists, including one a
+        // fast re-activate has already replaced (`generation` above).
+        if (deactivated || generation !== activationGeneration) { fail(new Error('extension deactivated')); return; }
         if (attempt > 1 && transfer?.cancelled) { fail(new Error('cancelled')); return; }
         // try/catch, because this runs inside out.close()'s callback or a timer
         // — long after the Promise executor returned. A throw here is not a
@@ -1071,7 +1083,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2627#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2639#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1351,7 +1363,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5320#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5332#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1576,12 +1588,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5350#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5362#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2415#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2427#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.

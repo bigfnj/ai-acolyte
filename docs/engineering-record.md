@@ -405,7 +405,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1537#runAutoLearnWorker`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1549#runAutoLearnWorker`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 
@@ -1285,7 +1285,7 @@ holds the full text.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:2983-2985#rides`);
+  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:2995-2997#rides`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -1889,7 +1889,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:4684#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:4696#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

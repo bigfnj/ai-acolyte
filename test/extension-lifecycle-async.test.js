@@ -2126,6 +2126,47 @@ test('a teardown while the publish is being refused publishes nothing and says n
     }
   });
 
+// The same teardown, with a same-realm re-activate inside the 20 ms wait (2026-10-14).
+// activate() clears `deactivated`, so to the old host's retry timer the host looked
+// live. What still stopped the rename was the transfer's `cancelled` flag, set by
+// deactivate's abort; what did NOT stop was the failure toast, "recall model download
+// failed — cancelled", raised in the successor's window for a download it never ran.
+test('a fast re-activate while the publish is being refused neither publishes the old download nor reports it to the new window',
+  TEST_TIMEOUT, async (t) => {
+    const box = await downloadAtPublish(t);
+    box.carrier.destroy = () => { box.carrier.destroyed = true; };
+    let teardown = null;
+    renameFailure = (attempt) => {
+      if (attempt > 1) return null; // the holder lets go: a retry WOULD land
+      teardown = box.app.extension.deactivate();
+      box.app.reactivate();
+      return holderError('EPERM');
+    };
+    t.after(() => { renameFailure = null; });
+    try {
+      box.body.finish();
+      assert.equal(await box.settled(), 'settled', 'the old download was left pending');
+      await teardown;
+      // NOT independently falsifiable today, and said so rather than claimed: dropping
+      // `generation !== activationGeneration` from publish leaves this green (run
+      // 2026-10-14), because deactivate's abortLiveTransfers also sets the handle's
+      // sticky `cancelled` flag, which the retry reads next and fails on. The
+      // generation check is the one that does not depend on the transfer still
+      // being registered when the host goes; the toast below is what the old code
+      // actually got wrong.
+      assert.equal(fs.existsSync(box.dest), false,
+        'WITNESS the predecessor’s retry published a model after a re-activate');
+      assert.equal(modelRenames, 1, 'no rename is attempted for a predecessor');
+      // MUTATION: drop the generation test from fail's toast. "download failed —
+      // extension deactivated" reaches the successor. Confirmed 2026-10-14.
+      assert.deepEqual(box.app.errors.filter((m) => m.includes('download failed')), [],
+        'the predecessor’s failure was reported in the successor’s window');
+      assert.deepEqual(box.leftovers(), [], 'the abandoned download left its .tmp behind');
+    } finally {
+      await box.app.dispose();
+    }
+  });
+
 test('a download another channel failed during the wait is not retried into place',
   TEST_TIMEOUT, async (t) => {
     const box = await downloadAtPublish(t);

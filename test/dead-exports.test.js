@@ -146,6 +146,9 @@ const TEST_ONLY = {
   'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
+  // Test-only since 2026-10-14: the extension's import of it was unused (since 000e5b0) and
+  // was what made the census count it as a production consumer.
+  'src/settings-write.js': ['SETTINGS_ABSENT'],
   'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
 };
 

@@ -116,6 +116,68 @@ function commandLaunch(name, args = []) {
   };
 }
 
+// AN npm SHIM, RUN AS THE NODE SCRIPT IT NAMES (2026-10-14). Launched through the
+// command processor, an npm `codex.cmd` is cmd.exe -> node, and that node is in no
+// job object: libuv puts every child a Node process spawns in a kill-on-close job
+// that allows silent breakaway, so cmd.exe is in the spawner's job and its own
+// child is not. A Codex config worker that dies with its host (the host's job ends
+// it) therefore ends cmd.exe, and the node under it keeps running (measured in
+// test/codex-mcp-config.test.js, "a worker whose host dies outright"). Spawned
+// directly, that node is the worker's own child, in the worker's job, and dies
+// with it; the native codex the npm launcher starts is in that node's job in turn.
+//
+// Only cmd-shim's own output is read, byte for byte apart from line endings and
+// the target: the form npm 7 and later write (cmd-shim 4+), which is the form any
+// npm that can install @openai/codex writes. The target must be a relative path
+// with no quote or `%` in it and must exist, and the node must be the shim's own
+// `node.exe` or, as the shim would choose, `node` from PATH, and an .exe. Anything
+// else (another shim generator, an older template, a hand-edited file, a shim that
+// passes node flags) returns null, and the caller launches the .cmd as before.
+// Windows only; POSIX has no .cmd. The cwd lookup cmd.exe would make for `node`
+// is not reproduced, on purpose (see taskkillPath below).
+const CMD_SHIM_HEAD = [
+  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0', '',
+  'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ') ELSE (', '  SET "_prog=node"',
+  '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\',
+].join('\n');
+const CMD_SHIM_TAIL = '" %*';
+function npmShimLaunch(name, args = []) {
+  if (process.platform !== 'win32') return null;
+  const shim = resolveExecutable(name);
+  if (!shim || path.extname(shim).toLowerCase() !== '.cmd') return null;
+  let text;
+  try {
+    if (fs.statSync(shim).size > 4096) return null;
+    text = fs.readFileSync(shim, 'utf8').replace(/\r\n/g, '\n').replace(/\n+$/, '');
+  } catch { return null; }
+  if (!text.startsWith(CMD_SHIM_HEAD) || !text.endsWith(CMD_SHIM_TAIL)) return null;
+  const target = text.slice(CMD_SHIM_HEAD.length, text.length - CMD_SHIM_TAIL.length);
+  if (!target || /["%\n]/.test(target) || path.isAbsolute(target) || /^[\\/]/.test(target)) return null;
+  const dir = path.dirname(shim);
+  const script = path.resolve(dir, target);
+  if (!isFile(script)) return null;
+  const local = path.join(dir, 'node.exe');
+  const node = isFile(local) ? local : resolveExecutable('node');
+  if (!node || path.extname(node).toLowerCase() !== '.exe') return null;
+  return { file: node, args: [script, ...(Array.isArray(args) ? args : []).map(String)], options: {}, resolved: shim };
+}
+
+// taskkill BY ABSOLUTE PATH, never by bare name (2026-10-14). libuv resolves a
+// bare name itself and looks in the CURRENT DIRECTORY before PATH, unless the
+// environment carries NoDefaultCurrentDirectoryInExePath. Measured on the
+// development box (libuv 1.52.1, Node 24.19.0): with that variable unset, a
+// taskkill.exe planted in the cwd ran in place of System32's; with it set, it did
+// not. The extension host's cwd is wherever VS Code was started (`code .` inside
+// a clone makes it that clone), and the Codex config worker inherits it, so a
+// repository could have supplied the program every deactivate runs. An agent
+// shell often sets the variable, which is how this hid: a test has to unset it.
+// SystemRoot is read first so a Windows installed off C: is honoured; the drive
+// is a last resort for an environment that carries neither variable.
+function taskkillPath() {
+  return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+}
+
 // End a child AND everything it started, which on Windows child.kill() does not.
 //
 // The launch above is why it matters. A batch shim runs through the command
@@ -158,9 +220,18 @@ function commandLaunch(name, args = []) {
 // someone else's. Suspected and not verified: taskkill /T finds the tree by
 // ParentProcessId, which Windows does not clear when a parent dies, so a reused
 // PID would also take every process that still names it as a parent.
+//
+// A CHILD STARTED ON A WORKER THREAD (src/spawn-thread.js) is ended BY that thread,
+// against the ChildProcess it holds, so every rule above (the tree kill, the group
+// signal, the freed-PID guard) is applied to the real handle, by this function.
+// What the host holds is a ThreadChild, which answers END_TREE.
+const END_TREE = Symbol.for('ai-acolyte.endProcessTree');
 function endProcessTree(child) {
   const fallback = () => { try { child.kill(); } catch { /* already gone */ } };
   if (!child) return Promise.resolve();
+  if (typeof child[END_TREE] === 'function') {
+    try { return Promise.resolve(child[END_TREE]()).then(() => {}, () => {}); } catch { return Promise.resolve(); }
+  }
   // Required here, not at the top: the CLI hook loads this module on every call,
   // and only a caller that is ending children needs a spawner.
   const childProcess = require('child_process');
@@ -176,7 +247,7 @@ function endProcessTree(child) {
   }
   return new Promise((resolve) => {
     try {
-      childProcess.execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'],
+      childProcess.execFile(taskkillPath(), ['/PID', String(child.pid), '/T', '/F'],
         { windowsHide: true, timeout: 5000 }, () => { fallback(); resolve(); });
     } catch {
       fallback();
@@ -185,11 +256,45 @@ function endProcessTree(child) {
   });
 }
 
+// A DEADLINE THAT ENDS THE WHOLE TREE, in place of execFile's `timeout` (2026-10-14).
+// execFile's own timeout kills the one child it holds, and on Windows that child is
+// routinely a launcher: an npm `codex.cmd` is cmd.exe -> node, and a venv's
+// Scripts\python.exe is a redirector whose interpreter is its child (measured on
+// the development box: the interpreter's parent pid was the pid execFile returned).
+// Ended that way the program that matters keeps running, and nothing can reach it
+// afterwards, because endProcessTree finds a tree by its root and the root is gone.
+// This is the version probe's pattern (src/codex-version.js, "ITS OWN TIMER"): a
+// timer that tree-kills the root while it is still alive. Returns the child, so a
+// call site reads `endTreeAfter(trackChild(execFile(...)), ms)`. Cleared on 'exit';
+// endProcessTree's own guard refuses an exited child as well. Unref'd, because the
+// child is what keeps a process alive while it runs, exactly as before.
+//
+// The callback sees the kill as the child's exit: on Windows taskkill /F leaves exit
+// code 1, on POSIX the SIGTERM. Either way execFile's error reads "Command failed:
+// <command>" plus its stderr, which is all any caller here reports.
+//
+// POSIX IS UNCHANGED, AND THAT IS RECORDED, NOT FIXED. endProcessTree reaches a
+// whole tree there only through a process group, and execFile cannot start a group
+// leader (it drops `detached`; see src/codex-mcp-config.js "SPAWN, NOT execFile"),
+// so this ends the child alone, as execFile's option did. The sites that use it have
+// no grandchild on POSIX: a venv's python is the interpreter itself, recall.py's own
+// re-run is suppressed by RECALL_REEXEC=1, and a native codex is one process.
+function endTreeAfter(child, ms) {
+  const deadline = Number(ms);
+  if (!child || !(deadline > 0)) return child;
+  const timer = setTimeout(() => { endProcessTree(child); }, deadline);
+  if (typeof timer.unref === 'function') timer.unref();
+  const listen = typeof child.once === 'function' ? 'once' : typeof child.on === 'function' ? 'on' : null;
+  if (listen) child[listen]('exit', () => clearTimeout(timer));
+  return child;
+}
+
 // `fallbackDirectories` is not exported: resolveExecutable is its only caller,
 // and test/exec-resolve.test.js already drives the whole fallback through
 // resolveExecutable with a fake APPDATA — including the case where PATH wins and
 // the case where neither holds the name. A test on the directory LIST would pin
 // less than the tests that already exist.
 module.exports = {
-  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree,
+  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
+  END_TREE, npmShimLaunch,
 };

@@ -42,34 +42,9 @@ the cached trust timeout are fixed and recorded under "The v1.6.3 release commit
   Claude-side env-prefixed rules.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
-and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It found:
-
-- **The recorded push figures are wrong.** On this box, `execFile()` blocks the calling thread
-  inside CreateProcess before returning. The real 332 MB winget `codex.exe` takes 428 ms (p50),
-  node 203 ms. So "106 ms cold" holds only with a `.cmd` stand-in. With the real Codex, a cold
-  push blocks the host for about 690 ms (the version probe plus the trust-worker spawn), and a
-  push after a `config.toml` edit for about 211 ms, not 9 ms. The fix is to make those spawns
-  from a worker thread; the record must be corrected either way.
-- **execFile's own `timeout` orphans grandchildren.** A `.cmd` shim killed this way leaves its
-  node child alive. The sites are `execFileCaptured` and the Python children in `extension.js`.
-  The fix is the version probe's pattern: its own timer calling `endProcessTree`.
-- **Bare `taskkill` is resolved by libuv, which searches the cwd before PATH.** Use
-  `%SystemRoot%\System32\taskkill.exe`.
-- **The trust worker's graceful timeout can lose to the host backstop on a slow machine.**
-  CI run 38535034218 failed on the Node 20 Windows job only; the same test passed on all 7 jobs
-  one push earlier. The test was `test/codex-mcp-config.test.js`, "the asynchronous layers read
-  does not block…". The worker's deadline counts from the worker's own start, so its startup is
-  not budgeted. After the deadline it still waits 1 s of grace plus a synchronous `taskkill`.
-  The graceful path therefore needs startup plus taskkill under 2 s, in the test and in
-  production alike. Both paths end the codex and both read as a timeout.
-- **On Windows, an npm `.cmd` codex can outlive an extension host that dies outright.**
-  MEASURED 2026-10-14 with a stand-in that never reads stdin. A Node host killed outright (not
-  deactivated) takes the trust worker with it through libuv's kill-on-close job, and the
-  worker's job takes its `cmd.exe`. The shim's node grandchild breaks away from both jobs and
-  keeps running. Deactivate's `taskkill /T` is unaffected. Unverified against a real build: a
-  real codex that reads stdin should see EOF when the worker dies. Options are to resolve the
-  shim to its node target and spawn node directly, or to accept the residual. Recorded in
-  `test/codex-mcp-config.test.js`, "a worker whose host dies outright".
+and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn
+findings, with the CI run 38535034218 timeout, are fixed or recorded in `docs/engineering-record.md`
+under "Process spawns: the v1.6.3 lifecycle and performance confirmation (2026-10-14)".
 
 Each one moves to the engineering record with its disposition when it is fixed and gated.
 

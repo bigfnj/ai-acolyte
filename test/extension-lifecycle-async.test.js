@@ -820,6 +820,35 @@ test('every child process the extension starts is handed over to be killable', (
     + `of ${sites.length}`);
 });
 
+// EVERY DEADLINE ENDS THE WHOLE TREE (2026-10-14). execFile's own `timeout` kills the
+// one child it holds, and each of these children is a launcher on Windows: the npm
+// codex.cmd is cmd.exe -> node, and the venv python.exe's interpreter is its child.
+// So no site may pass execFile a `timeout`; each takes its deadline from
+// endTreeAfter (src/exec-resolve.js), which tree-kills the root while it lives, and
+// keeps the length it had. test/exec-resolve.test.js shows the grandchild surviving
+// the one kill and not the other.
+test('every execFile site takes its deadline from endTreeAfter, never from execFile\'s own timeout', () => {
+  const source = fs.readFileSync(extensionPath, 'utf8');
+  const deadlines = [];
+  const call = /(?:[\w$]+\s*\.\s*)?\bexecFile\s*\(/g;
+  let hit;
+  while ((hit = call.exec(source)) !== null) {
+    const line = source.slice(source.lastIndexOf('\n', hit.index) + 1, source.indexOf('\n', hit.index));
+    const label = `extension.js:${source.slice(0, hit.index).split('\n').length}`;
+    // MUTATION: put `timeout: 30000` back into execFileCaptured's options and drop
+    // its endTreeAfter. Both checks below fail. Confirmed 2026-10-14.
+    assert.match(line, /endTreeAfter\(\s*trackChild\(\s*execFile\s*\(/, `${label} is not bounded by endTreeAfter`);
+    // The options are everything between the call and its callback's arrow.
+    const head = source.slice(hit.index, source.indexOf('=>', hit.index));
+    assert.doesNotMatch(head, /\btimeout\s*:/, `${label} passes execFile its own timeout`);
+    const close = /\}\)\),\s*(\d+)\)/.exec(source.slice(hit.index));
+    deadlines.push(close ? Number(close[1]) : null);
+  }
+  // The four lengths the sites had as execFile timeouts, in file order: the recall
+  // rebuild and the recall sync, the execpolicy check, the gate compile.
+  assert.deepEqual(deadlines, [180000, 180000, 30000, 60000]);
+});
+
 // memoryLint.cfg() is the single enumeration of the permissionWildcarding.memory.* keys.
 // Two hand-built copies used to live at the memory-card and gates watcher sites, and both
 // were wrong in the same two ways: they passed `dir: ''` so a pinned memory.dir was ignored,

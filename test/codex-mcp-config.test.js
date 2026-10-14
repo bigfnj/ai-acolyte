@@ -332,9 +332,10 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   assert.equal(tracked.length, 1, 'the worker is handed to the caller, so a deactivate can end it');
   // The WORKER's deadline, not this side's backstop: the worker is the one that
   // can end its own codex gracefully, so it has to be the one that fires first.
-  // MUTATION: drop `deadlineMs` from the worker request. The worker waits its 25 s
+  // MUTATION: drop `deadlineAt` from the worker request. The worker waits its 25 s
   // default, the 4 s backstop tree-kills it instead, and the reason reads
-  // "unavailable: the worker timed out". Confirmed 2026-10-14.
+  // "unavailable: the worker timed out". Confirmed 2026-10-14 (as `deadlineMs`
+  // before the deadline became a time, and again after).
   await assert.rejects(reading, /refused: Codex config operation timed out/,
     'a codex that never answers ends as the worker timing it out, not as a hang');
   const elapsed = Date.now() - started;
@@ -347,6 +348,52 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   assert.equal(alive, false, 'the worker tree-killed the codex it started');
   await assert.rejects(api.readCodexConfigLayersAsync({ home, codexHome, codexExecutable: codex.executable,
     rpc: () => Promise.resolve([{ config: {} }]) }), /did not return layers/, 'an injected route is checked like the real one');
+});
+
+// A WORKER THAT STARTS LATE STILL ENDS ITS OWN CODEX FIRST (2026-10-14). CI run
+// 38535034218 failed the test above on Node 20 / windows-latest only: the worker's
+// deadline was a length counted from its own start, so a slow start was taken out
+// of the 3 s margin its grace and its kill need, and the host's backstop got there
+// first ("unavailable: the worker timed out"). Here the start is slow on purpose: a
+// --require preload, active only in the process that runs --rpc-worker, holds it
+// for 5.5 s, past the 5 s deadline an 8 s budget sets. The deadline is a time now,
+// so the worker fails the call as soon as it arms it, and its 1 s grace and its
+// kill fit inside the 3 s that are left.
+test('a worker that starts after its deadline still ends its own codex before the host\'s backstop', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-late-'));
+  t.after(async () => {
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const codex = hangingCodex(t);
+  const preload = path.join(root, 'slow-worker.js');
+  fs.writeFileSync(preload, "if (process.argv.includes('--rpc-worker')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5500);\n");
+  const saved = process.env.NODE_OPTIONS;
+  // NODE_OPTIONS reads a backslash inside quotes as an escape: forward slashes.
+  process.env.NODE_OPTIONS = `--require "${preload.split(path.sep).join('/')}"`;
+  const started = Date.now();
+  let reading;
+  try {
+    reading = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
+      timeoutMs: 8000 }).then(() => 'answered', error => error.message);
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = saved;
+  }
+  const outcome = await reading;
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 5500, `precondition: the worker really started late (answered after ${elapsed} ms)`);
+  // MUTATION: make the deadline a length again (send `timeoutMs - 3000` as
+  // `deadlineAt` and arm it as is in the worker). It is armed 5 s after the late
+  // start, the 8 s backstop fires first, and this reads "unavailable: the worker
+  // timed out". Confirmed 2026-10-14.
+  assert.match(outcome, /refused: Codex config operation timed out/, 'the worker\'s deadline, not the host\'s backstop');
+  // The stand-in may not have got as far as writing its pid before the kill.
+  if (fs.existsSync(codex.pidFile)) {
+    const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+    t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+    assert.equal(await waitFor(() => gone(pid), 3000), true, 'the worker tree-killed the codex it started');
+  }
 });
 
 const gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };
@@ -410,6 +457,9 @@ test('a tree kill of the asynchronous worker ends the codex it started, on every
 // job and outlives an abrupt host death (measured 2026-10-14 with this stand-in,
 // which never reads its stdin; a codex that reads it sees EOF when the worker
 // dies). Deactivate's taskkill /T is unaffected: it runs while the host is alive.
+// Since 2026-10-14 the shim npm itself writes is run as its node script instead
+// (src/exec-resolve.js, npmShimLaunch; the next test), so this stand-in, a
+// two-line .cmd of no generator's making, is the shape the residual is left with.
 test('a worker whose host dies outright ends the codex it started and exits', async t => {
   const { spawn } = require('node:child_process');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-host-death-'));
@@ -451,4 +501,109 @@ test('a worker whose host dies outright ends the codex it started and exits', as
   // answer's write to the dead host is EPIPE, the worker dies of it, and the
   // codex is still running here. Confirmed 2026-10-14.
   assert.equal(await waitFor(() => gone(hung), 3000), true, 'the codex under the worker outlived the host');
+});
+
+// AN npm CODEX NO LONGER OUTLIVES A HOST THAT DIES OUTRIGHT, ON WINDOWS EITHER
+// (2026-10-14). The case above, with the shim npm itself writes, generated by the
+// cmd-shim bundled with the node running this suite. The worker runs the shim's
+// node script directly, so that node is the worker's own child, in the worker's
+// kill-on-close job, and dies when the host's job ends the worker.
+test('on Windows, an npm-shim codex dies with a host that dies outright', { skip: process.platform !== 'win32' }, async t => {
+  let cmdShim;
+  try { cmdShim = require(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'node_modules', 'cmd-shim')); }
+  catch { t.skip('npm\'s bundled cmd-shim is not next to this node'); return; }
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-npm-death-'));
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const pids = [];
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await waitFor(() => pids.every(gone), 3000);
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const npm = path.join(root, 'npm');
+  const bin = path.join(npm, 'node_modules', '@openai', 'codex', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const pidFile = path.join(root, 'codex.pid'), workerPidFile = path.join(root, 'worker.pid');
+  fs.writeFileSync(path.join(bin, 'codex.js'),
+    `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`);
+  await cmdShim(path.join(bin, 'codex.js'), path.join(npm, 'codex'));
+  const host = spawn(process.execPath, ['-e', `
+    require(${JSON.stringify(path.join(__dirname, '..', 'src', 'codex-mcp-config.js'))}).readCodexConfigLayersAsync({
+      home: ${JSON.stringify(home)}, codexHome: ${JSON.stringify(codexHome)}, workspaceRoot: ${JSON.stringify(root)},
+      codexExecutable: ${JSON.stringify(path.join(npm, 'codex.cmd'))}, timeoutMs: 40000,
+      track: child => require('fs').writeFileSync(${JSON.stringify(workerPidFile)}, String(child.pid)),
+    }).catch(() => {});
+    setInterval(() => {}, 1000);`], { stdio: 'ignore', windowsHide: true });
+  pids.push(host.pid);
+  const readPid = file => (fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8').trim()) || null : null);
+  assert.ok(await waitFor(() => readPid(pidFile) && readPid(workerPidFile), 10000),
+    'precondition: the host started the worker and the worker started the npm codex');
+  const worker = readPid(workerPidFile), hung = readPid(pidFile);
+  pids.push(worker, hung);
+  host.kill('SIGKILL');
+  assert.equal(await waitFor(() => gone(worker), 5000), true, 'the worker outlived its host');
+  // MUTATION: launch the app-server with commandLaunch alone again (drop
+  // npmShimLaunch in the worker). The shim's node is a grandchild through cmd.exe,
+  // in neither job, and it is still running here. Confirmed 2026-10-14.
+  assert.equal(await waitFor(() => gone(hung), 3000), true, 'the npm codex outlived the host');
+});
+
+// THE WORKER'S OWN KILL RUNS SYSTEM32's taskkill TOO (2026-10-14). The worker
+// inherits the host's cwd, and its grace kill named taskkill bare, which libuv
+// looks for in the cwd first unless NoDefaultCurrentDirectoryInExePath is set
+// (src/exec-resolve.js, taskkillPath). The host here is a real Node process
+// standing in a directory that holds a copy of node named taskkill.exe; a
+// --require preload writes a flag only when it runs as that copy. With a 4 s
+// budget the worker's deadline is 1 s and its grace 1 s, so its own kill is the
+// one that ends the stand-in codex, well inside the host's backstop. The flag is
+// not the only witness: endpoint scanning can hold the first run of a freshly
+// copied executable past the 4 s, and then the copy dies before its preload runs.
+// The answer is the witness that holds either way: only a kill that worked lets
+// the worker report its own deadline instead of the host's backstop.
+test('the config worker\'s own kill runs System32\'s taskkill, not one planted in its cwd', { skip: process.platform !== 'win32' }, async t => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-planted-'));
+  const pids = [];
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex'), cwd = path.join(root, 'cwd');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+  const flag = path.join(root, 'planted-taskkill-ran');
+  const marker = path.join(root, 'planted-marker.js');
+  fs.writeFileSync(marker, `if (/taskkill\\.exe$/i.test(process.execPath)) require('fs').writeFileSync(${JSON.stringify(flag)}, process.argv.slice(1).join(' '));\n`);
+  fs.copyFileSync(process.execPath, path.join(cwd, 'taskkill.exe'));
+  const codex = hangingCodex(t);
+  const env = { ...process.env, NODE_OPTIONS: `--require "${marker.split(path.sep).join('/')}"` };
+  // An agent shell often sets this, and with it set the unfixed code passes too.
+  delete env.NoDefaultCurrentDirectoryInExePath;
+  const host = spawn(process.execPath, ['-e', `
+    require(${JSON.stringify(path.join(__dirname, '..', 'src', 'codex-mcp-config.js'))}).readCodexConfigLayersAsync({
+      home: ${JSON.stringify(home)}, codexHome: ${JSON.stringify(codexHome)}, workspaceRoot: ${JSON.stringify(root)},
+      codexExecutable: ${JSON.stringify(codex.executable)}, timeoutMs: 4000,
+    }).then(() => process.stdout.write('answered'), error => process.stdout.write(error.message));`],
+  { cwd, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+  pids.push(host.pid);
+  const started = Date.now();
+  let outcome = '';
+  host.stdout.setEncoding('utf8');
+  host.stdout.on('data', chunk => { outcome += chunk; });
+  await new Promise(resolve => host.once('close', resolve));
+  // Said in every message below, so a failure on a loaded runner names its path.
+  outcome = `${outcome} (the host answered after ${Date.now() - started} ms)`;
+  assert.ok(fs.existsSync(codex.pidFile), `precondition: the stand-in codex started; the host said: ${outcome}`);
+  const hung = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  pids.push(hung);
+  // MUTATION: name 'taskkill' bare in the worker's grace kill again. The copy in
+  // the cwd runs instead (writing the flag once it is past the scan), the stand-in
+  // survives until the host's backstop ends the worker's tree, and the answer is
+  // "unavailable: the worker timed out". Confirmed 2026-10-14: both, on separate runs.
+  assert.equal(fs.existsSync(flag), false,
+    `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}; the host said: ${outcome}`);
+  assert.match(outcome, /refused: Codex config operation timed out/, `the worker's deadline, not the host's backstop; the host said: ${outcome}`);
+  assert.equal(await waitFor(() => gone(hung), 3000), true, 'the worker\'s kill ended the stand-in codex');
 });

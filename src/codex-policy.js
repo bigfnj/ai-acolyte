@@ -885,7 +885,7 @@ function projectRuleDirectories(options, codexHome, platform) {
 // trackChild, so deactivate ends it). Resolves `true` when something landed that
 // a fresh read should show, `false` when there was nothing to do or the refresh
 // was abandoned. Never rejects. Concurrent calls for one entry, config and
-// folder set share one worker.
+// folder set share one worker. `offThread: true` spawns it from a thread (src/spawn-thread.js).
 function refreshProjectTrust(options = {}) {
   try {
     if (!options.workspaceRoot) return Promise.resolve(false);
@@ -900,7 +900,7 @@ function refreshProjectTrust(options = {}) {
     const epoch = projectTrustEpoch;
     const promise = Promise.resolve()
       .then(() => require('./codex-mcp-config').readCodexConfigLayersAsync({ ...state.ask,
-        track: options.track, timeoutMs: PROJECT_TRUST_ASYNC_TIMEOUT_MS }))
+        track: options.track, timeoutMs: PROJECT_TRUST_ASYNC_TIMEOUT_MS, offThread: options.offThread === true }))
       .then((response) => response, asError)
       .then((asked) => {
         if (epoch !== projectTrustEpoch) return false;

@@ -200,11 +200,23 @@ function harness(box, opts = {}) {
   Object.assign(process.env, { HOME: box.home, USERPROFILE: box.home, CODEX_HOME: box.codexHome });
   const realChildProcess = require('node:child_process');
   // EVERY spawnSync any project module makes is recorded. The push must make none.
+  // So is every spawn and execFile made on THIS thread (2026-10-14): on Windows each
+  // one holds the calling thread for the length of CreateProcess. A worker thread's
+  // modules load outside this hook, so what they start is not counted, by design.
+  const hostSpawns = [];
   const spiedChildProcess = {
     ...realChildProcess,
     spawnSync(file, args, options) {
       spawnSyncCalls.push({ file, args, stack: new Error().stack });
       return realChildProcess.spawnSync(file, args, options);
+    },
+    spawn(file, ...rest) {
+      hostSpawns.push({ file, via: 'spawn', stack: new Error().stack });
+      return realChildProcess.spawn(file, ...rest);
+    },
+    execFile(file, ...rest) {
+      hostSpawns.push({ file, via: 'execFile', stack: new Error().stack });
+      return realChildProcess.execFile(file, ...rest);
     },
   };
   Module._load = function load(request, parent, isMain) {
@@ -265,7 +277,7 @@ function harness(box, opts = {}) {
   };
   let disposed = false;
   return {
-    commands, shown, posted, pushes, spawnSyncCalls, extension,
+    commands, shown, posted, pushes, spawnSyncCalls, hostSpawns, extension,
     get provider() { return provider; },
     // Times every push on the host thread and counts the spawnSync calls inside it.
     open() {
@@ -367,6 +379,37 @@ test('a cold push never spawns synchronously, refreshes trust once off-thread, a
     await settle();
     assert.equal(layers.calls.length, 1);
     assert.ok(app.pushes.every((push) => push.spawnSync === 0));
+  } finally {
+    await app.dispose();
+  }
+});
+
+// THE PUSH STARTS NO PROCESS ON THE HOST THREAD (2026-10-14). On Windows a spawn
+// holds the calling thread for the length of CreateProcess, and on the development
+// box that is 200-470 ms for node and the real codex.exe: a cold push held the
+// extension host for 673 ms (p50, n=11) on the tree before this change, all of it
+// in the version probe's execFile and the trust worker's spawn. Both now run on
+// worker threads (src/spawn-thread.js). The real worker and a stand-in codex that
+// answers both questions, so the answers that arrive prove the threads did the work.
+test('a cold push starts no process on the host thread, and both Codex answers still arrive', async (t) => {
+  const box = fixture(t);
+  const marks = path.join(box.base, 'ran.log');
+  const codex = fakeCodex(path.join(box.base, 'bin'), 'answer', null, marks);
+  const app = harness(box, { codexExecutable: codex });
+  try {
+    app.open();
+    await until(() => app.posted.some((data) => data.codexMemory?.cli?.version)
+      && app.posted.at(-1)?.codexPermissions?.pending === false, 20000, 'the version and the trust verdict');
+    const ran = fs.readFileSync(marks, 'utf8');
+    assert.match(ran, /^--version$/m, 'precondition: the version probe ran the stand-in');
+    assert.match(ran, /^app-server --stdio$/m, 'precondition: the trust worker ran the stand-in');
+    assert.equal(app.posted.at(-1).codexMemory.cli.version, '0.161.0');
+    assert.deepEqual(codexLabels(app.posted.at(-1)).sort(), ['["fd"]', '["rg"]'], 'the trust answer was read');
+    // MUTATION: drop `offThread: true` from the push's dashboardCodexVersion call.
+    // The probe's execFile runs here and is listed. The same for the one in
+    // refreshProjectTrustForDashboard: the worker's spawn is listed. Confirmed 2026-10-14.
+    assert.deepEqual(app.hostSpawns.map((entry) => `${entry.via} ${path.basename(String(entry.file))}`), [],
+      'a process was started on the extension host thread');
   } finally {
     await app.dispose();
   }

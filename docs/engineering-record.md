@@ -69,6 +69,94 @@ same day, under four concurrent worktrees driving Codex, one `codex execpolicy c
 run took 547 s of repeated 60 s timeouts and passed in 20 s alone — the timeouts held, and the
 product's validator (30 s, in the Auto Learn worker) is off the extension-host thread.
 
+### A held settings.json was rewritten in place by a hook that can be killed — FIXED, `3c2724d`
+
+Found by an audit on 2026-10-14, after the installers began registering the hook `"async": true`
+(the table's "hook blocked every Bash/PowerShell call" row, whose recorded cost this closes for
+every write the hook makes). `writeFileAtomicSync` (`src/permissions.js:29#writeFileAtomicSync`) writes a
+unique `<target>.<pid>.<base36>.wc.tmp`, retries the rename ten times (0.9 s), and then used to
+write the target IN PLACE: truncate, then fill.
+
+| Measured by the audit | |
+|---|---|
+| Fallback rate, uncontended | 0 of 380 writes |
+| Fallback rate, another process holding settings.json for 0.9 s or more | every write, even when the holder shares delete |
+| The truncating open | waits about 90–120 ms in the endpoint scanner first |
+| The window that follows | settings.json reads 0 bytes for p50 0.36 ms, max 1.2 ms |
+| Loss rate | ESTIMATED, not measured: about 3×10⁻⁴ per fallback write that overlaps a `claude -p` teardown |
+
+Why it mattered: `claude -p` kills a still-running async hook at teardown, and a kill inside the
+window leaves settings.json EMPTY, with deny rules, hooks and env gone. Rare, and the worst outcome
+this tool can produce. Re-verified before anything changed: a second Node process holding the file
+through Node's own open (which shares read, write and delete) made `writeFileAtomicSync` spend
+986 ms on refused renames and then write in place, with the fallback warning.
+
+**What changed.**
+- `writeFileAtomicSync(target, content, { inPlaceFallback })`, default `true`, which is the old
+  behaviour. Under `false` (`src/permissions.js:94#inPlaceFallback`), once the retries run out the
+  temp is unlinked, the target is left byte-identical, and it throws `SETTINGS_CONTENDED_CODE` with
+  the refused rename as its cause. A rename failure no retry fixes (EXDEV, ENOENT) is thrown as
+  itself, so the hook never waits in silence for a holder that does not exist. Against the same
+  holder: 963 ms, then the coded throw, the file unchanged, no temp, no warning.
+- `SETTINGS_CONTENDED_CODE` is now defined at `src/permissions.js:928#SETTINGS_CONTENDED_CODE`,
+  because that module may require only `./permission-match`. `src/settings-write.js:20#SETTINGS_CONTENDED_CODE`
+  imports and re-exports it, so there is one definition and every existing reader is unchanged.
+- The option is plumbed through `createSettingsWriter` (`src/settings-write.js:148#inPlaceFallback`)
+  to both of its writes, and through `drainLocalSettings` (`src/local-settings.js:211#inPlaceFallback`)
+  to the drain's snapshot and its prune.
+- The hook passes `false` for every write it makes: the wildcarding write
+  (`bin/wildcard-perms:573#inPlaceFallback`) and the drain (`bin/wildcard-perms:609#inPlaceFallback`),
+  which carries it to the promotion into settings.json and to the snapshot and prune of
+  settings.local.json. CONTENDED is handled like a busy policy lock
+  (`bin/wildcard-perms:602#SETTINGS_CONTENDED_CODE`): exit 0, nothing on stderr, nothing written,
+  and the next tool call redoes the pass, which is idempotent. The fixed-point cache needed no
+  change. It writes with a plain `writeFileSync`, where a torn key is a miss, and the hook records
+  a key only for bytes it verified as a fixed point, never after a write attempt. So a contended
+  pass leaves no key, and the next call is a miss that redoes it.
+- A held drain SNAPSHOT now stops the prune instead of being skipped
+  (`src/local-settings.js:174#SETTINGS_CONTENDED_CODE`). Writing it in place could empty the whole
+  history. Skipping it and pruning anyway would leave that round out of the only record of what
+  the project had approved. Stopping costs nothing, because the next call does both.
+- The orphan sweep (`src/permissions.js:954#sweepOrphanedTemps`). Nothing ever removed the temp of
+  a writer killed inside its retry window, which is a full copy of settings.json. Each write now
+  removes sibling files that meet all three tests: the name is exactly
+  `<basename>.<digits>.<base36>.wc.tmp`, matched as a literal prefix and suffix so no basename
+  character is read as regex syntax; lstat says regular file; and the mtime is more than ten
+  minutes old (`ORPHAN_TEMP_MIN_AGE_MS`). A live writer's temp lives about a second. The cost is
+  one readdir, paid only when a write happens. Every error is swallowed, and the sweep runs on both
+  paths.
+
+**Who still writes in place, and why.** Everything except the hook:
+- the extension: its settings writer, its drain, its backup copies and its Codex config write;
+- the user-invoked CLI verbs: `--bypass`, `--max off`, `--seed`, `--drain`,
+  `--codex-workspace-rules remove` and `--codex-max off`;
+- the guidance, derived-guidance, Codex hook, MCP config, legacy-backup and bypass-sidecar writers.
+
+No teardown kills them mid-pass, and an update they drop would not be redone by itself, so the old
+trade still holds for them. An extension host can also be killed at shutdown. If that is ever
+measured, the extension can opt in with the same one option; `vscode-extension/extension.js` was
+not changed in this pass. `atomicWrite` in src/auto-learn-manager.js and `strictWrite` in
+src/codex-memory-gates.js never had a fallback: both fail closed.
+
+**Pinned by** seven tests at the end of `test/settings-write.test.js`, and four at the end of
+`test/cli-hook.test.js`. One of the four is Windows-only and holds the file with a real process.
+Every test was run against a revert of its fix:
+- Reverting all four source files at once fails every one of them except the control. The control
+  passes at baseline and fails only when the default flips.
+- Each of sixteen single-point mutations is killed by the test written for it. They cover the
+  option branch, the sweep call, each plumbing site, the snapshot rethrow, an unescaped basename
+  pattern, the age test, the isFile test, a hook that reports contention, a flipped default,
+  contention reported for EXDEV, and a second definition of the constant.
+
+**Residual, recorded.**
+- A holder that NEVER lets go now means the hook never writes, in silence, where it used to write
+  in place. Nothing measured on this box holds settings.json for longer than a scan. The extension
+  and the verbs still write in place, and against a permanent holder the in-place write is exactly
+  the risky one.
+- When the wildcarding write is contended and a drain is also due, the drain's promotion can wait
+  its own 0.9 s. A contended hook run is therefore bounded by about 1.8 s of retries, which the
+  async registration keeps off the tool call.
+
 ## The 1.6.2 backlog clearance (2026-10-13)
 
 Prompted by two dashboard rows that were both false: Auto Learn read **"scan degraded —

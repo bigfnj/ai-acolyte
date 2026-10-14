@@ -435,6 +435,13 @@ test('resolveWebviewView wires the webview and pushes one debounced payload', as
     const unread = Object.keys(data).filter((key) => key !== 'type'
       && !new RegExp(String.raw`\bd\.${key}\b|\bd\?\.${key}\b`).test(script));
     assert.deepEqual(unread, [], `payload fields the webview never reads: ${unread.join(', ')}`);
+    // The Auto Learn card under the same rule (renderAutoLearn reads it as `a`):
+    // `lastScanAt` and `lastApplyAt` were posted on every push and read by nothing.
+    // MUTATION: put `lastScanAt: status.lastScanAt || null,` back in
+    // autoLearnCardData. This fails naming it. Confirmed 2026-10-14.
+    assert.ok(data.autoLearn && Object.keys(data.autoLearn).length > 5, 'precondition: the card was posted');
+    const unreadCard = Object.keys(data.autoLearn).filter((key) => !new RegExp(String.raw`\ba\.${key}\b`).test(script));
+    assert.deepEqual(unreadCard, [], `Auto Learn card fields the webview never reads: ${unreadCard.join(', ')}`);
   } finally {
     await app.dispose();
   }
@@ -769,7 +776,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3081#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3089#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2041,7 +2048,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // depends on a hash of the workspace root. Required lazily and INSIDE the
 // harness's Module._load hook rather than at the top of this file, so the copy it
 // resolves is the one the extension is already using, bound to the mocked `os`.
-function seedAutoLearnState(tempHome, lastScanStats) {
+function seedAutoLearnState(tempHome, lastScanStats, extra = {}) {
   // eslint-disable-next-line global-require
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
   const statePath = createAutoLearnManager({
@@ -2055,10 +2062,42 @@ function seedAutoLearnState(tempHome, lastScanStats) {
     applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
     codexTargets: {}, managedClaude: {}, managedHits: {}, managedHitsAt: null,
     derivedGuidance: { accepted: [], declined: [] }, prunedCandidates: {},
-    lastScanAt: Date.now(), lastScanStats, lastApplication: null,
+    lastScanAt: Date.now(), lastScanStats, lastApplication: null, ...extra,
   }, null, 2) + '\n');
   return statePath;
 }
+
+// `canUndo` drives the Undo button and had no test at all: replacing it with
+// `false` left the suite green (2026-10-14, while removing its redundant second
+// leg). One recorded application, in the shape the manager's own validator keeps.
+test('the Auto Learn Undo button is enabled exactly when an application is recorded', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, null, { lastApplication: { at: new Date().toISOString(), targets: [{
+      kind: 'claude', path: path.join(env.tempHome, '.claude', 'settings.json'),
+      backupPath: path.join(env.tempHome, '.claude', 'backups', 'auto-learn.json'),
+      beforeHash: 'a'.repeat(64), afterHash: 'b'.repeat(64), existed: true,
+    }] } });
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const recorded = ui.posted.at(-1).autoLearn;
+    // MUTATION: post `canUndo: false`. This fails. Confirmed 2026-10-14.
+    assert.equal(recorded.canUndo, true, 'a recorded application can be undone');
+    assert.equal(renderDashboard(app.provider, ui.posted.at(-1)).node('alUndo').disabled, false);
+
+    seedAutoLearnState(env.tempHome, null);
+    app.provider.refresh();
+    await settle();
+    const none = ui.posted.at(-1).autoLearn;
+    assert.equal(none.canUndo, false, 'nothing recorded, nothing to undo');
+    assert.equal(renderDashboard(app.provider, ui.posted.at(-1)).node('alUndo').disabled, true);
+  } finally {
+    await app.dispose();
+  }
+});
 
 test('the dashboard reports what the last scan could not read', async (t) => {
   const env = setup(t);

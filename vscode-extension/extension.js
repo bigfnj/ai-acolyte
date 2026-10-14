@@ -1083,7 +1083,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2658#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2666#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1363,7 +1363,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5351#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5359#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1402,19 +1402,22 @@ function autoLearnStateStamp(manager) {
   } catch { return 'absent'; }
 }
 
+// One overview() call, which answers status and candidates from a single state
+// read. There was a second leg here for a manager WITHOUT overview(), building
+// the pair from status() and listCandidates(). It could not run: the manager is
+// always createAutoLearnManager()'s, whose export list carries overview, and no
+// harness in test/ replaces the manager module. Removed 2026-10-14 (finding 9).
+// A manager that somehow lacked it now throws, which autoLearnCardData already
+// catches and reports on the card, rather than quietly reading state twice.
 function autoLearnEvidence(cfg) {
   const manager = getAutoLearnManager();
   const key = `${autoLearnManagerKey}|${autoLearnStateStamp(manager)}`;
   if (autoLearnCardCache?.key === key) return autoLearnCardCache.data;
-  const data = typeof manager?.overview === 'function'
-    ? (() => {
-      const view = manager.overview();
-      return {
-        status: view?.status || {},
-        candidates: Array.isArray(view?.candidates) ? view.candidates : [],
-      };
-    })()
-    : { status: managerStatus(manager) || {}, candidates: managerCandidates(manager) };
+  const view = manager.overview();
+  const data = {
+    status: view?.status || {},
+    candidates: Array.isArray(view?.candidates) ? view.candidates : [],
+  };
   autoLearnCardCache = { key, data };
   return data;
 }
@@ -1500,14 +1503,19 @@ function autoLearnCardData() {
     enabled: cfg.enabled, mode: cfg.mode, threshold: cfg.threshold,
     codexScope: cfg.codexScope, scopeWarning: cfg.scopeWarning,
     busy: autoLearnBusy, error: autoLearnLastError,
-    lastScanAt: status.lastScanAt || status.lastScan || null,
-    lastApplyAt: status.lastApplyAt || status.lastApplicationAt || null,
+    // No `lastScanAt` / `lastApplyAt` since 2026-10-14 (finding 9). Each carried a
+    // second leg (`|| status.lastScan`, `|| status.lastApplicationAt`) that could
+    // never decide anything, because the manager's status sets both spellings
+    // from the same value; and the webview read neither field at all, so the
+    // census in test/dashboard-view.test.js now holds this card to the same rule
+    // as the payload: every field posted has a reader. `canUndo` lost the same
+    // kind of leg: status.canUndo IS Boolean(state.lastApplication).
     counts: countAutoLearnCandidates(
       candidates, status, cfg.codexRulesPath ? ['claude', 'codex'] : ['claude'], cfg.mode, readSettings(),
     ),
     scan: autoLearnScanHealth(status.lastScanStats),
     codexEvidence: status.codexEvidence || null,
-    canUndo: Boolean(status.canUndo || status.lastApplication),
+    canUndo: status.canUndo === true,
   };
 }
 
@@ -1588,12 +1596,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5381#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5389#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2446#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2454#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.

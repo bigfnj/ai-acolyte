@@ -26,23 +26,16 @@ Re-verify before acting on anything here, including this paragraph.
 
 ### In flight: v1.6.3 CI and the confirmation audit (2026-10-14)
 
-The 1.6.3 release commit (7cbba2b) is not tagged: `test.yml` run 38525363435 failed 5 of 7
-jobs. Two causes were seen in the logs. First, the `codex-version` tests were cancelled on
-Node 20 and 22, because an unref'd timer left the event loop empty. Second, two
-`dashboard-project-trust` tests failed on Ubuntu, because the POSIX process-group kill does not
-reach a hung grandchild.
-
-A confirmation audit of the same commit found:
+The 1.6.3 release commit (7cbba2b) is not tagged. Its CI failures, the freed-PID tree kill and
+the cached trust timeout are fixed and recorded under "The v1.6.3 release commit's CI failures
+(2026-10-14)". Still open from the confirmation audit of that commit:
 
 - **MEDIUM.** A stored null-rule family that has not run since the upgrade can be written
   despite a user deny or managed ask. The boundary checks judge the stored null field; the write
   renders the derived rule. Deny still wins at runtime, so this is a dead entry reported as
   applied, not an escalation.
-- **LOW.** `endProcessTree` can tree-kill a freed pid after a child exited by signal (it checks
-  `exitCode` only).
 - **LOW.** A missing configured history root pins the Codex evidence rebuild without saying so.
 - **LOW.** A pending project-trust verdict can render "No saved permissions yet".
-- **LOW.** A transient trust-ask timeout is cached with no expiry.
 - **LOW.** make's other implicit program variables (`RM=`, `AR=`, …) still render in Codex
   export.
 - **LOW.** `memory.recallScript` and `backupMirrorPath` are window-scoped, so a workspace can
@@ -67,6 +60,14 @@ and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It
   about 0.4–1.2 ms. That matters now that the installers register the hook as async, because
   `claude -p` kills an async hook at teardown. Orphaned `*.wc.tmp` copies of `settings.json` are
   never swept.
+- **On Windows, an npm `.cmd` codex can outlive an extension host that dies outright.**
+  MEASURED 2026-10-14 with a stand-in that never reads stdin. A Node host killed outright (not
+  deactivated) takes the trust worker with it through libuv's kill-on-close job, and the
+  worker's job takes its `cmd.exe`. The shim's node grandchild breaks away from both jobs and
+  keeps running. Deactivate's `taskkill /T` is unaffected. Unverified against a real build: a
+  real codex that reads stdin should see EOF when the worker dies. Options are to resolve the
+  shim to its node target and spawn node directly, or to accept the residual. Recorded in
+  `test/codex-mcp-config.test.js`, "a worker whose host dies outright".
 
 Each one moves to the engineering record with its disposition when it is fixed and gated.
 

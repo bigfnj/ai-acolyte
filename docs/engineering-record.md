@@ -33,6 +33,28 @@ is unmeasurable at the process level.
 
 ---
 
+## The v1.6.3 release commit's CI failures (2026-10-14)
+
+CI run 38525363435 on `7cbba2b` failed 5 of 7 jobs; Windows Node 24 and the PowerShell 5.1
+installer job passed. Two failures were test defects and one was a real POSIX defect. Reproducing
+it found a second real defect. The confirmation audit added two LOW findings in the same files.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| `codex-version.test.js` cancelled on Node 20/22 | **FIXED (test)**, `09ced02` | The timeout case awaited the probe's deliberately unref'd timer, and the stand-in child is not a process, so nothing held the loop. Node 24's runner happened to keep its own loop alive. The test now fires the timer by hand and pins that it is unref'd. No product path awaits that timer alone: a real child is a ref'd handle, and `--learn status` probes synchronously (verified on Node 22). |
+| Deactivate left a hung codex running on Linux | **FIXED**, `f8a3b92` | `execFile` copies a fixed option list to `spawn` and drops `detached`, so the trust worker never led a process group. The `-pid` signal therefore hit ESRCH. The worker is now `spawn`ed, and the app-server stays in the worker's group, so one signal ends the whole tree. Windows was never affected. |
+| A worker whose host dies orphaned its codex | **FIXED on POSIX**, `c108d04`; Windows residual below | With the host SIGKILLed, the worker ran to its 25 s deadline and then died of an unhandled EPIPE before its armed kill fired; the codex was alive 30 s later. The worker now ignores stdout/stderr errors and watches its parent (ppid change or parent gone), which ends both within about 2 s. |
+| The version-probe dashboard test raced on Linux | **FIXED (test)**, `5ab4cc5` | It assumed `--version` is slower than the 150 ms settle. That holds for cmd.exe → node, not for sh → node. The stand-in's `--version` is now gated. |
+| `endProcessTree` could aim a tree kill at a freed PID | **FIXED**, `6dfe60b` | A signal-killed child has `exitCode` null and `signalCode` set; both are read now. Measured: at 'exit' the gap before 'close' is under a millisecond here. Unverified: taskkill /T walks ParentProcessId, which Windows does not clear when a parent dies. |
+| A trust-ask timeout was cached for the life of the window | **FIXED**, `e79e2a9` | A timeout now stands for 60 s, and the next push then asks again. A codex that never answers costs one ask per minute of pushes, not one per push. Other outcomes are cached as before. |
+
+**HARNESS HAZARD, 2026-10-14.**
+- Linux in podman:
+  - Stream `git -c core.autocrlf=false archive <rev>` into the container, not a folder subset.
+  - Run with `--init`, because a zombie still answers `kill(pid, 0)`.
+  - The node images have no git and run as root, so 13 tests fail there on any commit. Compare against a control run on the base commit.
+- Windows: a `.cmd` stand-in's hidden console host keeps its cwd for about 1 s after the last client dies, and Node 24's `rmSync` does not retry that EPERM.
+
 ## The v1.6.2 post-release audit (2026-10-14)
 
 Four read-only audits ran over the released v1.6.2: regressions, dead code and dead ends,

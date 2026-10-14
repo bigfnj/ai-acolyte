@@ -47,6 +47,11 @@ defects surfaced along the way:
 - **`src/agent-gates.js`'s header still says gates need `type: feedback`.** Selection has keyed
   on `scope: global` alone since the README's change.
 
+**Note (user, 2026-10-14):** the private spin-off `bigfnj/rampage` ("a memory manager for Claude
+Code") has feature work on memory gates and on Project-local draining. That work is being mapped
+against this repo for porting, starting with 1.6.5. Check rampage before designing a fix for the
+gaps above.
+
 ### For the maintainer to decide: may a workspace raise Auto Learn's mode? (2026-10-14)
 
 wave-f15's settings census ("The settings census behind S2" in the record) found

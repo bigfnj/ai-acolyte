@@ -153,11 +153,20 @@ function deadShellApprovals(allow) {
 //     list in test/permissions-keywords.test.js). Counting them would ask a user to
 //     remove a grant the next approval re-mints. `Bash(bash *)` and `Bash(. *)` are not
 //     counted either: the classifier calls them shell wrappers, which are commands.
-//   * A head that is only a wrapper the classifier strips (`command`, `builtin`,
-//     `timeout 5`). The command it wraps is under the star, so "no root" there is an
-//     artifact of cutting the head, not grammar; `missing-command-root` is dropped when
-//     `stripped-wrapper` is present. Measured 2026-10-13: without this, the
-//     development box's `Bash(command *)` was counted as a missing root.
+//   * A head that is a wrapper the classifier strips followed only by assignments
+//     (`timeout 5 FOO=1`, `nohup FOO=1`, `command FOO=1`). The classifier steps over the
+//     wrapper, then the assignment, finds no executable and reports `missing-command-root`
+//     beside `stripped-wrapper`. But the command is under the star, and the wrapper would
+//     exec the "assignment" as its program anyway, so "no root" there is an artifact of
+//     cutting the head, not grammar; `missing-command-root` is dropped when
+//     `stripped-wrapper` is present.
+//     Corrected 2026-10-14. This used to name a head that is ONLY a wrapper (`command`,
+//     `builtin`, `timeout 5`), measured 2026-10-13 on the development box's `Bash(command *)`.
+//     9a5324e (the same day) made the learner strip a wrapper the way Claude Code does, only
+//     when it wraps something, so a wrapper alone is now the root (`shell-wrapper`, a command)
+//     and never reaches this line: deleting the line left the whole suite green (1434 tests,
+//     measured 2026-10-14), where a test comment had recorded the mutation as killed. The
+//     wrapper-then-assignment heads above are what reach it; that test now pins them.
 //
 // Only wildcard entries are examined, the mirror image of deadShellApprovals above.
 // `Bash(*)` is an explicit tool-wide grant with no head, and is skipped. On the

@@ -24,7 +24,8 @@
 //   - endProcessTree runs on the thread, against the real child: taskkill /T on
 //     Windows, the group signal on POSIX (the config worker is still spawned
 //     detached), and the freed-PID guard (exitCode OR signalCode) on the real handle;
-//   - nativeRpcAsync keeps its 10 s backstop, its 16 MiB bound and its wordings,
+//   - nativeRpcAsync keeps its backstop (the caller's budget: 25 s for the trust ask
+//     since efeb0c1), its 16 MiB bound and its wordings,
 //     and its deadline is counted from the HOST's call (`startedAt`), so the
 //     thread's own start is budgeted like the worker's;
 //   - the process tree is the same one. A thread's children are this process's

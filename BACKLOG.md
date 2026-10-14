@@ -27,8 +27,9 @@ Re-verify before acting on anything here, including this paragraph.
 ### In flight: tagging 1.6.3 (2026-10-14)
 
 1.6.3 is not tagged yet. The original release commit was `7cbba2b`. Every finding of its two
-confirmation audits, and of every follow-up wave (F1–F7, G1–G4, H1–H4, J1–J2, K1–K3, L1–L4,
-M1–M6), is fixed or recorded in `docs/engineering-record.md`, in these sections:
+confirmation audits, and of every follow-up wave (F1–F7, G1–G4, J1–J2, K1–K3, L1–L4, M1–M6,
+and wave-f10's spawn census), is fixed or recorded in `docs/engineering-record.md`, in these
+sections:
 
 - "The v1.6.3 release commit's CI failures";
 - "The v1.6.3 confirmation audit";

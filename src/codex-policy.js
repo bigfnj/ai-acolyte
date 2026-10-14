@@ -594,9 +594,9 @@ const PROJECT_TRUST_ASYNC_TIMEOUT_MS = 25000;
 // config.toml fallback, cached like an answer until config.toml or the candidate
 // folders changed. For "Codex is not reachable", or a reply from Codex itself,
 // that is right: the answer describes the installation or the config, and an
-// edit or install re-asks. A timeout describes neither. A cold app-server can
-// miss the 7 s the worker gets inside PROJECT_TRUST_ASYNC_TIMEOUT_MS (one took
-// 3.3 s in an isolated home in the v1.6.3 confirmation audit), and that one
+// edit or install re-asks. A timeout describes neither. A cold app-server could
+// miss the 7 s the worker got under the old 10 s budget (one took 3.3 s in an
+// isolated home in the v1.6.3 confirmation audit; the budget is 25 s now, above), and that one
 // slow start then held the narrow fallback for the life of the window. A timed-out
 // ask is still shown as the fallback, which is the honest answer for now, but
 // only for this long: after it the read is a miss again, the next push is

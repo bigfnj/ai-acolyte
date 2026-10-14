@@ -329,7 +329,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Absolute path to your permission-wildcarding repo's `memory/recall.py`. Enables the dashboard Memory card's **Rebuild recall index** button (a CPU bge-small re-embed of the memory dir). Leave empty to auto-detect the repo layout; the passive CPU-LLM status probe works either way. Machine-scoped, because the extension runs this script: a repository's `.vscode/settings.json` cannot point it at a script of its own; set it in user settings."
+          "markdownDescription": "Absolute path to a `memory/recall.py` to use instead of the bundled one. The script powers the dashboard Memory card's **Rebuild recall index** button (a CPU bge-small re-embed of the memory dir). Leave empty to use the copy bundled with the extension (or, in a development checkout, the checkout's own); no workspace folder is searched. The passive CPU-LLM status probe works either way. Machine-scoped, because the extension runs this script: a repository's `.vscode/settings.json` cannot point it at a script of its own; set it in user settings."
         }
       }
     }

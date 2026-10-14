@@ -1029,3 +1029,19 @@ test('the user-scope write check never sees a trusted project rule, even one tha
       'and no project rule file was passed to it');
   }
 });
+
+// THE BACKGROUND ASK GETS 25 s (efeb0c1, src/codex-policy.js PROJECT_TRUST_ASYNC_TIMEOUT_MS).
+// Nothing pinned the budget. Set back to 10 s, the whole suite still passed (the final audit,
+// 2026-10-14), and the slow-runner fallback it fixed would have come back without a failing test.
+test('the background trust ask is given 25 s, so a slow start is not turned into the fallback', async (t) => {
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  const budgets = [];
+  const rpc = (requests, options) => {
+    budgets.push(options.timeoutMs);
+    return Promise.resolve(requests.map((request) => ({ config: {}, layers: [projectLayer(path.join(request.params.cwd, '.codex'))] })));
+  };
+  // MUTATION: PROJECT_TRUST_ASYNC_TIMEOUT_MS back to 10000. This reads [10000]. Confirmed 2026-10-14.
+  assert.equal(await refreshProjectTrust({ home: box.home, workspaceRoot: box.workspace, rpc }), true);
+  assert.deepEqual(budgets, [25000]);
+});

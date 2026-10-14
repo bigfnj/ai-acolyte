@@ -221,7 +221,7 @@ policy stays read-only. Interrupted writes offer an explicit completion step.
 that tool's native user configuration; different future arguments are covered, and the tool
 is not classified as safe. **Undo approval** restores the saved prior setting; changed
 configuration requires review ([reviewMcp](codexFeaturesUi.js#L177),
-[restoreCodexMcpApproval](../src/codex-mcp-config.js#L338)). Other tools, server settings and project trust are preserved.
+[restoreCodexMcpApproval](../src/codex-mcp-config.js#L462)). Other tools, server settings and project trust are preserved.
 
 **Configure Codex after-turn learning** adds a Stop hook using the current Auto Learn mode,
 so completed turns can be learned while the editor is closed. Configuration alone does

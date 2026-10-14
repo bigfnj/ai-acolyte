@@ -290,8 +290,8 @@ the raw bytes. It is the path for changes that cannot be represented as an addit
 delta while still preserving concurrent edits.
 
 Every in-process policy writer takes one advisory lock; instruction files get a separate one per
-target file (`instructionLockPath`, `src/agent-guidance.js:289#instructionLockPath`), and
-`withInstructionLock` (`src/agent-guidance.js:298#withInstructionLock`) takes it around the read as well as the write,
+target file (`instructionLockPath`, `src/agent-guidance.js:293#instructionLockPath`), and
+`withInstructionLock` (`src/agent-guidance.js:302#withInstructionLock`) takes it around the read as well as the write,
 since locking the write alone still admits a writer between this one's read and its own write.
 
 ### Auto Learn

@@ -283,7 +283,11 @@ function guidanceStatus(file = guidancePath(), block = SHELL_BLOCK) {
 const INSTRUCTION_LOCK_SUFFIX = '.wildcarding.lock';
 // The work under this lock is one read, a string operation and two atomic writes. Ten
 // minutes — `policy-lock`'s default, sized for a full transcript scan — is the wrong
-// order of magnitude for deciding that a holder of THIS lock has died.
+// order of magnitude for deciding that a holder of THIS lock has died. Past this age the
+// lock is reclaimed even when the pid in it answers (`reclaimLiveWhenStale` below): a pid
+// that answers after a crash is usually a reused one, and rampage measured a one-hour-old
+// lock naming a live bystander, or pid 4, refusing every gates write until it was deleted
+// by hand (7139659). No real holder of this lock runs for 30 s.
 const INSTRUCTION_LOCK_STALE_MS = 30 * 1000;
 
 function instructionLockPath(file) {
@@ -302,6 +306,7 @@ function withInstructionLock(file, write, onBusy) {
   const lock = createPolicyLock({
     lockPath: instructionLockPath(file),
     staleMs: INSTRUCTION_LOCK_STALE_MS,
+    reclaimLiveWhenStale: true,
     busyMessage: () => `${file} is being written by another permission-wildcarding process`,
   });
   try {

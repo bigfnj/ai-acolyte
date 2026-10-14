@@ -19,6 +19,14 @@ const DEFAULT_STALE_MS = 10 * 60 * 1000;
 const POLICY_LOCK_PATH = path.join(os.homedir(), '.claude', 'wildcarding', 'auto-learn-policy.lock');
 const POLICY_LOCK_BUSY_MESSAGE =
   'Auto Learn is mid-scan — try again in a moment.';
+// What `openSync(lockPath, 'wx')` fails with while another writer holds the lock or is
+// releasing it. EEXIST is the plain case. On Windows a lock its holder has just unlinked
+// stays delete-pending until the last handle on it closes, and creating it then fails with
+// EPERM: rampage measured 7 of 480 CLI writes in an 8-way race crashing on it with a stack
+// trace (7139659). EACCES and EBUSY are the same sharing family. All of them are a busy lock,
+// and the message names any code other than EEXIST, so a lock that can never be created (a
+// read-only directory gives EACCES too) does not read as an ordinary busy file.
+const CONTENDED_CODES = new Set(['EEXIST', 'EPERM', 'EACCES', 'EBUSY']);
 
 // How old a lock file is, never negative. `stat.mtimeMs` carries sub-millisecond
 // precision while `Date.now()` is whole milliseconds, so a file written moments
@@ -35,10 +43,19 @@ function lockAgeMs(stat) {
   return Math.max(0, Date.now() - stat.mtimeMs);
 }
 
+// `reclaimLiveWhenStale` is an OPT-IN, and only the instruction-file lock passes it
+// (src/agent-guidance.js withInstructionLock, a 30 s window over one read and two writes).
+// With it, a lock older than `staleMs` is reclaimed even when the pid in it answers, or
+// cannot be probed (EPERM), because a pid that answers after a crash is usually a reused
+// one. Without it, a live or unprobeable holder is honoured however old its lock is. The
+// policy lock at POLICY_LOCK_PATH must stay that way: the hook's drain, withPolicyLock and
+// Auto Learn share it with a ten-minute window sized for a full transcript scan, and a scan
+// that runs longer than that is still a live writer of settings.json.
 function createPolicyLock(options = {}) {
   const lockPath = options.lockPath;
   if (!lockPath) throw new Error('A policy lock requires a lock path');
   const staleMs = Number.isFinite(options.staleMs) ? Math.max(0, options.staleMs) : DEFAULT_STALE_MS;
+  const reclaimLiveWhenStale = options.reclaimLiveWhenStale === true;
   const clock = typeof options.now === 'function' ? options.now : () => new Date().toISOString();
   const busy = typeof options.busyMessage === 'function'
     ? options.busyMessage
@@ -88,23 +105,27 @@ function createPolicyLock(options = {}) {
     }
   }
 
-  // Only reclaim a lock whose owner is provably gone, and only after confirming
-  // the file did not change while that was being decided.
+  // Only reclaim a lock whose owner is provably gone (or, under the opt-in above, one
+  // older than the stale window whatever its pid says), and only after confirming the
+  // file did not change while that was being decided.
   function recoverLock() {
     try {
       const stat = fs.statSync(lockPath);
       const text = fs.readFileSync(lockPath, 'utf8');
       let metadata = {};
-      try { metadata = JSON.parse(text); } catch {}
+      // Object(): `null` and other non-object JSON parse fine and have no fields. Reading
+      // `.pid` off a bare `null` threw inside this try, which answered "not reclaimable"
+      // for good, even past the stale window.
+      try { metadata = Object(JSON.parse(text)); } catch {}
       const validPid = Number.isInteger(metadata.pid) && metadata.pid > 0;
       if (validPid) {
         let alive = true;
         try { process.kill(metadata.pid, 0); }
         catch (error) {
           if (error.code === 'ESRCH') alive = false;
-          else return false;
+          else if (!reclaimLiveWhenStale) return false;   // unprobeable: honour it
         }
-        if (alive) return false;
+        if (alive && !(reclaimLiveWhenStale && lockAgeMs(stat) >= staleMs)) return false;
       } else if (lockAgeMs(stat) < honourFor(stat, staleMs)) {
         return false;
       }
@@ -144,10 +165,16 @@ function createPolicyLock(options = {}) {
       }
       if (!failure) break;
       if (created) removeCreatedLock(owner, createdIno);
-      if (failure.code === 'EEXIST' && attempt === 0 && recoverLock()) continue;
-      if (failure.code === 'EEXIST') {
-        const conflict = new Error(busy(lockPath));
+      // Only CREATING the lock can be contended. Once this process has created it, an
+      // EACCES writing into it is this process's own I/O failure, and calling it
+      // "another process" would hide it.
+      const contended = !created && CONTENDED_CODES.has(failure.code);
+      if (contended && attempt === 0 && recoverLock()) continue;
+      if (contended) {
+        const conflict = new Error(busy(lockPath)
+          + (failure.code === 'EEXIST' ? '' : ` (${failure.code} creating the lock)`));
         conflict.code = POLICY_LOCK_CODE;
+        conflict.cause = failure;
         throw conflict;
       }
       throw failure;

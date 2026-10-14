@@ -342,6 +342,33 @@ test('a second writer of the same instruction file is refused, and changes nothi
     'the lock file does not outlive the write');
 });
 
+// The instruction-file lock is the one caller of policy-lock's `reclaimLiveWhenStale`. A
+// holder killed mid-write leaves a lock whose pid can belong to an unrelated live process by
+// the time anyone looks (rampage 7139659 measured it refusing every gates write for an hour).
+// The work under this lock takes milliseconds, so past its 30 s window the lock goes.
+test('an instruction lock older than its window is reclaimed even when its pid answers', () => {
+  const box = scratch();
+  fs.writeFileSync(box.file, USER_TEXT, 'utf8');
+  const lockPath = instructionLockPath(box.file);
+  const plant = (ageMs) => {
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, owner: 'reused-pid' }) + '\n');
+    const when = new Date(Date.now() - ageMs);
+    fs.utimesSync(lockPath, when, when);
+  };
+  plant(5_000);
+  assert.match(setGuidance(true, { file: box.file, backupDir: box.backupDir }).error, /being written by another/,
+    'inside the window the holder may be real');
+  assert.equal(fs.readFileSync(box.file, 'utf8'), USER_TEXT);
+  plant(60_000);
+  const row = setGuidance(true, { file: box.file, backupDir: box.backupDir });
+  assert.equal(row.error, null, 'a minute-old lock with a live pid is a dead holder\'s');
+  assert.equal(row.changed, true);
+  assert.equal(fs.existsSync(lockPath), false, 'and the reclaimed lock is released after the write');
+
+  // MUTATION: drop `reclaimLiveWhenStale: true` from withInstructionLock in
+  // src/agent-guidance.js and the second setGuidance reports "being written by another".
+});
+
 test('a missing CLAUDE.md is created rather than treated as an error', () => {
   const box = scratch();
   const result = setGuidance(true, { file: box.file, backupDir: box.backupDir });

@@ -8,7 +8,7 @@
 // an ERR_OUT_OF_RANGE for an EBADF from the close sends the reader after the
 // wrong thing entirely, and the descriptor is unusable either way.
 //
-// `src/policy-lock.js:143#fs.closeSync` and `atomicWrite` in `src/auto-learn-manager.js`
+// `src/policy-lock.js:164#fs.closeSync` and `atomicWrite` in `src/auto-learn-manager.js`
 // both already wrap theirs; this was the one that did not.
 //
 // MUTATION APPLIED: put the bare `fs.closeSync(descriptor);` back. This test

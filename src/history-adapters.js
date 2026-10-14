@@ -1723,7 +1723,7 @@ function readRange(file, start, length, chunk = READ_CHUNK_BYTES) {
     // failure (EBADF after an interrupted read, EIO on a disconnected share)
     // would land there instead of the EACCES or ERR_OUT_OF_RANGE that says what
     // actually went wrong, and the descriptor is already unusable either way.
-    // `src/policy-lock.js:143#closeSync` and `atomicWrite` in auto-learn-manager.js wrap
+    // `src/policy-lock.js:164#closeSync` and `atomicWrite` in auto-learn-manager.js wrap
     // theirs for the same reason; this was the one that did not.
     try { fs.closeSync(descriptor); } catch {}
   }

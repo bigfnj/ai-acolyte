@@ -1006,14 +1006,15 @@ function seed() {
 // Every Claude policy writer shares one lock, so one cannot land between Auto
 // Learn's settings write and its claims write. Reads and writes both go inside.
 function withPolicyLock(flag, run) {
-  const {
-    createPolicyLock, POLICY_LOCK_PATH, POLICY_LOCK_CODE, POLICY_LOCK_BUSY_MESSAGE,
-  } = require('../src/policy-lock');
+  const { createPolicyLock, POLICY_LOCK_PATH, POLICY_LOCK_CODE } = require('../src/policy-lock');
   try {
     createPolicyLock({ lockPath: POLICY_LOCK_PATH }).locked(run);
   } catch (err) {
+    // The busy error's own message: POLICY_LOCK_BUSY_MESSAGE, plus the code when the lock
+    // could not be CREATED for a sharing reason (EPERM, EACCES, EBUSY), which a read-only
+    // directory also produces and the constant alone would misreport as a scan.
     process.stderr.write(err?.code === POLICY_LOCK_CODE
-      ? `wildcard-perms ${flag}: ${POLICY_LOCK_BUSY_MESSAGE}\n`
+      ? `wildcard-perms ${flag}: ${err.message}\n`
       : `wildcard-perms ${flag}: write error: ${err.message}\n`);
     process.exit(1);
   }

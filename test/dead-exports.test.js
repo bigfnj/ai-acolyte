@@ -170,9 +170,9 @@ const TEST_ONLY = {
   // was what made the census count it as a production consumer.
   'src/settings-write.js': ['SETTINGS_ABSENT'],
   'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
-  // The VS Code host is the real consumer of these two (package.json `main`); the
-  // lifecycle tests load the module by path and call both. Off HELD 2026-10-14.
-  'vscode-extension/extension.js': ['activate', 'deactivate'],
+  // extension.js's activate and deactivate left this list 2026-10-14: the VS Code host is their real consumer (package.json
+  // `main`), and scripts/measure-push-host-thread.js now loads a tree's extension.js by path and calls both, which the
+  // census counts. Before that only the lifecycle tests did, which is why they were here.
   // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
   'vscode-extension/memoryLint.js': ['pickPrimaryDir'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test

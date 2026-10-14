@@ -1487,10 +1487,12 @@ test('a make override of a program its own rules run is broad, and data override
   for (const prefix of MAKE_DATA_NARROW) {
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
   }
-  // Case matters to make: `cc` is not the compiler variable, CC is. MUTATION: look the name up
-  // upper-cased in MAKE_PROGRAM_VARIABLES. `["make", "cc=x", "all"]` is refused and this fails.
-  // Confirmed 2026-10-14.
-  assert.equal(codexRuleCount(['make', 'cc=x', 'all']), 1);
+  // F6 pinned `["make", "cc=x", "all"]` rendering here, because `cc` is not make's compiler
+  // variable. L1 (2026-10-14, the lead's decision) refuses it: make also puts a command-line
+  // variable into every recipe line's environment, and a Windows child reading CC sees `cc`
+  // there, since a Windows environment name folds case. The L1 test below has the rows.
+  // MUTATION: judge MAKE's unsafeVariable by codexEnvNameIsUnsafe again. This fails.
+  assert.equal(codexRuleCount(['make', 'cc=x', 'all']), 0);
   assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
 });
 
@@ -1569,11 +1571,10 @@ test('J1: a build program named by an assignment makes a Codex prefix broad wher
     // MUTATION: add 'CFLAGS' to CARGO_PROGRAM_ENV. The CFLAGS rows fail. Confirmed 2026-10-14.
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
   }
-  // J1 pinned every assignment case-exact here. K1 (2026-10-14) folds case wherever the export
-  // reads an ENVIRONMENT assignment (the K1 tests below); a just override keeps J1's exact
-  // match, because just's variable names are case-sensitive. MUTATION: look the name up
-  // upper-cased in codexEnvNameIsUnsafe. This row is refused and this fails. Confirmed 2026-10-14.
-  assert.equal(codexRuleCount(['just', 'ar=x', 'build']), 1, 'to just, `ar` is not the variable AR');
+  // J1 pinned every assignment case-exact here. K1 (2026-10-14) folded case wherever the export
+  // reads an ENVIRONMENT assignment and kept a just override exact; L1 (the same day) folds the
+  // override too, because under `set export` it is an environment assignment (the L1 test below).
+  assert.equal(codexRuleCount(['just', 'ar=x', 'build']), 0, 'under `set export`, a Windows child reads `ar` as AR');
 });
 
 // K1 (2026-10-14, the lead's decision): an ENVIRONMENT name folds case on Windows, so the Codex
@@ -1617,12 +1618,6 @@ const K1_DATA_NARROW = [
   ['cflags=-O2', 'make', 'all'], ['foo=1', 'cat'], ['docker', 'exec', '-e', 'foo=bar', 'ctr', 'ls'],
   ['docker', 'exec', '-e', 'ci', 'ctr', 'ls'], ['docker', 'exec', '--env=tz=UTC', 'ctr', 'date'],
 ];
-// make's and just's own overrides keep F6's exact match (the lead's decision; its premise is
-// recorded as unverified in docs/engineering-record.md, K1).
-const K1_OVERRIDE_EXACT = [
-  ['make', 'cc=x', 'all'], ['make', 'ar=./x', 'lib'], ['make', 'Ranlib=./x', 'lib'], ['make', 'compile.c=./x', 'all'],
-  ['just', 'ar=x', 'build'], ['just', 'rustc=./x', 'build'],
-];
 
 test('K1: an environment assignment is judged case-insensitively wherever the Codex export reads one', () => {
   for (const prefix of K1_FOLDED_BROAD) {
@@ -1643,13 +1638,46 @@ test('K1: an environment assignment is judged case-insensitively wherever the Co
   }
 });
 
-test('K1, the control: make and just overrides keep their exact match', () => {
-  // Passes with and without K1. MUTATION: judge MAKE's unsafeVariable by
-  // codexFoldedEnvNameIsUnsafe. The make rows are refused and this fails. MUTATION: the same
-  // for JUST. The just rows are refused and this fails. Both confirmed 2026-10-14.
-  for (const prefix of K1_OVERRIDE_EXACT) {
-    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} sets no variable the tool reads by that name`);
+// L1 (2026-10-14, the lead's decision, reversing F6's and K1's exact match for make and just): a
+// make or just override is an environment assignment as well (GNU make exports a command-line
+// variable to every recipe line; just does under `set export`, measured), so it is judged folded
+// (src/policy-exporters.js, MAKE's comment). This replaces K1's control, which pinned these
+// overrides exact. Against the base source (2092793) every row of L1_OVERRIDE_FOLDED rendered.
+const L1_OVERRIDE_FOLDED = [
+  // K1's control rows, which rendered by its decision.
+  ['make', 'cc=x', 'all'], ['make', 'ar=./x', 'lib'], ['make', 'Ranlib=./x', 'lib'], ['make', 'compile.c=./x', 'all'],
+  ['just', 'ar=x', 'build'], ['just', 'rustc=./x', 'build'],
+  // Each set the fold reaches, in a lower or mixed case: code loading, program naming, the
+  // loader prefixes, F6's make sets, cargo's programs and K3's directories.
+  ['make', 'Cc=x', 'all'], ['make', 'node_options=--require=./y.js', 'test'], ['make', 'ld_preload=./x.so', 'all'],
+  ['make', 'Path=.', 'all'], ['make', 'git_pager=x', 'all'], ['make', 'shell=./x.sh', 'test'],
+  ['make', 'makeflags=--eval=x', 'all'], ['make', 'rustc=./x', 'all'], ['make', 'cargo_home=./h', 'all'],
+  ['make', 'test', 'cc=x'], ['make', 'cc :=x', 'all'], ['make', 'Link.o=./x', 'all'],
+  ['just', 'node_options=--require=./y.js', 'build'], ['just', 'Git_Pager=x', 'build'], ['just', 'ld_preload=./x.so', 'build'],
+  ['just', '--set', 'node_options', 'x', 'build'], ['just', '--set', 'ld', './x', 'build'],
+];
+// Data overrides still render, in any case.
+const L1_OVERRIDE_DATA = [
+  ['make', 'prefix=/usr/local', 'install'], ['make', 'PREFIX=/usr/local', 'install'], ['make', 'Prefix=/usr/local', 'install'],
+  ['make', 'DESTDIR=/tmp/stage', 'install'], ['make', 'destdir=/tmp/stage', 'install'], ['make', 'CFLAGS=-O2', 'all'],
+  ['make', 'cflags=-O2', 'all'], ['make', 'VERBOSE=1', 'all'], ['make', 'verbose=1', 'all'], ['make', 'V=1', 'test'],
+  ['make', 'v=1', 'test'], ['make', 'ldflags=-s', 'all'], ['make', 'rustflags=-g', 'all'], ['make', 'bindir=/opt/bin', 'install'],
+  ['just', 'PYTHON=python3', 'test'], ['just', 'python=python3', 'test'], ['just', 'a=b', 'build'],
+  ['just', '--set', 'verbose', '1', 'build'],
+];
+
+test('L1: a make or just override is judged case-insensitively, as the environment assignment it also is', () => {
+  for (const prefix of L1_OVERRIDE_FOLDED) {
+    // MUTATION: judge MAKE's unsafeVariable by codexEnvNameIsUnsafe again (L1 reverted there).
+    // The make rows render.
+    // MUTATION: the same for JUST. The just rows render, `--set` included.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} reaches a recipe's environment, where a Windows child folds it`);
   }
+  for (const prefix of L1_OVERRIDE_DATA) {
+    // MUTATION: make MAKE's or JUST's unsafeVariable refuse every name. That tool's rows fail.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
+  }
+  // Upper case, refused before L1 and after it.
   assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
   assert.equal(codexRuleCount(['just', 'AR=x', 'build']), 0);
 });

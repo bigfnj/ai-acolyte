@@ -1039,9 +1039,9 @@ const NPX_EXEC = {
 //   * MAKE_COMMAND_VARIABLE, the whole command lines the built-in rules run (the same table:
 //     COMPILE.c, LINK.o, PREPROCESS.S, LEX.l, YACC.y, LINT.c, ... and CHECKOUT,v). Overriding one
 //     replaces the command a rule runs outright.
-// Matched exactly, as make's variable names are case-sensitive. Not refused, on purpose: the
-// flags variables (CFLAGS, LDFLAGS, ARFLAGS, ...) and the install locations (PREFIX, DESTDIR,
-// prefix, bindir, ...), which the same table and standard define as data, and any variable a
+// Matched exactly until L1 (below), as make's variable names are case-sensitive. Not refused, on
+// purpose: the flags variables (CFLAGS, LDFLAGS, ARFLAGS, ...) and the install locations (PREFIX,
+// DESTDIR, prefix, bindir, ...), which the same table and standard define as data, and any variable a
 // makefile defines for itself, which is the makefile's own code, as a target's recipe is. just
 // gains nothing here: it has no built-in variables and no implicit rules, and an override of a
 // variable the justfile does not declare is an error (MEASURED, just 1.58.0, 2026-10-14: `just
@@ -1052,6 +1052,24 @@ const NPX_EXEC = {
 // environment judgment now holds the build programs, so `["just", "AR=x", "build"]`, which F6
 // left rendering, is broad: under `set export` it is `env AR=x` for every recipe, and a recipe
 // that runs make then runs x. `["just", "PYTHON=python3", "test"]` still renders.
+//
+// FOLDED SINCE L1 (2026-10-14, the lead's decision, reversing F6's and K1's exact match here). A
+// make or just override is judged by codexFoldedEnvNameIsUnsafe, the environment readers' check,
+// because it is an environment assignment as well as a variable. GNU make "exports a variable
+// only if it is either defined in the environment initially or if set on the command line and its
+// name consists only of letters, numbers, and underscores", and "adds the variable and its value
+// to the environment for running each line of the recipe" (the GNU make manual, "Communicating
+// Variables to a Sub-make", read 2026-10-14). just does the same under `set export`: MEASURED with
+// just 1.58.0 in a private temp directory, a justfile with `set export` and `node_options := ""`
+// whose recipe runs node ran y.js under `just node_options=--require=./y.js r`, and node saw
+// NODE_OPTIONS set. A native Windows child reads its environment case-insensitively (K1, at
+// codexFoldedEnvNameIsUnsafe), so `make cc=x all` hands every recipe line a variable a child
+// reading CC sees, though make's own `$(CC)` is untouched. Refusing it is the safe failure, so
+// F6's pinned `["make", "cc=x", "all"]` is broad now. Data overrides still render in any case
+// (`prefix=`, `PREFIX=`, `DESTDIR=`, `CFLAGS=`, `cflags=`, `VERBOSE=`, `V=`): the fold reaches
+// only the program, code-loading and configuration sets. It also refuses a dotted spelling such
+// as `compile.c=` or `.shellflags=`, which make neither reads as the built-in variable nor
+// exports; that over-refusal is the cost of one predicate, and the safe direction.
 const MAKE_SHELL_VARIABLES = new Set(['SHELL', '.SHELLFLAGS', 'MAKESHELL', 'MAKEFLAGS', 'MFLAGS', 'MAKEFILES']);
 const MAKE_PROGRAM_VARIABLES = new Set([
   'AR', 'AS', 'CC', 'OBJC', 'CXX', 'CO', 'CPP', 'FC', 'F77', 'GET', 'LD', 'LEX', 'LINT', 'M2C', 'PC', 'YACC',
@@ -1066,8 +1084,8 @@ const MAKE = {
     assignments: /^\s*([^\s:#=]*?)\s*([:+?!]*)=/,
     // codexEnvNameIsUnsafe is MAKE_SHELL_VARIABLES, MAKE_PROGRAM_VARIABLES, MAKE_COMMAND_VARIABLE
     // and envNameIsUnsafe, which this line named one by one until J1, plus cargo's program names
-    // (a command-line variable reaches every recipe's environment, see above).
-    unsafeVariable: (name, operator) => operator.includes('!') || codexEnvNameIsUnsafe(name),
+    // (a command-line variable reaches every recipe's environment, see above); folded since L1.
+    unsafeVariable: (name, operator) => operator.includes('!') || codexFoldedEnvNameIsUnsafe(name),
     scanAll: true,
     flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
       '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',
@@ -1096,7 +1114,7 @@ const MAKE = {
 // s.ps1"` (1.58's option to load a command's output as the environment) ran s.ps1, which wrote
 // its marker. A variable override, `NAME=VALUE` or `--set NAME VALUE`, is judged by
 // envNameIsUnsafe since the same day (codexEnvNameIsUnsafe since J1, which adds the build
-// programs): under `set export` it reaches every recipe's environment,
+// programs, and folded since L1, MAKE above): under `set export` it reaches every recipe's environment,
 // and `just NODE_OPTIONS=--require=./y.js build` (NODE_OPTIONS declared in the justfile) ran y.js,
 // measured. just overrides only variables the justfile declares, and no variable chooses the
 // shell, so a data override stays narrow.
@@ -1104,7 +1122,7 @@ const JUST = {
   info: DEFAULT_INFO,
   target: {
     assignments: /^([A-Za-z_][A-Za-z0-9_-]*)()=/,
-    unsafeVariable: (name) => codexEnvNameIsUnsafe(name),
+    unsafeVariable: (name) => codexFoldedEnvNameIsUnsafe(name),
     flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
       '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
     flagPattern: /^-v+$/,
@@ -2018,7 +2036,7 @@ function envAssignmentIsUnsafe(value) {
 // override (MAKE's and JUST's unsafeVariable), and a prefix that opens with assignments
 // (candidateEligibleForCodex). Matched exactly, as F6's names are: make's variable names are
 // case-sensitive, and so is a POSIX environment. Since K1 (below) the ENVIRONMENT readers fold
-// case through codexFoldedEnvNameIsUnsafe; the make and just overrides still call this one.
+// case through codexFoldedEnvNameIsUnsafe, and since L1 the make and just overrides do too.
 //
 // THE CLAUDE HALF IS NOT CHANGED. claudePermissionIsSafe judges a leading assignment by
 // envNameIsUnsafe, as before, so `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
@@ -2119,12 +2137,12 @@ function codexEnvNameIsUnsafe(name) {
 // suffix (`COMPILE.c`, `CHECKOUT,v`) matched case-insensitively. That covers envNameIsUnsafe's
 // sets too (CODE_LOADING_ENV, PROGRAM_NAMING_ENV, `LD_*` and `DYLD_*`), which were exact.
 //
-// NOT USED for make's and just's own overrides, which stay exact (MAKE's and JUST's
-// unsafeVariable, codexEnvNameIsUnsafe), by the same decision: make's variable names are
-// case-sensitive, so `["make", "cc=x", "all"]` sets no compiler variable and still renders, as
-// F6 pinned. That half of the decision is recorded for the lead as unverified: make exports a
-// command-line variable to every recipe line's environment, and just does so under `set
-// export`, where a Windows child reads it folded (docs/engineering-record.md, K1).
+// USED for make's and just's own overrides too since L1 (MAKE's and JUST's unsafeVariable; the
+// lead's decision, reversing K1's exact half). K1 kept them exact, because make's variable names
+// are case-sensitive and `["make", "cc=x", "all"]` sets no compiler variable for make itself, and
+// recorded that premise as unverified: make exports a command-line variable to every recipe
+// line's environment, and just does so under `set export` (measured), where a Windows child reads
+// it folded. MAKE's comment above has the sources (docs/engineering-record.md, K1 and L1).
 const MAKE_COMMAND_VARIABLE_FOLDED = new RegExp(MAKE_COMMAND_VARIABLE.source, 'i');
 function codexFoldedEnvNameIsUnsafe(name) {
   const text = String(name);

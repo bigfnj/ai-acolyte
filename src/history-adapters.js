@@ -2582,32 +2582,54 @@ function withReadOnlyDatabase(file, read) {
 // `offsets` is the projection's cursor into each rollout. Read only where the
 // column exists, because a store this reader does not fully know must still
 // supply its thread ids rather than fail the whole comparison on a column.
+//
+// THE PROJECTION TABLE ALONE WHEN IT EXISTS (2026-10-14). This read runs on
+// every scan and every Codex Stop, and it used to take `select distinct
+// thread_id` over `thread_items` and `thread_turns` as well: a walk of every
+// index entry, because the id is only the leading column of a key with one row
+// per item. MEASURED on a synthetic home with Codex 0.161.0's schema (2,000
+// threads, 1,000,000 items, a 736 MB store; median of 7, Node 24.19.0):
+//   distinct thread_items 124 ms   distinct thread_turns 6 ms
+//   thread_history_projection_state 0.6 ms (one row per thread, its PRIMARY KEY)
+// and the same three id sets: on the development box all three tables hold the
+// same 13 ids, and on 0.145.0 (2026-09-24) the projection's 52 rows matched the
+// 52 rollouts exactly. The projection writes the items, so a thread cannot have
+// items without its row except inside the projection's own write. One query
+// now reads ids and offsets together. The other two tables are read only when
+// the projection table is absent, or has no `thread_id`, as a store this reader
+// does not know may.
+//
+// The loose-index-scan CTE (`min(thread_id)` stepped by `thread_id > ?`), 22 ms
+// on the same store, was not taken for that fallback: it is fast only through
+// an index led by `thread_id`, and on a store without one each of its
+// one-per-thread steps scans the table. DISTINCT is the bounded one.
 function readThreadStoreIds(storePath) {
   return withReadOnlyDatabase(storePath, (db, tables, columns) => {
     const ids = new Set();
     const offsets = new Map();
+    const projection = tables.has('thread_history_projection_state')
+      ? columns('thread_history_projection_state') : new Set();
+    if (projection.has('thread_id')) {
+      const withOffset = projection.has('next_rollout_byte_offset');
+      for (const row of db.prepare(`select thread_id as id${withOffset ? ', next_rollout_byte_offset as offset' : ''} `
+        + 'from thread_history_projection_state').all()) {
+        if (!row.id) continue;
+        const id = String(row.id).toLowerCase();
+        ids.add(id);
+        const offset = Number(row.offset);
+        if (withOffset && Number.isFinite(offset)) offsets.set(id, offset);
+      }
+      return { ok: true, ids, offsets };
+    }
     let read = 0;
-    for (const [table, column] of [
-      ['thread_history_projection_state', 'thread_id'],
-      ['thread_items', 'thread_id'],
-      ['thread_turns', 'thread_id'],
-    ]) {
+    for (const table of ['thread_items', 'thread_turns']) {
       if (!tables.has(table)) continue;
-      for (const row of db.prepare(`select distinct ${column} as id from "${table}"`).all()) {
+      for (const row of db.prepare(`select distinct thread_id as id from "${table}"`).all()) {
         if (row.id) ids.add(String(row.id).toLowerCase());
       }
       read += 1;
     }
     if (!read) return { ok: false, reason: `${path.basename(storePath)} holds no known thread-history table` };
-    if (tables.has('thread_history_projection_state')
-        && columns('thread_history_projection_state').has('next_rollout_byte_offset')) {
-      for (const row of db.prepare(
-        'select thread_id as id, next_rollout_byte_offset as offset from thread_history_projection_state',
-      ).all()) {
-        const offset = Number(row.offset);
-        if (row.id && Number.isFinite(offset)) offsets.set(String(row.id).toLowerCase(), offset);
-      }
-    }
     return { ok: true, ids, offsets };
   });
 }

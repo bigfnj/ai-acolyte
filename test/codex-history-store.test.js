@@ -390,6 +390,49 @@ test('a store cursor past the end of its transcript is a stale projection', { sk
   assert.deepEqual(level.projectionAhead, []);
 });
 
+// THE PROJECTION TABLE ALONE SUPPLIES THE IDS WHEN IT EXISTS (2026-10-14).
+// `select distinct thread_id` over `thread_items` walked every index entry on
+// every scan and every Codex Stop: 124 ms at a million items, against 0.6 ms
+// for the projection's one row per thread (src/history-adapters.js,
+// readThreadStoreIds). The witness: a `thread_items` this reader cannot query at
+// all (no `thread_id` column) next to a projection table. Read, it throws and the
+// verdict degrades to `partial`; not read, the verdict is exact.
+test('the projection table alone supplies a store\'s thread ids when it exists', { skip: !exactTier }, (t) => {
+  const home = codexHome(t, 'projection-only');
+  const file = rollout(home, THREADS[0]);
+  const store = threadStore(home, [THREADS[0]], { offsets: { [THREADS[0]]: fs.statSync(file).size } });
+  const db = new SqliteDatabase(store);
+  db.exec('DROP TABLE thread_items');
+  db.exec('CREATE TABLE thread_items (item_id TEXT NOT NULL)');
+  db.exec('CREATE TABLE thread_turns (turn_id TEXT NOT NULL)');
+  db.close();
+  const state = codexHistoryStoreState({ home });
+  assert.equal(state.inspected, 'exact',
+    `witness:projection-only -- the item or turn table was queried beside the projection: ${state.notes.join(' | ')}`);
+  assert.equal(state.stale, false, state.reasons.join(' | '));
+  assert.equal(state.storeThreads, 1);
+});
+
+// The control: with no projection table, the item and turn tables are still how
+// a store names its threads, so a thread only they know is still found missing.
+test('control: a store with no projection table is read through its item and turn tables', { skip: !exactTier }, (t) => {
+  const home = codexHome(t, 'items-fallback');
+  rollout(home, THREADS[0]);
+  const store = threadStore(home, []);
+  const db = new SqliteDatabase(store);
+  db.exec('DROP TABLE thread_history_projection_state');
+  db.exec('CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL)');
+  const item = db.prepare("INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json) VALUES (?, 't', ?, 0, 0, '{}')");
+  item.run(THREADS[0], 'i0');
+  item.run(THREADS[1], 'i1');
+  db.prepare("INSERT INTO thread_turns VALUES (?, 't')").run(THREADS[2]);
+  db.close();
+  const state = codexHistoryStoreState({ home });
+  assert.equal(state.inspected, 'exact', state.notes.join(' | '));
+  assert.equal(state.storeThreads, 3, 'both tables are read');
+  assert.deepEqual(state.orphans, [THREADS[1], THREADS[2]].sort(), 'a thread only the items or the turns name is missing');
+});
+
 test('the thread-state database classifies a missing transcript and never adds one', { skip: !exactTier }, (t) => {
   const elsewhere = (home) => path.join(home, '.codex', 'elsewhere');
 

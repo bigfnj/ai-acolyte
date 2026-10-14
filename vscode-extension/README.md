@@ -19,7 +19,7 @@ Codex entries open their existing rule review. The overflow link searches both a
 A separate **Codex memory** row provides native
 memory search, diagnostics and gate controls.
 
-Version **1.6.1** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.6.2** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance

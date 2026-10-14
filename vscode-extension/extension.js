@@ -627,10 +627,10 @@ function toolboxPython() {
 //   2. the copy bundled into the VSIX by scripts/package.mjs — the normal case for an
 //      installed extension, and why a fresh install no longer needs a checkout at all
 //   3. the dev layout — vscode-extension/ sits next to memory/ (running from the repo, e.g. F5)
-//   4. an open workspace folder that IS or CONTAINS the permission-wildcarding repo — it can
-//      live on any drive, so probe the usual layouts (folder = repo | a projects/ dir |
-//      a .claude/ root) rather than a fixed path
-//   5. the ~/.claude/projects/permission-wildcarding convention
+// and nowhere else. Never an open workspace folder, so no repository can supply the script
+// the extension runs: why is at the end of the function. A checkout anywhere else is named
+// through the setting, which only the user tier can set.
+//
 // Empty string when none resolve — the rebuild button then guides the user to set it, while
 // the passive status probe keeps working regardless.
 function recallScriptPath() {
@@ -645,15 +645,15 @@ function recallScriptPath() {
   const dev = hit(path.join(__dirname, '..', 'memory', 'recall.py'));
   if (dev) return dev;
 
-  for (const f of vscode.workspace.workspaceFolders || []) {
-    const root = f.uri.fsPath;
-    const found = hit(path.join(root, 'memory', 'recall.py'))                           // folder is the repo root
-      || hit(path.join(root, 'permission-wildcarding', 'memory', 'recall.py'))              // folder is a projects/ dir
-      || hit(path.join(root, 'projects', 'permission-wildcarding', 'memory', 'recall.py')); // folder is a .claude/ root
-    if (found) return found;
-  }
+  // Nothing after these two (2026-10-14, G1). Three legs used to follow, probing each open
+  // workspace folder as the repo root, a projects/ dir and a .claude/ root, and then a fourth,
+  // ~/.claude/projects/permission-wildcarding: the project's pre-rename name. They ran only
+  // with the bundled copy missing, and then a repository's own memory/recall.py was the script
+  // the extension ran, the hole F7 closed for the setting left open one layer down. The
+  // caller's own "not found" path covers the rest: it offers the setting, at the user tier.
+  // test/recall-script-path.test.js holds it shut, and holds the VSIX to shipping the copy.
 
-  return hit(path.join(PROJECTS_DIR, 'permission-wildcarding', 'memory', 'recall.py'));
+  return '';
 }
 
 // Stable home for the 32MB model, deliberately outside both the extension dir and any
@@ -1093,7 +1093,7 @@ function autoSyncRecallIfStale() {
 async function setRecallPath() {
   const val = await vscode.window.showInputBox({
     title: 'ai-acolyte: path to recall.py',
-    prompt: "Absolute path to your permission-wildcarding repo's memory/recall.py",
+    prompt: "Absolute path to an ai-acolyte checkout's memory/recall.py (saved to user settings)",
     value: recallScriptPath(),
     ignoreFocusOut: true,
   });

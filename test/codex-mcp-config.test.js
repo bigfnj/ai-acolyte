@@ -588,10 +588,13 @@ test('the config worker\'s own kill runs System32\'s taskkill, not one planted i
     }).then(() => process.stdout.write('answered'), error => process.stdout.write(error.message));`],
   { cwd, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
   pids.push(host.pid);
+  const started = Date.now();
   let outcome = '';
   host.stdout.setEncoding('utf8');
   host.stdout.on('data', chunk => { outcome += chunk; });
   await new Promise(resolve => host.once('close', resolve));
+  // Said in every message below, so a failure on a loaded runner names its path.
+  outcome = `${outcome} (the host answered after ${Date.now() - started} ms)`;
   assert.ok(fs.existsSync(codex.pidFile), `precondition: the stand-in codex started; the host said: ${outcome}`);
   const hung = Number(fs.readFileSync(codex.pidFile, 'utf8'));
   pids.push(hung);
@@ -600,7 +603,7 @@ test('the config worker\'s own kill runs System32\'s taskkill, not one planted i
   // survives until the host's backstop ends the worker's tree, and the answer is
   // "unavailable: the worker timed out". Confirmed 2026-10-14: both, on separate runs.
   assert.equal(fs.existsSync(flag), false,
-    `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}`);
-  assert.match(outcome, /refused: Codex config operation timed out/, 'the worker\'s deadline, not the host\'s backstop');
+    `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}; the host said: ${outcome}`);
+  assert.match(outcome, /refused: Codex config operation timed out/, `the worker's deadline, not the host's backstop; the host said: ${outcome}`);
   assert.equal(await waitFor(() => gone(hung), 3000), true, 'the worker\'s kill ended the stand-in codex');
 });

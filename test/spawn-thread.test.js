@@ -24,14 +24,20 @@ async function waitFor(predicate, ms) {
 }
 const readPid = (file) => (fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8').trim()) || null : null);
 
+// ONE hook, in this order: kill what the test recorded, wait for it to be gone, and
+// only then remove the directory. A stand-in that is still running stands in it,
+// and a .cmd stand-in's hidden console host keeps that cwd for about a second
+// after it dies, which rmSync does not retry. Two hooks registered remove-first
+// left a directory behind on every run.
 function scratch(t, name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `acolyte-spawn-thread-${name}-`));
-  // A .cmd stand-in's hidden console host keeps its cwd for about a second after
-  // it dies, and rmSync does not retry that EPERM.
+  const pids = [];
   t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await waitFor(() => pids.every(gone), 3000);
     await waitFor(() => { try { fs.rmSync(dir, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
   });
-  return dir;
+  return { dir, pids };
 }
 
 // A codex that starts and never answers: the npm shape on Windows (cmd.exe -> node),
@@ -80,7 +86,7 @@ test('execFile on a thread answers in execFile\'s shape, and its handle closes w
 // codex left running. The same contract test/codex-mcp-config.test.js pins for
 // the in-process route.
 test('the trust ask on a thread keeps its budget, its deadline\'s wording and its kill', async (t) => {
-  const dir = scratch(t, 'ask');
+  const { dir, pids } = scratch(t, 'ask');
   const home = path.join(dir, 'home'), codexHome = path.join(home, '.codex');
   fs.mkdirSync(codexHome, { recursive: true });
   const codex = hangingCodex(dir);
@@ -95,7 +101,7 @@ test('the trust ask on a thread keeps its budget, its deadline\'s wording and it
   assert.ok(elapsed < 6000, `bounded by its 4 s budget plus a kill: took ${elapsed} ms`);
   const pid = readPid(codex.pidFile);
   if (pid) {
-    t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+    pids.push(pid);
     assert.equal(await waitFor(() => gone(pid), 3000), true, 'the worker ended the codex it started');
   }
 });
@@ -106,7 +112,7 @@ test('the trust ask on a thread keeps its budget, its deadline\'s wording and it
 // POSIX reach the codex under it. The worker's deadline is its 25 s ceiling, so
 // within these 3 s only the kill can have ended the codex.
 test('ending a thread child ends the worker and the codex it started, on every platform', async (t) => {
-  const dir = scratch(t, 'tree');
+  const { dir, pids } = scratch(t, 'tree');
   const home = path.join(dir, 'home'), codexHome = path.join(home, '.codex');
   fs.mkdirSync(codexHome, { recursive: true });
   const codex = hangingCodex(dir);
@@ -115,7 +121,7 @@ test('ending a thread child ends the worker and the codex it started, on every p
     timeoutMs: 40000, offThread: true, track: (child) => tracked.push(child) }).then(() => 'answered', (error) => error.message);
   assert.ok(await waitFor(() => readPid(codex.pidFile), 15000), 'precondition: the worker started the stand-in codex');
   const pid = readPid(codex.pidFile);
-  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  pids.push(pid);
   assert.equal(gone(pid), false, 'precondition: the stand-in codex is running');
   // MUTATION: make the thread ignore the host's `end` message (runTask's handler
   // returns at once). Nothing ends the worker, and the codex is still running
@@ -135,15 +141,13 @@ test('ending a thread child ends the worker and the codex it started, on every p
 // the host's death can have ended it.
 test('a host that dies outright still takes the worker it started from a thread', async (t) => {
   const { spawn } = require('node:child_process');
-  const dir = scratch(t, 'death');
+  const { dir, pids } = scratch(t, 'death');
   const home = path.join(dir, 'home'), codexHome = path.join(home, '.codex');
   fs.mkdirSync(codexHome, { recursive: true });
   const codex = hangingCodex(dir);
   const workerPidFile = path.join(dir, 'worker.pid');
   const preload = path.join(dir, 'worker-pid.js');
   fs.writeFileSync(preload, `if (process.argv.includes('--rpc-worker')) require('fs').writeFileSync(${JSON.stringify(workerPidFile)}, String(process.pid));\n`);
-  const pids = [];
-  t.after(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } });
   const host = spawn(process.execPath, ['-e', `
     require(${JSON.stringify(path.join(__dirname, '..', 'src', 'codex-mcp-config.js'))}).readCodexConfigLayersAsync({
       home: ${JSON.stringify(home)}, codexHome: ${JSON.stringify(codexHome)}, workspaceRoot: ${JSON.stringify(dir)},

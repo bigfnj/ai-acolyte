@@ -41,7 +41,7 @@ Config via env:
 
 Retrieval quality is measured by bench/gate_recall.py, not asserted here.
 """
-import os, sys, re, json, math, argparse, hashlib, unicodedata
+import os, sys, re, json, math, time, argparse, hashlib, unicodedata
 from collections import Counter
 
 # --- runtime shim: onnxruntime + numpy live in the DevToolbox venv, not system python.
@@ -120,6 +120,8 @@ def _discover_memory_dir():
     except OSError as e:
         print(f"[recall] cannot list {root} ({e}); falling back to the default store",
               file=sys.stderr)
+        if not isinstance(e, FileNotFoundError):   # no projects dir at all: a fresh machine
+            _DISCOVERY_ERRORS.append((root, e))
         slugs = []
     for slug in slugs:
         candidate = os.path.join(root, slug, "memory")
@@ -137,6 +139,7 @@ def _discover_memory_dir():
             # EMFILE scored a 123-file store below a 7-file one.
             print(f"[recall] cannot read {candidate} ({e}); it cannot win corpus selection",
                   file=sys.stderr)
+            _DISCOVERY_ERRORS.append((candidate, e))
             continue
         if count > best_count:
             best, best_count = candidate, count
@@ -149,7 +152,12 @@ def _discover_memory_dir():
 # two compile_gates() refusal messages, where a mixed-separator path reads like a bug in the
 # thing reporting the bug. Separator-only, so the message LENGTH does not move (228 and 226
 # chars here, both still inside extension.js's 300-char stderr slice).
-MEMORY_DIR = os.path.normpath(os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir())
+#
+# _DISCOVERY_ERRORS holds (path, error) for each directory discovery could not read, and
+# compile_gates() refuses on any of them (ported from rampage 7139659, 2026-10-14). An explicit
+# RECALL_MEMORY_DIR skips discovery, so it never fills.
+_DISCOVERY_ERRORS = []
+MEMORY_DIR =os.path.normpath(os.environ.get("RECALL_MEMORY_DIR") or _discover_memory_dir())
 # This count rule is the AUTHORITY. Two other places pick a corpus -- memoryLint.js
 # pickPrimaryDir and scripts/verify-release.ps1 Find-MemoryDir -- and both used to sort by
 # MEMORY.md mtime instead. The extension pins RECALL_MEMORY_DIR from its copy on every spawn, so
@@ -1090,6 +1098,23 @@ def compile_gates(allow_empty=False):
     """Lift every scope:global gate block into one block for the installer to drop into
     CLAUDE.md, and write it. The judgement happened when the memory was written, which is
     what lets this run unattended."""
+    # Discovery that could not read a store has not answered "which store", only "which of the
+    # stores I could read". Compiling from that answer replaced the standing orders with the
+    # next-largest store's, exit 0: reproduced in rampage (7139659) with one store denied by
+    # icacls, where two gates became the other store's one and the only trace was a warning the
+    # caller never showed. So refuse before anything is read or written. Search and --lint still
+    # run on such a pick (they warn); a gate is a standing order. An explicit RECALL_MEMORY_DIR,
+    # which is what the extension passes whenever it has a store, skips discovery entirely, and
+    # an absent ~/.claude/projects is a fresh machine, not a read failure, so it is not recorded.
+    # The extension's compileGates shows the first 300 chars of stderr; the discovery warning
+    # printed above this line already names the store, and this line names it again.
+    if _DISCOVERY_ERRORS:
+        store, err = _DISCOVERY_ERRORS[0]
+        more = f" and {len(_DISCOVERY_ERRORS) - 1} more" if len(_DISCOVERY_ERRORS) > 1 else ""
+        sys.exit(f"[recall] refusing to compile gates: cannot read {os.path.normpath(store)} "
+                 f"({type(err).__name__}){more}, so {MEMORY_DIR} may be the wrong store. Fix that, "
+                 f"or set RECALL_MEMORY_DIR.")
+
     # A missing memory dir is a normal state (a fresh machine, a mocked HOME), not a crash.
     # This can run from a hook, where an unhandled traceback would land in the agent's face.
     #
@@ -1139,9 +1164,40 @@ def compile_gates(allow_empty=False):
 
     # newline="\n" on purpose: a CRLF translation on Windows would change the bytes and
     # make the hash useless as a "has anything actually changed" signal.
+    #
+    # Through a pid-named temp and os.replace, as save_index writes the index (ported from
+    # rampage 7139659). Written in place, a reader racing the write sees an empty or partial
+    # file, and src/agent-gates.js turned an empty read into an empty gates block. Rampage
+    # measured it 2026-10-08, two runs of a Node readFileSync loop against a writer looping
+    # for 5 s: in place, 2,275 and 2,136 empty reads (27,369 and 14,423 EBUSY); replaced,
+    # 14,485 and 8,526 whole reads and not one empty, partial or failed read.
+    #
+    # The retry is there because Windows will not replace a file another process holds open:
+    # against that same reader a bare os.replace failed 1,849 and 1,724 of 2,000 times (WinError
+    # 5). Same schedule as src/permissions.js writeFileAtomicSync, 10 attempts at 20..180 ms.
+    # Unlike that writer there is NO in-place fallback, because writing in place is the bug. A
+    # reader that never lets go still wins, and then this exits non-zero with the previous file
+    # whole, which both callers already handle as a failed compile.
     os.makedirs(os.path.dirname(GATES_OUT), exist_ok=True)
-    with open(GATES_OUT, "w", encoding="utf-8", newline="\n") as f:
-        f.write(out)
+    tmp = f"{GATES_OUT}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(out)
+        for attempt in range(10):
+            try:
+                os.replace(tmp, GATES_OUT)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        sys.exit(f"[recall] could not write {GATES_OUT} ({type(e).__name__}: {e}); "
+                 f"the previous file is unchanged.")
 
     if not names:
         print(f"\n  no scope:global gate blocks found -- wrote 0 bytes to {GATES_OUT}")

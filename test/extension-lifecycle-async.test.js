@@ -621,11 +621,19 @@ let recallModelHidden = null;
 let tmpUnlinkObserved = null;
 
 // HOW MANY TIMES the .tmp was unlinked, which the single-slot observable above
-// cannot say. `fail` is reachable from five call sites across four channels and
-// had no once-guard, so one destroyed socket cleaned up twice — the second
+// cannot say. `fail` is reachable from five call sites in the transfer across four
+// channels (and, since b4271f3, three more in the publish step) and had no
+// once-guard, so one destroyed socket cleaned up twice — the second
 // unlink throwing ENOENT into a swallowing catch, which is why nothing ever
 // noticed. Reset when a fresh .tmp stream opens.
 let tmpUnlinkCount = 0;
+
+// Every .tmp path a write stream was opened on, and every .tmp path unlinked, in
+// order and never reset by a new stream: two downloads at once are the case the
+// per-stream counters above cannot describe. Added 2026-10-13 with the unique temp
+// name; each test that reads them empties them first.
+const tmpStreamPaths = [];
+const tmpUnlinkPaths = [];
 
 // When set, fs.renameSync throws it. The publish step runs inside out.close()'s
 // callback, long after the Promise executor returned, so an unwrapped throw
@@ -650,6 +658,7 @@ function fsHidingRecallModel(realFs) {
     createWriteStream(target, ...rest) {
       const stream = realFs.createWriteStream(target, ...rest);
       if (String(target).endsWith('.tmp')) {
+        tmpStreamPaths.push(String(target));
         tmpStreamClosed = false;
         tmpUnlinkObserved = null;
         tmpUnlinkCount = 0;
@@ -671,6 +680,7 @@ function fsHidingRecallModel(realFs) {
       if (String(target).endsWith('.tmp')) {
         tmpUnlinkObserved = { closedFirst: tmpStreamClosed };
         tmpUnlinkCount += 1;
+        tmpUnlinkPaths.push(String(target));
       }
       return realFs.unlinkSync(target);
     },
@@ -1899,8 +1909,8 @@ test('a transfer that completes during teardown does not publish the model',
   });
 
 test('one socket error fails the download once, not once per channel', TEST_TIMEOUT, async (t) => {
-  // `fail` had no once-guard and is reachable from five call sites across four
-  // independent channels: httpsGetFollow's error, a non-200, the response
+  // `fail` had no once-guard and is reachable from five call sites in the transfer
+  // across four independent channels: httpsGetFollow's error, a non-200, the response
   // stream's 'error', the short-file check, and the write stream's 'error'. A
   // destroyed socket fires more than one of them — the request errors and the
   // response it was feeding errors too — so a single failure showed the user two
@@ -2140,6 +2150,92 @@ test('a download another channel failed during the wait is not retried into plac
       await box.app.dispose();
     }
   });
+
+// ── two downloads at once ─────────────────────────────────────────────────────
+//
+// RECALL_MODEL_HOME is one directory for every VS Code window, and rebuildRecall
+// does not stop a second download in the same window either. Until 2026-10-13 the
+// temp name was the fixed `bge-small.onnx.tmp`, so two downloads at once opened one
+// file twice, and the first to fail unlinked the other's partial file. Two
+// rebuildRecall calls in one harness are two downloads in one process, the harder
+// case for a per-writer name: the pid is shared, so only the random part separates them.
+const MODEL_TMP_NAME = new RegExp(`^bge-small\\.onnx\\.${process.pid}\\.[0-9a-f]{12}\\.tmp$`);
+
+test('two downloads at once write two temp files, and the one that fails removes only its own',
+  TEST_TIMEOUT, async (t) => {
+    const home = tempHome(t);
+    const corpus = memoryCorpus(t);
+    fakeRecallEnvironment(t, { model: false });
+    const app = harness(home, { memoryDir: corpus, warningChoice: 'Download' });
+    tmpStreamPaths.length = 0;
+    tmpUnlinkPaths.length = 0;
+    const models = path.join(home, '.claude', 'wildcarding', 'models');
+    const leftovers = () => fs.readdirSync(models).filter((f) => f.endsWith('.tmp')).sort();
+    try {
+      const first = app.commands.get('permission-wildcarding.rebuildRecall')();
+      const second = app.commands.get('permission-wildcarding.rebuildRecall')();
+      await tick(50);
+      assert.equal(app.httpsRequests.length, 2, 'precondition: both downloads started');
+      app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+      app.httpsRequests[1].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+      const body = liveBodyResponse();
+      app.httpsRequests[2].respond(body);
+      body.deliver(6 * 1024 * 1024);
+
+      // MUTATION: restore `const tmp = dest + '.tmp'`. Both streams open one path, so this
+      // fails first, and with it gone the next assertion fails too: the second download's
+      // cleanup unlinks the first one's file. Confirmed 2026-10-13.
+      // MUTATION: drop the random part (`${dest}.${process.pid}.tmp`). One process, one
+      // pid, one name again, and this fails. Confirmed 2026-10-13.
+      assert.equal(new Set(tmpStreamPaths).size, 2, `two downloads shared a temp file: ${tmpStreamPaths.join(', ')}`);
+      for (const tmp of tmpStreamPaths) {
+        assert.equal(path.dirname(tmp), models, 'the temp file sits beside the model, so the publish stays a rename');
+        assert.match(path.basename(tmp), MODEL_TMP_NAME, 'the name is `<dest>.<pid>.<random>.tmp`');
+      }
+
+      // The second download fails while the first is still transferring.
+      app.httpsRequests[3].respond({ statusCode: 500, headers: {}, resume() {} });
+      await second;
+      assert.ok(app.errors.some((m) => m.includes('HTTP 500')), `the failure was not reported: ${JSON.stringify(app.errors)}`);
+      assert.deepEqual(tmpUnlinkPaths, [tmpStreamPaths[1]], 'the failed download unlinked something other than its own file');
+      assert.deepEqual(leftovers(), [path.basename(tmpStreamPaths[0])],
+        'the transfer still running lost its partial file to the other download\'s cleanup');
+
+      app.errors.length = 0;
+      body.finish();
+      await first;
+      assert.equal(fs.existsSync(path.join(models, 'bge-small.onnx')), true, 'the surviving download published the model');
+      assert.deepEqual(leftovers(), [], 'its temp file was renamed into place');
+      assert.deepEqual(app.errors.filter((m) => m.includes('download failed')), [],
+        `the surviving download reported a failure: ${JSON.stringify(app.errors)}`);
+    } finally {
+      await app.dispose();
+    }
+  });
+
+test('a failed download leaves another download\'s temp file alone', TEST_TIMEOUT, async (t) => {
+  // The other window's file, in the shape that window's download writes, made before
+  // this one starts. Cleanup unlinks the name THIS download wrote, never a pattern.
+  const { app, home, rebuild } = await startModelDownload(t);
+  const models = path.join(home, '.claude', 'wildcarding', 'models');
+  const foreign = path.join(models, 'bge-small.onnx.4242.0123456789ab.tmp');
+  fs.writeFileSync(foreign, 'another window is still writing this');
+  tmpUnlinkPaths.length = 0;
+  try {
+    app.httpsRequests[0].respond(redirectTo('https://cdn.example.invalid/model_quantized.onnx'));
+    app.httpsRequests[1].respond({ statusCode: 404, headers: {}, resume() {} });
+    await rebuild;
+    assert.ok(app.errors.some((m) => m.includes('HTTP 404')));
+    // MUTATION: make `fail` unlink every `bge-small.onnx.*.tmp` in the directory. The
+    // other window's file goes with it and this fails. Confirmed 2026-10-13.
+    assert.equal(fs.existsSync(foreign), true, 'a failed download removed another download\'s temp file');
+    assert.equal(tmpUnlinkPaths.length, 1, 'one cleanup, of its own file');
+    assert.match(path.basename(tmpUnlinkPaths[0]), MODEL_TMP_NAME);
+    assert.deepEqual(fs.readdirSync(models).filter((f) => f.endsWith('.tmp')), [path.basename(foreign)]);
+  } finally {
+    await app.dispose();
+  }
+});
 
 // ── six awaited dialogs, all of them resuming into a write ────────────────────
 //

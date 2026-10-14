@@ -767,12 +767,22 @@ function abortLiveTransfers() {
 const MODEL_RENAME_HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const MODEL_RENAME_ATTEMPTS = 10;
 
-// Downloads to `<dest>.tmp` and renames on success so a cancelled/failed run never
-// leaves a half-written bge-small.onnx that would falsely read as "model present".
+// Downloads to a temp file beside `<dest>` and renames on success so a cancelled/failed
+// run never leaves a half-written bge-small.onnx that would falsely read as "model present".
 function downloadRecallModel() {
   const modelDir = RECALL_MODEL_HOME;
   const dest = path.join(modelDir, RECALL_MODEL_FILE);
-  const tmp = dest + '.tmp';
+  // Unique per download, `<dest>.<pid>.<random>.tmp`, the scheme every other writer here
+  // uses (src/permissions.js writeFileAtomicSync, the manager's atomicWrite). Until
+  // 2026-10-13 it was the fixed `<dest>.tmp`, and RECALL_MODEL_HOME is one directory for
+  // every VS Code window (and for two downloads in one window, which rebuildRecall does
+  // not prevent): two downloads at once opened one file for writing twice, and the first
+  // to fail unlinked the other's partial file, so its publish renamed nothing or a file
+  // both had written into. Cleanup is unchanged: `fail` unlinks this download's own name,
+  // and nothing else. A download killed with its host (not deactivated, which unlinks) now
+  // leaves its partial under a name no later download reuses; the fixed name was
+  // overwritten by the next one.
+  const tmp = `${dest}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   const vocabSource = recallVocabSource();
   const vocabTarget = path.join(modelDir, RECALL_VOCAB_FILE);
 
@@ -804,13 +814,20 @@ function downloadRecallModel() {
 
       const out = fs.createWriteStream(tmp);
       let received = 0, total = 0, reported = 0, transfer = null;   // the redirect-following handle, not one request
-      // ONE settlement, whichever of the six call sites gets here first.
-      // `fail` alone is reachable from five, across four independent channels
-      // (the follower's error, a non-200, the response stream, the short-file
-      // check and the write stream) — and one destroyed socket fires several of
+      // ONE settlement, whichever of the nine call sites gets here first: the
+      // eight `fail` calls and publish's success. Five `fail` calls are in the
+      // transfer, across four independent channels (the follower's callback,
+      // for its error and a non-200; the response stream; the short-file check
+      // in the write stream's close callback; the write stream's error), and
+      // three are in the publish step, which runs in that close callback or a
+      // retry timer (teardown, a Cancel between attempts, and a rename error that
+      // is not retried or has run out of attempts). One destroyed socket fires several of
       // them. Unguarded that showed the user two error toasts for one failure,
       // unlinked the .tmp twice, and called resolve() on an already-settled
-      // promise, which is silent and hides the double-report.
+      // promise, which is silent and hides the double-report. Recounted
+      // 2026-10-13: this said six and five. It left out the rename step's own
+      // two exits from the day it was written (05d5bc4 had seven `fail` calls
+      // and the success), and b4271f3 added the Cancel check between attempts.
       let settled = false;
 
       const claim = () => {

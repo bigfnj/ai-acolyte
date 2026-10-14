@@ -1330,6 +1330,11 @@ function parseCodexJsonl(text, options = {}) {
   // identityParts already use, so no observation id moves, and an append slice,
   // seeded with the same in-order session after the head, keys a call and its
   // result the way a full read does (test/codex-session-call-groups.test.js).
+  // ACCEPTED-RECORDED 2026-10-14: a result arriving after a `session_meta` for
+  // another session finds no call (`unknown`, where the id-only key read
+  // `failed`). No rollout Codex writes has that shape -- meta only at the head,
+  // resume appends with none, a fork is a new file; 13 box rollouts surveyed --
+  // and the same test file pins the verdict and checks every sanitized rollout.
   const callGroups = new Map();
   const results = new Map();
   const mcpCalls = new Map();

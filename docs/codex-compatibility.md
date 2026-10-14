@@ -1327,7 +1327,7 @@ either way. **sqlite is a projection, so the reader was not changed.**
 `codexHistoryStoreState` compares the two on every scan and reports `codexHistoryStale`
 plus `codexHistoryInspected`. The current implementation distinguishes `exact`,
 `unavailable`, `partial` and `skipped`: an unavailable SQLite API is not proof of
-healthy storage or of stale history (`src/history-adapters.js:2344#unavailable`). VS Code 1.141.1
+healthy storage or of stale history (`src/history-adapters.js:2349#unavailable`). VS Code 1.141.1
 (Node 24.21.0) loads `node:sqlite`; hosts within the `^1.80` engine floor may not, so the
 `unavailable` tier stays (measured 2026-10-13). This storage check does not detect every
 possible rollout-format change.
@@ -1349,7 +1349,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1832#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1837#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

@@ -272,15 +272,20 @@ test('cell IDs bind only inside their own session', () => {
   // session A's cell 3 yields and A's wait arrives. Scoped by session, A's wait
   // has exactly one cell to bind; unscoped, it would see two and withhold, or
   // bind the wrong one.
-  // Call ids are renamed in B, as two real sessions' would differ: the parser
-  // groups a call by its id, and a shared id is a different question.
-  const sessionB = renamed('0192cccc-3333-7000-8000-00000000cc0b').filter((record) => record !== three && record !== outputOf(three))
-    .map((record) => (record.payload?.call_id ? edited(record, (payload) => ({ ...payload, call_id: `${payload.call_id}_b` })) : record));
-  const both = parseCodexJsonl(jsonl([...sessionB, ...renamed('0192cccc-3333-7000-8000-00000000cc0a')]), { file: FIXTURE, platform: 'win32' });
-  const pick = (session, callId) => both.find((item) => item.session === session && item.callId === callId).status;
-  assert.equal(pick('0192cccc-3333-7000-8000-00000000cc0a', 'call_cell_3'), 'success');
-  assert.equal(pick('0192cccc-3333-7000-8000-00000000cc0b', 'call_cell_3_b'), 'unknown', 'no wait in session B, no outcome in session B');
-  assert.equal(pick('0192cccc-3333-7000-8000-00000000cc0b', 'call_cell_4_b'), 'failed');
+  // B's call ids first renamed, as two real sessions' would differ, then left
+  // as A's: since call groups are scoped by session too (2026-10-13,
+  // test/codex-session-call-groups.test.js) a shared id is no longer a
+  // different question, and both spellings read the same.
+  for (const suffix of ['_b', '']) {
+    const sessionB = renamed('0192cccc-3333-7000-8000-00000000cc0b').filter((record) => record !== three && record !== outputOf(three))
+      .map((record) => (record.payload?.call_id ? edited(record, (payload) => ({ ...payload, call_id: `${payload.call_id}${suffix}` })) : record));
+    const both = parseCodexJsonl(jsonl([...sessionB, ...renamed('0192cccc-3333-7000-8000-00000000cc0a')]), { file: FIXTURE, platform: 'win32' });
+    const pick = (session, callId) => both.find((item) => item.session === session && item.callId === callId).status;
+    const label = suffix ? 'renamed call ids' : 'shared call ids';
+    assert.equal(pick('0192cccc-3333-7000-8000-00000000cc0a', 'call_cell_3'), 'success', label);
+    assert.equal(pick('0192cccc-3333-7000-8000-00000000cc0b', `call_cell_3${suffix}`), 'unknown', `${label}: no wait in session B, no outcome in session B`);
+    assert.equal(pick('0192cccc-3333-7000-8000-00000000cc0b', `call_cell_4${suffix}`), 'failed', label);
+  }
 });
 
 // THE APPEND-SLICE IDENTITY RULE (9abc330): whatever bytes a scan starts from, a

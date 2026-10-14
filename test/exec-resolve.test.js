@@ -176,3 +176,60 @@ test('PATH stays authoritative over the fallback directories', { skip: !windows 
     else process.env.APPDATA = beforeAppData;
   }
 });
+
+// THE TREE KILL IS NEVER AIMED AT A FREED PID (2026-10-14). A child ended by a
+// signal has `exitCode` null and `signalCode` set, and by 'exit' Node has reaped
+// it, so its PID may already be reused; the extension forgets a child only on
+// 'close', which comes after. endProcessTree is called here INSIDE 'exit', the
+// gap deactivate can land in, on a child that execFile's own timeout killed.
+// taskkill and the group signal are stubbed, so this test never sends either.
+test('a child its own execFile timeout ended gets no tree kill, and a live child does', async (t) => {
+  const childProcess = require('node:child_process');
+  const { endProcessTree } = require('../src/exec-resolve');
+  const realExecFile = childProcess.execFile;
+  const realKill = process.kill;
+  const treeKills = [];
+  const stub = () => {
+    childProcess.execFile = function execFile(file, args, options, callback) {
+      if (file !== 'taskkill') return realExecFile.apply(this, arguments);
+      treeKills.push(['taskkill', ...args]);
+      process.nextTick(callback);
+      return null;
+    };
+    process.kill = function kill(pid, signal) {
+      if (pid >= 0) return realKill.apply(process, arguments);
+      treeKills.push(['group', pid, signal]);
+      return true;
+    };
+  };
+  const restore = () => { childProcess.execFile = realExecFile; process.kill = realKill; };
+  t.after(restore);
+
+  const forever = ['-e', 'setInterval(() => {}, 1000)'];
+  const timedOut = realExecFile(process.execPath, forever, { timeout: 200, windowsHide: true }, () => {});
+  const atExit = await new Promise((resolve) => timedOut.once('exit', () => {
+    const state = { exitCode: timedOut.exitCode, signalCode: timedOut.signalCode };
+    stub();
+    try { endProcessTree(timedOut); } finally { restore(); }
+    resolve(state);
+  }));
+  assert.equal(atExit.exitCode, null, 'precondition: a child ended by a signal has no exit code');
+  assert.ok(atExit.signalCode, 'precondition: it has a signal code instead');
+  // MUTATION: test `child.exitCode != null` alone again, as before 2026-10-14.
+  // taskkill /T (Windows) or the group signal (POSIX) is aimed at the freed PID
+  // and this lists it. Confirmed 2026-10-14.
+  assert.deepEqual(treeKills, [], 'a tree kill was aimed at a PID the system may already have reused');
+
+  // The control: a live child does get the tree kill, so the stub sees one when
+  // one is sent. Its fallback child.kill() is real and ends the child.
+  const live = childProcess.spawn(process.execPath, forever, { stdio: 'ignore', windowsHide: true });
+  t.after(() => { try { live.kill('SIGKILL'); } catch {} });
+  await new Promise((resolve) => live.once('spawn', resolve));
+  const exited = new Promise((resolve) => live.once('exit', resolve));
+  stub();
+  let ending;
+  try { ending = endProcessTree(live); } finally { restore(); }
+  await ending;
+  await exited;
+  assert.deepEqual(treeKills, windows ? [['taskkill', '/PID', String(live.pid), '/T', '/F']] : [['group', -live.pid, 'SIGTERM']]);
+});

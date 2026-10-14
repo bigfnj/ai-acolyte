@@ -307,16 +307,50 @@ test('a probe ends by its own timer as "timed out", and one killed from outside 
 
   // The probe's own timer: the only "timed out" there is. The stand-in child
   // answers a kill the way a real one does, by calling back with an error.
+  //
+  // FIRED BY HAND, NOT AWAITED (2026-10-14). This case used to wait 30 ms for the
+  // real timer, and that timer is unref'd ON PURPOSE: it must never be what keeps
+  // the extension host, or a CLI that loads this module, alive. With a stand-in
+  // child that is not a process, nothing else held the event loop open while the
+  // test waited, so Node 20 and 22 ended the file with "Promise resolution is
+  // still pending but the event loop has already resolved" and cancelled it and
+  // every test after it (CI run 38525363435, all four Node 20/22 legs; Node 24's
+  // runner happened to keep its own loop alive). In production the probe's child
+  // is a real ChildProcess, a ref'd handle of its own, so this was the test's
+  // defect alone. The timer is captured as it is armed, checked for being
+  // unref'd and for the delay asked for, cleared, and its callback run here.
   const slow = fakeBinary(t);
   const child = {};
-  const finished = new Promise((resolve) => {
-    dashboardCodexVersion({ executable: slow, timeoutMs: 30, execFile: (f, a, o, callback) => {
-      child.kill = () => { callback(Object.assign(new Error('Command failed'), { killed: true }), '', ''); resolve(); };
-      return child;
-    } });
-  });
+  const realSetTimeout = global.setTimeout;
+  let armed = null;
+  global.setTimeout = (fn, ms, ...rest) => {
+    const handle = realSetTimeout(fn, ms, ...rest);
+    armed = { fn, ms, handle };
+    return handle;
+  };
+  let finished;
+  try {
+    finished = new Promise((resolve) => {
+      dashboardCodexVersion({ executable: slow, timeoutMs: 30, execFile: (f, a, o, callback) => {
+        child.kill = () => { callback(Object.assign(new Error('Command failed'), { killed: true }), '', ''); resolve(); };
+        return child;
+      } });
+    });
+  } finally {
+    global.setTimeout = realSetTimeout;
+  }
+  assert.ok(armed, 'precondition: the probe armed a timer of its own');
+  assert.equal(armed.ms, 30, 'the timer is the one the caller bounded the probe with');
+  // MUTATION: drop `timer.unref()` in probeCodexVersionStatus, which is the
+  // tempting way to make the old version of this case pass on Node 20/22. This
+  // fails. Confirmed 2026-10-14.
+  assert.equal(armed.handle.hasRef(), false, 'a probe timer must never hold the host or the CLI open');
+  clearTimeout(armed.handle);
+  armed.fn();
   await finished;
   const timedOut = dashboardCodexVersion({ executable: slow, execFile: () => assert.fail('cached') });
+  // MUTATION: drop `timedOut = true` from the probe's timer. This reads the kill's
+  // own error code instead. Confirmed 2026-10-14.
   assert.match(timedOut.note, /timed out/);
 });
 

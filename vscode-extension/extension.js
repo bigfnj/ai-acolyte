@@ -1083,7 +1083,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2639#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2658#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1363,7 +1363,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5332#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5351#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1588,12 +1588,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5362#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5381#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2427#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2446#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -2338,35 +2338,54 @@ function registerLocalWatchers(context) {
 // Never allowed to throw into the scan: the channel API is absent from some test
 // hosts, and a logging failure must not turn a scan that returned into one the
 // card reports as failed.
+//
+// THE SET IS OF KINDS, NOT OF LINES (2026-10-14). The signature was the joined
+// text, counts included, so "3 files could not be read" and then "4 files could
+// not be read" were two sets, and a corpus whose unreadable count moved by one
+// file per scan appended a line per scan: the very flood the dedupe is for. Each
+// line now carries a kind (its text with every number replaced), and only a
+// change in kinds logs again. The counts in the channel are the first sighting's;
+// the card shows the current ones.
+//
+// AND THE HISTORY NOTES ARE LOGGED TOO, as notes. `codexHistoryNotes` (migrations
+// recorded, archived threads with no transcript, a degraded or unavailable
+// cross-check) were computed by every scan and reached only the CLI's JSON; the
+// panel's hover shows reasons alone. They are information, not trouble, so they
+// carry their own label and are never what makes the card say "degraded".
 let lastScanTroubleLog = '';
 function logScanTrouble(result) {
   try {
     if (!result || typeof result !== 'object') return;
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const lines = [];
-    if (result.blindScan) lines.push('nothing was enumerated, so the cursor map was preserved');
+    const add = (label, text) => lines.push({ label, text, kind: `${label}\0${String(text).replace(/\d+/g, '#')}` });
+    const trouble = (text) => add('Auto Learn scan', text);
+    if (result.blindScan) trouble('nothing was enumerated, so the cursor map was preserved');
     for (const reason of Array.isArray(result.codexHistoryReasons) ? result.codexHistoryReasons : []) {
-      lines.push(`Codex history: ${reason}`);
+      trouble(`Codex history: ${reason}`);
     }
-    if (result.codexHistoryInspected === 'partial') lines.push('the Codex history-store check ran degraded');
-    if (result.errors) lines.push(`${plural(result.errors, 'file', 'files')} could not be read`);
+    if (result.codexHistoryInspected === 'partial') trouble('the Codex history-store check ran degraded');
+    if (result.errors) trouble(`${plural(result.errors, 'file', 'files')} could not be read`);
     if (result.unreadable) {
-      lines.push(`${plural(result.unreadable, 'file', 'files')} had an unreadable stretch that was skipped`);
+      trouble(`${plural(result.unreadable, 'file', 'files')} had an unreadable stretch that was skipped`);
     }
     if (result.retainedObservations) {
-      lines.push(`${plural(result.retainedObservations, 'observation hash', 'observation hashes')} held over the cap`);
+      trouble(`${plural(result.retainedObservations, 'observation hash', 'observation hashes')} held over the cap`);
     }
     if (result.unmatchedResults) {
-      lines.push(`${plural(result.unmatchedResults, 'result', 'results')} could not be matched to a call`);
+      trouble(`${plural(result.unmatchedResults, 'result', 'results')} could not be matched to a call`);
     }
-    const signature = lines.join('\n');
+    for (const note of Array.isArray(result.codexHistoryNotes) ? result.codexHistoryNotes : []) {
+      add('Auto Learn scan note', `Codex history: ${note}`);
+    }
+    const signature = lines.map((line) => line.kind).join('\n');
     if (signature === lastScanTroubleLog) return;
     lastScanTroubleLog = signature;
     if (!lines.length) return;
     const channel = sharedChannel();
     if (!channel) return;
     const stamp = new Date().toISOString();
-    for (const line of lines) channel.appendLine(`[${stamp}] Auto Learn scan: ${line}`);
+    for (const line of lines) channel.appendLine(`[${stamp}] ${line.label}: ${line.text}`);
   } catch (error) {
     console.error('ai-acolyte: could not log Auto Learn scan trouble —', error);
   }

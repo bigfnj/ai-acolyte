@@ -33,13 +33,21 @@ const HARNESS = path.join(__dirname, '..', 'scripts', 'check-codex-mcp-runtime.j
 const NEW_SHAPE = 'item_completed/McpToolCall';
 const OLD_SHAPE = 'mcp_tool_call_end';
 
-// The five real case rollouts, in the harness's case order, with what each did.
+// The six real case rollouts, in the harness's case order, with what each did. These
+// are ROLLOUT facts -- `executed` is "recorded a result" -- not the parser's verdict,
+// so the parser reading a decline as no evidence (2026-10-13) changes none of them;
+// the sixth, a call the server failed, was added that day, and it records no result
+// either. `errorMessage` is the exact recorded error, the only thing that tells a
+// decline from a server error.
+const DECLINED = 'user rejected MCP tool call';
+const SERVER_ERROR = 'tool call error: tool call failed for `fixture/crash`\n\nCaused by:\n    Mcp error: -32603: acolyte-mcp-crash-witness';
 const EXPECTED = [
-  { server: 'fixture', tool: 'succeed', executed: false, isError: false, status: 'failed' },
+  { server: 'fixture', tool: 'succeed', executed: false, isError: false, status: 'failed', errorMessage: DECLINED },
   { server: 'fixture', tool: 'succeed', executed: true, isError: false, status: 'completed', witness: 'acolyte-mcp-succeed-witness' },
   { server: 'fixture', tool: 'fail', executed: true, isError: true, status: 'failed', witness: 'acolyte-mcp-fail-witness' },
-  { server: 'fixture', tool: 'neighbor', executed: false, isError: false, status: 'failed' },
+  { server: 'fixture', tool: 'neighbor', executed: false, isError: false, status: 'failed', errorMessage: DECLINED },
   { server: 'fixture', tool: 'succeed', executed: true, isError: false, status: 'completed', witness: 'acolyte-mcp-succeed-witness' },
+  { server: 'fixture', tool: 'crash', executed: false, isError: false, status: 'failed', errorMessage: SERVER_ERROR },
 ];
 
 function sessions() {
@@ -65,7 +73,7 @@ const withItem = (records, change) => records.map((record) => (!isItem(record) ?
 
 test('the shared assertion accepts every real 0.161.0 MCP outcome as Codex recorded it', () => {
   const all = sessions();
-  assert.equal(all.length, EXPECTED.length, 'precondition: five real case rollouts');
+  assert.equal(all.length, EXPECTED.length, 'precondition: six real case rollouts');
   // The suite's former check, in effect: exactly one mcp_tool_call_end, or fail.
   const formerCheck = (records) => records.filter((item) => item.type === 'event_msg' && item.payload.type === OLD_SHAPE).length === 1;
   for (const [index, records] of all.entries()) {
@@ -113,6 +121,20 @@ test('the shared assertion fails a rollout that disagrees with what the case did
     /ran nothing/);
   // One call recorded twice in one shape is not one outcome.
   assert.throws(() => assertMcpRolloutOutcome([...ran, ran.find(isItem)], EXPECTED[1]), /at most once per shape/);
+  // The exact error: a decline is not a server error, in either shape, and an
+  // extra key, or a null result key, beside the decline's message is not the
+  // measured decline (2026-10-13).
+  const serverError = sessions()[5];
+  for (const shape of [(records) => records, asOldShape]) {
+    assert.throws(() => assertMcpRolloutOutcome(shape(serverError), { ...EXPECTED[5], errorMessage: DECLINED }), /exactly the error/);
+    assert.throws(() => assertMcpRolloutOutcome(shape(declined), { ...EXPECTED[0], errorMessage: SERVER_ERROR }), /exactly the error/);
+  }
+  assert.throws(() => assertMcpRolloutOutcome(withItem(declined, (item) => ({ ...item, error: { ...item.error, code: 1 } })), EXPECTED[0]),
+    /exactly the error/);
+  assert.throws(() => assertMcpRolloutOutcome(withItem(declined, (item) => ({ ...item, result: null })), EXPECTED[0]), /no result key/);
+  // Without an errorMessage expectation the assertion is what it was: the
+  // acceptance suite asks for none, so it checks exactly the facts it always did.
+  assert.equal(assertMcpRolloutOutcome(serverError, { ...EXPECTED[5], errorMessage: undefined }), NEW_SHAPE);
   // Only a direct event_msg counts, as in the parser: the item nested anywhere else is not a record of the outcome.
   const nested = ran.map((record) => (isItem(record) ? { type: 'response_item', payload: record.payload } : record));
   assert.throws(() => assertMcpRolloutOutcome(nested, EXPECTED[1]), /one of the two known shapes/);

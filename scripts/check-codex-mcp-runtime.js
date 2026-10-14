@@ -4,10 +4,13 @@
 //   [--write-fixture <path>]
 // The named subject (default: this checkout) supplies the history parser whose
 // verdict on each actual rollout is checked (2026-10-13).
-// `--write-fixture` writes a sanitized copy of all five case rollouts, one
+// `--write-fixture` writes a sanitized copy of all six case rollouts, one
 // session after another, for test/codex-mcp-item-completed.test.js: only the
 // record kinds the parser reads survive, and ids, paths, timestamps and every
-// instruction or message text are replaced (2026-10-13).
+// instruction or message text are replaced (2026-10-13). The sixth, a call the
+// server answers with a JSON-RPC error, was added later the same day beside the
+// two declines, so a decline (no evidence) and a failure in the call (evidence)
+// are measured in the same shape; the first five sessions are unchanged.
 // No provider inference, credentials, live policy changes, or extension UI claims.
 'use strict';
 const assert = require('node:assert/strict');
@@ -30,7 +33,12 @@ function fixtureServer() {
     if (request.method === 'initialize') result = { protocolVersion: request.params.protocolVersion,
       capabilities: { tools: {} }, serverInfo: { name: 'acolyte-isolated-fixture', version: '1' } };
     else if (request.method === 'ping') result = {};
-    else if (request.method === 'tools/list') result = { tools: ['succeed','fail','neighbor','ProbeCase','NeighborCase'].map(name => ({
+    // `crash` (2026-10-13): the server answers its call with a JSON-RPC error, so
+    // a call that reached the server and failed there is measured beside a decline.
+    else if (request.method === 'tools/call' && request.params?.name === 'crash') {
+      send({ jsonrpc:'2.0', id:request.id, error:{ code:-32603, message:'acolyte-mcp-crash-witness' } }); return;
+    }
+    else if (request.method === 'tools/list') result = { tools: ['succeed','fail','neighbor','ProbeCase','NeighborCase','crash'].map(name => ({
       name, description: 'Harmless isolated ' + name + ' fixture', inputSchema: { type:'object',
         properties:{ shouldFail:{type:'boolean'}, marker:{type:'string'} }, additionalProperties:false },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } })) };
@@ -192,12 +200,16 @@ async function mcpRuntimeCase(context, name, options = {}) {
 // `executed`: the tool ran, so Ok / a result whose `isError` must match;
 // otherwise the call was declined, so Err / an error with no result. `status` is
 // the McpToolCall item's own status (the old record has none); `witness`, when
-// given, must appear in the recorded result content. Each shape present must
-// agree. A rollout carrying both -- no measured version writes both -- passes
-// only if both agree, the same call the parser merges into one observation.
-// Returns the shape or shapes found, `+`-joined, for the evidence record.
+// given, must appear in the recorded result content. `errorMessage`, when given
+// for a call with no result, is the exact recorded error (the Err string, or the
+// item's error.message, and nothing else in it): a decline's and a server
+// error's words are what tells them apart (2026-10-13, see DECLINED in main()).
+// Each shape present must agree. A rollout carrying both -- no measured version
+// writes both -- passes only if both agree, the same call the parser merges into
+// one observation. Returns the shape or shapes found, `+`-joined, for the
+// evidence record.
 function assertMcpRolloutOutcome(records, expected, label = 'MCP outcome') {
-  const { server, tool, executed, isError, status, witness } = expected;
+  const { server, tool, executed, isError, status, witness, errorMessage } = expected;
   const direct = (Array.isArray(records) ? records : []).filter((record) =>
     record && record.type === 'event_msg' && record.payload && typeof record.payload === 'object');
   const ends = direct.filter((record) => record.payload.type === 'mcp_tool_call_end');
@@ -215,7 +227,10 @@ function assertMcpRolloutOutcome(records, expected, label = 'MCP outcome') {
       assert.ok(result && Object.hasOwn(result, 'Ok'), `${label}: an executed call is recorded Ok`);
       assert.equal(result.Ok?.isError, isError, `${label}: mcp_tool_call_end isError`);
       assert.ok(carries(result.Ok.content), `${label}: mcp_tool_call_end carries the tool's own result`);
-    } else assert.ok(result && Object.hasOwn(result, 'Err'), `${label}: a declined call is recorded Err`);
+    } else {
+      assert.ok(result && Object.hasOwn(result, 'Err'), `${label}: a declined call is recorded Err`);
+      if (errorMessage !== undefined) assert.deepEqual(result, { Err: errorMessage }, `${label}: mcp_tool_call_end records exactly the error`);
+    }
   }
   if (items.length) {
     const { item } = items[0].payload;
@@ -229,6 +244,10 @@ function assertMcpRolloutOutcome(records, expected, label = 'MCP outcome') {
     } else {
       assert.equal(item.result ?? null, null, `${label}: a declined call ran nothing`);
       assert.ok(item.error?.message, `${label}: a declined call records why`);
+      if (errorMessage !== undefined) {
+        assert.equal(Object.hasOwn(item, 'result'), false, `${label}: McpToolCall writes no result key at all`);
+        assert.deepEqual(item.error, { message: errorMessage }, `${label}: McpToolCall records exactly the error`);
+      }
     }
   }
   return shapes.join('+');
@@ -314,14 +333,31 @@ async function main() {
   const versionRun = spawnSync(versionLaunch.file, versionLaunch.args, { ...versionLaunch.options, windowsHide:true, encoding:'utf8', timeout:10000 });
   assert.equal(versionRun.status,0); const codexVersion=versionRun.stdout.trim();
   const results=[], rollouts=[];
+  // WHAT A DECLINE AND A SERVER ERROR WRITE, measured 2026-10-13 on codex-cli
+  // 0.161.0: both are a failed McpToolCall with no result, told apart only by
+  // the error's words. Declined: the user refused at the prompt and the local
+  // server log shows no tools/call. Server error: the call reached the server,
+  // which answered it with a JSON-RPC error (fixtureServer's `crash`). Each is
+  // asserted exactly; a build that rewords either fails here before the parser
+  // can quietly misread it (src/history-adapters.js, CODEX_MCP_DECLINED, keeps
+  // its own copy of the first, so this harness never borrows the parser's view).
+  const DECLINED='user rejected MCP tool call';
+  const SERVER_ERROR='tool call error: tool call failed for `fixture/crash`\n\nCaused by:\n    Mcp error: -32603: acolyte-mcp-crash-witness';
+  // name, tool, per-tool overrides, prompt answer, prompts, tools/call count,
+  // item status, Ok or Err, the exact error, and THE PARSER'S VERDICT: a
+  // declined call never ran, so it is no evidence, `unknown` (2026-10-13; it
+  // read `failed` before); a tool that ran and said isError, or a call the
+  // server failed, is `failed`. The server-error case is last, so the first
+  // five sessions of the written fixture are what they always were.
   const cases = [
-    ['default-prompt-decline','succeed',{},'decline',1,0,'failed','Err'],
-    ['exact-approved-success','succeed',{succeed:'approve'},'decline',0,1,'completed','Ok'],
-    ['exact-approved-failure','fail',{fail:'approve'},'decline',0,1,'failed','Ok'],
-    ['neighbor-remains-prompt','neighbor',{succeed:'approve'},'decline',1,0,'failed','Err'],
-    ['single-call-reviewed-success','succeed',{},'accept',1,1,'completed','Ok'],
+    ['default-prompt-decline','succeed',{},'decline',1,0,'failed','Err',DECLINED,'unknown'],
+    ['exact-approved-success','succeed',{succeed:'approve'},'decline',0,1,'completed','Ok',undefined,'success'],
+    ['exact-approved-failure','fail',{fail:'approve'},'decline',0,1,'failed','Ok',undefined,'failed'],
+    ['neighbor-remains-prompt','neighbor',{succeed:'approve'},'decline',1,0,'failed','Err',DECLINED,'unknown'],
+    ['single-call-reviewed-success','succeed',{},'accept',1,1,'completed','Ok',undefined,'success'],
+    ['exact-approved-server-error','crash',{crash:'approve'},'decline',0,1,'failed','Err',SERVER_ERROR,'failed'],
   ];
-  for (const [name,tool,overrides,approval,prompts,executed,status,resultKind] of cases) {
+  for (const [name,tool,overrides,approval,prompts,executed,status,resultKind,errorMessage,verdict] of cases) {
     const directory=path.join(root,name),home=path.join(directory,'home');
     const context=createMcpRuntimeContext({home,codexHome:path.join(home,'.codex'),workspace:path.join(directory,'workspace'),
       fixtureServerPath:path.join(root,'fixture-server.cjs'),logPath:path.join(directory,'mcp.jsonl')});
@@ -350,11 +386,11 @@ async function main() {
     // wrote, checked by the assertion scripts/vscode-acceptance/mcp.js shares,
     // and recorded.
     results.at(-1).recordShape=assertMcpRolloutOutcome(observed.records,{server:'fixture',tool,executed:resultKind==='Ok',
-      isError:tool==='fail',status,witness:'acolyte-mcp-'+tool+'-witness'},name);
+      isError:tool==='fail',status,witness:'acolyte-mcp-'+tool+'-witness',errorMessage},name);
     // What the product's history parser makes of the same rollout. Recorded per
     // case and asserted after the loop, so one run reports every case.
     const parsed=parseCodexJsonl(fs.readFileSync(observed.rollout,'utf8'),{file:observed.rollout}).filter(x=>x.kind==='codex-mcp');
-    results.at(-1).parser={expected:status==='completed'&&tool!=='fail'?'success':'failed',observations:parsed.map(x=>({server:x.mcpServer,tool:x.mcpTool,status:x.status}))};
+    results.at(-1).parser={expected:verdict,observations:parsed.map(x=>({server:x.mcpServer,tool:x.mcpTool,status:x.status}))};
     assert.equal(observed.configRead.config.mcp_servers.fixture.default_tools_approval_mode,'prompt');
     for(const [key,value] of Object.entries(overrides))assert.equal(observed.configRead.config.mcp_servers.fixture.tools[key].approval_mode,value);
   }
@@ -373,7 +409,8 @@ async function main() {
   const parserMisses=results.filter(r=>r.parser.observations.length!==1||r.parser.observations[0].status!==r.parser.expected||r.parser.observations[0].tool!==r.tool);
   const status=parserMisses.length?'failed':'passed';
   const report=path.join(root,'evidence.json');fs.writeFileSync(report,JSON.stringify({status,root,codexVersion,boundary:'Actual Codex app-server and local MCP; scripted loopback provider, no inference or credentials',parserMisses:parserMisses.map(r=>r.name),fixture,results},null,2)+'\n');
-  console.log(JSON.stringify({status,codexVersion,shapes:[...new Set(results.map(r=>r.recordShape))],parserMisses:parserMisses.map(r=>`${r.name}: expected ${r.parser.expected}, parser saw ${r.parser.observations.length} MCP observations`),report}));
+  console.log(JSON.stringify({status,codexVersion,shapes:[...new Set(results.map(r=>r.recordShape))],parserMisses:parserMisses.map(r=>`${r.name}: expected ${r.parser.expected}, parser saw ${r.parser.observations.length} MCP observations (${r.parser.observations.map(x=>x.status).join(', ')||'none'})`),
+    verdicts:results.map(r=>`${r.name}: ${r.parser.observations.map(x=>x.status).join(', ')||'none'}`),report}));
   assert.deepEqual(parserMisses.map(r=>r.name),[],`the history parser missed ${parserMisses.length} of ${results.length} actual MCP outcomes on ${codexVersion}`);
 }
 module.exports={createMcpRuntimeContext,writeMcpFixture,mcpRuntimeCase,assertMcpRolloutOutcome,workspaceUnderTempTree};

@@ -263,9 +263,9 @@ test('a managed ask that covers only the alternate spelling withholds that spell
 // Stored state alone, the shape test/auto-learn-null-revival.test.js uses for F1: the family
 // is read from the state file and no scan runs, so nothing a fresh run brings can stand in for
 // what the load produced.
-function storedBothSpellings(t, { deny = [], ask = [] } = {}) {
+function storedBothSpellings(t, { deny = [], ask = [], userAsk = [] } = {}) {
   const home = tempHome(t);
-  writeSettings(home, { permissions: { allow: ['WebSearch'], deny } });
+  writeSettings(home, { permissions: { allow: ['WebSearch'], deny, ask: userAsk } });
   fs.writeFileSync(path.join(home, '.claude', 'remote-settings.json'),
     JSON.stringify({ permissions: { ask, allow: [], deny: [] } }));
   const statePath = path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json');
@@ -291,7 +291,7 @@ function storedBothSpellings(t, { deny = [], ask = [] } = {}) {
   const result = learn.applyClaude({
     keys: [listed.key], includeReviewed: true, expectedFingerprints: { [listed.key]: listed.fingerprint },
   });
-  return { result, allow: readSettings(home).permissions.allow };
+  return { result, allow: readSettings(home).permissions.allow, listed };
 }
 
 test('stored state alone: a reviewed apply withholds a user-denied alternate and writes the rule', (t) => {
@@ -374,4 +374,107 @@ test('an applied family whose rule is now denied does not gain its alternate', (
   assert.ok(alternate, `the withheld alternate is reported: ${JSON.stringify(result.withheldByPolicy)}`);
   assert.equal(alternate.withRule, 'Bash(git status *)', 'the report names the rule it was withheld with');
   assert.equal(alternate.rule, 'Bash(git status:*)');
+});
+
+// ── the user's own ask list (K2, 2026-10-14) ──────────────────────────────────
+// Claude Code evaluates deny, then ask, then allow, across merged layers, so an allow entry a
+// user ask covers never takes effect (docs/claude-code-permissions.md, "Precedence"). Until K2
+// neither the listing, nor the write, nor planPromotions read the user's ask: reproduced on
+// 55ceafb, with `Bash(git status:*)` in the user's ask list the listing gave `eligibleTargets:
+// ['claude']`, the apply wrote `Bash(git status *)` and reported it applied.
+
+test('K2: a user ask on the rule withholds the family in the listing and in the write', (t) => {
+  // MUTATION: drop the user ask from refusalFor. The family is listed and pending, Review offers
+  // it, and the apply writes it: every assertion below fails. Confirmed 2026-10-14.
+  // MUTATION: read `deny` in place of `ask` in readUserRules. This fails. Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], ask: ['Bash(git status:*)'] } });
+  const learn = manager(home, THREE_GIT_STATUS);
+  learn.scan();
+  const [family] = learn.listCandidates();
+  assert.equal(family.policy, 'unknown', '`policy` is still the managed verdict alone');
+  assert.deepEqual(family.eligibleTargets, []);
+  assert.deepEqual(family.pendingTargets, []);
+  assert.equal(isCandidateComplete(family, {}, ['claude']), true);
+  assert.deepEqual(reviewableCandidates([family], {}, ['claude'], readSettings(home)).candidates, [],
+    'Review and the counts offer no family whose grant would prompt anyway');
+
+  const automatic = learn.apply();
+  assert.equal(automatic.appliedCount, 0);
+  const reviewed = learn.applyClaude({
+    keys: [family.key], includeReviewed: true, expectedFingerprints: { [family.key]: family.fingerprint },
+  });
+  assert.equal(reviewed.appliedCount, 0);
+  assert.deepEqual(reviewed.withheldByPolicy, [{
+    key: 'bash:git status', permission: 'Bash(git status *)', decision: 'ask', rule: 'Bash(git status:*)', source: 'user-ask',
+  }]);
+  assert.deepEqual(readSettings(home).permissions.allow, [], 'no dead entry is written');
+});
+
+test('K2: a user ask on the alternate spelling only withholds just that spelling', (t) => {
+  // MUTATION: drop the user ask from refusalFor. `Bash(git.exe status *)` is written and nothing
+  // is withheld: this fails. Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], ask: ['Bash(git.exe status:*)'] } });
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  const [family] = learn.listCandidates();
+  assert.deepEqual(family.eligibleTargets, ['claude'], 'the rule is not what the ask covers, so the family is offered');
+  const result = learn.apply();
+  assert.deepEqual(result.appliedKeys, ['bash:git status']);
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)']);
+  assert.deepEqual(result.withheldByPolicy, [{
+    key: 'bash:git status', permission: 'Bash(git.exe status *)', decision: 'ask', rule: 'Bash(git.exe status:*)',
+    source: 'user-ask',
+  }]);
+});
+
+test('K2, stored state alone: a user ask withholds the family, or only the spelling it covers', (t) => {
+  // MUTATION: drop the user ask from refusalFor. Both spellings are written: this fails.
+  // Confirmed 2026-10-14.
+  const onRule = storedBothSpellings(t, { userAsk: ['Bash(git status:*)'] });
+  assert.deepEqual(onRule.listed.eligibleTargets, [], 'the stored listing withholds it as well');
+  assert.deepEqual(onRule.result.appliedKeys, []);
+  assert.deepEqual(onRule.allow, ['WebSearch']);
+  assert.deepEqual(onRule.result.withheldByPolicy.map(({ permission, source }) => [permission, source]),
+    [['Bash(git status *)', 'user-ask']]);
+
+  const onAlternate = storedBothSpellings(t, { userAsk: ['Bash(git.exe status *)'] });
+  assert.deepEqual(onAlternate.listed.eligibleTargets, ['claude']);
+  assert.deepEqual(onAlternate.result.appliedKeys, ['bash:git status']);
+  assert.deepEqual(onAlternate.allow, ['WebSearch', 'Bash(git status *)']);
+  assert.deepEqual(onAlternate.result.withheldByPolicy.map(({ permission, source }) => [permission, source]),
+    [['Bash(git.exe status *)', 'user-ask']]);
+});
+
+test('K2, the control: an ask that does not cover the rule leaves the family listed, pending and written', (t) => {
+  // Passes with and without K2. MUTATION: make refusalFor refuse every permission a user ask
+  // list exists for. This fails. Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [], ask: ['Bash(git push:*)'] } });
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  const [family] = learn.listCandidates();
+  assert.deepEqual(family.eligibleTargets, ['claude']);
+  assert.deepEqual(family.pendingTargets, ['claude']);
+  assert.equal(reviewableCandidates([family], {}, ['claude'], readSettings(home)).candidates.length, 1);
+  const result = learn.apply();
+  assert.deepEqual(result.withheldByPolicy, []);
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)', 'Bash(git.exe status *)']);
+});
+
+test('K2 keeps "new grants only": a spelling already written stays written and claimed when an ask later covers it', (t) => {
+  // Passes with and without K2, as its deny twin above does. MUTATION: drop the
+  // `fileAllow.has(permission)` keep in applyUnlocked. This fails. Confirmed 2026-10-14.
+  const home = tempHome(t);
+  writeSettings(home, { permissions: { allow: [] } });
+  const learn = manager(home, BOTH_SPELLINGS);
+  learn.scan();
+  learn.apply();
+  writeSettings(home, { permissions: {
+    allow: ['Bash(git status *)', 'Bash(git.exe status *)'], ask: ['Bash(git.exe status:*)'],
+  } });
+  learn.apply();
+  assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status *)', 'Bash(git.exe status *)']);
+  assert.equal(readClaims(home).permissions['Bash(git.exe status *)']?.managed, true, 'the claim is kept');
 });

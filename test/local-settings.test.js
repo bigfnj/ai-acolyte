@@ -151,6 +151,57 @@ test('a deny rule outranks a candidate, so it is reported instead of promoted', 
   assert.equal(denied[0].rule, 'Bash(rm *)');
 });
 
+// K2 (2026-10-14): a user ask outranks a promotion too (ask before allow), so it is reported in
+// `asked`, not in `denied`, whose readers word it as a deny.
+test('K2: a user ask outranks a candidate, so it is reported in `asked` instead of promoted', () => {
+  // MUTATION: drop the userAsk check from planPromotions. `Bash(git status *)` is promoted and
+  // `asked` is empty: this fails. Confirmed 2026-10-14.
+  const { promote, denied, asked } = planPromotions({
+    localAllow: ['Bash(git status)', 'Bash(rg x)', 'Bash(rm -rf build)'],
+    userAllow: [],
+    userDeny: ['Bash(rm *)'],
+    userAsk: ['Bash(git status:*)', 'Bash(rm:*)'],
+  });
+  assert.deepEqual(promote, ['Bash(rg *)']);
+  assert.deepEqual(asked, [{ entry: 'Bash(git status)', candidate: 'Bash(git status *)', rule: 'Bash(git status:*)' }]);
+  assert.deepEqual(denied.map(({ candidate }) => candidate), ['Bash(rm *)'], 'deny outranks ask, so it is reported as a deny');
+});
+
+test('K2, the control: an ask that does not cover the candidate leaves it promoted', () => {
+  // Passes with and without K2. MUTATION: withhold every candidate as asked. This fails.
+  // Confirmed 2026-10-14.
+  const { promote, asked } = planPromotions({
+    localAllow: ['Bash(git status)'], userAllow: [], userAsk: ['Bash(git push:*)'],
+  });
+  assert.deepEqual(promote, ['Bash(git status *)']);
+  assert.deepEqual(asked || [], [], 'before K2 there is no `asked` list at all');
+});
+
+test('K2: a drain leaves a local entry the user asks about where it was, and reports it', () => {
+  // MUTATION: drop `userAsk` from drainLocalSettings' planPromotions call. The entry is
+  // promoted, its local copy pruned, and this fails. Confirmed 2026-10-14.
+  const box = scratch();
+  box.writeLocal({ permissions: { allow: ['Bash(git status)', 'Bash(rg x)'] } });
+  const user = userScope();
+  user.state.permissions.ask = ['Bash(git status:*)'];
+  const report = drainLocalSettings({
+    workspaceRoot: box.workspace, readUserSettings: user.readUserSettings,
+    applyUserAllow: user.applyUserAllow, backupDir: box.backupDir,
+  });
+  assert.deepEqual(report.promoted, ['Bash(rg *)']);
+  assert.deepEqual(report.asked.map(({ candidate, rule }) => [candidate, rule]), [['Bash(git status *)', 'Bash(git status:*)']]);
+  assert.deepEqual(user.state.permissions.allow, ['Bash(rg *)'], 'no allow the ask makes dead is written to user scope');
+  assert.deepEqual(box.readLocal().permissions.allow, ['Bash(git status)']);
+  // The dry run plans the same.
+  box.writeLocal({ permissions: { allow: ['Bash(git status)'] } });
+  const plan = drainLocalSettings({
+    workspaceRoot: box.workspace, readUserSettings: user.readUserSettings,
+    applyUserAllow: user.applyUserAllow, backupDir: box.backupDir, dryRun: true,
+  });
+  assert.deepEqual(plan.promote, []);
+  assert.deepEqual(plan.asked.map(({ candidate }) => candidate), ['Bash(git status *)']);
+});
+
 test('pruning is coverage, not identity', () => {
   const { prune, keep } = partitionLocal(
     ['Bash(git status)', 'Bash(git status *)', 'PowerShell($x = 1; ls)'],

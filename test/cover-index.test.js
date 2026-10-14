@@ -407,7 +407,7 @@ test('the key memo cap is the documented value, and holds the 3,200-entry growth
 // The `typeof` passthrough in coverLookupKeys survived deletion with this file
 // green (mutation tracker, 2026-10-13). It is reachable. settings.local.json's
 // allow array is taken exactly as JSON.parse returned it, checked only by
-// `Array.isArray(local?.permissions?.allow)` at src/local-settings.js:223#localAllow, and
+// `Array.isArray(local?.permissions?.allow)` at src/local-settings.js:231#localAllow, and
 // each entry goes on unchanged through partitionLocal -> redundantUnder ->
 // grantedBy -> index.covers, so an array or object entry arrives here. The ANSWER
 // cannot go stale — `ruleMatches` (permission-match.js:120#ruleMatches) refuses every

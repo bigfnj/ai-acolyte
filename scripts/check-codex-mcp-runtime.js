@@ -20,7 +20,7 @@ const http = require('node:http');
 const readline = require('node:readline');
 const { spawn, spawnSync } = require('node:child_process');
 const { commandLaunch } = require('../src/exec-resolve');
-const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
+const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions, PROVIDER_CREDENTIAL_ENV } = require('./check-codex-runtime');
 function fixtureServer() {
   const fs = require('node:fs'), readline = require('node:readline');
   const log = process.argv[2];
@@ -135,7 +135,7 @@ async function mcpRuntimeCase(context, name, options = {}) {
     const resolver=context.extensionDir?require(path.join(context.extensionDir,'src','exec-resolve')):{commandLaunch};
     const launch=resolver.commandLaunch('codex',['-c','model_providers.acolyte_fixture.base_url='+JSON.stringify(endpoint),'app-server','--stdio']);assert.ok(launch.resolved);
     const env={...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:codexHome};
-    for(const key of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','OPENAI_BASE_URL','OPENAI_ORG_ID','OPENAI_ORGANIZATION','OPENAI_PROJECT_ID','AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT']) delete env[key];
+    for(const key of PROVIDER_CREDENTIAL_ENV) delete env[key];
     child=spawn(launch.file,launch.args,{...launch.options,windowsHide:true,cwd:workspace,env,stdio:['pipe','pipe','pipe']});
     closed=new Promise(resolve=>child.once('close',resolve));child.once('error',fail);
     child.stderr.on('data',x=>observed.stderr+=x.toString());

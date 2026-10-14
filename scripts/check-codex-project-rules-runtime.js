@@ -34,8 +34,8 @@ const { isolateWorkspaceInstructions, assertNoForeignInstructions } = require('.
 
 const COMMAND = 'acolyte-project-rules-probe.cmd';
 const WITNESS = 'acolyte-project-rules-witness';
-const CREDENTIALS = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID',
-  'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT'];
+// The provider credentials scrubbed from the Codex this launches: the one shared list (2026-10-14).
+const { PROVIDER_CREDENTIAL_ENV: CREDENTIALS } = require('./check-codex-runtime');
 const lcDrive = (value) => value[0].toLowerCase() + value.slice(1);
 
 function isolatedEnv(home, codexHome, extraPath) {

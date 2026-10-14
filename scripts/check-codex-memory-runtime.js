@@ -16,8 +16,8 @@ const { isolateWorkspaceInstructions, assertNoForeignInstructions } = require('.
 
 const TIMEOUT_MS = 45000;
 const BOUNDARY = 'Actual fresh Codex app-server processes, synthetic native-memory files and named extension adapter. Scripted loopback responder, no model inference or credentials. Memory generation disabled. No VS Code UI or model obedience claim; fixture enablement is not a live-profile setting.';
-const SECRET_ENV = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
-  'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT'];
+// The provider credentials scrubbed from the Codex this launches: the one shared list (2026-10-14).
+const { PROVIDER_CREDENTIAL_ENV: SECRET_ENV } = require('./check-codex-runtime');
 const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const hashFile = (file) => sha(fs.readFileSync(file));
 function strings(value, result = []) {

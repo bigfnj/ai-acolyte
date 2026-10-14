@@ -17,8 +17,8 @@ const { createRuntimeContext, runtimeCase, assertAllowed, rolloutFor, runtimeShe
   assertNoForeignInstructions } = require('./check-codex-runtime');
 
 const BOUNDARY = 'Real Codex exec with the staged setCodexHook configuration and staged Stop callback; no editor, synthetic history, provider inference, credentials or persisted hook-trust changes. Scripted loopback responder requests inspected read-only git commands in an isolated empty repository.';
-const ENV_KEYS = ['HOME', 'USERPROFILE', 'CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
-  'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT'];
+// The three homes, then the provider credentials from the one shared list (2026-10-14).
+const ENV_KEYS = ['HOME', 'USERPROFILE', 'CODEX_HOME', ...require('./check-codex-runtime').PROVIDER_CREDENTIAL_ENV];
 const MODULES = ['auto-learn-manager', 'codex-stop-hook', 'codex-hook-config', 'codex-hook-install', 'history-adapters'];
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const fileHash = (file) => hash(fs.readFileSync(file));

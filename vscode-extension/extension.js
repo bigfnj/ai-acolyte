@@ -767,6 +767,34 @@ function abortLiveTransfers() {
 const MODEL_RENAME_HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const MODEL_RENAME_ATTEMPTS = 10;
 
+// Since 7e43af2 a download writes `<dest>.<pid>.<12hex>.tmp`. deactivate() unlinks an
+// in-flight one, but a host KILLED outright (a crash, a kill -9, the machine losing power)
+// cannot, so its partial stays under a name no later download reuses, forever; and a build
+// before 7e43af2 wrote a fixed `bge-small.onnx.tmp` that nothing cleans either. At the start
+// of each download, sweep those: any `<dest>.*.tmp` (the per-writer scheme and the legacy
+// fixed name both begin `bge-small.onnx.` and end `.tmp`) whose mtime is older than
+// MODEL_TMP_STALE_MS, except the name THIS download is about to write. A NEWER temp is left
+// alone — RECALL_MODEL_HOME is one directory for every window, so a fresh one may be another
+// window's live transfer, the very file a blind sweep would destroy (the reason 7e43af2 added
+// none). A day is generous past any real transfer: each https hop times out at 30 s and a
+// ~32MB body finishes in minutes even on a slow link, so a tmp a day old is abandoned, never
+// in flight. Best-effort: a directory that cannot be listed, or a file another process removes
+// first, is not a reason to fail the download. Measured 2026-10-13.
+const MODEL_TMP_STALE_MS = 24 * 60 * 60 * 1000;
+function sweepStaleModelTemps(modelDir, ownTmp, now = Date.now()) {
+  const prefix = `${RECALL_MODEL_FILE}.`;
+  let entries;
+  try { entries = fs.readdirSync(modelDir); } catch { return; }
+  for (const name of entries) {
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+    const full = path.join(modelDir, name);
+    if (full === ownTmp) continue;                 // our own in-flight download, never ours to sweep
+    try {
+      if (now - fs.statSync(full).mtimeMs > MODEL_TMP_STALE_MS) fs.unlinkSync(full);
+    } catch { /* vanished under us, or unreadable: leave it */ }
+  }
+}
+
 // Downloads to a temp file beside `<dest>` and renames on success so a cancelled/failed
 // run never leaves a half-written bge-small.onnx that would falsely read as "model present".
 function downloadRecallModel() {
@@ -779,9 +807,10 @@ function downloadRecallModel() {
   // not prevent): two downloads at once opened one file for writing twice, and the first
   // to fail unlinked the other's partial file, so its publish renamed nothing or a file
   // both had written into. Cleanup is unchanged: `fail` unlinks this download's own name,
-  // and nothing else. A download killed with its host (not deactivated, which unlinks) now
-  // leaves its partial under a name no later download reuses; the fixed name was
-  // overwritten by the next one.
+  // and nothing else. A download killed with its host (not deactivated, which unlinks) leaves
+  // its partial under a name no later download reuses; a day later the next download reaps it
+  // (sweepStaleModelTemps above), so the per-writer name no longer trades the fixed name's
+  // self-overwrite for an unbounded pile of abandoned partials.
   const tmp = `${dest}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   const vocabSource = recallVocabSource();
   const vocabTarget = path.join(modelDir, RECALL_VOCAB_FILE);
@@ -795,6 +824,9 @@ function downloadRecallModel() {
       // writes a .tmp, and there is nothing for teardown to clean up.
       if (deactivated) { resolve(false); return; }
       fs.mkdirSync(modelDir, { recursive: true });
+      // Reap partials abandoned by an earlier killed host (sweepStaleModelTemps above); never
+      // this download's own name, and never one young enough to be a live transfer.
+      sweepStaleModelTemps(modelDir, tmp);
 
       // Seed the vocab first: the model cannot load without it, and failing before a
       // 32MB transfer is friendlier than failing after one.

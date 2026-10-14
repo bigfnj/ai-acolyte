@@ -484,7 +484,9 @@ test('devbox run and ssh are broad at any depth, and so are the identity and hos
     ['devbox', 'run'], ['devbox', 'run', 'test'], ['devbox', 'run', 'npm', 'test'], ['devbox', 'run', '--pure', 'test'],
     ['devbox', 'shell'], ['devbox', 'global', 'run', 'x'], ['mise', 'watch', 'build'], ['npm', 'explore', 'x'],
     ['yarn', 'exec', 'x'], ['yarn', 'workspace', 'a', 'build'], ['poetry', 'shell'],
-    ['ssh'], ['ssh', 'host'], ['ssh', 'host', 'ls'], ['ssh', '-p', '22', 'host', 'ls'], ['ssh.exe', 'host'], ['ssh', '-V'],
+    // `["ssh", "-V"]` was in this row until 2026-10-14; it prints and exits (measured), and the
+    // informational-forms test below holds it narrow. `-V` before a host is still broad.
+    ['ssh'], ['ssh', 'host'], ['ssh', 'host', 'ls'], ['ssh', '-p', '22', 'host', 'ls'], ['ssh.exe', 'host'], ['ssh', '-V', 'host'],
     ['docker', 'exec', '-u', 'root', 'ctr', 'ls'], ['docker', 'exec', '--privileged', 'ctr', 'ls'],
     ['docker', 'run', '-v', '/:/h', 'img', 'ls'], ['docker', 'run', '--privileged', 'img', 'ls'],
     ['docker', 'run', '--entrypoint', 'sh', 'img', 'x'], ['kubectl', 'exec', '--as', 'admin', 'pod', '--', 'ls'],
@@ -1224,5 +1226,120 @@ test('hyperfine, duckdb and wsl are broad at any depth, but for the informationa
   for (const permission of ['Bash(hyperfine --version *)', 'Bash(duckdb x.db *)', 'Bash(wsl --version *)',
     'PowerShell(wsl ls *)']) {
     assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+});
+
+// Exporter consistency (2026-10-14). MEASURED against 09df009 over exactly the rows below:
+// 15/15 Claude informational rules, 19/19 Codex informational prefixes and 3/3 Claude tar/find/fd
+// rules went from refused to rendered; 7/8 `.cmd`/`.bat` Claude rules and 10/10 env rows from
+// rendered to refused; all 34 controls kept their verdict.
+test('a runner that is not a wrapper keeps its exact informational forms narrow on the Claude half too', () => {
+  // b0685b2: "Exact informational forms (`["docker", "--version"]`) stay narrow", true on the
+  // Codex half and not on this one, where reachesRunnerExec read `--version` as an unknown
+  // dispatcher option. Every rule in the first list was refused at 09df009.
+  for (const permission of ['Bash(docker --version *)', 'Bash(docker -h *)', 'Bash(podman --version *)',
+    'Bash(uv --version *)', 'Bash(uv -V *)', 'Bash(poetry --version *)', 'Bash(pipx --version *)',
+    'Bash(kubectl --help *)', 'Bash(kubectl -h *)', 'Bash(direnv --help *)', 'Bash(mise --version *)',
+    'Bash(devbox --version *)', 'Bash(nerdctl --version *)', 'Bash(docker-compose --version *)',
+    'PowerShell(docker --version *)']) {
+    // MUTATION: drop the informational line at the top of reachesRunnerExec. `Bash(docker
+    // --version *)` is refused again and this fails. Confirmed 2026-10-14.
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], permission);
+    assert.deepEqual(renderClaudePermissions([permission], {}), [], `${permission} is never automatic`);
+  }
+  // Controls: only the exact two-token form, only at the runner's own level, and never for a
+  // runner the Claude half refuses by membership or as a network root.
+  for (const permission of ['Bash(docker --version x *)', 'Bash(docker exec --help *)', 'Bash(uv run --help *)',
+    'Bash(devbox run --help *)', 'Bash(kubectl exec -h *)', 'Bash(docker -H x *)', 'Bash(npm --version *)',
+    'Bash(npx --version *)', 'Bash(make --version *)', 'Bash(ssh -V *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  // And the two halves now agree on every form the first list names.
+  for (const prefix of [['docker', '--version'], ['uv', '-V'], ['kubectl', '--help'], ['podman', '--version']]) {
+    assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
+  }
+});
+
+test('the exact long informational form of a measured wrapper, tar, find and fd is narrow, and ssh -V', () => {
+  // Each was refused on both halves with no stated reason. MEASURED 2026-10-14 (marker-file
+  // payloads, src/policy-exporters.js WRAPPER_INFO_ROOTS and RUNNER_GRAMMAR): every one prints
+  // and exits before the command or option after it is read.
+  for (const prefix of [['timeout', '--version'], ['timeout', '--help'], ['nice', '--version'], ['nohup', '--help'],
+    ['stdbuf', '--version'], ['chroot', '--version'], ['env', '--version'], ['env', '--help'], ['xargs', '--version'],
+    ['xargs', '--help'], ['tar', '--version'], ['tar', '--help'], ['find', '--version'], ['find', '--help'],
+    ['fd', '--version'], ['fdfind', '--help'], ['ssh', '-V'], ['ssh.exe', '-V'], ['timeout.exe', '--version']]) {
+    // MUTATION: drop the WRAPPER_INFO_ROOTS line in wrapperIsBroad. `["timeout", "--version"]`
+    // is an unknown option again and this fails. Confirmed 2026-10-14.
+    // MUTATION: give tar RUNS_ANY_COMMAND again. `["tar", "--version"]` fails. Confirmed
+    // 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} prints and exits`);
+  }
+  // Controls: the short forms are other options to these tools (`tar -h` dereferences, `tar
+  // -V` names a volume), anything after the informational word is not exact, and the
+  // unmeasured, identity-changing and shell-text wrappers keep no exception.
+  for (const prefix of [['timeout', '-h'], ['tar', '-h'], ['tar', '-V'], ['find', '-h'], ['fd', '-V'],
+    ['ssh', '--version'], ['ssh', '-V', 'host'], ['timeout', '--version', '5', 'sh'], ['xargs', '--help', 'sh'],
+    ['tar', '--version', '--to-command=sh'], ['setsid', '--version'], ['strace', '--version'], ['sudo', '-V'],
+    ['sudo', '--version'], ['eval', '--version'], ['watch', '--version'], ['rsync', '--version'], ['scp', '-V'],
+    ['command', '--version'], ['duckdb', '--version']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  // The Claude half: tar, find and fd are runners that are not wrappers, so their long forms
+  // render there too; the wrappers stay refused by membership (64b4eaa), and ssh as a network
+  // root, which is the reason this half does not follow the Codex one for them.
+  for (const permission of ['Bash(tar --version *)', 'Bash(find --help *)', 'Bash(fd --version *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], permission);
+  }
+  for (const permission of ['Bash(timeout --version *)', 'Bash(env --version *)', 'Bash(xargs --help *)',
+    'Bash(ssh -V *)', 'Bash(tar -h *)', 'Bash(find . *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+});
+
+test('the .cmd and .bat spellings of a risky root are refused like the root, on both halves', () => {
+  // Item 2's normalization (commandBase) reached the wrapper and interpreter tables; the
+  // destructive, network, state-mutating and git checks still read the exact spelling, so 7
+  // of these 8 rendered at 09df009 as reviewed Claude rules: the root was on no list.
+  // `Bash(ssh.cmd host *)` was refused already, by the runner table item 2 had reached.
+  for (const permission of ['Bash(git.cmd push *)', 'Bash(git.bat reset --hard *)', 'Bash(rm.cmd -rf *)',
+    'Bash(curl.bat https://example.invalid *)', 'Bash(ssh.cmd host *)', 'Bash(hostname.bat -s *)',
+    'Bash(gh.cmd pr *)', 'PowerShell(remove-item.bat x *)']) {
+    // MUTATION: make refusedRoot read the exact spelling only. `Bash(rm.cmd -rf *)` renders and
+    // this fails. Confirmed 2026-10-14. `Bash(git.cmd push *)` is refused by prefixIsKnownRisky's
+    // git check (commandBase); claudePermissionIsSafe's own git branch keeps the exact spelling,
+    // because normalizing it too was measured to be an equivalent mutant and was not kept.
+    // MUTATION: restore `root === 'git' || root === 'git.exe'` in prefixIsKnownRisky.
+    // `Bash(git.cmd push *)` renders. Confirmed 2026-10-14.
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  // Controls: a read-only git subcommand in that spelling renders as it did (the exporter's
+  // allow tables keep the exact spelling, so `cat.cmd` is not trusted as `cat`).
+  assert.deepEqual(renderClaudePermissions(['Bash(git.cmd status *)'], { includeReviewed: true }), ['Bash(git.cmd status *)']);
+  assert.deepEqual(renderClaudePermissions(['Bash(cat.cmd *)'], { includeReviewed: true }), []);
+  assert.deepEqual(renderClaudePermissions(['Bash(cat *)'], { includeReviewed: true }), ['Bash(cat *)']);
+  // The automatic Codex path and the validator read the same tables.
+  assert.equal((renderCodexRules([candidate(['curl.bat', '--head'])]).match(/prefix_rule\(/g) || []).length, 0);
+  for (const pattern of [['curl.bat'], ['git.cmd'], ['Curl.CMD']]) {
+    // MUTATION: restore the exact `['curl', 'curl.exe']` list in the validator. `["curl.bat"]`
+    // validates and this fails. Confirmed 2026-10-14.
+    assert.equal(validateCodexRulesText(manualRule(pattern)).valid, false, JSON.stringify(pattern));
+  }
+});
+
+test('on the Codex half an env assignment that names or loads a program is refused, as it is on the Claude half', () => {
+  // 520103d: "The Codex exporter is unaffected", true of a LEADING assignment, which never
+  // reaches a prefix; env carries its assignments as arguments. Each row rendered at 09df009.
+  for (const prefix of [['env', 'GIT_PAGER=x', 'git', 'log'], ['env', 'LD_PRELOAD=./x.so', 'cat'],
+    ['env', 'PATH=/tmp', 'ls'], ['env', '-i', 'EDITOR=x', 'git', 'commit'], ['env', 'FOO=1', 'GIT_SSH_COMMAND=x', 'git', 'fetch'],
+    ['env', 'NODE_OPTIONS=--require=./x', 'npm', 'test'], ['env', 'DYLD_INSERT_LIBRARIES=x', 'ls'], ['env', '--', 'PAGER=x', 'man'],
+    ['xargs', 'env', 'PAGER=x', 'man', 'ls'], ['timeout', '5', 'env', 'BASH_ENV=x', 'make', 'test']]) {
+    // MUTATION: delete the assignment check in wrapperIsBroad's env branch. `["env",
+    // "GIT_PAGER=x", "git", "log"]` renders and this fails. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} hands a program over in an assignment`);
+  }
+  // Controls: an ordinary assignment, an unset, and a named command, as before.
+  for (const prefix of [['env', 'FOO=1', 'git', 'log'], ['env', 'LANG=C', 'ls'], ['env', '-u', 'PATH', 'rm'],
+    ['env', 'CI=1', 'make', 'test']]) {
+    assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
   }
 });

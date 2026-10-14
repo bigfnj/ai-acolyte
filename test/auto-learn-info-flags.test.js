@@ -147,7 +147,9 @@ test('an upgrade keeps the reviewed informational grants already applied', (t) =
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const settings = path.join(home, '.claude', 'settings.json');
   writeJson(settings, { permissions: { allow: ['WebSearch'] } });
-  const observations = [...thrice('cargo --version'), ...thrice('df -h')];
+  // `docker --version` joined 2026-10-14 with the runner fix (src/policy-exporters.js
+  // reachesRunnerExec): v1.6.2 refused its rule for that reason as well as the null.
+  const observations = [...thrice('cargo --version'), ...thrice('df -h'), ...thrice('docker --version')];
   const learn = createAutoLearnManager({
     home, threshold: 3, codexRulesPath: null, codexValidator: () => ({ valid: true, decision: 'allow' }),
     historyScanner: () => ({
@@ -157,20 +159,20 @@ test('an upgrade keeps the reviewed informational grants already applied', (t) =
   });
   learn.scan();
   const picked = learn.listCandidates().filter((item) => item.meetsThreshold);
-  assert.deepEqual(picked.map((item) => item.key), ['bash:cargo --version', 'bash:df -h']);
+  assert.deepEqual(picked.map((item) => item.key), ['bash:cargo --version', 'bash:df -h', 'bash:docker --version']);
   learn.applyClaude({
     keys: picked.map((item) => item.key), includeReviewed: true,
     expectedFingerprints: Object.fromEntries(picked.map((item) => [item.key, item.fingerprint])),
   });
-  const granted = ['Bash(cargo --version *)', 'Bash(df -h *)'];
+  const granted = ['Bash(cargo --version *)', 'Bash(df -h *)', 'Bash(docker --version *)'];
   const allow = () => JSON.parse(fs.readFileSync(settings, 'utf8')).permissions.allow;
-  assert.deepEqual(allow().filter((entry) => granted.includes(entry)), granted, 'precondition: both applied');
+  assert.deepEqual(allow().filter((entry) => granted.includes(entry)), granted, 'precondition: all three applied');
 
   // The upgrade: the state file as v1.6.1 wrote it, each family's rule null, then the
   // first scan after it in auto-safe mode, which applies with no user action at all.
   const statePath = learn.paths.state;
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  for (const key of ['bash:cargo --version', 'bash:df -h']) {
+  for (const key of ['bash:cargo --version', 'bash:df -h', 'bash:docker --version']) {
     state.candidates[key].claudePermission = null;
     state.candidates[key].permissions = [];
   }
@@ -178,8 +180,9 @@ test('an upgrade keeps the reviewed informational grants already applied', (t) =
   learn.setMode('auto-safe');
   learn.scan();
   // MUTATION: honour every explicit null again (see above). The first v1.6.2 scan+apply
-  // removed both entries from `allow`, which is what this measured against 9467b09.
-  // Confirmed 2026-10-14.
+  // removed these entries from `allow`, which is what this measured against 9467b09.
+  // Confirmed 2026-10-14. MUTATION: drop the informational line in reachesRunnerExec. The
+  // docker grant alone is revoked. Confirmed 2026-10-14.
   assert.deepEqual(allow().filter((entry) => granted.includes(entry)), granted,
     'the reviewed grants the user applied before the upgrade are still in settings.json');
   assert.ok(allow().includes('WebSearch'));

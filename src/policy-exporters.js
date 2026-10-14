@@ -500,6 +500,34 @@ const ALWAYS_BROAD_WRAPPERS = new Set([
   'systemd-run', 'watch',
 ]);
 
+// The wrappers whose exact `--version` or `--help` prefix is narrow on the Codex half
+// (2026-10-14). Until then the walk read either word as an unknown option, so `["timeout",
+// "--version"]` and `["xargs", "--help"]` were refused with no reason anywhere. MEASURED that
+// day, each with a payload after the informational word that writes a marker file, and a
+// control run without the word that did write it: `timeout --version 5 sh -c '...'` and
+// `--help`, `nice --version`/`--help`, `nohup --version`/`--help`, `stdbuf --version`/`--help`,
+// `chroot --version / sh -c '...'` and `--help` (GNU coreutils 8.32), `env --version sh -c
+// '...'` and `--help`, `echo g | xargs --version sh -c '...'` and `--help` (GNU findutils
+// 4.10.0). None wrote its marker: each prints and exits inside its option loop, before the
+// command it would run is reached. Only the long forms: none of these tools has a short one.
+//
+// Not opened, and why:
+//   * the other exec wrappers (setsid, ionice, flock, nsenter, unshare, taskset, chrt, strace,
+//     ltrace, valgrind, time, busybox) were not measured: none is on the box, or the one that
+//     is is another program (Git for Windows' `strace` is Cygwin's, `time` is a shell keyword).
+//   * the shell builtins (builtin, noglob, nocorrect, command, exec): their informational
+//     forms are not documented, and `command --version` would look up a command of that name.
+//   * ALWAYS_BROAD_WRAPPERS: the identity changers (sudo, doas, pkexec, su, runuser, runas)
+//     and the shell-text and unbounded runners (watch, script, firejail, systemd-run, gdb,
+//     parallel) stay broad at any depth, the row's own rule. eval is the one that cannot be
+//     opened at all: POSIX eval takes no options and joins its arguments into shell text, so
+//     whether `eval --version '; CMD'` runs CMD depends on the shell (bash 5's builtin
+//     rejects `--version` as an invalid option, measured; a POSIX eval does not parse it).
+// On the Claude half every one of these is a SHELL_WRAPPERS member and refused at any depth,
+// informational forms included, by the membership 64b4eaa pinned: `Bash(timeout --version *)`
+// is a rule for a wrapper Claude Code strips anyway.
+const WRAPPER_INFO_ROOTS = new Set(['env', 'xargs', 'timeout', 'nice', 'nohup', 'stdbuf', 'chroot']);
+
 // The prefix after an exec wrapper's options and operands: possibly empty, `LOOKUP` for
 // `command -v`, or null when an option is unknown or the "command" is an option.
 //
@@ -964,7 +992,11 @@ const GIT = {
 const RUNNER_GRAMMAR = new Map(Object.entries({
   // ssh hands its arguments to the remote login shell as one command line, so naming a
   // command narrows nothing, and the remote host is outside anything a prefix can bound.
-  ssh: RUNS_ANY_COMMAND,
+  // `-V` alone is narrow (2026-10-14): OpenSSH prints its version and exits inside its option
+  // loop, so `ssh -V -o ProxyCommand='sh -c "echo X>s1.txt"' example.invalid` wrote nothing
+  // (measured, OpenSSH_10.3p1). `--version` is not an ssh option. On the Claude side ssh stays
+  // refused at any depth as a NETWORK_OR_INSTALL_ROOTS member.
+  ssh: infoOnly(new Set(['-V'])),
   direnv: { info: DEFAULT_INFO, sub: { exec: { exec: { operands: 1 } } } },
   // devbox runs an ad-hoc command through `eval`: internal/devbox/devbox.go RunScript
   // (jetify-com/devbox main, read 2026-10-13) sets `env["DEVBOX_RUN_CMD"] =
@@ -1076,8 +1108,19 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
   // multi-token one but scp's and sftp's rendered as a reviewed Claude rule too (`Bash(tar
   // -xf *)`, `Bash(find . *)`, `Bash(rsync -a *)`), measured against 3a451fd. RUNS_ANY_COMMAND
   // refuses both, and the recursion carries it through every wrapper (`["xargs", "tar"]`).
-  rsync: RUNS_ANY_COMMAND, scp: RUNS_ANY_COMMAND, sftp: RUNS_ANY_COMMAND, tar: RUNS_ANY_COMMAND,
-  find: RUNS_ANY_COMMAND, fd: RUNS_ANY_COMMAND, fdfind: RUNS_ANY_COMMAND,
+  //
+  // Except, since 2026-10-14, the exact long informational forms of tar, find and fd, on both
+  // halves (infoOnly(LONG_INFO)). Each prints and exits before it reads the option that would
+  // run something, MEASURED that day with a marker-file payload whose control run (the same
+  // line without the informational word) did write the marker: `tar --version -cf a.tar g
+  // --checkpoint=1 --checkpoint-action=exec='sh -c "echo X>r1.txt"'` and the `--help` twin
+  // (GNU tar 1.35; neither wrote a.tar either), `find --version . -exec sh -c '...' ';'` and
+  // `--help` (GNU findutils 4.10.0), `fd --version g -x sh -c '...'` (fd 10.4.2). The short
+  // forms are not informational here: `tar -h` dereferences symlinks and `tar -V` names a
+  // volume. Not opened: rsync (not measured, there is none on the box), scp and sftp (they
+  // have no informational option: `scp -V` is "unknown option", measured).
+  rsync: RUNS_ANY_COMMAND, scp: RUNS_ANY_COMMAND, sftp: RUNS_ANY_COMMAND, tar: infoOnly(LONG_INFO),
+  find: infoOnly(LONG_INFO), fd: infoOnly(LONG_INFO), fdfind: infoOnly(LONG_INFO),
   // Runners whose arguments are commands or code wherever they sit, so naming one narrows
   // nothing (2026-10-14). Until then all three had only the generic ends-in-an-option rule at
   // the bottom of wrapperIsBroad, so `["hyperfine", "echo SAFE"]`, `["duckdb", "x.db"]` and
@@ -1175,7 +1218,19 @@ function runnerIsBroad(node, rest) {
 // decides, as `Bash(npx tsc *)` and `Bash(timeout 5 rg *)` already are. A task runner's
 // rule is refused only while it names no target (`Bash(mise run *)`); a fixed subcommand
 // (`Bash(docker ps *)`, `Bash(uv sync *)`, `Bash(kubectl get *)`) is untouched.
+//
+// An exact informational form (`Bash(docker --version *)`) is narrow here too, as it is in
+// runnerIsBroad (2026-10-14). b0685b2 said "exact informational forms (`["docker",
+// "--version"]`) stay narrow", and on the Codex half they did, but this walk read
+// `--version` as an unknown dispatcher option and refused it, so `Bash(docker --version *)`,
+// `Bash(uv --version *)`, `Bash(poetry --version *)`, `Bash(podman --version *)` and
+// `Bash(kubectl --help *)` were refused while their prefix_rules rendered (measured against
+// 09df009). That refusal also revoked an applied `Bash(docker --version *)` on upgrade (see
+// candidateClaudePermission). A runner that is ALSO a wrapper (npm, npx, make, just, hyperfine,
+// wsl) is still refused at any depth on this half, by the membership 64b4eaa pinned; this
+// line only reaches the runners that are not.
 function reachesRunnerExec(node, rest) {
+  if (rest.length === 1 && node.info?.has(rest[0])) return false;
   if (node === RUNS_ANY_COMMAND || node.exec || node.any) return true;
   if (!node.sub) return false;
   const at = skipRunnerOptions(node.options, rest, 0);
@@ -1207,8 +1262,18 @@ function wrapperIsBroad(prefix) {
   // broader than `["rm"]` with arguments read from stdin, which a reviewer may already
   // approve; `["xargs", "sh"]` is as broad as `["sh"]`. Hence the recursion. A prefix that
   // ends before naming a command (`["xargs", "-0"]`, `["env", "FOO=1"]`) runs anything.
+  if (prefix.length === 2 && WRAPPER_INFO_ROOTS.has(base) && LONG_INFO.has(String(prefix[1]))) return false;
   if (base === 'env' || base === 'xargs') {
     const inner = innerCommandPrefix(base, prefix);
+    // The assignments env makes are judged as the Claude half judges a leading one
+    // (assignmentIsUnsafe, 2026-10-14): `["env", "GIT_PAGER=x", "git", "log"]` is a grant to run
+    // `x`, and `["env", "LD_PRELOAD=./x.so", "cat"]` one to load it, whatever the command after
+    // them is. 520103d said "the Codex exporter is unaffected" because a Codex prefix starts at
+    // the command; that holds for a LEADING assignment, which never reaches a prefix, but env
+    // carries its assignments as arguments, and they were walked over unread (measured against
+    // 09df009: both rows above rendered).
+    if (base === 'env' && inner !== null && prefix.slice(1, prefix.length - inner.length)
+      .some((token) => ASSIGNMENT_WORD.test(String(token)) && assignmentIsUnsafe(String(token)))) return true;
     return inner === null || inner.length === 0 || wrapperIsBroad(inner);
   }
   // The process and exec wrappers, by the same rule (EXEC_WRAPPER_GRAMMAR above), and the
@@ -1267,15 +1332,25 @@ function prefixIsAutoSuffixClosed(prefix) {
   return AUTO_SUFFIX_CLOSED_ROOTS.has(root);
 }
 
+// A refusal-table lookup in every spelling (commandBase, 2026-10-14). The tables list the bare
+// name, so the base alone would find most entries; the exact spelling is tried too, so an entry
+// that is itself a suffixed name commandBase keeps (`format.com`) still matches. Until then each
+// of these tables was read by exact spelling, so a reviewed `Bash(git.cmd push *)`, `Bash(rm.cmd
+// -rf *)` or `Bash(curl.bat https://example.invalid *)` rendered: the root was on no list and
+// fell through to "not known risky" (measured against 09df009).
+function refusedRoot(table, token) {
+  return table.has(canonicalRoot(token)) || table.has(commandBase(token));
+}
+
 function prefixIsKnownRisky(prefix) {
   if (!Array.isArray(prefix) || prefix.length === 0) return true;
-  const root = canonicalRoot(prefix[0]);
-  if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
-      STATE_MUTATING_ROOTS.has(root)) return true;
-  if (root === 'git' || root === 'git.exe') {
+  const base = commandBase(prefix[0]);
+  if ([DESTRUCTIVE_OR_ADMIN_ROOTS, NETWORK_OR_INSTALL_ROOTS, STATE_MUTATING_ROOTS]
+    .some((table) => refusedRoot(table, prefix[0]))) return true;
+  if (base === 'git') {
     return prefix.length < 2 || !SAFE_GIT_READ_SUBCOMMANDS.has(String(prefix[1]).toLowerCase());
   }
-  if (root === 'rg' || root === 'rg.exe') {
+  if (base === 'rg') {
     return prefix.length < 2 || !SAFE_RG_PREFIXES.has(String(prefix[1]));
   }
   if (prefix.length === 1 && ['docker', 'node', 'perl', 'python', 'ruby'].includes(commandBase(prefix[0]))) return true;
@@ -1543,17 +1618,18 @@ function patternSafetyErrors(pattern, number) {
   }
 
   const root = canonicalRoot(pattern[0]);
+  const base = commandBase(pattern[0]);                // every spelling of the root (2026-10-14)
   const second = pattern.length > 1
     ? (Array.isArray(pattern[1]) ? pattern[1] : [pattern[1]]).map((value) => String(value).toLowerCase())
     : [];
-  if (['powershell', 'pwsh'].includes(commandBase(pattern[0])) &&
+  if (['powershell', 'pwsh'].includes(base) &&
       (pattern.length === 1 || (pattern.length === 2 && second.some((value) => ['-c', '-command'].includes(value))))) {
     errors.push(`Rule ${number}: broad PowerShell command prefix is forbidden`);
   }
-  if (pattern.length === 1 && (['curl', 'curl.exe'].includes(root) || commandBase(pattern[0]) === 'python')) {
+  if (pattern.length === 1 && ['curl', 'python'].includes(base)) {
     errors.push(`Rule ${number}: bare ${root} prefix is too broad`);
   }
-  if ((root === 'git' || root === 'git.exe') && pattern.length === 1) errors.push(`Rule ${number}: bare git prefix is too broad`);
+  if (base === 'git' && pattern.length === 1) errors.push(`Rule ${number}: bare git prefix is too broad`);
   return errors;
 }
 
@@ -1654,7 +1730,10 @@ function parseClaudePermission(permission) {
 //     development box's 581 allow entries is an env-led rule that renders at all).
 // NODE_OPTIONS, PYTHONSTARTUP, PERL5OPT and RUBYOPT are this class too and are already in
 // CODE_LOADING_ENV (the interpreter start-up set), so they are not repeated. The Codex
-// exporter is unaffected: its prefix is the command's, with the assignment stripped.
+// exporter's prefix is the command's, so a LEADING assignment never reaches it; an `env`
+// wrapper's assignments do, and wrapperIsBroad judges them by assignmentIsUnsafe too
+// (2026-10-14; until then "the Codex exporter is unaffected" stood here, which held only for
+// the leading case).
 const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 const CODE_LOADING_ENV = new Set([
   'PATH', 'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'NODE_OPTIONS', 'NODE_PATH',
@@ -1680,8 +1759,8 @@ function claudePermissionIsSafe(parsed, options) {
     return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
   }
   const root = parsed.root.toLowerCase();
-  if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
-      STATE_MUTATING_ROOTS.has(root) || SHELL_WRAPPERS.has(root) || SHELL_WRAPPERS.has(commandBase(root))) return false;
+  if ([DESTRUCTIVE_OR_ADMIN_ROOTS, NETWORK_OR_INSTALL_ROOTS, STATE_MUTATING_ROOTS, SHELL_WRAPPERS]
+    .some((table) => refusedRoot(table, root))) return false;
   if (claudeRuleRunsAnyCommand(parsed.tokens)) return false;
   if (!reviewed && !prefixIsAutoSuffixClosed(parsed.tokens)) return false;
   if (parsed.tokens.length === 1) {

@@ -824,7 +824,9 @@ test('an exec wrapper is exactly as narrow as the command it names', () => {
     ['nice', '-n', '10', 'rg'], ['nohup', 'rg'], ['stdbuf', '-oL', 'grep'], ['time', '-p', 'rg'],
     ['setsid', 'rg'], ['ionice', '-c', '3', 'rg'], ['flock', '/tmp/l', 'rg'], ['busybox', 'ls'],
     ['nsenter', '-t', '1', '-m', 'ls'], ['strace', '-f', 'ls'], ['ltrace', '-c', 'ls'],
-    ['chroot', '/srv/x', 'ls'], ['unshare', '-r', 'ls'], ['taskset', '0x1', 'ls'],
+    // `['unshare', '-r', 'ls']` left this list for the M3 broad set (-r maps to root); `-f` is fork,
+    // not an identity option, so it still renders.
+    ['chroot', '/srv/x', 'ls'], ['unshare', '-f', 'ls'], ['taskset', '0x1', 'ls'],
     ['chrt', '-f', '10', 'ls'], ['valgrind', '--tool=memcheck', 'ls'], ['builtin', 'cd'],
     ['noglob', 'ls'], ['nocorrect', 'ls'], ['command', 'rg'], ['exec', 'rg'],
     ['command', '-v'], ['command', '-v', 'rg'],
@@ -836,6 +838,46 @@ test('an exec wrapper is exactly as narrow as the command it names', () => {
     // narrow anyway. The explicit return is kept so that reads as intended.)
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
   }
+});
+
+// M3: an option that changes who the command runs as makes a modelled wrapper's prefix broad
+// (src/policy-exporters.js, each wrapper's entry). Verified against each tool's man page. Against the
+// M2 commit every M3_IDENTITY_BROAD row rendered.
+const M3_IDENTITY_BROAD = [
+  ['strace', '-u', 'root', 'cat'], ['strace', '-uroot', 'cat'], ['strace', '--user=root', 'cat'],
+  ['strace', '--user', 'root', 'cat'], ['strace', '--us=root', 'cat'], ['strace', '--u=root', 'cat'],
+  ['ltrace', '-u', 'root', 'ls'], ['ltrace', '-uroot', 'ls'],
+  ['chroot', '--userspec=0:0', '/srv', 'rm'], ['chroot', '--userspec', '0:0', '/srv', 'ls'],
+  ['chroot', '--groups=wheel', '/srv', 'ls'],
+  ['nsenter', '-t', '1', '-S', '0', 'cat'], ['nsenter', '-t', '1', '--setuid=0', 'cat'],
+  ['nsenter', '-t', '1', '-G', '0', 'ls'], ['nsenter', '-t', '1', '--setgid', '0', 'ls'],
+  // inner command is NARROW (ls/rg), so only the identity option makes the prefix broad: without M3
+  // each of these renders.
+  ['unshare', '-r', 'ls'], ['unshare', '--map-root-user', 'ls'], ['unshare', '-c', 'ls'],
+  ['unshare', '--map-current-user', 'ls'], ['unshare', '--map-user', '0', 'ls'],
+  ['unshare', '--map-users=0:0:1', 'ls'], ['unshare', '--setuid', '0', 'rg'],
+  ['unshare', '--setgid=0', 'ls'], ['unshare', '-fr', 'ls'],
+  ['timeout', '5', 'chroot', '--userspec=0:0', '/srv', 'ls'],
+];
+const M3_IDENTITY_NARROW = [
+  // the same wrappers without an identity option still name their command and render
+  ['strace', '-f', 'ls'], ['strace', '-U', 'name', 'ls'], ['ltrace', '-c', 'ls'],
+  ['chroot', '/srv', 'ls'], ['chroot', '--skip-chdir', '/srv', 'ls'],
+  ['nsenter', '-t', '1', '-m', 'ls'], ['unshare', '-f', 'ls'], ['unshare', '-m', 'ls'],
+  ['unshare', '-C', 'ls'],   // -C is cgroup (upper case), not -c map-current-user
+];
+
+test('M3: an identity option makes a modelled wrapper broad, fused, separated or abbreviated', () => {
+  for (const prefix of M3_IDENTITY_BROAD) {
+    // MUTATION: remove the identity check in execWrapperInner — every row renders.
+    // MUTATION: drop `identity`/`identityFused` from one wrapper's entry — that wrapper's rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs the command under another identity`);
+  }
+  for (const prefix of M3_IDENTITY_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command with no identity change`);
+  }
+  // Claude half: these are all wrapper roots, refused at any depth already.
+  assert.deepEqual(renderClaudePermissions(['Bash(chroot --userspec=0:0 /srv rm *)'], { includeReviewed: true }), []);
 });
 
 test('identity-changing and shell-text wrappers are broad at any depth', () => {

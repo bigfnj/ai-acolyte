@@ -47,12 +47,18 @@ scripts/check-codex-code-mode-runtime.js text eol=lf
 scripts/drive-installed.js text eol=lf
 scripts/drive-vscode.js text eol=lf
 scripts/vscode-acceptance/renderer.js text eol=lf
-# The MCP runtime harness, a shebang'd sibling of the three above that was missed
-# (2026-10-13; its working copy was CRLF against an LF index). Not yet listed, and
-# shebang'd too, so CRLF in this checkout: check-codex-hook-runtime.js,
-# -memory-runtime.js, -native-gates-runtime.js, -recall-runtime.js,
-# -restore-runtime.js, -wait-runtime.js, drive-codex-background.js, mask-sqlite.js.
+# The MCP runtime harness and the eight other shebang'd scripts that were missed
+# (2026-10-13; each working copy was CRLF against an LF index). All are run with
+# `node` explicitly, so this is the same hygiene, closed for every shebang'd script.
 scripts/check-codex-mcp-runtime.js text eol=lf
+scripts/check-codex-hook-runtime.js text eol=lf
+scripts/check-codex-memory-runtime.js text eol=lf
+scripts/check-codex-native-gates-runtime.js text eol=lf
+scripts/check-codex-recall-runtime.js text eol=lf
+scripts/check-codex-restore-runtime.js text eol=lf
+scripts/check-codex-wait-runtime.js text eol=lf
+scripts/drive-codex-background.js text eol=lf
+scripts/mask-sqlite.js text eol=lf
 
 # The retired approve-all.js, kept verbatim so the cleanup path can prove a file is
 # OURS before deleting it. src/legacy-max-cleanup.js compares a SHA-256 of the bytes

@@ -60,7 +60,7 @@ function snapshot(file) {
 // 6 in parallel), eleven of its tests failed on this rename: 41 of 60 runs
 // failed holding 10 ms, 60 of 60 holding 100 ms. With the retry below (and the
 // test's own fixture retries), 0 of 60 at either hold.
-const HELD_RENAME = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const { RETRYABLE_RENAME_CODES: HELD_RENAME } = require('./permissions'); // the one shared set, ETXTBSY included (2026-10-14)
 const RENAME_ATTEMPTS = 10; // 20, 40, ... 180 ms between: 0.9 s at most, as atomicWrite in auto-learn-manager
 const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 

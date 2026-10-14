@@ -4,6 +4,20 @@
 // Actual extension-host background routes, isolated from the nine UI groups.
 // Periodic fixtures deliberately drop Codex watcher scheduling, without changing
 // the product's one-minute minimum interval. No vscode or timer API is mocked.
+//
+// Usage (added 2026-10-14; the v1.6.2 audit found no usage line here). Windows only:
+//
+//   node scripts/drive-codex-background.js --extension-dir <source or staged extension dir>
+//     [--route watcher|periodic] [--codex-layout default|custom-override]
+//     [--mutation none|watcher-noop|periodic-noop]
+//
+// Defaults: --route watcher, --codex-layout custom-override, --mutation none; a mutation
+// must name the route being run (`<route>-noop`) and is the negative control. It LAUNCHES
+// A SEPARATE VS CODE (Code.exe beside the `code` on PATH) with its own user-data and
+// extensions directories and a sandbox HOME under a fresh acolyte-background-* temp
+// directory, so the window you work in is never touched, and runs
+// scripts/vscode-background/index.js inside it. Prints one verdict per result and the
+// path of background.json; exits 1 unless every result is PASS and the host exited 0.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');

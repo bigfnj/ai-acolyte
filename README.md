@@ -240,7 +240,9 @@ list is already a fixed point, and everything authoritative is redone inside the
 the result differs. `finish()` is the one exit path and takes a single lock acquisition covering
 both the wildcarding write and the project-local drain; locking them separately left a window for
 Auto Learn to land its settings write and its claims write in between. A busy lock stays silent,
-because the next tool call fires the hook again and the pass is idempotent.
+because the next tool call fires the hook again and the pass is idempotent. That is also what
+makes it safe to register the hook with `"async": true`: its work is for the next prompt, so no
+tool call waits on it, and two runs that overlap simply contend for the lock.
 
 ### Generalization, coverage, and the local drain
 
@@ -426,10 +428,14 @@ given a method it never had.
 ### Build, test, release
 
 Both halves need Node 20 or newer, the floor CI tests: `.github/workflows/test.yml` runs the suite
-on every push and pull request across Node 20 and 22 on Linux and Windows, `fail-fast` off so a
+on every push and pull request across Node 20, 22 and 24 (24 is what the VS Code extension host
+runs) on Linux and Windows, `fail-fast` off so a
 platform-specific failure is never hidden. On Linux and macOS `install.sh` registers the hook's
-bare path; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
-`node "<path>"`, because a bare extensionless path has no Windows association. Neither uninstaller touches the allow list. Each removes its own checkout's hook
+bare path, quoted if it has a space in it; on Windows `install.ps1`, and `install.sh` run from Git Bash, MSYS2 or Cygwin, register
+`node "<path>"`, because a bare extensionless path has no Windows association. Both write
+`"async": true`, so Claude Code runs the hook in the background rather than holding every Bash and
+PowerShell call for it; a Claude Code older than 2.1.15 strips the key and runs it synchronously,
+as before. Neither uninstaller touches the allow list. Each removes its own checkout's hook
 and any left by a checkout that no longer exists, and names, without removing, one that belongs
 to another checkout still on disk. Cutting a GitHub Release builds and
 attaches the `.vsix`, the version taken from the tag so neither manifest is hand-edited:
@@ -440,6 +446,7 @@ workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
 node --test                         # `npm test` runs the same suite
+node --require ./scripts/mask-sqlite.js --test   # the same suite with node:sqlite hidden, as CI's Node 20 legs see it
 npm run smoke                       # scripts/smoke.sh, against the LIVE ~/.claude
 node scripts/drive-installed.js     # activates the INSTALLED VSIX and drives it
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN
@@ -451,6 +458,15 @@ python memory/recall.py --lint      # index clean, gates not stale against sourc
 (it needs the toolbox Python, which CI has no way to provide) and it was not in this
 checklist either, so three real repairs made to it were exercised only if somebody
 remembered. It exits 0 with `skip:` when the interpreter is absent.
+
+The masked run is listed for the same reason: `scripts/mask-sqlite.js` was documented only in
+its own header. `node:sqlite` exists on the Node this repo is developed on and not on Node 20,
+so a capability probe can be green here and red on CI; the two runs should differ only in their
+skip count (the header says what to compare, and why the `./` is required). The Codex runtime
+harnesses, `scripts/check-codex-*-runtime.js` and `scripts/drive-codex-background.js`, are
+evidence runs rather than release gates: each names its options in its header or in the usage
+line it prints on a bad argument (`test/script-usage.test.js` holds them to that), and
+[docs/codex-compatibility.md](docs/codex-compatibility.md) records what they last proved.
 
 `npm run smoke` is the only gate that drives the hook the way Claude Code does, against this
 machine's real `settings.json` rather than a fixture, so it catches what a suite of mocked homes

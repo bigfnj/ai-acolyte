@@ -240,4 +240,9 @@ function main(argv, { env = process.env, write = (text) => process.stdout.write(
 // `exitCode` rather than `process.exit`, which can cut a pipe off mid-write.
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
-module.exports = { parseArgs, readAllow, stripCredentials, audit, render, main, CREDENTIAL_ENV_PREFIXES };
+// CREDENTIAL_ENV_PREFIXES left this list 2026-10-14 (v1.6.2 audit): nothing imported
+// it, and stripCredentials, its one reader, is tested directly (emptying the list
+// fails two tests). `main` stays: it had no consumer either, but breaking it failed
+// nothing, which is a gap, not dead weight, so test/auto-mode-audit.test.js now calls
+// it on the one path that launches nothing.
+module.exports = { parseArgs, readAllow, stripCredentials, audit, render, main };

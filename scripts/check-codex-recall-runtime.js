@@ -3,6 +3,19 @@
 
 // Actual CPU model acceptance over synthetic, private temporary fixtures. No
 // Codex turn, model generation, GPU, download or live memory/profile access.
+//
+// Usage (added 2026-10-14; the v1.6.2 audit found no usage line here):
+//
+//   node scripts/check-codex-recall-runtime.js --extension-dir <absolute source or staged extension dir>
+//     [--case all|paraphrases|windows|cache|profiles|foreign-cache|fallback]
+//     [--python-executable <absolute CPU python>] [--model-path <absolute bge-small.onnx>]
+//
+// --python-executable defaults to the python named in %LOCALAPPDATA%\DevToolbox\
+// toolbox-manifest.json, and --model-path to <extension-dir>/memory/models/bge-small.onnx;
+// both must exist, because this never downloads. --case runs one check (the integrity
+// check always runs). Prints PASS, FAIL or SKIP per check, then one JSON summary line
+// naming the evidence.json it wrote under a fresh acolyte-codex-recall-runtime-* temp
+// directory; exits 1 if any check failed.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

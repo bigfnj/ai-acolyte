@@ -19,17 +19,18 @@ $userProfile = [System.Environment]::GetFolderPath("UserProfile")
 $settingsDir = Join-Path $userProfile ".claude"
 $settingsPath = Join-Path $settingsDir "settings.json"
 
-# One hook path, several spellings: `node "<path>"` or the bare path, backslashes or
-# forward slashes, /d/repo (Git Bash) or D:/repo (PowerShell), any casing.
+# One hook path, several spellings: `node "<path>"` or the bare path, quoted or not,
+# backslashes or forward slashes, /d/repo (Git Bash), /cygdrive/d/repo (Cygwin) or
+# D:/repo (PowerShell), any casing. The quotes come off a bare path too and
+# /cygdrive/ folds, both since 2026-10-14 (uninstall.sh's hookPath has why).
 function ConvertTo-HookPath {
     param([object] $Value)
 
     $text = "$Value".Trim()
-    if ($text -match '^node\s+(.+)$') {
-        $text = $Matches[1].Trim().Trim('"').Trim("'")
-    }
+    if ($text -match '^node\s+(.+)$') { $text = $Matches[1].Trim() }
+    $text = $text.Trim('"').Trim("'")
     $text = $text.Replace("\", "/")
-    if ($text -match '^/([A-Za-z])/(.*)$') {
+    if ($text -match '^(?:/cygdrive)?/([A-Za-z])/(.*)$') {
         $text = "$($Matches[1]):/$($Matches[2])"
     }
     return (Resolve-LongPath $text).TrimEnd("/").ToLowerInvariant()
@@ -93,27 +94,43 @@ function ConvertTo-OrderedDict {
 # Same strict grammar as install.ps1's Get-WildcardPermsTarget (its comment has
 # the reasoning): `node <path>` or a bare `<path>`, optionally quoted whole,
 # ending in bin\wildcard-perms or bin/wildcard-perms, nothing else. A relative
-# path cannot be checked for existence, so it counts as still there.
+# path cannot be checked for existence, so it counts as still there. An UNQUOTED
+# path with whitespace in it is ours only when a file by exactly that name exists
+# (this checkout's own is matched by ConvertTo-HookPath first), so one of those is
+# never "gone": an absent file proves nothing about a command a shell would split.
 function Get-WildcardPermsTarget {
     param([object] $Command)
     if ($Command -isnot [string]) { return $null }
     $text = $Command.Trim()
     if ($text -match '^node\s+(.+)$') { $text = $Matches[1].Trim() }
+    $quoted = $false
     if ($text -match '^"([^"]+)"$') {
         $text = $Matches[1]
+        $quoted = $true
     } elseif ($text -match "^'([^']+)'$") {
         $text = $Matches[1]
-    } elseif ($text -match '\s') {
-        return $null
+        $quoted = $true
     }
     if ($text -notmatch '[\\/]bin[\\/]wildcard-perms$') { return $null }
+    if (-not $quoted -and $text -match '\s' -and -not (Test-ExistingFile $text)) { return $null }
     return $text
+}
+
+function Test-ExistingFile {
+    param([string] $Path)
+    $native = $Path.Replace("\", "/")
+    if ($native -match '^(?:/cygdrive)?/([A-Za-z])/(.*)$') { $native = "$($Matches[1]):/$($Matches[2])" }
+    try {
+        return ([System.IO.Path]::IsPathRooted($native) -and [System.IO.File]::Exists($native))
+    } catch {
+        return $false
+    }
 }
 
 function Test-GoneRegistration {
     param([string] $Path)
     $native = $Path.Replace("\", "/")
-    if ($native -match '^/([A-Za-z])/(.*)$') { $native = "$($Matches[1]):/$($Matches[2])" }
+    if ($native -match '^(?:/cygdrive)?/([A-Za-z])/(.*)$') { $native = "$($Matches[1]):/$($Matches[2])" }
     # [System.IO.File], not Test-Path: no provider, so no wildcard expansion of
     # `[` in a user's path and no dependence on the current PowerShell drive.
     # IsPathRooted THROWS on .NET Framework (so under 5.1) for a path holding

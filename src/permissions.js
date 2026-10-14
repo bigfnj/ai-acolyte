@@ -6,9 +6,9 @@ const path = require('path');
 
 const { ruleMatches, sameRule, normalizeRule, claudeStripsAssignment, claudeWrapperPrefix, wrapperLength, claudeAllowCandidates } = require('./permission-match');
 
-// Rename codes that are transient on Windows: another process (Claude Code
-// writing settings.json, Defender/Search indexer scanning the temp file, or a
-// second wildcarding writer) held a handle at the instant of the atomic swap.
+// Rename codes that are transient: another process (Claude Code writing settings.json,
+// Defender or the indexer scanning the temp file, a second wildcarding writer) held a
+// handle at the swap; ETXTBSY is POSIX's busy text file. SHARED: see RENAME_RETRY_ATTEMPTS.
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'ETXTBSY']);
 
 // Block the calling thread briefly without a dependency. Only hit on the rare
@@ -49,7 +49,7 @@ function writeFileAtomicSync(target, content) {
     throw err;
   }
 
-  const MAX_ATTEMPTS = 10;
+  const MAX_ATTEMPTS = RENAME_RETRY_ATTEMPTS;
   let lastErr;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
@@ -62,7 +62,7 @@ function writeFileAtomicSync(target, content) {
       // 200ms bought nothing and was a fifth of the 1.1s worst case. That window is
       // Atomics.wait, an unyieldable thread block, and in the extension it blocks the
       // extension-host thread, which is why the fixed-point cache uses a plain write.
-      if (attempt < MAX_ATTEMPTS - 1) sleepSync(20 * (attempt + 1)); // 20,40,…,180ms
+      if (attempt < MAX_ATTEMPTS - 1) sleepSync(renameRetryDelayMs(attempt + 1)); // 20,40,…,180ms
     }
   }
 
@@ -866,10 +866,31 @@ function applyBypass(settings, on) {
 // known-safe environment list and of its wrapper stripping. The direction is the safe
 // one for the fixed-point cache: the learner imports from this stamped file, never the
 // reverse, so nothing outside the stamp can change what processAllowList emits.
+//
+// RETRYABLE_RENAME_CODES (top of file), RENAME_RETRY_ATTEMPTS and renameRetryDelayMs are
+// THE rename-retry policy for every atomic writer in the product, since 2026-10-14. There
+// were four copies and they had already drifted (v1.6.2 audit): writeFileAtomicSync and
+// src/auto-learn-manager.js's atomicWrite retried ETXTBSY, src/codex-memory-gates.js's
+// strictWrite (597b4f7) and the model download in vscode-extension/extension.js (b4271f3)
+// did not, and each re-typed the "ten attempts, 0.9 s" budget. The other three import the
+// codes from here; test/rename-retry-policy.test.js fails on a fifth Set of these codes
+// anywhere, and on an attempt bound or backoff step that disagrees with the two constants
+// below. They live in THIS module because it may require nothing but ./permission-match
+// (src/fixed-point-cache.js stamps exactly those two files, and the closure is pinned), so
+// a shared module of its own would have had to be required from here. Placed down here, and
+// read by writeFileAtomicSync only when it is called, so no citation above them moved.
+// Never mutate the Set: every writer shares it.
+//
+// Ten attempts with a growing wait between them and none after the last: 20, 40, ...
+// 180 ms, 0.9 s at most.
+const RENAME_RETRY_ATTEMPTS = 10;
+const renameRetryDelayMs = (failures) => 20 * failures;
+
 module.exports = {
   generalizePermission, BASH_SCRIPT_KEYWORDS, isPowerShellCommandName, claudeStripsAssignment,
   claudeWrapperPrefix,
   isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync,
+  RETRYABLE_RENAME_CODES, RENAME_RETRY_ATTEMPTS, renameRetryDelayMs,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   currentMode, isBypassOn, applyBypass, readBypassState,
 };

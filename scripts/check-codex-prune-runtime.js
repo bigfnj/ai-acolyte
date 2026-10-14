@@ -15,8 +15,8 @@ const { spawnSync } = require('node:child_process');
 const { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined } = require('./check-codex-runtime');
 
 const BOUNDARY = 'Named staged extension manager; exactly three synthetic success observations per candidate and explicit fingerprint-based review. Real Codex execpolicy validation, fresh app-server processes and harmless shell execution. Scripted loopback model responder; no inference, credentials, real-history learning or VS Code UI claim.';
-const SECRET_ENV = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
-  'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT'];
+// The provider credentials scrubbed from the Codex this launches: the one shared list (2026-10-14).
+const { PROVIDER_CREDENTIAL_ENV: SECRET_ENV } = require('./check-codex-runtime');
 const ENV_KEYS = ['HOME', 'USERPROFILE', 'CODEX_HOME', ...SECRET_ENV];
 
 function parseArgs(argv) {

@@ -66,7 +66,9 @@ test('package.mjs inspects the built VSIX after vsce writes it', () => {
   const source = fs.readFileSync(
     path.resolve(__dirname, '..', 'scripts', 'package.mjs'), 'utf8',
   );
-  const packageAt = source.indexOf('execSync(`npx --yes @vscode/vsce package');
+  // `${VSCE}`, the pinned @vscode/vsce@<exact>, since 2026-10-14 (test/release-pins.test.js
+  // holds the pin itself); before, the unpinned `@vscode/vsce`.
+  const packageAt = source.indexOf('execSync(`npx --yes ${VSCE} package');
   const gateAt = source.indexOf('assertRetiredMaxAbsent(out)');
   assert.ok(packageAt >= 0, 'the supported package command must invoke vsce');
   assert.ok(gateAt > packageAt, 'the content gate must inspect the artifact vsce actually wrote');
@@ -87,6 +89,6 @@ test('package.mjs quarantines a VSIX the content gate rejects', () => {
     /gateOrQuarantine\(\s*out,\s*join\(root, BUILD_STAMP\),\s*\(\)\s*=>\s*assertRetiredMaxAbsent\(out\)\s*\)/,
     'the gate must run inside gateOrQuarantine, over `out`, with the stamp this build wrote');
   assert.ok(
-    source.indexOf('gateOrQuarantine(out') > source.indexOf('execSync(`npx --yes @vscode/vsce package'),
+    source.indexOf('gateOrQuarantine(out') > source.indexOf('execSync(`npx --yes ${VSCE} package'),
     'and after vsce, like the gate itself');
 });

@@ -772,7 +772,7 @@ function abortLiveTransfers() {
 // (writeFileAtomicSync, atomicWrite, strictWrite). This one failed the whole
 // download on the first refusal and threw the 32MB away with it.
 // Ten attempts, 20, 40, ... 180 ms apart: 0.9 s at most, the budget those use.
-const MODEL_RENAME_HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const { RETRYABLE_RENAME_CODES: MODEL_RENAME_HELD } = require('./src/permissions'); // the one shared set, ETXTBSY included (2026-10-14)
 const MODEL_RENAME_ATTEMPTS = 10;
 
 // Since 7e43af2 a download writes `<dest>.<pid>.<12hex>.tmp`. deactivate() unlinks an

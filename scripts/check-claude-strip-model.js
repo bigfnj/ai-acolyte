@@ -165,4 +165,7 @@ function main(argv) {
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
-module.exports = { check, nameArrays, defaultBinary, main };
+// nameArrays left this list 2026-10-14 (v1.6.2 audit): nothing imported it, and it is
+// check()'s own reader, so test/check-claude-strip-model.test.js reaches it through
+// check and main (nameArrays returning nothing fails five of its six tests).
+module.exports = { check, defaultBinary, main };

@@ -18,7 +18,7 @@ assert.equal(process.argv[2], '--extension-dir');
 const subject = path.resolve(process.argv[3]);
 const { commandLaunch } = require(path.join(subject, 'src/exec-resolve'));
 const { parseCodexJsonl } = require(path.join(subject, 'src/history-adapters'));
-const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions } = require('./check-codex-runtime');
+const { rolloutFor, isolateWorkspaceInstructions, assertNoForeignInstructions, PROVIDER_CREDENTIAL_ENV } = require('./check-codex-runtime');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-wait-completion-'));
 const evidence = { boundary: 'Isolated real Codex app-server; scripted loopback provider, no inference or credentials; fixture-only rollouts.', root, cases: [] };
 const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -37,7 +37,7 @@ async function run(name, exitCode) {
   // five-poll budget on both.
   fs.writeFileSync(script, `setTimeout(() => { console.log('acolyte-wait-completion-witness'); process.exit(${exitCode}); }, 12000);\n`);
   const childEnv = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome };
-  for (const key of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','OPENAI_BASE_URL','OPENAI_ORG_ID','OPENAI_ORGANIZATION','OPENAI_PROJECT_ID','AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT']) delete childEnv[key];
+  for (const key of PROVIDER_CREDENTIAL_ENV) delete childEnv[key];
   const observed = { name, exitCode, requests: 0, approvals: 0, calls: [], toolResults: [], commandEvents: [] };
   evidence.cases.push(observed);
   let child, lines, timer, stopping = false, count = 0, finishedResolve, finishedReject;

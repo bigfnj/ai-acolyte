@@ -42,8 +42,8 @@ function createRuntimeContext(options) {
   assert.ok(launch.resolved, 'Codex executable is not reachable');
   const childEnv = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome,
     PATH: workspace + path.delimiter + process.env.PATH };
-  for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
-    'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT']) delete childEnv[key];
+  // Every provider credential, from the one list (PROVIDER_CREDENTIAL_ENV, end of file).
+  for (const key of PROVIDER_CREDENTIAL_ENV) delete childEnv[key];
   return { workspace, home, codexHome, launch, childEnv,
     guidance: require(path.join(extensionDir, 'src', 'agent-guidance.js')),
     gates: require(path.join(extensionDir, 'src', 'agent-gates.js')),
@@ -580,8 +580,8 @@ async function main() {
     report.codexVersion = version.stdout.trim();
     const launch = commandLaunch(executable, ['app-server', '--stdio']);
     const childEnv = { ...process.env, PATH: workspace + path.delimiter + process.env.PATH };
-    for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
-      'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT']) delete childEnv[key];
+    // Every provider credential, from the one list (PROVIDER_CREDENTIAL_ENV, end of file).
+    for (const key of PROVIDER_CREDENTIAL_ENV) delete childEnv[key];
     fs.writeFileSync(path.join(workspace, COMMAND), `@echo off\r\necho ${SHELL_WITNESS}\r\n`);
     const agentsFile = path.join(codexHome, customLayout ? 'AGENTS.override.md' : 'AGENTS.md');
     const shadowedText = `# Base instructions kept intact\n${SHADOWED_WITNESS}\n`;
@@ -674,8 +674,24 @@ async function main() {
   }
 }
 
+// runtimeShellArguments left this list 2026-10-14 (v1.6.2 audit): nothing imported it.
+// It is this harness's own builder for the scripted function call, and no test reaches
+// it (it returning {} failed nothing): it is checked by the harness run itself, where
+// Codex refuses arguments of the wrong shape and the case fails.
+// THE provider credentials a runtime harness scrubs from the Codex it launches, so a run
+// can never reach a real model on the developer's account: the scripted loopback
+// responder is the only provider. ONE list since 2026-10-14; before, twelve identical
+// copies lived in ten harnesses (the v1.6.2 audit), and a variable Codex learns to read
+// would have had to be added to all twelve. Every harness already imports from here;
+// test/runtime-credential-scrub.test.js fails on a credential name spelled anywhere else
+// in scripts/check-codex-*.js and on a harness that drives Codex without this list.
+// Frozen: a harness that mutated it would change every other one's scrub.
+const PROVIDER_CREDENTIAL_ENV = Object.freeze(['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN',
+  'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY',
+  'AZURE_OPENAI_ENDPOINT']);
+
 module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined,
-  runtimeShellTool, runtimeShellArguments, PROVENANCE_ROOTS, localRequireClosure,
-  isolateWorkspaceInstructions, assertNoForeignInstructions };
+  runtimeShellTool, PROVENANCE_ROOTS, localRequireClosure,
+  isolateWorkspaceInstructions, assertNoForeignInstructions, PROVIDER_CREDENTIAL_ENV };
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });

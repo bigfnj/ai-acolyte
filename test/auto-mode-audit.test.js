@@ -18,7 +18,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
-  parseArgs, readAllow, stripCredentials, audit, render,
+  parseArgs, readAllow, stripCredentials, audit, render, main,
 } = require('../scripts/auto-mode-audit.js');
 
 function sandboxDir(t) {
@@ -237,4 +237,24 @@ test('the flags parse into the shape audit and main consume', () => {
   assert.equal(args.mode, 'manual');
   assert.deepEqual(args.entries, ['Bash(*)', 'Read(*)']);
   assert.deepEqual(parseArgs([]), { mode: 'auto', json: false, settings: null, entries: null, keep: false });
+});
+
+// `main` had no test until 2026-10-14: the v1.6.2 audit's census of scripts/ found
+// it exported with no consumer, and breaking it failed nothing. These are the paths
+// it can take without launching anything: a settings file that is missing or not
+// JSON is answered with one line on stderr and exit 1, and nothing reaches stdout,
+// so the probe (which would spawn `claude`) is never reached.
+test('main answers a missing or unparseable settings file with exit 1 and one stderr line', (t) => {
+  const dir = sandboxDir(t);
+  const broken = path.join(dir, 'broken.json');
+  fs.writeFileSync(broken, '{ "permissions": ');
+  for (const [target, message] of [[path.join(dir, 'nope.json'), /no settings file at/], [broken, /is not valid JSON/]]) {
+    const out = [];
+    const err = [];
+    const code = main(['--settings', target], { env: {}, write: (text) => out.push(text), fail: (text) => err.push(text) });
+    assert.equal(code, 1, target);
+    assert.equal(err.length, 1, err.join(''));
+    assert.match(err[0], message);
+    assert.deepEqual(out, [], 'nothing on stdout: the audit never ran');
+  }
 });

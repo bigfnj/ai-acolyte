@@ -674,8 +674,12 @@ async function main() {
   }
 }
 
+// runtimeShellArguments left this list 2026-10-14 (v1.6.2 audit): nothing imported it.
+// It is this harness's own builder for the scripted function call, and no test reaches
+// it (it returning {} failed nothing): it is checked by the harness run itself, where
+// Codex refuses arguments of the wrong shape and the case fails.
 module.exports = { createRuntimeContext, runtimeCase, rolloutFor, assertAllowed, assertDeclined,
-  runtimeShellTool, runtimeShellArguments, PROVENANCE_ROOTS, localRequireClosure,
+  runtimeShellTool, PROVENANCE_ROOTS, localRequireClosure,
   isolateWorkspaceInstructions, assertNoForeignInstructions };
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });

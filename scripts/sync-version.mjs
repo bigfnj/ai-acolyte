@@ -18,7 +18,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const MANIFESTS = ['vscode-extension/package.json', 'package.json'];
+const MANIFESTS = ['vscode-extension/package.json', 'package.json'];
+// Not exported since 2026-10-14 (v1.6.2 audit): nothing imported it. README.md cites
+// this line, which is a reference, not a consumer, and syncVersion, its one reader, is
+// what test/release-version.test.js drives; emptying the list fails two of its tests.
 
 /**
  * Write `override` into both manifests under `root`.

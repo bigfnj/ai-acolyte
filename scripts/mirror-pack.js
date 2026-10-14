@@ -94,7 +94,10 @@ function mirrorTargets(pack) {
   return { missing: [...new Set(missing)].sort((a, b) => a.localeCompare(b)), skipped };
 }
 
-module.exports = { mirrorTargets, parseEntry, NEVER_MIRROR };
+// parseEntry left this list 2026-10-14 (v1.6.2 audit): nothing imported it, and the
+// function is mirrorTargets' own parser, so test/starter-pack.test.js reaches it
+// through mirrorTargets (parseEntry returning null fails one of its tests).
+module.exports = { mirrorTargets, NEVER_MIRROR };
 
 if (require.main === module) {
   const pack = JSON.parse(fs.readFileSync(PACK_PATH, 'utf8'));

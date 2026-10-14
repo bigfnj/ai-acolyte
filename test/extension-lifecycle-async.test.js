@@ -2300,8 +2300,18 @@ test('a download sweeps the stale temp files a killed host left, and leaves live
     assert.equal(box.app.httpsRequests.length >= 1, true);
     const own = tmpStreamPaths.map((p) => path.basename(p)).find((n) => MODEL_TMP_NAME.test(n));
     assert.ok(own && box.present().has(own), 'the download\'s own temp is written and kept');
+    await box.app.dispose();
+    // SETTLE before the temp home is removed. dispose() aborts the transfer, and the abort
+    // unlinks the download's own temp inside the write stream's close() callback, which runs
+    // after dispose() returns. The cancel test above awaits `rebuild` for the same reason.
+    // Without it the home's teardown raced that callback: green locally on Node 24, and
+    // ENOTEMPTY on the models directory on CI's Node 20 / windows-latest leg (run
+    // 38508110502, 2026-10-14).
+    await box.rebuild;
+    assert.ok(!fs.existsSync(path.join(box.models, own)), 'the aborted download removed its own temp');
   } finally {
     await box.app.dispose();
+    await box.rebuild;
   }
 });
 
@@ -2317,7 +2327,9 @@ test('a download keeps a fresh legacy temp: an old build may be mid-transfer', T
     // swept and this fails. Confirmed 2026-10-13.
     assert.ok(box.present().has(freshLegacy), 'a fresh legacy temp is a possible live transfer and is kept');
   } finally {
+    // Settle the aborted download before teardown; see the test above.
     await box.app.dispose();
+    await box.rebuild;
   }
 });
 

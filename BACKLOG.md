@@ -24,37 +24,20 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### In flight: v1.6.3 CI and the confirmation audit (2026-10-14)
+### In flight: tagging 1.6.3 (2026-10-14)
 
-The 1.6.3 release commit (7cbba2b) is not tagged. Its CI failures, the freed-PID tree kill and
-the cached trust timeout are fixed and recorded under "The v1.6.3 release commit's CI failures
-(2026-10-14)". The first confirmation audit's other five findings are fixed and recorded under
-"The v1.6.3 confirmation audit (2026-10-14)". Its follow-ups (G1–G4) are fixed or recorded
-under "Follow-ups to the v1.6.3 confirmation audit (2026-10-14)". Still in flight:
+1.6.3 is not tagged yet. The original release commit was `7cbba2b`. Every finding of its two
+confirmation audits, and of every follow-up wave (F1–F7, G1–G4, H1–H4, J1–J2, K1–K3, L1–L4,
+M1–M6), is fixed or recorded in `docs/engineering-record.md`, in these sections:
 
-- **wave-f14, the converging wave.** Already fixed and recorded:
-  - wave-f10's spawn census;
-  - J1–J2, K1–K3 and L1–L4;
-  - the drain's `asked` report (`fb8aac3`);
-  - the trust ask's 25 s budget (`efeb0c1`).
+- "The v1.6.3 release commit's CI failures";
+- "The v1.6.3 confirmation audit";
+- "Process spawns: the v1.6.3 lifecycle and performance confirmation";
+- "Bare-name spawns: the census";
+- "Follow-ups to the v1.6.3 confirmation audit".
 
-  The remaining items:
-  - a bounded census of exec wrappers no table names, bwrap first;
-  - `strace -o '|cmd'`;
-  - identity options in the wrappers already modelled;
-  - `valgrind --tool=<path>`;
-  - a test pinning the case-exact strip;
-  - two accuracy items.
-
-  The exporter header will then record a third standing limit: a runner that no table names
-  is judged as an ordinary program.
-
-A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
-and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn
-findings, with the CI run 38535034218 timeout, are fixed or recorded in `docs/engineering-record.md`
-under "Process spawns: the v1.6.3 lifecycle and performance confirmation (2026-10-14)".
-
-Each one moves to the engineering record with its disposition when it is fixed and gated.
+The exporter's header now records a third standing limit: a runner that no table names is
+judged as an ordinary program. What remains is one final audit of `7cbba2b..HEAD`, then the tag.
 
 ### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
 

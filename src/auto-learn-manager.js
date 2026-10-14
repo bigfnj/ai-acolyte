@@ -836,7 +836,19 @@ function scanStats(value) {
       ['orphans', 'relocated', 'projectionAhead', 'emptyRollouts'].map((name) =>
         [name, Math.max(0, Math.floor(Number(value.codexHistoryFindings[name]) || 0))]),
     ) : null,
+    // The folders a held Codex evidence rebuild is waiting for (2026-10-14, G3), as data, so the
+    // scan-health line can call it trouble: the reason above says the same in prose, on hover,
+    // but the line read "✓ read N files cleanly" while every family with Codex evidence was
+    // blocked. NAMES only, re-derived here so no state file can smuggle a path through:
+    // whatever follows the last separator, and a link marker.
+    codexRebuildWaitingFor: (Array.isArray(value.codexRebuildWaitingFor) ? value.codexRebuildWaitingFor : [])
+      .slice(0, 8).filter(object).map((entry) => ({ name: folderName(entry.name), link: entry.link === true }))
+      .filter((entry) => entry.name),
   };
+}
+// A folder's NAME, never its path: the part after the last separator, cleaned.
+function folderName(value) {
+  return clean(String(value ?? '').split(/[\\/]/).filter(Boolean).pop() || '', 80);
 }
 function persistentState(state) {
   const candidates = {};
@@ -2703,6 +2715,7 @@ function createAutoLearnManager(options = {}) {
         }
       }
       let rebuildHeldOpen = null; // rebuildHeldOpenReason, below createAutoLearnManager
+      let rebuildWaitingFor = []; // missingFolders, the same folders as data (scanStats)
       if (rebuildingCodex) {
         const codexFiles = scannedFiles.filter((entry) => entry.source === 'codex');
         const incomplete = codexFiles.filter((entry) =>
@@ -2762,17 +2775,40 @@ function createAutoLearnManager(options = {}) {
         // is not exempt, because Codex writes every live rollout there and makes
         // it again on its next run, so blocking costs a scan or two at most. A
         // root the user configured and then deleted holds the rebuild until it
-        // returns or leaves the configuration: gone and unplugged look alike, and
-        // guessing "gone" is how the audit's grant-then-revoke happened.
+        // returns, leaves the configuration, or an empty folder takes its place
+        // (below): gone and unplugged look alike, and guessing "gone" is how the
+        // audit's grant-then-revoke happened.
         const benignAbsence = normalizedPath(path.join(codexHome, 'archived_sessions'));
         const missingCodexRoots = (Array.isArray(result.missingRoots) ? result.missingRoots : []).filter((entry) =>
           entry?.source === 'codex' && (entry.link === true || normalizedPath(entry.path) !== benignAbsence));
         if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoots.length) {
           for (const id of [...pendingFiles]) if (!enumerated.has(id)) pendingFiles.delete(id);
         }
+        // THE WAY OUT OF A FOLDER GONE FOR GOOD (2026-10-14, G3). The user's exits from a held
+        // rebuild are to bring the folder back or, if it is gone, to create it again: a folder
+        // that is there and listed completely holds everything it holds, so an id it does not
+        // list is a deleted transcript, the case the drop above exists for. But a walk that
+        // found NO Codex file at all kept the rebuild open as `history-unavailable` whatever
+        // it had proved, so on a box whose Codex history was deleted outright, recreating the
+        // folder moved the pin from "missing folder" to "history unavailable" and only a new
+        // Codex rollout ended it: never, for someone who stopped using Codex (reproduced
+        // 2026-10-14 with the real walk). Zero files now ends the rebuild when the scanner
+        // PROVES the listing: every configured Codex root is in its `walkedRoots` (present,
+        // listed with no failure) or is this home's archived_sessions/, whose absence the drop
+        // above already treats as benign (a link there still keeps the pending ids, above). No
+        // guess that a folder is gone is made here; that stays the user's call, made by
+        // recreating it. A scanner that reports no `walkedRoots` proves nothing and keeps the
+        // old answer.
+        const walked = new Set((Array.isArray(result.walkedRoots) ? result.walkedRoots : [])
+          .filter((entry) => entry?.path).map((entry) => normalizedPath(entry.path)));
+        const provenEmpty = codexFiles.length === 0 && Array.isArray(result.walkedRoots) &&
+          codexRoots.every((root) => walked.has(normalizedPath(root)) || normalizedPath(root) === benignAbsence);
         state.codexEvidencePendingFiles = [...pendingFiles].sort();
-        state.codexEvidenceRebuildPending = codexFiles.length === 0 || incomplete.length > 0 || pendingFiles.size > 0;
-        rebuildHeldOpen = rebuildHeldOpenReason(missingCodexRoots, [...pendingFiles].filter((id) => !enumerated.has(id)).length);
+        state.codexEvidenceRebuildPending = (codexFiles.length === 0 && !provenEmpty) || incomplete.length > 0 ||
+          pendingFiles.size > 0;
+        const owed = [...pendingFiles].filter((id) => !enumerated.has(id)).length;
+        rebuildWaitingFor = owed > 0 ? missingFolders(missingCodexRoots) : [];
+        rebuildHeldOpen = rebuildHeldOpenReason(rebuildWaitingFor, owed);
       }
       refreshEvidenceStatus(state);
       // Enforce the cap on the way out, so one scan cannot leave the file
@@ -2844,6 +2880,7 @@ function createAutoLearnManager(options = {}) {
         codexHistoryReasons: rebuildHeldOpen ? [rebuildHeldOpen, ...codexHistory.reasons] : codexHistory.reasons,
         codexHistoryNotes: codexHistory.notes,
         codexHistoryFindings: codexHistory.findings ?? null,
+        codexRebuildWaitingFor: rebuildWaitingFor,
       };
       save(state);
       const application = state.mode === 'auto-safe' && !rebuildingCodex && !state.codexEvidenceRebuildPending
@@ -2868,6 +2905,7 @@ function createAutoLearnManager(options = {}) {
         codexHistoryReasons: state.lastScanStats.codexHistoryReasons,
         codexHistoryNotes: state.lastScanStats.codexHistoryNotes,
         codexHistoryFindings: state.lastScanStats.codexHistoryFindings,
+        codexRebuildWaitingFor: state.lastScanStats.codexRebuildWaitingFor,
         candidates: Object.keys(state.candidates).length, application, apply: application,
       };
     });
@@ -3103,15 +3141,39 @@ function takeExporterRule(item) {
 // NAMES only, the probe's own convention (dirNames in src/history-adapters.js): reasons are
 // persisted in lastScanStats, and the state file holds no transcript or history-root path
 // (test/auto-learn-integration.test.js).
-function rebuildHeldOpenReason(roots, owed) {
-  if (!roots.length || owed <= 0) return null;
-  const names = [...new Set(roots.map((entry) => `${path.basename(path.resolve(String(entry.path)))}/${
-    entry.link === true ? ' (a link to a missing target)' : ''}`))];
+//
+// AND IT SAYS WHAT CLEARS IT (2026-10-14, G3). It used to end "until it returns or is no longer a
+// configured history root", and the second half is no action a user has: the product's Codex
+// roots are fixed, `sessions/` and `archived_sessions/` under the Codex home (the extension passes
+// no `codexHistory` on purpose, autoLearnManagerOptions; the CLI passes only `codexHome`). Nothing
+// here guesses that a folder is gone, because gone and unplugged look alike (the scan's comment on
+// the benign absence). The user says so, by putting an empty folder in its place, which the scan
+// then lists completely and so releases (`provenEmpty`, and the drop beside it). The action comes
+// before the consequence so that the 400-character cap in scanStats cuts the consequence first.
+function rebuildHeldOpenReason(folders, owed) {
+  if (!folders.length || owed <= 0) return null;
+  const names = folders.map((entry) => `${entry.name}/${entry.link ? ' (a link to a missing target)' : ''}`);
   const one = names.length === 1;
   return `The Codex evidence rebuild is held open: the configured history folder${one ? '' : 's'} ` +
     `${names.join(', ')} ${one ? 'is' : 'are'} missing, and ${owed} transcript(s) still owed a complete read ` +
-    'may be there. Families with Codex evidence are not applied, automatically or from Review, until ' +
-    `${one ? 'it returns or is' : 'they return or are'} no longer a configured history root.`;
+    `may be there. ${one ? 'Reconnect it if it is offline; if it is gone for good, an empty folder in its'
+      : 'Reconnect any that is offline; for one gone for good, an empty folder in its'} place clears this. ` +
+    'Until then, families with Codex evidence are not applied, automatically or from Review.';
+}
+// The missing roots a held rebuild waits for, as folder names: one entry per name and link
+// marker, in the walk's order. Shared by the reason above and lastScanStats.codexRebuildWaitingFor,
+// so the hover and the scan-health line can never name different folders.
+function missingFolders(roots) {
+  const seen = new Set();
+  const folders = [];
+  for (const entry of roots) {
+    const folder = { name: folderName(path.resolve(String(entry.path))), link: entry.link === true };
+    const key = `${folder.name}\u0000${folder.link}`;
+    if (!folder.name || seen.has(key)) continue;
+    seen.add(key);
+    folders.push(folder);
+  }
+  return folders;
 }
 
 // Exported for independent coverage of the version floor and missing steps.

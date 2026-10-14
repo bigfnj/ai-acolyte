@@ -787,6 +787,8 @@ test('a missing root that holds the rebuild open is named, by folder name only, 
   fs.renameSync(f.rootA, offlineA);
   const both = f.learn().scan({ platform: 'win32' });
   assert.match(both.codexHistoryReasons[0], /folders history-a\/, history-b\/ are missing/);
+  // The same folders as data, for the scan-health line (G3), in the walk's order.
+  assert.deepEqual(both.codexRebuildWaitingFor, [{ name: 'history-a', link: false }, { name: 'history-b', link: false }]);
   fs.renameSync(offlineA, f.rootA);
 
   // Back: the rebuild completes and the reason goes with it.
@@ -794,6 +796,7 @@ test('a missing root that holds the rebuild open is named, by folder name only, 
   const back = f.learn().scan({ platform: 'win32' });
   assert.equal(back.codexEvidence.pending, false);
   assert.deepEqual(back.codexHistoryReasons, [], 'a cleared condition left its reason behind');
+  assert.deepEqual(back.codexRebuildWaitingFor, []);
 });
 
 // The other half of "only when the root is what holds it": a pending transcript the walk DID
@@ -811,4 +814,196 @@ test('a missing root beside a rebuild that waits only on a capped read is not na
   // as holding a rebuild it does not hold ("0 transcript(s) still owed") and this fails.
   // Confirmed 2026-10-14.
   assert.ok(!again.codexHistoryReasons.some((reason) => HELD_OPEN.test(reason)), JSON.stringify(again.codexHistoryReasons));
+  // And so no folder for the scan-health line either: catching up is not trouble (G3).
+  assert.deepEqual(again.codexRebuildWaitingFor, []);
+});
+
+// ── A FOLDER GONE FOR GOOD (2026-10-14, G3) ──────────────────────────────────────────────────
+//
+// The product's Codex roots are fixed: `sessions/` and `archived_sessions/` under the Codex home
+// (the extension passes no `codexHistory`, the CLI only `codexHome`). So "no longer a configured
+// history root", which F3's reason offered as a way out, is no action a user has, and the ways out
+// are: the folder comes back, or the user puts an empty folder in its place. The second did not
+// work until G3: a walk that found no Codex file at all kept the rebuild open as
+// `history-unavailable` whatever it had proved, so on a box whose Codex history was deleted
+// outright, recreating the folder moved the pin and only a new Codex rollout could end it. These
+// fixtures use the DEFAULT roots, as the product does, and the real walk.
+
+// A folder rename or removal on Windows is refused while anything holds a handle under it, and an
+// endpoint scanner opens each file a fixture has just written (the engineering record's "Tests that
+// failed under parallel load"). Retried briefly here, for these fixtures' own moves only.
+function settled(act) {
+  for (let attempt = 0; ; attempt++) {
+    try { return act(); } catch (error) {
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt >= 30) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
+function defaultRoots(t, { archivedSuccess = false } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-evidence-gone-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const sessions = path.join(home, '.codex', 'sessions');
+  const archive = path.join(home, '.codex', 'archived_sessions');
+  const write = (dir, thread, callId, exit) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `rollout-${thread}.jsonl`), [
+      { type: 'session_meta', payload: { id: thread, cwd: home } },
+      { type: 'response_item', timestamp: '2026-01-01T00:00:00Z', payload: { type: 'function_call', name: 'exec_command',
+        call_id: callId, arguments: JSON.stringify({ cmd: 'git status' }) } },
+      { type: 'response_item', payload: { type: 'function_call_output', call_id: callId,
+        output: `Process exited with code ${exit}\nOutput:\nfixture` } },
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+  };
+  write(path.join(sessions, '2026', '01', '01'), 'thread-live', 'call-live', 1);
+  if (archivedSuccess) write(archive, 'thread-archived', 'call-archived', 0);
+  const options = { home, claudeRoots: [], threshold: 1, mode: 'auto-safe',
+    codexValidator: () => ({ valid: true, decision: 'allow' }),
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }) };
+  const learn = () => createAutoLearnManager(options);
+  learn().scan({ platform: 'win32' });
+  const statePath = learn().paths.state;
+  const settingsPath = learn().paths.claudeSettings;
+  const read = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const state = read();
+  state.codexEvidenceRevision = CURRENT_REVISION - 1;
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+  const granted = () => fs.existsSync(settingsPath)
+    && (JSON.parse(fs.readFileSync(settingsPath, 'utf8')).permissions?.allow || []).includes('PowerShell(git status *)');
+  return { home, sessions, archive, learn, read, granted };
+}
+
+test('a sessions folder deleted for good holds the rebuild, says how to clear it, and an empty folder in its place clears it', (t) => {
+  const f = defaultRoots(t);
+  settled(() => fs.rmSync(f.sessions, { recursive: true, force: true }));
+  // Held for as long as the folder stays away, scan after scan, and named each time, as data and
+  // as a reason that says what clears it.
+  for (let pass = 0; pass < 3; pass++) {
+    const held = f.learn().scan({ platform: 'win32' });
+    assert.equal(held.codexEvidence.pending, true, `scan ${pass}: precondition: the rebuild is held`);
+    assert.deepEqual(held.codexRebuildWaitingFor, [{ name: 'sessions', link: false }], `scan ${pass}`);
+    assert.match(held.codexHistoryReasons[0] || '', HELD_OPEN);
+    assert.match(held.codexHistoryReasons[0], /if it is gone for good, an empty folder in its place clears this/);
+    assert.doesNotMatch(held.codexHistoryReasons[0], /no longer a configured history root/,
+      'the reason offered a way out the product has no setting for');
+  }
+  assert.deepEqual(f.read().lastScanStats.codexRebuildWaitingFor, [{ name: 'sessions', link: false }], 'persisted');
+  assert.equal(f.granted(), false);
+
+  // The action the reason names. MUTATION: drop `&& !provenEmpty` from the manager's pending
+  // condition (the tree before G3). The rebuild stays open as `history-unavailable` with nothing
+  // on the hover, for good, and this fails. Confirmed 2026-10-14.
+  fs.mkdirSync(f.sessions);
+  const cleared = f.learn().scan({ platform: 'win32' });
+  assert.equal(cleared.codexEvidence.pending, false, JSON.stringify(cleared.codexEvidence));
+  assert.deepEqual(cleared.codexEvidence.reasons, []);
+  assert.deepEqual(cleared.codexRebuildWaitingFor, []);
+  assert.ok(!cleared.codexHistoryReasons.some((reason) => HELD_OPEN.test(reason)));
+  // What the empty folder releases is a deleted transcript's evidence, the case the pending drop
+  // already accepts (9abc330): its failure is not counted, and no grant was ever made on the way.
+  assert.equal(f.granted(), false);
+});
+
+test('the controls for the empty-folder exit: a walk that proves nothing, or a link, still holds', (t) => {
+  // An empty history is complete only when the scanner PROVES the listing. A scanner that reports
+  // no walkedRoots (every scripted one) keeps the old `history-unavailable` answer, with the
+  // product's default roots and with none configured at all.
+  // MUTATION: drop `Array.isArray(result.walkedRoots)` from provenEmpty. The second case (no Codex
+  // root, so the root check is vacuous) completes and this fails. Confirmed 2026-10-14.
+  for (const codexRoots of [undefined, []]) {
+    const scripted = defaultRoots(t);
+    const unproven = createAutoLearnManager({ home: scripted.home, claudeRoots: [], threshold: 1, mode: 'auto-safe',
+      ...(codexRoots ? { codexRoots } : {}), codexValidator: () => ({ valid: true, decision: 'allow' }),
+      codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }),
+      historyScanner: () => ({ observations: [], cursors: {}, files: [] }) }).scan();
+    assert.equal(unproven.codexEvidence.pending, true, JSON.stringify(codexRoots));
+    assert.deepEqual(unproven.codexEvidence.reasons, ['history-unavailable']);
+  }
+
+  // A proof must cover EVERY configured root. Here the real walk lists nothing and sessions/ is
+  // missing, with no pending id left to hold the rebuild (as after a cursor prune), so only the
+  // root check stands between an unplugged sessions/ and a rebuild finished without it.
+  // MUTATION: make provenEmpty's root check always true. This fails. Confirmed 2026-10-14.
+  const pruned = defaultRoots(t);
+  settled(() => fs.rmSync(pruned.sessions, { recursive: true, force: true }));
+  pruned.learn().scan({ platform: 'win32' });
+  const state = pruned.read();
+  assert.equal(state.codexEvidenceRebuildPending, true, 'precondition');
+  state.codexEvidencePendingFiles = [];
+  fs.writeFileSync(pruned.learn().paths.state, JSON.stringify(state, null, 2) + '\n');
+  const partial = pruned.learn().scan({ platform: 'win32' });
+  assert.equal(partial.codexEvidence.pending, true, 'a walk that could not list sessions/ proved an empty history');
+  assert.deepEqual(partial.codexEvidence.reasons, ['history-unavailable']);
+
+  // A sessions/ that is a link to a missing target is not an empty folder: it is held, named as
+  // a link, and the empty-folder exit does not apply until the link is replaced.
+  const linked = defaultRoots(t);
+  const external = path.join(linked.home, 'external-drive', 'sessions');
+  fs.mkdirSync(path.dirname(external), { recursive: true });
+  settled(() => fs.renameSync(linked.sessions, external));
+  fs.symlinkSync(external, linked.sessions, process.platform === 'win32' ? 'junction' : 'dir');
+  settled(() => fs.renameSync(path.dirname(external), `${path.dirname(external)}-unplugged`));
+  const held = linked.learn().scan({ platform: 'win32' });
+  assert.equal(held.codexEvidence.pending, true);
+  assert.deepEqual(held.codexRebuildWaitingFor, [{ name: 'sessions', link: true }]);
+  assert.match(held.codexHistoryReasons[0], /folder sessions\/ \(a link to a missing target\) is missing/);
+});
+
+test('a sessions folder that comes back is read, its failure counted, and nothing was granted meanwhile', (t) => {
+  // The audit's grant-then-revoke with the DEFAULT roots: a success in archived_sessions/, the
+  // failure in sessions/, and sessions/ away for two scans.
+  const f = defaultRoots(t, { archivedSuccess: true });
+  const offline = `${f.sessions}-offline`;
+  settled(() => fs.renameSync(f.sessions, offline));
+  for (let pass = 0; pass < 2; pass++) {
+    const held = f.learn().scan({ platform: 'win32' });
+    assert.equal(held.codexEvidence.pending, true, `scan ${pass}`);
+    assert.deepEqual(held.codexRebuildWaitingFor, [{ name: 'sessions', link: false }], `scan ${pass}`);
+  }
+  assert.equal(f.granted(), false, 'auto-safe granted while the failure that forbids it sat in the missing folder');
+  settled(() => fs.renameSync(offline, f.sessions));
+  const back = f.learn().scan({ platform: 'win32' });
+  assert.equal(back.codexEvidence.pending, false);
+  assert.deepEqual(back.codexRebuildWaitingFor, [], 'a cleared condition left its folders behind');
+  assert.deepEqual(f.read().candidates['powershell:git status'].counts, { success: 1, failed: 1, unknown: 0, total: 2 });
+  f.learn().scan({ platform: 'win32' });
+  assert.equal(f.granted(), false, 'no grant, and so no revocation either');
+});
+
+test('a root that leaves the configuration releases its pending transcripts: it is no longer a source', (t) => {
+  // Reachable in the product only by changing CODEX_HOME, and through the manager's `codexRoots`
+  // option. Decided 2026-10-14 (G3) and recorded in docs/engineering-record.md: a root nobody
+  // configures is not walked, so "not enumerated" from it says nothing it could contradict later,
+  // and its transcripts' evidence is not re-read, exactly as for a transcript deleted mid-rebuild
+  // (9abc330). Pins behaviour that predates G3; MUTATION: report every root the state has ever
+  // seen pending as missing (hold on any pending id the walk did not enumerate). This fails.
+  const f = twoRoots(t);
+  settled(() => fs.renameSync(f.rootB, `${f.rootB}-offline`));
+  const held = f.learn().scan({ platform: 'win32' });
+  assert.deepEqual(held.codexRebuildWaitingFor, [{ name: 'history-b', link: false }], 'precondition: B holds it');
+
+  const options = { home: f.home, claudeRoots: [], codexRoots: [f.rootA], threshold: 1, mode: 'auto-safe',
+    codexValidator: () => ({ valid: true, decision: 'allow' }),
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }) };
+  const released = createAutoLearnManager(options).scan({ platform: 'win32' });
+  assert.equal(released.codexEvidence.pending, false);
+  assert.deepEqual(released.codexRebuildWaitingFor, []);
+  assert.ok(!released.codexHistoryReasons.some((reason) => HELD_OPEN.test(reason)));
+  // Judged on what the configured roots hold: A's success. B's failure is not counted.
+  assert.deepEqual(f.read().candidates['powershell:git status'].counts, { success: 1, failed: 0, unknown: 0, total: 1 });
+});
+
+test('the waiting folders persist as names only, whatever a state file holds', (t) => {
+  // scanStats re-derives each name from the stored value, so a path written into the state file
+  // by anything is cut to its last segment on the next load, and a junk entry is dropped.
+  // MUTATION: whitelist the stored entries unchanged. This fails. Confirmed 2026-10-14.
+  const f = twoRoots(t);
+  const state = f.read();
+  state.lastScanStats = { ...(state.lastScanStats || {}), codexRebuildWaitingFor: [
+    { name: path.join(f.home, 'deep', 'history-b'), link: false }, { name: 'archived_sessions', link: true }, 'junk', { name: '' },
+  ] };
+  fs.writeFileSync(f.learn().paths.state, JSON.stringify(state, null, 2) + '\n');
+  assert.deepEqual(f.learn().status().lastScanStats.codexRebuildWaitingFor,
+    [{ name: 'history-b', link: false }, { name: 'archived_sessions', link: true }]);
 });

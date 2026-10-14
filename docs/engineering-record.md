@@ -186,6 +186,49 @@ Found while closing that audit's F1, F3 and F7, each verified in the code before
 | Finding | Disposition | Evidence |
 |---|---|---|
 | A refused alternate spelling was written dead | **FIXED** (G2) | `applyUnlocked` judged a family's rule against the managed-inert and user-deny checks and then wrote every spelling the exporter renders, so a deny or managed ask covering only `Bash(git.exe status *)` left that entry in `allow` and the family reported applied with nothing withheld (reproduced on `b1cf72c`, fresh scan and stored state alike). The class F1 closed for a null rule, and older than F1. Each spelling is now judged by the same `refusal()` as the rule; a refused one is not added and is reported in `withheldByPolicy`, so that report is per spelling. **Decision:** the family's other spellings still apply. That mirrors the exporter, which emits an alternate only after the rule passes its safety gate and drops a failing alternate alone; a deny naming only `git.exe status` covers nothing `Bash(git status *)` grants. A refused rule still withholds the whole family, and a retained family with a refused rule gains no spelling (reported with `withRule`). Only additions are withheld: a spelling already in the file stays and stays claimed, by the gate's standing "new grants only" limit. The listing's `clone` keeps judging the rule alone, which is consistent with that decision. |
+| A rebuild held open by a missing folder read "✓ cleanly", and a folder gone for good held it for ever | **FIXED** (G3); decision below | F3 (`3ce06e0`) put the reason on the hover and in the output channel, but the scan-health line still read "✓ last scan read N files cleanly" while the rebuild blocked auto-safe and made a reviewed apply throw for every family with Codex evidence. It blocks something, so it is trouble: a scan stat `codexRebuildWaitingFor` (folder names and a link marker, re-derived from the stored value on every load so no path survives) and the phrase "Codex rebuild waiting for a missing history folder (sessions) — reconnect or recreate it"; the collapsed row reads "scan degraded". The budget deferral stays catch-up, not trouble. |
+
+**The liveness decision (G3, 2026-10-14).** What a folder gone for good did, measured with the real
+walk:
+- **The product has no way to un-configure a root.** Its Codex roots are fixed, `sessions/` and
+  `archived_sessions/` under the Codex home: the extension passes no `codexHistory` on purpose and
+  the CLI passes only `codexHome`. So F3's "until it returns or is no longer a configured history
+  root" offered an exit the user does not have, short of changing `CODEX_HOME`.
+- **A `sessions/` deleted for good held the rebuild until Codex recreated it.** Recreating it by
+  hand did not help when no Codex rollout was left anywhere. The walk then found zero Codex files,
+  and the rebuild stayed open as `history-unavailable`, with nothing on the hover, until a new
+  rollout appeared. So a user who had deleted their Codex history and stopped running Codex had no
+  exit at all.
+- **`archived_sessions/` absent is benign already.** As a link to a missing target it holds the
+  rebuild until the link is reconnected or removed.
+
+Decided:
+- **Nothing guesses that a folder is gone.** Gone and unplugged look alike, which is 7ce6217's
+  reason, and guessing "gone" is how the audit's grant-then-revoke happened.
+- **The user's act is the exit**, and the reason now names it before the consequence: reconnect the
+  folder if it is offline; if it is gone for good, an empty folder in its place clears it.
+- **That exit is made to work.** A walk with zero Codex files ends the rebuild only when the
+  scanner proves the listing: every configured Codex root is in its `walkedRoots`, or is the benign
+  absent archive. A scanner that reports no `walkedRoots` keeps the old answer.
+- **It does not reopen 7ce6217's hole.** A folder that is there and was listed completely cannot
+  come back with transcripts the walk did not see. What the empty folder releases is a deleted
+  transcript's evidence, the loss 9abc330 already accepts. The grant-then-revoke needed a folder
+  that was away and then returned.
+- **A root that leaves the configuration releases its pending ids.** This already held, because
+  `missingRoots` lists only configured roots; it is now pinned by a test. A root nobody configures
+  is not a source, so in a rebuild its transcripts are not re-read, as with a transcript deleted
+  mid-rebuild. Outside a rebuild its counted evidence stays counted. In the product this is
+  reachable only by changing `CODEX_HOME`.
+
+Pinned in `test/codex-evidence-migration.test.js`:
+- the permanently-missing case, held for three scans and then cleared by an empty folder;
+- the controls: a scanner that proves nothing, a walk that cannot list `sessions/`, and a link;
+- the comes-back case, with the default roots;
+- the un-configured case;
+- the names-only reload.
+
+The line and the row are pinned in `test/dashboard-view.test.js`. Every mutation of the new code was
+killed.
 
 ## The 1.6.2 backlog clearance (2026-10-13)
 
@@ -1376,7 +1419,7 @@ in this project should be sited.
 ## Whole-object settings.json writers: FIVE sites, not one
 
 The earlier entry called the apply path — built at `const updated = {`, written by
-`atomicWrite(change.path, change.content)`, `src/auto-learn-manager.js:2286-2343#updated` —
+`atomicWrite(change.path, change.content)`, `src/auto-learn-manager.js:2344-2401#updated` —
 "a third unrebased whole-object writer". Right, but incomplete, and the migration
 is harder than it looked.
 
@@ -1389,10 +1432,10 @@ Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `const updated = {` at `src/auto-learn-manager.js:2332-2335#updated`, written `src/auto-learn-manager.js:2389#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2386-2388#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2896#next`, written `src/auto-learn-manager.js:2977#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:2064#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2060#change.afterHash`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2996#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:2992#item.restored.hash` hash guard. |
+| `const updated = {` at `src/auto-learn-manager.js:2344-2347#updated`, written `src/auto-learn-manager.js:2401#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2398-2400#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2934#next`, written `src/auto-learn-manager.js:3015#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:2076#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2072#change.afterHash`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3034#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3030#item.restored.hash` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:278#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:217#readFileSync` read → `src/local-settings.js:278#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -1407,7 +1450,7 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `src/auto-learn-manager.js:2064#change.before.content` blindly restores `change.before.content`. If the writer
+- `rollback()` at `src/auto-learn-manager.js:2076#change.before.content` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a

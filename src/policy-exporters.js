@@ -2002,9 +2002,10 @@ function assignmentIsUnsafe(token) {
 // The value of a container's `-e`/`--env` (execWrapperInner, 2026-10-14): `NAME=VALUE`, or a
 // bare `NAME`, which docker and podman fill from the caller's own environment, so a value the
 // prefix does not even show. Judged by the name alone either way; a missing value (the prefix
-// ends at `-e`) is no assignment, and that prefix names no command anyway.
+// ends at `-e`) is no assignment, and that prefix names no command anyway. Case folded since
+// K1 (codexFoldedEnvNameIsUnsafe below).
 function envAssignmentIsUnsafe(value) {
-  return value !== undefined && codexEnvNameIsUnsafe(String(value).split('=', 1)[0]);
+  return value !== undefined && codexFoldedEnvNameIsUnsafe(String(value).split('=', 1)[0]);
 }
 
 // THE BUILD PROGRAMS, CODEX EXPORT ONLY (J1, 2026-10-14: the lead's answer to the maintainer
@@ -2016,7 +2017,8 @@ function envAssignmentIsUnsafe(value) {
 // (wrapperIsBroad), a container's `-e`/`--env` (envAssignmentIsUnsafe above), a make or just
 // override (MAKE's and JUST's unsafeVariable), and a prefix that opens with assignments
 // (candidateEligibleForCodex). Matched exactly, as F6's names are: make's variable names are
-// case-sensitive, and so is a POSIX environment.
+// case-sensitive, and so is a POSIX environment. Since K1 (below) the ENVIRONMENT readers fold
+// case through codexFoldedEnvNameIsUnsafe; the make and just overrides still call this one.
 //
 // THE CLAUDE HALF IS NOT CHANGED. claudePermissionIsSafe judges a leading assignment by
 // envNameIsUnsafe, as before, so `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
@@ -2085,11 +2087,39 @@ function codexEnvNameIsUnsafe(name) {
   return envNameIsUnsafe(name) || MAKE_SHELL_VARIABLES.has(name) || MAKE_PROGRAM_VARIABLES.has(name) ||
     MAKE_COMMAND_VARIABLE.test(name) || CARGO_PROGRAM_ENV.has(name) || CARGO_PROGRAM_ENV_PATTERN.test(name);
 }
+// AN ENVIRONMENT NAME FOLDS CASE ON WINDOWS (K1, 2026-10-14, the lead's decision). A native
+// Windows program looks its environment up case-insensitively, so an assignment to `rustc`,
+// `ld_preload` or `Node_Options` is the variable itself there. MEASURED that day under Git Bash
+// with node 24: `env node_options=--require=./y.js node -e ...` and the bash spelling
+// `node_options=--require=./y.js node -e ...` each ran y.js and saw NODE_OPTIONS set, and a run
+// with neither saw it undefined (J1 had measured `env rustc_probe=./x node` seeing
+// RUSTC_PROBE). So every ENVIRONMENT reader in the Codex export judges a name by this, on every
+// platform, because a rules file is not tied to the OS it was generated on and refusing more is
+// the safe failure: an `env` wrapper's assignments (wrapperIsBroad), a container's `-e`/`--env`
+// (envAssignmentIsUnsafe above) and a prefix that opens with assignments
+// (candidateEligibleForCodex), the last two through codexAssignmentIsUnsafe below. It is a
+// superset of codexEnvNameIsUnsafe by construction: the exact name, its upper-case spelling
+// (every set member is upper case), and the built-in command lines with their lower-case
+// suffix (`COMPILE.c`, `CHECKOUT,v`) matched case-insensitively. That covers envNameIsUnsafe's
+// sets too (CODE_LOADING_ENV, PROGRAM_NAMING_ENV, `LD_*` and `DYLD_*`), which were exact.
+//
+// NOT USED for make's and just's own overrides, which stay exact (MAKE's and JUST's
+// unsafeVariable, codexEnvNameIsUnsafe), by the same decision: make's variable names are
+// case-sensitive, so `["make", "cc=x", "all"]` sets no compiler variable and still renders, as
+// F6 pinned. That half of the decision is recorded for the lead as unverified: make exports a
+// command-line variable to every recipe line's environment, and just does so under `set
+// export`, where a Windows child reads it folded (docs/engineering-record.md, K1).
+const MAKE_COMMAND_VARIABLE_FOLDED = new RegExp(MAKE_COMMAND_VARIABLE.source, 'i');
+function codexFoldedEnvNameIsUnsafe(name) {
+  const text = String(name);
+  return codexEnvNameIsUnsafe(text) || codexEnvNameIsUnsafe(text.toUpperCase()) ||
+    MAKE_COMMAND_VARIABLE_FOLDED.test(text);
+}
 // A word that is an assignment to an unsafe name. env takes any `NAME=VALUE` that is not an
 // option as an assignment (innerCommandPrefix), so the name is everything before the first `=`.
 function codexAssignmentIsUnsafe(token) {
   const text = String(token);
-  return !text.startsWith('-') && text.includes('=') && codexEnvNameIsUnsafe(text.split('=', 1)[0]);
+  return !text.startsWith('-') && text.includes('=') && codexFoldedEnvNameIsUnsafe(text.split('=', 1)[0]);
 }
 
 function claudePermissionIsSafe(parsed, options) {

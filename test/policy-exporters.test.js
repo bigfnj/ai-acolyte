@@ -1569,16 +1569,89 @@ test('J1: a build program named by an assignment makes a Codex prefix broad wher
     // MUTATION: add 'CFLAGS' to CARGO_PROGRAM_ENV. The CFLAGS rows fail. Confirmed 2026-10-14.
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
   }
-  // Case-exact, as F6's names are. To make, `ar` is not the archiver variable; a POSIX
-  // environment is case-sensitive too. MUTATION: look the name up upper-cased in
-  // codexEnvNameIsUnsafe. Every row here is refused and this fails. Confirmed 2026-10-14.
-  // (A native Windows program reads its environment case-insensitively, measured with node: that
-  // residual is recorded in docs/engineering-record.md, J1, and this pins the decision as made.)
-  for (const prefix of [['env', 'ar=./x', 'make', 'all'], ['env', 'Ar=./x', 'make', 'all'], ['ar=./x', 'make', 'all'],
-    ['env', 'ranlib=./x', 'make', 'lib'], ['env', 'rustc=./x', 'cargo', 'build'],
-    ['env', 'CARGO_TARGET_x86_64_unknown_linux_gnu_LINKER=./x', 'cargo', 'build'], ['just', 'ar=x', 'build']]) {
-    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is not the variable the tool reads`);
+  // J1 pinned every assignment case-exact here. K1 (2026-10-14) folds case wherever the export
+  // reads an ENVIRONMENT assignment (the K1 tests below); a just override keeps J1's exact
+  // match, because just's variable names are case-sensitive. MUTATION: look the name up
+  // upper-cased in codexEnvNameIsUnsafe. This row is refused and this fails. Confirmed 2026-10-14.
+  assert.equal(codexRuleCount(['just', 'ar=x', 'build']), 1, 'to just, `ar` is not the variable AR');
+});
+
+// K1 (2026-10-14, the lead's decision): an ENVIRONMENT name folds case on Windows, so the Codex
+// export judges an environment assignment case-insensitively, on every platform
+// (src/policy-exporters.js codexFoldedEnvNameIsUnsafe). Measured that day under Git Bash:
+// `env node_options=--require=./y.js node ...` and `node_options=--require=./y.js node ...` each
+// ran y.js. Against the base source (55ceafb) every row of K1_FOLDED_BROAD rendered.
+const K1_FOLDED_NAMES = [
+  // envNameIsUnsafe's sets: CODE_LOADING_ENV, PROGRAM_NAMING_ENV and the loader prefixes.
+  'ld_preload', 'Ld_Preload', 'dyld_insert_libraries', 'ld_library_path', 'node_options', 'Node_Options', 'path',
+  'Path', 'bash_env', 'pythonpath', 'pythonstartup', 'perl5opt', 'java_tool_options', 'git_pager', 'git_ssh_command',
+  'editor', 'Pager', 'cc', 'Cxx',
+  // F6's make sets, as J1 reads them in the environment.
+  'ar', 'Ar', 'ranlib', 'rm', 'makeflags', 'Makefiles', 'shell', 'compile.c', 'Link.o', 'checkout,v', 'Checkout,V',
+  // cargo's program names, the patterns included.
+  'rustc', 'Rustc_Wrapper', 'rustdoc', 'cargo_build_rustc', 'cargo_target_x86_64_unknown_linux_gnu_linker',
+  'CARGO_TARGET_x86_64_pc_windows_msvc_RUNNER', 'cargo_doc_browser',
+];
+const K1_FOLDED_BROAD = [
+  ...K1_FOLDED_NAMES.flatMap((name) => [
+    ['env', `${name}=./x`, 'make', 'all'],                                   // env's assignments
+    ['docker', 'exec', '-e', `${name}=./x`, 'ctr', 'make', 'all'],           // a container's -e
+    ['docker', 'exec', `--env=${name}=./x`, 'ctr', 'make', 'all'],
+    ['docker', 'exec', `-e${name}=./x`, 'ctr', 'make', 'all'],
+  ]),
+  // A leading NAME=, which needs a shell identifier (ASSIGNMENT_WORD), so the dotted names are
+  // left to env.
+  ...K1_FOLDED_NAMES.filter((name) => /^[A-Za-z_]\w*$/.test(name)).map((name) => [`${name}=./x`, 'make', 'all']),
+  ['docker', 'exec', '-e', 'ld_preload', 'ctr', 'cat'],                      // a bare -e copies the caller's value
+  ['podman', 'run', '-e', 'node_options=--require=./y.js', 'img', 'npm', 'test'],
+  ['docker', 'compose', 'exec', '-e', 'Git_Pager=x', 'web', 'git', 'log'],
+  ['timeout', '5', 'env', 'rustc=./x', 'cargo', 'build'], ['FOO=1', 'env', 'ld_preload=./x.so', 'cat'],
+  ['env', 'node_options=--require=./y.js', 'node', 'x.js'], ['env', 'rustc=./x', 'cargo', 'build'],
+];
+// Data stays data in any case.
+const K1_DATA_NARROW = [
+  ['env', 'cflags=-O2', 'make', 'all'], ['env', 'Cflags=-O2', 'make', 'all'], ['env', 'verbose=1', 'make', 'all'],
+  ['env', 'prefix=/usr/local', 'make', 'install'], ['env', 'destdir=/tmp/stage', 'make', 'install'],
+  ['env', 'rustflags=-g', 'cargo', 'build'], ['env', 'cargo_target_dir=t', 'cargo', 'build'],
+  ['env', 'rust_log=debug', 'cargo', 'test'], ['env', 'lang=C', 'git', 'log'], ['lang=C', 'git', 'log'],
+  ['cflags=-O2', 'make', 'all'], ['foo=1', 'cat'], ['docker', 'exec', '-e', 'foo=bar', 'ctr', 'ls'],
+  ['docker', 'exec', '-e', 'ci', 'ctr', 'ls'], ['docker', 'exec', '--env=tz=UTC', 'ctr', 'date'],
+];
+// make's and just's own overrides keep F6's exact match (the lead's decision; its premise is
+// recorded as unverified in docs/engineering-record.md, K1).
+const K1_OVERRIDE_EXACT = [
+  ['make', 'cc=x', 'all'], ['make', 'ar=./x', 'lib'], ['make', 'Ranlib=./x', 'lib'], ['make', 'compile.c=./x', 'all'],
+  ['just', 'ar=x', 'build'], ['just', 'rustc=./x', 'build'],
+];
+
+test('K1: an environment assignment is judged case-insensitively wherever the Codex export reads one', () => {
+  for (const prefix of K1_FOLDED_BROAD) {
+    // MUTATION: judge codexAssignmentIsUnsafe by codexEnvNameIsUnsafe again (K1 reverted there).
+    // The env and leading rows render. Confirmed 2026-10-14.
+    // MUTATION: judge envAssignmentIsUnsafe by codexEnvNameIsUnsafe again. The docker, podman
+    // and compose rows render. Confirmed 2026-10-14.
+    // MUTATION: drop the upper-case lookup from codexFoldedEnvNameIsUnsafe. Every row but the
+    // dotted command-line ones renders. Confirmed 2026-10-14.
+    // MUTATION: drop MAKE_COMMAND_VARIABLE_FOLDED. The `checkout,v` and `Checkout,V` rows
+    // render. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names the variable on Windows`);
   }
+  for (const prefix of K1_DATA_NARROW) {
+    // MUTATION: make codexFoldedEnvNameIsUnsafe return true. Every row here fails. Confirmed
+    // 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
+  }
+});
+
+test('K1, the control: make and just overrides keep their exact match', () => {
+  // Passes with and without K1. MUTATION: judge MAKE's unsafeVariable by
+  // codexFoldedEnvNameIsUnsafe. The make rows are refused and this fails. MUTATION: the same
+  // for JUST. The just rows are refused and this fails. Both confirmed 2026-10-14.
+  for (const prefix of K1_OVERRIDE_EXACT) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} sets no variable the tool reads by that name`);
+  }
+  assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
+  assert.equal(codexRuleCount(['just', 'AR=x', 'build']), 0);
 });
 
 test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led build-program rule still renders', () => {

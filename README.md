@@ -445,6 +445,7 @@ workflow re-checks it against the packaged artefact. Before tagging:
 
 ```bash
 node --test                         # `npm test` runs the same suite
+node --require ./scripts/mask-sqlite.js --test   # the same suite with node:sqlite hidden, as CI's Node 20 legs see it
 npm run smoke                       # scripts/smoke.sh, against the LIVE ~/.claude
 node scripts/drive-installed.js     # activates the INSTALLED VSIX and drives it
 node scripts/check-line-refs.js     # must exit 0 with 0 BROKEN
@@ -456,6 +457,15 @@ python memory/recall.py --lint      # index clean, gates not stale against sourc
 (it needs the toolbox Python, which CI has no way to provide) and it was not in this
 checklist either, so three real repairs made to it were exercised only if somebody
 remembered. It exits 0 with `skip:` when the interpreter is absent.
+
+The masked run is listed for the same reason: `scripts/mask-sqlite.js` was documented only in
+its own header. `node:sqlite` exists on the Node this repo is developed on and not on Node 20,
+so a capability probe can be green here and red on CI; the two runs should differ only in their
+skip count (the header says what to compare, and why the `./` is required). The Codex runtime
+harnesses, `scripts/check-codex-*-runtime.js` and `scripts/drive-codex-background.js`, are
+evidence runs rather than release gates: each names its options in its header or in the usage
+line it prints on a bad argument (`test/script-usage.test.js` holds them to that), and
+[docs/codex-compatibility.md](docs/codex-compatibility.md) records what they last proved.
 
 `npm run smoke` is the only gate that drives the hook the way Claude Code does, against this
 machine's real `settings.json` rather than a fixture, so it catches what a suite of mocked homes

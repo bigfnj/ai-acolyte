@@ -283,7 +283,7 @@ test('a rule with no star is not in the pool, and covers nothing but what the st
 // report its own hit rate would be checking bookkeeping, and bookkeeping is
 // exactly what a broken memo gets wrong. This counts the work itself, so
 // "0 probes on a repeat" cannot be true unless the walk really was skipped.
-const BOUNDARY_PROBE = /[\s:]/.source; // the probe at src/permissions.js:286
+const BOUNDARY_PROBE = /[\s:]/.source; // the probe at src/permissions.js:320
 
 function countBoundaryProbes(run) {
   const original = RegExp.prototype.test;
@@ -374,7 +374,7 @@ test('the key memo is bounded, and stays correct across an eviction', (t) => {
 // The test above reads the cap from coverKeyCacheStats(), so it holds for ANY
 // value of COVER_KEY_CACHE_LIMIT. Mutation tracker, 2026-10-13: the cap set to
 // 3 left this file 11/11 green. Here the number is load-bearing rather than
-// copied (src/permissions.js:634-639#copied): one sweep visits every entry once, so a
+// copied (src/permissions.js:668-673#copied): one sweep visits every entry once, so a
 // cap below the list length clears mid-sweep and hands the next sweep a cold
 // memo, and 5000 was chosen to keep the 3,200-entry growth case inside one
 // sweep. Pinned the way test/permission-match.test.js pins the matcher cache:
@@ -407,7 +407,7 @@ test('the key memo cap is the documented value, and holds the 3,200-entry growth
 // The `typeof` passthrough in coverLookupKeys survived deletion with this file
 // green (mutation tracker, 2026-10-13). It is reachable. settings.local.json's
 // allow array is taken exactly as JSON.parse returned it, checked only by
-// `Array.isArray(local?.permissions?.allow)` at src/local-settings.js:211#localAllow, and
+// `Array.isArray(local?.permissions?.allow)` at src/local-settings.js:223#localAllow, and
 // each entry goes on unchanged through partitionLocal -> redundantUnder ->
 // grantedBy -> index.covers, so an array or object entry arrives here. The ANSWER
 // cannot go stale — `ruleMatches` (permission-match.js:120#ruleMatches) refuses every

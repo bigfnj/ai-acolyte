@@ -6,7 +6,7 @@
 // test/cli-hook.test.js:202#legitimate, test/cli-hook.test.js:277#keeps). `--bypass off`
 // had none, in any file, and OFF is the only reader of the sidecar stash: applyBypass
 // writes { savedMode } on the way in and reads it back on the way out, so "turning it OFF
-// restores exactly what you had" -- the sentence src/permissions.js:783#restores promises --
+// restores exactly what you had" -- the sentence src/permissions.js:817#restores promises --
 // rested on a line no test could reach.
 //
 // MEASURED, not assumed. `readBypassState` was on test/dead-exports.test.js's
@@ -23,7 +23,7 @@
 //
 // Its own process, and os.homedir() is stubbed BEFORE src/permissions is required,
 // because BYPASS_STATE_FILE is computed once at module scope
-// (src/permissions.js:797#BYPASS_STATE_FILE).
+// (src/permissions.js:831#BYPASS_STATE_FILE).
 // node --test gives each file its own child process, so the stub cannot leak.
 
 const { test, after } = require('node:test');

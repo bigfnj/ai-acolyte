@@ -20,7 +20,8 @@ const {
   SETTINGS_ABSENT, SETTINGS_PRESENT, SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_CODE,
   SETTINGS_CONTENDED_CODE,
 } = require('../src/settings-write');
-const { writeFileAtomicSync } = require('../src/permissions');
+const permissions = require('../src/permissions');
+const { writeFileAtomicSync, RENAME_RETRY_ATTEMPTS } = permissions;
 
 function tempSettings(t, value) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-write-'));
@@ -636,9 +637,9 @@ test('a settings.json that vanishes between reads is absent, but an unreadable o
 });
 
 // writeFileAtomicSync gives up its atomic guarantee on this path and writes in place.
-// That is the right call — losing the update is worse than a brief partial-read window —
-// but it must SAY why, or a rename that fails for a real reason (a cross-device target, a
-// permissions problem) looks exactly like a healthy run.
+// That is still the call for every writer except the hook (whose opt-out is tested at the
+// end of this file) but it must SAY why, or a rename that fails for a real reason (a
+// cross-device target, a permissions problem) looks exactly like a healthy run.
 //
 // Nothing asserted this. The emitWarning sat behind `if (lastErr)`, which no reachable
 // input could make false, and mutating that guard to `if (false)` left the whole suite
@@ -759,4 +760,233 @@ test('a write that throws does not fire the high-water hook', (t) => {
   assert.ok(threw, 'precondition: the write really failed rather than being swallowed');
   assert.deepEqual(seen, [],
     'the high-water hook must not fire for a write that did not land');
+});
+
+// ── the hook's writer has no in-place fallback (2026-10-14) ──────────────────
+//
+// Measured by an audit: the in-place write ran on EVERY write while another process held
+// settings.json open for 0.9 s or more, and it truncates before it fills, so the file
+// reads 0 bytes for up to 1.2 ms. The PostToolUse hook is registered `"async": true` and
+// `claude -p` kills a still-running async hook at teardown; a kill in that window left
+// settings.json empty. So the hook passes `inPlaceFallback: false`: the renames are
+// retried exactly as before, and when they run out the target is left byte-identical and
+// the caller gets SETTINGS_CONTENDED_CODE, which it already treats as "come back later".
+//
+// The holder is simulated by refusing the rename with EPERM, which is what Windows
+// returns for a held destination (reproduced against a real holder on Windows by
+// test/cli-hook.test.js). Every attempt is refused, so each of these sits through the
+// real 0.9 s backoff: the retry budget is part of what is being pinned.
+
+function refuseEveryRename(t, code = 'EPERM') {
+  const realRename = fs.renameSync;
+  const attempts = [];
+  fs.renameSync = (from, to) => {
+    attempts.push(to);
+    throw Object.assign(new Error(`${code}: operation not permitted, rename`), { code });
+  };
+  const release = () => { fs.renameSync = realRename; };
+  t.after(release);
+  return { attempts, release };
+}
+
+// emitWarning delivers on the next tick, so a test asserting "no warning" must flush
+// first or it passes for the wrong reason. And a warning an EARLIER test emitted can
+// still be in flight, so flush once before listening too, or it is counted here.
+async function fallbackWarnings(t) {
+  await new Promise((resolve) => setImmediate(resolve));
+  const seen = [];
+  const onWarning = (warning) => { if (warning.name === 'PermissionWildcardingAtomicFallback') seen.push(warning); };
+  process.on('warning', onWarning);
+  t.after(() => process.off('warning', onWarning));
+  return async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return seen;
+  };
+}
+
+function heldTarget(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-held-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'settings.json');
+  const original = Buffer.from(JSON.stringify({
+    model: 'claude-opus-5',
+    hooks: { PostToolUse: [{ matcher: 'Bash' }] },
+    permissions: { allow: ['Bash(git status)'], deny: ['Bash(rm -rf /*)'] },
+  }, null, 2) + '\n');
+  fs.writeFileSync(target, original);
+  return { dir, target, original };
+}
+
+test('with the in-place fallback off, a held target is left byte-identical and the error is coded', async (t) => {
+  const { dir, target, original } = heldTarget(t);
+  const warnings = await fallbackWarnings(t);
+  const held = refuseEveryRename(t);
+
+  let thrown = null;
+  try {
+    writeFileAtomicSync(target, '{"permissions":{}}\n', { inPlaceFallback: false });
+  } catch (err) {
+    thrown = err;
+  }
+  held.release();
+
+  assert.ok(thrown, 'it must throw: returning would tell the caller a write landed that did not');
+  assert.equal(thrown.code, SETTINGS_CONTENDED_CODE,
+    'coded as contention, the code every caller already treats as "retry on the next trigger"');
+  assert.equal(thrown.cause?.code, 'EPERM', 'and the refused rename is kept as the cause');
+  assert.equal(held.attempts.length, RENAME_RETRY_ATTEMPTS,
+    'the whole retry budget is spent before giving up: the option removes the fallback, not the retry');
+  assert.ok(fs.readFileSync(target).equals(original),
+    'the target is byte-identical: nothing was truncated, nothing was written in place');
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json'],
+    'and the temp, a full copy of the new settings, is not left behind');
+  assert.deepEqual(await warnings(), [],
+    'no fallback warning, because no fallback ran');
+
+  // MUTATION: delete the `if (!inPlaceFallback)` block in writeFileAtomicSync and this
+  // fails on the content: the in-place write replaces the file and warns.
+});
+
+test('control: the default path still writes in place, and says so', async (t) => {
+  // The same refused renames, no option. Every writer except the hook depends on this
+  // path landing its update, so the opt-out must not have changed the default.
+  const { dir, target } = heldTarget(t);
+  const warnings = await fallbackWarnings(t);
+  const held = refuseEveryRename(t);
+  writeFileAtomicSync(target, '{"permissions":{}}\n');
+  held.release();
+
+  assert.equal(held.attempts.length, RENAME_RETRY_ATTEMPTS);
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"permissions":{}}\n', 'written in place');
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
+  const seen = await warnings();
+  assert.equal(seen.length, 1, 'the fallback still announces itself');
+  assert.match(seen[0].message, /EPERM/);
+});
+
+test('with the fallback off, a rename no retry can fix is reported as itself, not as contention', async (t) => {
+  // EXDEV is permanent: calling it SETTINGS_CONTENDED would have the hook wait silently
+  // for a holder that does not exist, forever. The real error propagates instead, and the
+  // target and the directory are still left exactly as they were.
+  const { dir, target, original } = heldTarget(t);
+  const warnings = await fallbackWarnings(t);
+  const held = refuseEveryRename(t, 'EXDEV');
+  assert.throws(() => writeFileAtomicSync(target, '{"permissions":{}}\n', { inPlaceFallback: false }),
+    (err) => err.code === 'EXDEV');
+  held.release();
+
+  assert.equal(held.attempts.length, 1, 'a permanent failure is not retried');
+  assert.ok(fs.readFileSync(target).equals(original));
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
+  assert.deepEqual(await warnings(), []);
+});
+
+test('createSettingsWriter carries the opt-out to both of its writes', async (t) => {
+  // The hook reaches writeFileAtomicSync only through this writer, so the option is
+  // only as good as its plumbing. writeAllow and writeTransform each make their own call.
+  const { dir, target, original } = heldTarget(t);
+  const warnings = await fallbackWarnings(t);
+  const writer = createSettingsWriter({
+    settingsPath: target,
+    inPlaceFallback: false,
+    onWrite: () => assert.fail('the high-water hook must not fire for a write that did not land'),
+  });
+  const held = refuseEveryRename(t);
+
+  assert.throws(() => writer.writeAllow(JSON.parse(original), ['Bash(git status *)']),
+    (err) => err.code === SETTINGS_CONTENDED_CODE, 'writeAllow');
+  assert.throws(() => writer.writeTransform((latest) => ({
+    changed: true, settings: { ...latest, effortLevel: 'high' },
+  })), (err) => err.code === SETTINGS_CONTENDED_CODE, 'writeTransform');
+  held.release();
+
+  assert.equal(held.attempts.length, 2 * RENAME_RETRY_ATTEMPTS, 'both writes really reached the rename');
+  assert.ok(fs.readFileSync(target).equals(original), 'neither write landed in place');
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
+  assert.deepEqual(await warnings(), []);
+
+  // MUTATION: drop `{ inPlaceFallback }` from either writeFileAtomicSync call in
+  // src/settings-write.js and that half fails, with the file rewritten in place.
+});
+
+test('SETTINGS_CONTENDED_CODE has one definition, re-exported by settings-write', () => {
+  // permissions.js may require only ./permission-match, so the constant moved there and
+  // settings-write.js re-exports it. Two literals could drift; one binding cannot.
+  assert.equal(permissions.SETTINGS_CONTENDED_CODE, 'SETTINGS_CONTENDED');
+  assert.equal(SETTINGS_CONTENDED_CODE, permissions.SETTINGS_CONTENDED_CODE);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'settings-write.js'), 'utf8');
+  assert.doesNotMatch(source, /['"]SETTINGS_CONTENDED['"]/,
+    'settings-write.js spells the code itself again instead of importing it');
+});
+
+// ── orphaned temps are swept on the write path (2026-10-14) ──────────────────
+//
+// Every exit from writeFileAtomicSync unlinks its temp, but a KILLED process reaches no
+// exit: the hook killed at teardown inside its 0.9 s retry leaves
+// `settings.json.<pid>.<base36>.wc.tmp`, a full copy of the user's policy, for good.
+// Each write now sweeps the old ones for its own target, and must touch nothing else.
+
+test('a write sweeps its own old orphaned temps, and nothing else', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-sweep-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'settings.json');
+  const hourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+  const make = (name, { old = true, directory = false } = {}) => {
+    const file = path.join(dir, name);
+    if (directory) fs.mkdirSync(file);
+    else fs.writeFileSync(file, '{"permissions":{"allow":["Bash(git *)"]}}\n');
+    if (old) fs.utimesSync(file, hourAgo, hourAgo);
+    return name;
+  };
+
+  const orphan = make('settings.json.4242.k3j9x0q.wc.tmp');
+  const kept = [
+    make('settings.json', { old: true }), // the target itself, however old
+    make('settings.json.4243.a1b2c3.wc.tmp', { old: false }), // a live writer's, seconds old
+    make('settings.local.json.4244.zz9.wc.tmp'), // another target's orphan
+    make('settingsXjson.4245.abc.wc.tmp'), // what an unescaped `.` in a pattern would match
+    make('settings.json.x1.abc.wc.tmp'), // not a pid
+    make('settings.json.4246.ABC.wc.tmp'), // not what Math.random().toString(36) writes
+    make('settings.json.4247.abc.wc.tmp.bak'), // a suffix after the shape
+    make('settings.json.4248.dir.wc.tmp', { directory: true }), // the right name, not a file
+    make('settings.json.bak'),
+    make('notes.txt'),
+    make('real-dir', { directory: true }),
+  ];
+  // The right name on a LINK: unlinkSync would delete it (a junction on Windows, which
+  // needs no privilege; a directory symlink elsewhere), so only the lstat isFile test
+  // keeps it. Aged with lutimes, which sets the link's own time rather than its target's.
+  const link = 'settings.json.4249.lnk.wc.tmp';
+  fs.symlinkSync(path.join(dir, 'real-dir'), path.join(dir, link), process.platform === 'win32' ? 'junction' : 'dir');
+  fs.lutimesSync(path.join(dir, link), hourAgo, hourAgo);
+  kept.push(link);
+
+  writeFileAtomicSync(target, '{"ok":true}\n');
+
+  assert.deepEqual(fs.readdirSync(dir).sort(), [...kept].sort(),
+    `exactly the one old orphan of this target goes (${orphan}); everything else stays`);
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"ok":true}\n', 'and the write itself landed');
+
+  // MUTATION: remove the sweepOrphanedTemps call from writeFileAtomicSync and the orphan
+  // is still listed. Build the match as an unescaped RegExp of the basename and
+  // settingsXjson... goes too; drop the age test and the live writer's temp goes; drop
+  // the isFile test and the link goes.
+});
+
+test('the sweep also runs on the hook\'s path, where the write itself is refused', async (t) => {
+  // The orphans come from the hook, so the hook's own writes must collect them, and a
+  // contended write is still a write attempt that paid for the readdir.
+  const { dir, target, original } = heldTarget(t);
+  const hourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+  const orphan = path.join(dir, 'settings.json.4242.k3j9x0q.wc.tmp');
+  fs.writeFileSync(orphan, original);
+  fs.utimesSync(orphan, hourAgo, hourAgo);
+
+  const held = refuseEveryRename(t);
+  assert.throws(() => writeFileAtomicSync(target, '{}\n', { inPlaceFallback: false }),
+    (err) => err.code === SETTINGS_CONTENDED_CODE);
+  held.release();
+
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
+  assert.ok(fs.readFileSync(target).equals(original));
 });

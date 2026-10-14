@@ -30,7 +30,7 @@ const path = require('path');
 
 const {
   generalizePermission, createCoverIndex, writeFileAtomicSync,
-  BASH_SCRIPT_KEYWORDS, isPowerShellCommandName,
+  BASH_SCRIPT_KEYWORDS, isPowerShellCommandName, SETTINGS_CONTENDED_CODE,
 } = require('./permissions');
 const { legacyClaudeMaxStatus } = require('./legacy-max-cleanup');
 // The same glob matcher the policy guard uses to decide whether managed policy
@@ -151,7 +151,7 @@ function localBackupPath(workspaceRoot, backupDir) {
   return path.join(backupDir, `settings.local.${hash}.json`);
 }
 
-function backupLocalAllow(workspaceRoot, backupDir, allow) {
+function backupLocalAllow(workspaceRoot, backupDir, allow, writeOptions) {
   try {
     const file = localBackupPath(workspaceRoot, backupDir);
     let previous = [];
@@ -166,9 +166,12 @@ function backupLocalAllow(workspaceRoot, backupDir, allow) {
       path: localSettingsPath(workspaceRoot),
       savedAt: new Date().toISOString(),
       allow: merged,
-    }, null, 2) + '\n');
+    }, null, 2) + '\n', writeOptions);
     return file;
-  } catch {
+  } catch (error) {
+    // A held snapshot under the hook's no-fallback writer: the drain stops before its
+    // prune, so the paper trail never misses a round. See drainLocalSettings.
+    if (error?.code === SETTINGS_CONTENDED_CODE) throw error;
     return null; // best-effort: pruning is already loss-free, this is the paper trail
   }
 }
@@ -188,6 +191,14 @@ function emptyReport(file, extra) {
 // CLI and the extension merge into user scope differently (the extension rebases
 // onto the newest file and refreshes its backup); this module never writes
 // settings.json itself.
+//
+// `inPlaceFallback` reaches this module's own two writes, the snapshot and the
+// local prune. The PostToolUse hook passes false (writeFileAtomicSync in
+// src/permissions.js says why), and its applyUserAllow does the same for the
+// promotion. Under it, a held file throws SETTINGS_CONTENDED_CODE out of here, and
+// every throw lands before something this pass still depends on: a promotion that
+// did not land prunes nothing, a snapshot that did not land stops the prune, and a
+// refused prune leaves the local file byte-identical. The next tool call redoes it.
 function drainLocalSettings({
   workspaceRoot,
   readUserSettings,
@@ -197,6 +208,7 @@ function drainLocalSettings({
   legacyStatePath,
   legacyScriptPath,
   platform,
+  inPlaceFallback = true,
 } = {}) {
   const file = localSettingsPath(workspaceRoot);
 
@@ -261,9 +273,9 @@ function drainLocalSettings({
 
   let backup = null;
   if (prune.length) {
-    backup = backupLocalAllow(workspaceRoot, backupDir, localAllow);
+    backup = backupLocalAllow(workspaceRoot, backupDir, localAllow, { inPlaceFallback });
     const permissions = { ...(local.permissions ?? {}), allow: keep };
-    writeFileAtomicSync(file, JSON.stringify({ ...local, permissions }, null, 2) + '\n');
+    writeFileAtomicSync(file, JSON.stringify({ ...local, permissions }, null, 2) + '\n', { inPlaceFallback });
   }
 
   return {

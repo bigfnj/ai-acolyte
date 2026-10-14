@@ -8,11 +8,12 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.6.2 stops two false dashboard warnings and follows Codex 0.161.0 and Claude
-Code 2.1.296's own matching**: archived Codex threads no longer mark a scan degraded, Codex
-memory no longer flags project skill paths, and generalization, Auto Learn and the Codex
-exporter follow what each agent actually strips and runs. Version 1.6.1 combines Claude and
-Codex in one Saved permissions list; 1.6.0 adds core Codex feature coverage. Real
+**Version 1.6.3 fixes what a post-release audit of 1.6.2 found**: the dashboard never blocks
+the extension host, a missing Codex root holds an Auto Learn rebuild open, informational rules
+are proposed again, the Codex exporter refuses every prefix that can run an unpinned program,
+and the hook registers asynchronously. Version 1.6.2 stopped two false dashboard warnings and
+follows Codex 0.161.0 and Claude Code 2.1.296's own matching; 1.6.1 combines Claude and Codex
+in one Saved permissions list; 1.6.0 adds core Codex feature coverage. Real
 extension-host and fresh-session checks cover the supported workflows below. The feature
 inventory and evidence are in [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
@@ -45,7 +46,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v162.vsix
+code --install-extension ai-acolyte-v163.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

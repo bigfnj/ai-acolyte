@@ -354,7 +354,7 @@ test('the extension writes no Codex rules while the setting still says workspace
       createOutputChannel() { return { appendLine() {}, append() {}, show() {}, clear() {}, dispose() {} }; },
       createStatusBarItem() { return { show() {}, hide() {}, dispose() {}, text: '', tooltip: '' }; },
       registerWebviewViewProvider() { return disposable(); },
-      setStatusBarMessage() {},
+      setStatusBarMessage() { return disposable(); },   // a Disposable, as the real API returns
       showErrorMessage() {},
       showInformationMessage() { return Promise.resolve(undefined); },
       showWarningMessage() {},

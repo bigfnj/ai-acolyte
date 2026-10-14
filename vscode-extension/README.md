@@ -63,6 +63,11 @@ The Auto Learn review list hides candidates an existing allow rule already
 covers — proposing `Bash(rg --files *)` when `Bash(rg *)` is already granted
 changes no prompt, and the wildcarding pass prunes the entry on its next run
 anyway. The count is shown in the picker title so nothing disappears silently.
+When nothing is left to offer, Review says so in a modal dialog with the covered
+count, and **Show covered** lists each hidden family beside the allow rule that
+covers it. That list is read-only. Review shows its progress in the status bar
+from the click, waits for a scan that is already running, and reports a failed
+scan instead of returning in silence.
 Only your user settings are visible to that check, so it can hide redundancy but
 never risk; deny- and ask-governed families still reach review, labelled with the
 rule that overrides them.
@@ -148,7 +153,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4077#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4174#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -211,10 +216,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4026#showWarningMessage`).
+`vscode-extension/extension.js:4123#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:3846#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:3943#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -277,12 +282,12 @@ works under a managed policy.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:636#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:641#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:902#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:907#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -295,7 +300,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:713#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:718#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -310,7 +315,7 @@ the model asset and the venv, and never runs Python.
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1055#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1060#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -430,7 +435,9 @@ Four buttons: **Scan now**, **Review (N)**, **Undo**, **Why prompt?**
 
 **Review** shows a live count of candidates the picker will actually offer —
 candidates an existing allow rule already covers are excluded from the count, since
-approving them changes no prompt. **Optimize permissions** handles existing saved
+approving them changes no prompt. The **safe** tile counts the auto-safe part of that
+same list, so a covered auto-safe family appears under "already covered" and not as
+safe. **Optimize permissions** handles existing saved
 permissions in both agents; Auto Learn Review handles history-derived proposals.
 
 **Apply safe** and **Cycle mode** were dropped from the card and remain in the

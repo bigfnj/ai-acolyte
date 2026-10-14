@@ -41,15 +41,9 @@ The exporter's header now records a third standing limit: a runner that no table
 judged as an ordinary program.
 
 The final audit of `7cbba2b..2074deb` found no regression. Its documentation findings are fixed
-in `4d39174`. It found two MEDIUM security defects, both older than the delta, and both are in
-flight on wave-f15 before the tag:
-
-- **"Why did this prompt?" can run code through cmd.exe.** It happens when codex is an npm
-  `.cmd` and the pasted command carries `%CMDCMDLINE:~-1%&…` (the BatBadBut class). The audit
-  reproduced it end to end.
-- **A workspace `memory.dir` chooses the corpus.** The gate blocks compiled from it are
-  installed into the user's global `CLAUDE.md` and `AGENTS.md`. The audit traced this in code;
-  it has not been run.
+in `4d39174`. It also found two MEDIUM security defects, both older than the delta: the cmd.exe
+injection in "Why did this prompt?", and the workspace-chosen `memory.dir`. Both are fixed in
+wave-f15 (`e3c5fd1`, `84c14c7`) and recorded under "The final pre-tag audit (2026-10-14)".
 
 ### Memory gates: three gaps found on the second workstation (2026-10-14)
 
@@ -68,6 +62,28 @@ defects surfaced along the way:
   here. A 2026-09-24 compile on this box came from that branch.
 - **`src/agent-gates.js`'s header still says gates need `type: feedback`.** Selection has keyed
   on `scope: global` alone since the README's change.
+
+### For the maintainer to decide: may a workspace raise Auto Learn's mode? (2026-10-14)
+
+wave-f15's settings census ("The settings census behind S2" in the record) found
+`autoLearn.mode` is still window-scoped. So a repository's `.vscode/settings.json` can set
+`auto-safe`, and Auto Learn then applies grants unattended to `~/.claude/settings.json` and
+`~/.codex/rules`, with no confirmation modal. `autoLearn.successThreshold` can lower the bar at
+the same time. The grants still come only from the user's own observed history, through the
+auto-safe classifier, so a repository cannot inject a rule. But it can opt the user into
+unattended writes to global files.
+
+This is a product decision, not a defect: `cycleAutoLearnMode` deliberately writes the workspace
+tier. One candidate is to let a workspace lower the mode but never raise it above the user tier.
+Same class, lower impact: `autoLearn.codexScope`, which can turn Codex export back on, and
+`localDrain.enabled`.
+
+Also from wave-f15, ACCEPTED-RECORDED rather than queued:
+- **Argument splitting on the cmd route.** A token ending in `\` before the closing quote merges
+  with the next argument. That is argument splitting, not injection, and it affects only a
+  non-npm batch-file codex.
+- **The version probe still runs an npm `codex.cmd` through cmd.exe.** It is safe with fixed
+  arguments.
 
 ### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
 

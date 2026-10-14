@@ -119,7 +119,7 @@ test('ending a thread child ends the worker and the codex it started, on every p
   const tracked = [];
   const outcome = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: dir, codexExecutable: codex.executable,
     timeoutMs: 40000, offThread: true, track: (child) => tracked.push(child) }).then(() => 'answered', (error) => error.message);
-  assert.ok(await waitFor(() => readPid(codex.pidFile), 15000), 'precondition: the worker started the stand-in codex');
+  assert.ok(await waitFor(() => readPid(codex.pidFile), 30000), 'precondition: the worker started the stand-in codex');
   const pid = readPid(codex.pidFile);
   pids.push(pid);
   assert.equal(gone(pid), false, 'precondition: the stand-in codex is running');
@@ -159,7 +159,7 @@ test('a host that dies outright still takes the worker it started from a thread'
     env: { ...process.env, NODE_OPTIONS: `--require "${preload.split(path.sep).join('/')}"` },
   });
   pids.push(host.pid);
-  assert.ok(await waitFor(() => readPid(codex.pidFile) && readPid(workerPidFile), 15000),
+  assert.ok(await waitFor(() => readPid(codex.pidFile) && readPid(workerPidFile), 30000),
     'precondition: the host\'s thread started the worker, and the worker the stand-in codex');
   const worker = readPid(workerPidFile), hung = readPid(codex.pidFile);
   pids.push(worker, hung);

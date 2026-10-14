@@ -2120,6 +2120,16 @@ const STRACE_OUT_NARROW = [
   ['ltrace', '-o', '|./x', 'ls'], ['ltrace', '-o|./x', 'ls'], ['ltrace', '--output=|./x', 'ls'],
 ];
 
+test('M6: strace --expr is not a real long option, so it is broad; --trace, the real filter, renders', () => {
+  // MUTATION: restore `--expr` to strace's `values`. The first row reads `trace=open` as the option's
+  // value, names `ls`, and renders.
+  assert.equal(codexRuleCount(['strace', '--expr', 'trace=open', 'ls']), 0);
+  assert.equal(codexRuleCount(['strace', '--expr=trace=open', 'ls']), 1); // the fused `--[a-z-]+=` form is still inert
+  // Control: the real filter option, -e / --trace, still renders.
+  assert.equal(codexRuleCount(['strace', '--trace', 'open', 'ls']), 1);
+  assert.equal(codexRuleCount(['strace', '-e', 'trace=open', 'ls']), 1);
+});
+
 test('M4: valgrind --tool must be a plain tool name, a path-like value is broad; other long options stay open', () => {
   for (const prefix of [
     ['valgrind', '--tool=../../x', 'prog'], ['valgrind', '--tool=../../x', 'ls'],

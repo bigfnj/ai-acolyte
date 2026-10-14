@@ -542,9 +542,14 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
   // by `identity`/`identityFused`. `-u` and `--user` leave `values`; `-U` (summary-columns, upper case)
   // is untouched. Until this, `-u` was a plain value option, so `["strace", "-u", "root", "cat"]`
   // rendered (measured against the M2 commit).
+  //
+  // `--expr` left `values` (M6, 2026-10-14): strace has no such long option. getopt_long's longopts
+  // name the filter `-e`/`--trace` (src/strace.c, read 2026-10-14; `expr` appears only as the `-e`
+  // argument's metavar), so `--expr` is unlisted and now broad, per the header. Until this it was a
+  // value option, so `["strace", "--expr", "trace=open", "ls"]` rendered.
   strace: { flagPattern: /^-[cCdDfFhiknqrtTvVwxyzZ]+$/,
     values: ['-e', '-p', '-s', '-E', '-P', '-S', '-a', '-b', '-I', '-X', '-O', '-U', '--trace',
-      '--expr', '--attach', '--string-limit', '--env', '--trace-path', '--columns'],
+      '--attach', '--string-limit', '--env', '--trace-path', '--columns'],
     fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/,
     outSep: /^(?:-o|--o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?)$/, outFused: /^(?:-o|--o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?=)(.+)$/,
     identity: ['-u', '--user', '--u', '--us', '--use'], identityFused: /^(?:-u.|--u(?:se?r?)?=)/,

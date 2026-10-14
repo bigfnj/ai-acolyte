@@ -572,6 +572,140 @@ test('on the Claude side a runner-exec rule is refused at any depth, and a fixed
   }
 });
 
+// "A value is a command" (2026-10-13). Each row below rendered as a reviewed Codex
+// prefix_rule against 3a451fd (72 of the 76 rows of the probe these come from; the other four
+// were the xargs and ssh pins at the end), because git, rsync, scp, sftp, tar, find, fd, the
+// compose binaries and nerdctl were on no wrapper or runner table. What each one runs is in
+// the comments at GIT and at the end of RUNNER_GRAMMAR in src/policy-exporters.js, with the
+// measurements.
+test('a git prefix carrying -c, --config-env or --exec-path= before its subcommand is broad, and so is one that names none', () => {
+  for (const prefix of [
+    ['git'], ['git', '-c'], ['git', '-c', 'core.pager=less'], ['git', '-c', 'core.fsmonitor=x', 'status'],
+    ['git', '-c', 'alias.st=!sh', 'st'], ['git', '-ccore.pager=x', 'log'], ['git', '--config-env', 'core.pager=X', 'log'],
+    ['git', '--config-env=core.pager=X', 'log'], ['git', '-C', 'dir', '-c', 'x=y', 'status'],
+    ['git', '--no-pager', '-c', 'x=y', 'log'], ['git', '--exec-path=/x', 'status'], ['git', '--bogus', 'status'],
+    ['git.exe', '-c', 'x=y', 'status'], ['GIT', '-c', 'x=y', 'status'],
+    // a prefix that ends in global options has named no subcommand; the next word may be `-c`
+    ['git', '-C', 'dir'], ['git', '--no-pager'], ['git', '-p'], ['git', '--git-dir', 'x'], ['git', '--work-tree=x'],
+    // and through every wrapper, by the recursion
+    ['xargs', 'git'], ['xargs', '-I', '{}', 'git'], ['timeout', '5', 'git', '-c', 'x=y', 'status'],
+    ['env', 'git', '-c', 'x=y', 'log'], ['uv', 'run', 'git', '-c', 'x=y', 'status'],
+    ['docker', 'exec', 'ctr', 'git', '--config-env=alias.x=Y', 'x'],
+  ]) {
+    // MUTATION: delete the `if (base === 'git')` line in wrapperIsBroad. Nothing judges a git
+    // prefix and `["git"]` renders. Confirmed 2026-10-13.
+    // MUTATION: delete the git line in candidateEligibleForCodex. `["git"]` renders; the
+    // wrapper rows are still refused, by the recursion. Confirmed 2026-10-13.
+    // MUTATION: add '-c' to GIT's `values`. `["git", "-c", "core.fsmonitor=x", "status"]`
+    // reads as `-c VALUE status` and renders. Confirmed 2026-10-13.
+    // MUTATION: add `config-env` to GIT's `fused`. `["git", "--config-env=core.pager=X",
+    // "log"]` renders. Confirmed 2026-10-13.
+    // MUTATION: add `exec-path` to GIT's `fused`. `["git", "--exec-path=/x", "status"]`
+    // renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} lets the next token name a program`);
+  }
+  // The learner never hands this shape over (a git argv that opens with an option has no
+  // family subcommand, so it is `complex`), and it is refused for that reason as before.
+  const { classifyInvocation } = require('../src/auto-learn');
+  const learned = classifyInvocation({ tool: 'Bash', command: 'git -c core.pager=less log', source: 'claude' });
+  assert.equal(learned.complex, true, 'precondition');
+  assert.equal((renderCodexRules([learned], { includeReviewed: true }).match(/prefix_rule\(/g) || []).length, 0);
+});
+
+test('a git prefix that names its subcommand after path options still renders, and the automatic path is unchanged', () => {
+  for (const prefix of [
+    ['git', 'status'], ['git', 'log'], ['git', 'push'], ['git', '-C', 'dir', 'status'], ['git', '--no-pager', 'log'],
+    ['git', '-C', 'dir', '--no-pager', 'diff'], ['git', '--git-dir=x', 'status'], ['git', '--git-dir', 'x', 'status'],
+    ['git', '--work-tree', 'w', '--git-dir', 'x', 'status'], ['git', '--version'], ['git', '--help'], ['git', '-v'],
+    // after the subcommand, `-c` is the subcommand's (reuse a message, count matches)
+    ['git', 'commit', '-c', 'HEAD'], ['git', 'grep', '-c', 'x'], ['git.exe', 'status'],
+    ['xargs', 'git', 'status'], ['timeout', '5', 'git', 'status'], ['uv', 'run', 'git', 'status'],
+  ]) {
+    // MUTATION: drop '-C' from GIT's `values`. `["git", "-C", "dir", "status"]` is an unknown
+    // option and is refused. Confirmed 2026-10-13.
+    // MUTATION: give GIT no `info`. `["git", "--version"]` is refused. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its subcommand and still renders`);
+  }
+  // The automatic path: AUTO_SAFE_GIT_SUBCOMMANDS still renders unreviewed, unioned.
+  // MUTATION: put `git: GIT` in RUNNER_GRAMMAR instead of the two by-name checks. Membership
+  // there refuses every git prefix on the automatic path: this assertion fails, and so do
+  // the first test in this file ('Codex renderer is deterministic and unions strict
+  // auto-safe Git subcommands') and the managed-merge test. Confirmed 2026-10-13.
+  assert.ok(compact(renderCodexRules([candidate(['git', 'status']), candidate(['git', 'rev-parse'])]))
+    .includes('pattern = ' + JSON.stringify(['git', ['rev-parse', 'status']])));
+  // The Claude side needed nothing: a word other than a read subcommand after `git` was
+  // already refused. These are pins, true at 3a451fd too.
+  for (const permission of ['Bash(git -c x=y status *)', 'Bash(git -C dir status *)', 'Bash(git --config-env=a=B log *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  assert.deepEqual(renderClaudePermissions(['Bash(git status *)'], { includeReviewed: true }), ['Bash(git status *)']);
+});
+
+test('rsync, scp, sftp, tar, find and fd read a program from an option anywhere on the line, so no prefix of them is narrow', () => {
+  const prefixes = [
+    ['rsync'], ['rsync', '-a'], ['rsync', '-av', 'src/', 'dst/'], ['rsync', '-e', 'ssh'], ['rsync', '--rsh=ssh'],
+    ['rsync.exe', '-a'], ['scp'], ['scp', '-r'], ['scp', '-S', 'prog'], ['scp', 'a', 'host:b'], ['scp', '-o', 'ProxyCommand=x'],
+    ['sftp'], ['sftp', '-D', 'x'], ['sftp', 'host'], ['tar'], ['tar', '-xf'], ['tar', '-tf', 'a.tar'],
+    ['tar', '-xf', 'a.tar', '--to-command=sh'], ['tar', '-I', 'x'], ['tar', '--use-compress-program=x'], ['tar.exe', '-xf'],
+    ['tar', '-cf', 'a.tar', 'dir'], ['find'], ['find', '.'], ['find', '.', '-name', 'x'], ['find', '.', '-exec'],
+    ['find.exe', '.'], ['fd'], ['fd', 'pattern'], ['fd', '-x'], ['fdfind', 'x'],
+    // the recursion carries them through a wrapper
+    ['xargs', 'tar'], ['xargs', 'find'], ['nice', '-n', '5', 'rsync', '-a'],
+  ];
+  for (const prefix of prefixes) {
+    // MUTATION: delete `rsync: RUNS_ANY_COMMAND` from RUNNER_GRAMMAR. `["rsync"]` renders.
+    // The same for `scp`, `sftp`, `tar`, `find`, `fd` and `fdfind`, one at a time: each one's
+    // first row renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} admits a later option that names a program`);
+    if (prefix.length > 1 && !['scp', 'sftp', 'xargs', 'nice'].includes(prefix[0])) {
+      // The Claude side: each multi-token rule rendered under review at 3a451fd.
+      const rule = `Bash(${prefix.join(' ')} *)`;
+      assert.deepEqual(renderClaudePermissions([rule], { includeReviewed: true }), [], rule);
+    }
+  }
+});
+
+test('docker-compose, podman-compose and nerdctl take the docker grammar', () => {
+  for (const prefix of [
+    ['docker-compose'], ['docker-compose', 'exec'], ['docker-compose', 'exec', 'web'], ['docker-compose', 'exec', 'web', 'sh'],
+    ['docker-compose', 'run', 'web', 'bash'], ['docker-compose', 'run', '--rm', 'web'],
+    ['docker-compose', '-f', 'x.yml', 'exec', 'web', 'ls'], ['docker-compose', 'exec', '-u', 'root', 'web', 'ls'],
+    ['docker-compose.exe', 'exec', 'web', 'sh'], ['podman-compose', 'exec', 'web', 'sh'], ['nerdctl'], ['nerdctl', 'exec', 'ctr'],
+    ['nerdctl', 'exec', 'ctr', 'sh'], ['nerdctl', 'run', 'img'], ['nerdctl', 'run', '--privileged', 'img', 'ls'],
+    ['nerdctl', 'container', 'exec', 'ctr', 'sh'], ['nerdctl', 'compose', 'exec', 'web', 'sh'],
+    ['nerdctl', '--namespace', 'k8s.io', 'exec', 'c', 'ls'],
+  ]) {
+    // MUTATION: delete `'docker-compose': COMPOSE` from RUNNER_GRAMMAR. `["docker-compose"]`
+    // renders. Likewise `nerdctl` and `podman-compose`. Confirmed 2026-10-13.
+    // MUTATION: give COMPOSE `sub: {}`. `exec` is a fixed subcommand and
+    // `["docker-compose", "exec", "web", "sh"]` renders. Confirmed 2026-10-13.
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  for (const prefix of [
+    ['docker-compose', 'exec', 'web', 'pytest'], ['docker-compose', 'run', '--rm', 'web', 'pytest'], ['docker-compose', 'ps'],
+    ['docker-compose', 'up'], ['docker-compose', '--version'], ['podman-compose', 'exec', 'web', 'ls'], ['nerdctl', 'ps'],
+    ['nerdctl', 'exec', 'ctr', 'ls'], ['nerdctl', 'images'],
+  ]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names its command and still renders`);
+  }
+  for (const permission of ['Bash(docker-compose exec *)', 'Bash(docker-compose run web pytest *)', 'Bash(nerdctl exec *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  for (const permission of ['Bash(docker-compose ps *)', 'Bash(nerdctl ps *)', 'Bash(podman-compose logs *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], permission);
+  }
+});
+
+test('xargs -I and ssh -o ProxyCommand were already broad where they should be', () => {
+  // Pins, each true at 3a451fd: xargs is judged by the command it names (`-I` takes a value),
+  // and ssh is broad at any depth (RUNNER_GRAMMAR), ProxyCommand included.
+  for (const prefix of [['xargs', '-I', '{}'], ['xargs', '-I', '{}', 'sh'], ['xargs', '-I{}', 'sh', '-c'],
+    ['ssh', '-o', 'ProxyCommand=x', 'host'], ['ssh', '-oProxyCommand=x']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  assert.equal(codexRuleCount(['xargs', '-I', '{}', 'rm']), 1, 'control: as narrow as `["rm"]`');
+});
+
 test('PowerShell code switches were already broad in every abbreviation, and stay so', () => {
   // PowerShell accepts any unambiguous prefix of a parameter, case-insensitively, so
   // `-co`, `-Com` and `-e` are `-Command` and `-EncodedCommand`. The existing branch

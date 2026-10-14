@@ -2237,6 +2237,90 @@ test('a failed download leaves another download\'s temp file alone', TEST_TIMEOU
   }
 });
 
+// ── stale temp sweep ──────────────────────────────────────────────────────────
+//
+// A download whose host is KILLED (a crash, a power loss) cannot run deactivate()'s unlink,
+// so its `<dest>.<pid>.<hex>.tmp` partial, and a pre-2026-10-13 build's fixed
+// `bge-small.onnx.tmp`, stay in the one shared model directory forever. Since 2026-10-13 each
+// download first sweeps any `<dest>.*.tmp` older than a day (sweepStaleModelTemps), but never
+// a younger one — RECALL_MODEL_HOME is one directory for every window, so a fresh temp may be
+// another window's live transfer.
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Start a download with the model directory pre-seeded. `plant` writes a file and back-dates
+// its mtime by `ageMs`. Returns once the sweep has run (the download has issued its first
+// request). The download is left in flight; the caller disposes.
+async function startDownloadWithSeededModelDir(t, seed) {
+  const home = tempHome(t);
+  const corpus = memoryCorpus(t);
+  fakeRecallEnvironment(t, { model: false });
+  const app = harness(home, { memoryDir: corpus, warningChoice: 'Download' });
+  const models = path.join(home, '.claude', 'wildcarding', 'models');
+  fs.mkdirSync(models, { recursive: true });
+  const plant = (name, ageMs) => {
+    const full = path.join(models, name);
+    fs.writeFileSync(full, 'partial');
+    const when = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(full, when, when);
+    return name;
+  };
+  seed(plant);
+  tmpStreamPaths.length = 0;
+  const rebuild = app.commands.get('permission-wildcarding.rebuildRecall')();
+  await tick(50);
+  assert.equal(app.httpsRequests.length, 1, 'precondition: the download started, so the sweep ran');
+  return { app, models, rebuild, present: () => new Set(fs.readdirSync(models)) };
+}
+
+test('a download sweeps the stale temp files a killed host left, and leaves live and unrelated ones', TEST_TIMEOUT, async (t) => {
+  let oldWriter, oldLegacy, freshWriter, unrelated;
+  const box = await startDownloadWithSeededModelDir(t, (plant) => {
+    oldWriter = plant('bge-small.onnx.9999.aaaaaaaaaaaa.tmp', 2 * DAY_MS);   // a crashed older download
+    oldLegacy = plant('bge-small.onnx.tmp', 2 * DAY_MS);                     // a pre-2026-10-13 build's fixed name
+    freshWriter = plant('bge-small.onnx.4242.bbbbbbbbbbbb.tmp', 60 * 1000);  // another window, transferring now
+    unrelated = plant('bge-small.onnx.keep.notatmp', 2 * DAY_MS);           // not a `.tmp`
+    plant('scratch.tmp', 2 * DAY_MS);                                        // a `.tmp`, but not a model temp
+  });
+  try {
+    const present = box.present();
+    // MUTATION: drop the `sweepStaleModelTemps(modelDir, tmp)` call. The old partials survive
+    // and these two fail. Confirmed 2026-10-13.
+    // MUTATION: invert the age test (`<` for `>`). The old ones are kept and the fresh one is
+    // swept, so both these and the "kept" block fail. Confirmed 2026-10-13.
+    assert.ok(!present.has(oldWriter), 'a day-old per-writer partial from a killed host is swept');
+    assert.ok(!present.has(oldLegacy), 'the legacy fixed `bge-small.onnx.tmp` is swept when old');
+    // MUTATION: sweep unconditionally (drop the age comparison). The fresh file goes with it
+    // and this fails. Confirmed 2026-10-13.
+    assert.ok(present.has(freshWriter), 'a minute-old temp may be another window\'s live transfer and is kept');
+    // MUTATION: match on `endsWith('.tmp')` alone (drop the `startsWith` model-name guard).
+    // `scratch.tmp` is swept and this fails. Confirmed 2026-10-13.
+    assert.ok(present.has('scratch.tmp'), 'an unrelated `.tmp` is not a model temp and is left alone');
+    assert.ok(present.has(unrelated), 'a non-`.tmp` model file is left alone');
+    // The download's own temp (this process, just opened) is present and never a sweep target.
+    assert.equal(box.app.httpsRequests.length >= 1, true);
+    const own = tmpStreamPaths.map((p) => path.basename(p)).find((n) => MODEL_TMP_NAME.test(n));
+    assert.ok(own && box.present().has(own), 'the download\'s own temp is written and kept');
+  } finally {
+    await box.app.dispose();
+  }
+});
+
+test('a download keeps a fresh legacy temp: an old build may be mid-transfer', TEST_TIMEOUT, async (t) => {
+  // The fixed name is swept only when stale; a current download by a pre-2026-10-13 build in
+  // another window writes the same fixed name, and the age guard is what tells them apart.
+  let freshLegacy;
+  const box = await startDownloadWithSeededModelDir(t, (plant) => {
+    freshLegacy = plant('bge-small.onnx.tmp', 5 * 60 * 1000);                // 5 minutes old
+  });
+  try {
+    // MUTATION: give MODEL_TMP_STALE_MS a tiny value (e.g. 1000). The fresh legacy temp is
+    // swept and this fails. Confirmed 2026-10-13.
+    assert.ok(box.present().has(freshLegacy), 'a fresh legacy temp is a possible live transfer and is kept');
+  } finally {
+    await box.app.dispose();
+  }
+});
+
 // ── six awaited dialogs, all of them resuming into a write ────────────────────
 //
 // A notification or QuickPick outlives the extension host that raised it: VS Code

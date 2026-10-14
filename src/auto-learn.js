@@ -849,31 +849,50 @@ function extractInvocations(tool, command, metadata = {}) {
 // a grant the evidence earned; `aggregateObservations` keeps every observed
 // spelling instead, and the exporter emits each one.
 //
-// An env-led key (candidateKey, 2026-10-13: one holding a `NAME=VALUE` word, which no
-// prefix part can, isBareCommandPart) is returned as built, for two reasons. Its first
-// word is the assignment, so the old rewrite would strip `.exe` from a VALUE (`FOO=x.exe`
-// becoming `FOO=x`, another family). And its root keeps the spelling it ran with, so
-// `FOO=1 cat f` and `FOO=1 cat.exe f` stay two families with one rule each: both copies of
-// normalizePermissionSpelling read only a rule's first word, which here is the
-// assignment, so one family holding both rules would call them a conflict and propose
-// neither.
-const SHELL_FAMILY_KEY = /^([^\s:]+):([^\s]+)([\s\S]*)$/;
+// The `.exe` on the COMMAND ROOT is normalized in an env-led key too (2026-10-13), the same
+// way a plain key's is, so `FOO=1 cat f` and `FOO=1 cat.exe f` are one family. The command is
+// the first word that is not a kept assignment (`NAME=VALUE`, which no prefix part can be,
+// isBareCommandPart): the leading assignment words keep their value verbatim, so a `.exe`
+// inside one (`FOO=x.exe`, where `x.exe` is a VALUE, not an executable) is untouched, and a
+// later prefix token (`git status.exe`) is untouched, exactly as for a plain key. The matching
+// normalizePermissionSpelling (below, and the exporter's copy) strips `.exe` from the same
+// command root, so the two rules `Bash(FOO=1 cat *)` and `Bash(FOO=1 cat.exe *)` reconcile as
+// two spellings of one grant rather than nulling the family as a conflict, as `Bash(git status
+// *)` and `Bash(git.exe status *)` already do. A wrapper word in the lead (a stripped wrapper
+// after a kept assignment, e.g. `bash:FOO=1 timeout cat`) is a bare name that never carries
+// `.exe`, so normalizing at its position is a no-op; such families get no rule and stay
+// separated, which is harmless.
+const SHELL_FAMILY_KEY = /^([^\s:]+):([\s\S]*)$/;
+function commandRootIndex(words) {
+  return words.findIndex((word) => !word.includes('='));
+}
 function normalizeCandidateKey(key) {
   const text = String(key == null ? '' : key);
   const match = SHELL_FAMILY_KEY.exec(text);
-  if (!match || `${match[2]}${match[3]}`.includes('=')) return text;
-  return `${match[1]}:${match[2].replace(/\.exe$/i, '')}${match[3]}`;
+  if (!match) return text;
+  const words = match[2].split(' ');
+  const at = commandRootIndex(words);
+  if (at < 0) return text;
+  words[at] = words[at].replace(/\.exe$/i, '');
+  return `${match[1]}:${words.join(' ')}`;
 }
 
 // The spelling-independent identity of a permission: the same rule with any
 // `.exe` stripped from its command root. Two permissions that agree here are
-// two spellings of one grant rather than two grants.
+// two spellings of one grant rather than two grants. The command root is the
+// first word that is not a kept assignment (commandRootIndex), so an env-led
+// rule's assignment values are kept verbatim and `Bash(FOO=1 cat *)` and
+// `Bash(FOO=1 cat.exe *)` reconcile the same way `Bash(git status *)` and
+// `Bash(git.exe status *)` do (2026-10-13).
 const PERMISSION_ROOT = /^([A-Za-z_][A-Za-z0-9_]*)\(([^\s)]+)([\s\S]*)\)$/;
 function normalizePermissionSpelling(permission) {
   const text = String(permission == null ? '' : permission);
   const match = PERMISSION_ROOT.exec(text);
   if (!match) return text;
-  return `${match[1]}(${match[2].replace(/\.exe$/i, '')}${match[3]})`;
+  const words = `${match[2]}${match[3]}`.split(' ');
+  const at = commandRootIndex(words);
+  if (at >= 0) words[at] = words[at].replace(/\.exe$/i, '');
+  return `${match[1]}(${words.join(' ')})`;
 }
 
 // The same identity for a prefix, which is what the Codex exporter renders

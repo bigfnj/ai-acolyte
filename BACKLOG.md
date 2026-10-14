@@ -26,21 +26,17 @@ Re-verify before acting on anything here, including this paragraph.
 
 ### In flight on 2026-10-13
 
-- **Codex dev-environment runners.** Reviewed two-token Codex prefixes still render for
-  `uv run`, `poetry run`, `pipx run`, `npm exec`, `direnv exec`, `devbox run`, `mise exec`,
-  `docker exec`, `kubectl exec` and `ssh <host>`, and the value options of make/just/npm are not
-  modelled, so `["make","-C","dir"]` renders.
-- **Env-led learner families.** A family mixing runs led by an assignment Claude Code keeps
-  with plain runs gets no Claude rule at all; the kept-assignment runs should be their own
-  family.
-- **The recall model download uses one fixed temp name**, so two windows downloading at once
-  share it.
-- **A code-mode cell whose nested command Codex refused** (approval policy never with
-  `require_escalated`) reads `failed` although the command never ran.
-- `docs/claude-code-permissions.md` merges two separate docs bullets into one sentence about
-  `watch`/`setsid`/`ionice`/`flock`.
-- The Windows file-holder stress harness used for the 2026-10-13 rename fixes lives only in a
-  session scratchpad; re-runnable tooling belongs in the repo.
+- **"A value is a command" Codex prefixes.** `git -c core.sshCommand=…`, `rsync -e`, and the
+  `docker-compose` (v1) and `nerdctl` spellings of the docker grammar still render as narrow
+  reviewed prefixes.
+- **Program-choosing environment variables** (`PAGER`, `EDITOR`, `GIT_SSH_COMMAND`, …) render in
+  env-led reviewed rules with their value pinned; only code-loading variables are refused.
+- **`FOO=1 cat` and `FOO=1 cat.exe` learn as two families**, because env-led keys skip the
+  `.exe` unification plain keys get.
+- **A recall download killed with its host leaves its partial file**, and an older build's
+  fixed-name temp file is never cleaned.
+- **Already-scanned Codex history keeps its old verdicts.** None of the 2026-10-13 parser fixes
+  raised `CODEX_EVIDENCE_REVISION`, so rollouts scanned before them are not re-read.
 
 ### VS Code acceptance has not run against the 1.6.2 tree
 

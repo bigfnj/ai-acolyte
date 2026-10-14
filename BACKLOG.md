@@ -29,24 +29,24 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Memory gates: `agents:` targeting (2026-10-14; two of three gaps closed)
+### Memory gates: `agents:` targeting (2026-10-14; all three gaps closed)
 
 A read-only census of this box found 0 compiled gates and 1 qualifying memory. The 16 gates in
 the repo's comments, from a 119–123-memory corpus, lived on the development machine. Three
-defects surfaced along the way. Two are closed, with their evidence in `docs/engineering-record.md`
-under "Rampage's memory-gates hardening, ported (2026-10-14)":
+defects surfaced along the way, and all three are closed, with their evidence in
+`docs/engineering-record.md` under "Rampage's memory-gates hardening, ported (2026-10-14)" and
+"Per-agent memory gates (2026-10-14)":
 
 - **CLOSED, FIXED by reporting (`a9a2dbf`): the compiler reads one store and ignored the rest
   without saying so.** By the maintainer's decision the other stores are still never compiled.
   `recall.py --lint` and the dashboard's gates card now name each other store and its count of
   gate memories that are not installed.
-- **OPEN: `agents:` targeting is ignored.** A gate marked `agents: [codex]` is installed into
-  Claude's `CLAUDE.md` too. Per-agent output (`gates.generated.{claude,codex}.md`) exists only
-  in the older `permission-wildcarding-agent-targeted-gates` checkout, which was never merged
-  here. A 2026-09-24 compile on this box came from that branch. This is the next wave. Extend
-  recall.py's `_gate_body`, which is now the one selection rule that the compiler and both
-  censuses share. Give each per-agent file its own header sha, because `compiledIsWhole` checks
-  one file.
+- **CLOSED, FIXED (`c6a1878`): `agents:` targeting was ignored.** A gate marked `agents: [codex]`
+  was installed into Claude's `CLAUDE.md` too. Now `agents:` decides which agents get each gate,
+  and once one names a subset the compile writes one file with a section per agent, each under
+  its own header sha, read once and refused whole if any section is torn. The older checkout's
+  per-agent files are never read. A corpus with no `agents:` key compiles and installs byte for
+  byte as before, pinned against `d624539` by test/recall-py.sh.
 - **CLOSED, FIXED (`659be23`): `src/agent-gates.js`'s header said gates need `type: feedback`.**
   It now says selection is on `scope: global` alone.
 
@@ -54,7 +54,8 @@ under "Rampage's memory-gates hardening, ported (2026-10-14)":
 Code") has feature work on memory gates and on Project-local draining. Its memory-gates hardening
 (`7139659`) was ported in wave-h1 (the record section above). Rampage's later "retire and restore
 memory gates one at a time" (`e5c0ee7`) and its Project-local drain work are not mapped yet. Check
-them before designing either.
+them before designing either. The record's "Per-agent memory gates (2026-10-14)" ends with how
+retire and restore should treat `agents:`.
 
 ### For the maintainer to decide: may a workspace raise Auto Learn's mode? (2026-10-14)
 

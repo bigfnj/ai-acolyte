@@ -48,6 +48,26 @@ A confirmation audit of the same commit found:
 - **LOW.** `memory.recallScript` and `backupMirrorPath` are window-scoped, so a workspace can
   choose them.
 
+A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
+and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It found:
+
+- **The recorded push figures are wrong.** On this box, `execFile()` blocks the calling thread
+  inside CreateProcess before returning. The real 332 MB winget `codex.exe` takes 428 ms (p50),
+  node 203 ms. So "106 ms cold" holds only with a `.cmd` stand-in. With the real Codex, a cold
+  push blocks the host for about 690 ms (the version probe plus the trust-worker spawn), and a
+  push after a `config.toml` edit for about 211 ms, not 9 ms. The fix is to make those spawns
+  from a worker thread; the record must be corrected either way.
+- **execFile's own `timeout` orphans grandchildren.** A `.cmd` shim killed this way leaves its
+  node child alive. The sites are `execFileCaptured` and the Python children in `extension.js`.
+  The fix is the version probe's pattern: its own timer calling `endProcessTree`.
+- **Bare `taskkill` is resolved by libuv, which searches the cwd before PATH.** Use
+  `%SystemRoot%\System32\taskkill.exe`.
+- **The hook's in-place fallback can empty `settings.json` if the hook is killed mid-write.**
+  The fallback runs whenever another process holds the file for 0.9 s or more. The window is
+  about 0.4–1.2 ms. That matters now that the installers register the hook as async, because
+  `claude -p` kills an async hook at teardown. Orphaned `*.wc.tmp` copies of `settings.json` are
+  never swept.
+
 Each one moves to the engineering record with its disposition when it is fixed and gated.
 
 ### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)

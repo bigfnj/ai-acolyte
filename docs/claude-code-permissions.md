@@ -227,7 +227,16 @@ any depth. `devbox run` is broad even with a command named, because devbox hands
 ad-hoc command to `eval` with each argument in double quotes, which a shell still
 expands **[measured against the source: jetify-com/devbox `internal/devbox/devbox.go`,
 RunScript, read 2026-10-13]**; the docs' own `Bash(devbox run npm test)` is safe as the
-exact rule it is written as.
+exact rule it is written as. The same day the exporter began refusing tools whose option
+VALUE names a program, read anywhere on the line: every reviewed Codex prefix of `rsync`
+(`-e`), `scp` and `sftp` (`-S`, `-o ProxyCommand`, `-D`), `tar` (`--to-command`, `-I`,
+`--checkpoint-action=exec=`), `find` (`-exec`) and `fd` (`-x`), and the Claude rule of the
+same shape. `docker-compose`, `podman-compose` and `nerdctl` take docker's grammar. A
+reviewed Codex git prefix is refused when `-c`, `--config-env` or `--exec-path=` comes
+before the subcommand, or when it ends before naming one **[measured: `git -c
+core.fsmonitor=CMD status` runs CMD, git 2.55.0, 2026-10-13]**; `-C dir` is a path and
+stays narrow. The Claude half already refused a git rule whose second word is not a read
+subcommand.
 
 A prefix rule cannot auto-approve two further kinds of command, which the page lists as
 two separate bullets **[docs: permissions, "Exec wrappers and `find` actions", read

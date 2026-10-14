@@ -710,6 +710,15 @@ const DOCKER = {
     compose: { sub: { exec: { exec: COMPOSE_EXEC }, run: { exec: COMPOSE_RUN } } },
   },
 };
+// The standalone compose binaries take `docker compose`'s grammar (added 2026-10-13):
+// `docker-compose`, which is the v1 Python CLI or, under the same name, the v2+ binary (the
+// one on the development box reports "Docker Compose version v5.4.0" and documents `exec` as
+// `docker compose exec [OPTIONS] SERVICE COMMAND [ARGS...]`, read that day), and
+// podman-compose, which mirrors it. Until then neither was on any table, so a reviewed
+// `["docker-compose", "exec", "web", "sh"]` rendered (measured against 3a451fd). Their global
+// options (`-f`, `-p`, `--project-directory`, `--env-file`, `-H`) are not modelled, so any of
+// them is broad, as it already is after `docker compose`.
+const COMPOSE = { info: DEFAULT_INFO, sub: DOCKER.sub.compose.sub };
 // kubectl parses its options anywhere before `--` (pflag, interspersed), so in `kubectl
 // exec pod ls` a later `--as=system:admin`, `--context` or `-n kube-system` is kubectl's own:
 // only `--` bounds the command, and the reference has deprecated the form without it.
@@ -849,6 +858,52 @@ const PNPM_OPTIONS = {
   flags: ['-r', '--recursive', '-w', '--workspace-root', '-s', '--silent', '--parallel', '--stream'],
   values: ['-C', '--dir', '-F', '--filter', '--filter-prod'], fused: /^(?:-[CF].|--(?:dir|filter|filter-prod)=)/,
 };
+// git's own options, before its subcommand (decided 2026-10-13). In git a configuration
+// VALUE is a command: `core.fsmonitor`, `core.pager`, `core.sshCommand`, `core.editor`,
+// `diff.external`, `credential.helper`, `gpg.program`, `alias.NAME=!...` and `core.hooksPath`
+// each name a program git runs, so `-c NAME=VALUE` hands the prefix's continuation a program
+// to run, and `--config-env NAME=ENVVAR` does the same with the value taken from the
+// environment. MEASURED 2026-10-13, git 2.55.0, in a private temp repository: `git -c
+// core.fsmonitor='echo PWNED >&2; exit 1 #' status --short` printed PWNED (status, the
+// subcommand AUTO_SAFE_GIT_SUBCOMMANDS trusts most), and so did `git -c alias.zz='!echo
+// PWNED' zz` and `Z='!echo PWNED' git --config-env=alias.zz=Z zz`. `--exec-path=DIR` is the
+// same class: it chooses the directory git runs its helper programs from (bare
+// `--exec-path` only prints it). Until then nothing on the reviewed Codex path looked at a git
+// prefix: `["git", "-c", "core.fsmonitor=x", "status"]` rendered, and so did bare `["git"]`,
+// which the validator flags only after rendering (measured against 3a451fd).
+//
+// So `-c`, `--config-env` and `--exec-path=` are deliberately absent below: unknown, so broad,
+// fused or not, wherever they sit before the subcommand. The walk is the RUNNER_GRAMMAR
+// dispatcher's (runnerIsBroad), which also makes a prefix that ENDS in global options broad:
+// `["git", "-C", "dir"]` and `["git", "--no-pager"]` have named no subcommand and admit `git -C
+// dir -c core.pager=CMD log`. `-C`, `--git-dir`, `--work-tree`, `--namespace` and
+// `--attr-source` take a value that is a path, not a program: they choose which repository,
+// and so which repository config, git reads, which `cd dir && git status` does too, so
+// `["git", "-C", "dir", "status"]` is exactly as narrow as `["git", "status"]`. After the
+// subcommand every word is the subcommand's (`git commit -c HEAD` reuses a message, `git grep
+// -c` counts), so no `-c` there is judged. Not covered, and recorded: a subcommand's own
+// command-valued options. MEASURED the same day: `git grep -O'echo PWNED #' -e foo` and `git
+// grep --open-files-in-pager=CMD foo` run CMD through a shell (`git grep foo -O...` is refused
+// by git: options must precede the pattern), and grep is in SAFE_GIT_READ_SUBCOMMANDS, so the
+// reviewed `Bash(git grep *)` and `["git", "grep"]` admit it; `rebase -x`, `bisect run`,
+// `submodule foreach`, `difftool -x` and `fetch --upload-pack` are the write-side cases.
+//
+// git is not a RUNNER_GRAMMAR root, because membership there refuses every prefix of the root
+// on the automatic path and `["git", "status"]` is auto-safe; wrapperIsBroad and
+// candidateEligibleForCodex consult this node by name instead. The Claude side needed nothing:
+// claudePermissionIsSafe already requires a SAFE_GIT_READ_SUBCOMMANDS word right after `git`,
+// so `Bash(git -c x=y status *)` and `Bash(git -C dir status *)` were refused before this.
+const GIT = {
+  info: new Set([...DEFAULT_INFO, '-v']),
+  options: {
+    flags: ['-p', '--paginate', '-P', '--no-pager', '--no-replace-objects', '--no-lazy-fetch', '--no-optional-locks',
+      '--no-advice', '--bare', '--html-path', '--man-path', '--info-path', '--exec-path', '--literal-pathspecs',
+      '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs'],
+    values: ['-C', '--git-dir', '--work-tree', '--namespace', '--attr-source'],
+    fused: /^--(?:git-dir|work-tree|namespace|attr-source|list-cmds)=/,
+  },
+  sub: {},
+};
 const RUNNER_GRAMMAR = new Map(Object.entries({
   // ssh hands its arguments to the remote login shell as one command line, so naming a
   // command narrows nothing, and the remote host is outside anything a prefix can bound.
@@ -925,8 +980,47 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
     },
   },
   docker: DOCKER, podman: DOCKER,
+  // nerdctl is containerd's Docker-compatible CLI, with the same `exec`, `run`, `container
+  // exec|run` and `compose exec|run` forms; its global options (`--namespace`, `--address`,
+  // `--snapshotter`) are not modelled and so are broad. Added 2026-10-13 with the compose
+  // binaries (COMPOSE above).
+  nerdctl: DOCKER, 'docker-compose': COMPOSE, 'podman-compose': COMPOSE,
   kubectl: KUBECTL,
   make: MAKE, just: JUST,
+  // Tools whose option VALUE is a program to run, read anywhere on the line, so no prefix of
+  // them can be narrow (added 2026-10-13). A prefix rule admits every continuation, and each
+  // of these reads such an option after operands as well as before them:
+  //   * rsync: `-e`/`--rsh COMMAND` is the remote shell it starts (rsync(1); also
+  //     `--rsync-path`), and its option parser takes options after the paths, so `["rsync",
+  //     "-a"]` admits `rsync -a -e 'CMD' src host:dst`. Not measured: no rsync on the box.
+  //   * scp and sftp: `-S PROGRAM` is the transport they run, `-o ProxyCommand=CMD` and `-F
+  //     FILE` hand ssh a local command, and sftp's `-D COMMAND` runs a local sftp server.
+  //     MEASURED 2026-10-13 with OpenSSH_10.3p1: `scp -S ./x.sh g example.invalid:x` ran
+  //     x.sh, and `sftp -D ./x.sh` ran it too. Both were already refused on the Claude side
+  //     (NETWORK_OR_INSTALL_ROOTS); ssh itself is the entry at the top of this table.
+  //   * tar: `--to-command=CMD`, `-I`/`--use-compress-program=PROG`,
+  //     `--checkpoint-action=exec=CMD`, `-F`/`--info-script`/`--new-volume-script`,
+  //     `--rsh-command` and a remote `-f host:archive`, which GNU tar reads after operands.
+  //     MEASURED 2026-10-13 with GNU tar 1.35: `tar -cf a.tar g --checkpoint=1
+  //     --checkpoint-action=exec='echo PWNED'` and `tar -xf a.tar --to-command='echo PWNED'`
+  //     each printed PWNED, so even `["tar", "-tf", "a.tar"]` admits a program. (Windows'
+  //     bsdtar 3.8.8 stops options at the first operand, measured the same day; which tar a
+  //     prefix will meet is unknowable here, so the stricter reading wins.)
+  //   * find and fd: `-exec`, `-execdir`, `-ok` and `-okdir` (find), `-x`/`--exec` and
+  //     `-X`/`--exec-batch` (fd, measured the same day: `fd zz dir -x echo PWNED` ran echo)
+  //     come after the paths, which is where every prefix ends. `fdfind` is Debian's name.
+  //     Claude Code itself will not auto-approve `find` with an action through a prefix rule
+  //     (docs/claude-code-permissions.md, "Exec wrappers and `find` actions"), so on the
+  //     Claude side this refusal is belt and braces. It is kept because that guard is one
+  //     harness version's documented behavior, fd has none, and it costs nothing measured:
+  //     the learner never proposes a multi-token find rule (find is no family root), and 0 of
+  //     the development box's 581 allow entries changed verdict.
+  // Until this, each rendered as a reviewed Codex prefix_rule, bare included, and every
+  // multi-token one but scp's and sftp's rendered as a reviewed Claude rule too (`Bash(tar
+  // -xf *)`, `Bash(find . *)`, `Bash(rsync -a *)`), measured against 3a451fd. RUNS_ANY_COMMAND
+  // refuses both, and the recursion carries it through every wrapper (`["xargs", "tar"]`).
+  rsync: RUNS_ANY_COMMAND, scp: RUNS_ANY_COMMAND, sftp: RUNS_ANY_COMMAND, tar: RUNS_ANY_COMMAND,
+  find: RUNS_ANY_COMMAND, fd: RUNS_ANY_COMMAND, fdfind: RUNS_ANY_COMMAND,
 }));
 
 // The index of the first token at or after `k` that is not one of `grammar`'s options, or
@@ -1015,6 +1109,10 @@ function wrapperIsBroad(prefix) {
   const root = canonicalRoot(prefix?.[0]);
   const base = root.replace(/\.(?:exe|cmd)$/, '');
   const runner = RUNNER_GRAMMAR.get(base);
+  // git's global options (GIT above): reached here directly and through every wrapper's
+  // recursion, so `["xargs", "git"]` and `["timeout", "5", "git", "-c", "x=y", "status"]` are
+  // as broad as the git prefix they name.
+  if (base === 'git') return runnerIsBroad(GIT, prefix.slice(1).map(String));
   if (!SHELL_WRAPPERS.has(root) && !runner) return false;
   if (prefix.length === 1) return true;
   if (INLINE_CODE_FLAGS.has(base) && prefix.slice(1).some((token) => INLINE_CODE_FLAGS.get(base)(String(token)))) {
@@ -1110,10 +1208,13 @@ function candidateEligibleForCodex(candidate, options) {
   // A runner root (RUNNER_GRAMMAR) is judged like a wrapper here and only here: it is not a
   // SHELL_WRAPPERS member, because membership there would also refuse `Bash(docker ps *)`
   // on the Claude side, at any depth (claudeRuleRunsAnyCommand draws that line instead).
-  if (candidateIsWrapper(candidate, prefix) ||
-      RUNNER_GRAMMAR.has(canonicalRoot(prefix[0]).replace(/\.(?:exe|cmd)$/, ''))) {
+  const base = canonicalRoot(prefix[0]).replace(/\.(?:exe|cmd)$/, '');
+  if (candidateIsWrapper(candidate, prefix) || RUNNER_GRAMMAR.has(base)) {
     if (!reviewed || wrapperIsBroad(prefix)) return null;
   }
+  // git on both paths (GIT above). The automatic one already needs an AUTO_SAFE_GIT_SUBCOMMANDS
+  // word right after the root, which this never refuses, so only reviewed prefixes change.
+  if (base === 'git' && wrapperIsBroad(prefix)) return null;
   if (!reviewed && (candidateRiskIsUnsafe(candidate) || candidateHasAutomaticBlock(candidate) ||
       prefixIsKnownRisky(prefix) || !prefixIsAutoSuffixClosed(prefix))) return null;
   return prefix;

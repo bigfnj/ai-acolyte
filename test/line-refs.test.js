@@ -69,8 +69,10 @@ const CHECKER = path.join(__dirname, '..', 'scripts', 'check-line-refs.js');
 // change that stops parsing the group, leaves every remaining test green while the
 // citation slides back into the unchecked population. Raise this as references are
 // migrated; never lower it to make a failure go away. 1 on 2026-10-13: the citation in
-// memory/recall.py of the `.slice(0, 300)` that cuts the gate compiler's stderr.
-const ANCHORED_FLOOR = 1;
+// memory/recall.py of the `.slice(0, 300)` that cuts the gate compiler's stderr. 193 later
+// the same day, when the migration finished and every collected citation was anchored;
+// from then on the test below the floor test also refuses a NEW un-anchored citation.
+const ANCHORED_FLOOR = 193;
 
 // A throwaway checkout, for the tests that need a corpus of their own: one that MUST
 // hold a broken reference (the real tree must not), or one --fix-anchored may rewrite.
@@ -236,6 +238,38 @@ test('the tree keeps at least ANCHORED_FLOOR anchored references', () => {
       `${anchored.length}. Either an edit dropped an anchor (find it and put it back) or the ` +
       'extractor in scripts/check-line-refs.js stopped parsing them.'
   );
+});
+
+// The gate is exact only while EVERY citation is. The migration finished 2026-10-13 with
+// all 193 collected citations anchored; before it, 61 of 160 were STALE and nothing could
+// fail on them. An un-anchored citation added after that day goes back through the
+// heuristic, which by design never fails the suite, so it would rot unseen exactly as the
+// old corpus did. A citation that must stay as written (history, a quoted defect) carries
+// a `line-refs:ignore` marker and is not collected at all.
+test('every collected file:line citation declares an anchor', () => {
+  const bare = collectRefs(tracked()).filter((r) => r.declaredRaw == null);
+  assert.deepEqual(
+    bare.map((r) => `${r.source}:${r.sourceLine} -> ${r.raw}`),
+    [],
+    `${bare.length} citation(s) have no #anchor. Write them as file:line#identifier, naming a ` +
+      'token that is on the cited line (see scripts/check-line-refs.js), or mark a deliberately ' +
+      'historical one with line-refs:ignore.'
+  );
+});
+
+// Mid-merge, `git ls-files` lists a conflicted path once per index stage; the checker
+// must still see one file. Built with three real index stages for one path.
+test('an unmerged path is enumerated once, not once per index stage', (t) => {
+  const root = fixtureRepo(t, { 'a.md': 'see `b.js:1#x`\n', 'b.js': 'const x = 1;\n' });
+  const blob = execFileSync('git', ['-C', root, 'hash-object', '-w', 'a.md'], { encoding: 'utf8' }).trim();
+  execFileSync('git', ['-C', root, 'update-index', '--force-remove', 'a.md']);
+  execFileSync('git', ['-C', root, 'update-index', '--index-info'], {
+    input: [1, 2, 3].map((stage) => `100644 ${blob} ${stage}\ta.md\n`).join(''),
+  });
+  const raw = execFileSync('git', ['-C', root, 'ls-files'], { encoding: 'utf8' }).split('\n').filter(Boolean);
+  assert.equal(raw.filter((f) => f === 'a.md').length, 3, 'precondition: git lists the unmerged path three times');
+  assert.deepEqual(tracked(root).filter((f) => f === 'a.md'), ['a.md']);
+  assert.equal(collectRefs(tracked(root), root).length, 1, 'one citation, counted once');
 });
 
 // The parse, line by line. Rows 1, 5 and 6 are the CONTROL: a reference with no anchor,

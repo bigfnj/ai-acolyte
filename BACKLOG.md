@@ -34,28 +34,6 @@ real-editor groups, including the MCP acceptance suite's new 0.161.0 shape check
 Run `node scripts/drive-vscode.js --extension-dir <stage>` (plus `--review-runtime yes
 --dashboard-ui yes`) after the next VS Code restart.
 
-### The `file:line` gate catches less than it looks like it catches
-
-`test/line-refs.test.js` fails an UN-anchored citation only when it lands on a missing file, a
-line past the end, a descending range, a blank line or a bare closing brace. A stale one
-pointing at a plausible line is invisible to CI. **Run `node scripts/check-line-refs.js --quiet`
-rather than trusting a number written here**; on branch wave-e1 (88a4c1d plus the anchor work,
-2026-10-13) it read 160 references, 1 anchored, with 64 STALE.
-
-**The mechanism landed 2026-10-13; the migration has not.** An anchored citation,
-`file:line#identifier`, is checked exactly and asserted, and `--fix-anchored` repoints one
-whose anchor moved to exactly one other line. See the engineering record, "`file:line` rot".
-Converting the existing corpus waits until code stops moving. The `.py`/`.yml`/`.yaml` blind
-spot is closed, and the `memory/recall.py` citation it hid is corrected and anchored.
-
-### `check-line-refs.js` triples every citation while a merge is unresolved
-
-Found 2026-10-13 merging wave-a12: during an unfinished merge `git ls-files` lists a conflicted
-file once per index stage, so the checker collected each citation in it three times, and
-`--fix-anchored` planned the same edit three times and (correctly) refused to write when the
-second application no longer matched. Staging the resolved files cleared it. The file list
-should be de-duplicated so the counts and the fixer are right mid-merge too.
-
 ### A worker-runner timing test was cancelled once under heavy load
 
 2026-10-13, while four worktrees ran full suites at once: a long timing test in

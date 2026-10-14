@@ -141,11 +141,18 @@ const EXTLESS_SOURCE = new Set(['wildcard-perms', 'smoke', 'install', 'uninstall
 // 2026-10-13 for --fix-anchored, whose tests have to rewrite files: pointing them at
 // this checkout would edit the real corpus mid-suite, so they build a throwaway git
 // repo and pass its root instead. --root exposes the same seam on the command line.
+//
+// De-duplicated, because `git ls-files` lists an UNMERGED path once per index stage.
+// Measured 2026-10-13 mid-merge: every citation in the three conflicted files was
+// collected three times, the summary counted 279 references for 173, and --fix-anchored
+// planned each edit three times, then refused (correctly) when the second application no
+// longer read the digits it expected. The working tree holds one copy of the file
+// whatever the index says, so one entry per path is the truth.
 function tracked(root = ROOT) {
-  return execFileSync('git', ['-C', root, 'ls-files'], { encoding: 'utf8' })
+  return [...new Set(execFileSync('git', ['-C', root, 'ls-files'], { encoding: 'utf8' })
     .split('\n')
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean))];
 }
 
 // Keyed on root AND path, so two checkouts in one process cannot read each other's

@@ -37,7 +37,7 @@ its own real-host evidence below.
 | Memory gates | FIXED in development for explicitly marked native global sections | A separate native compiler reviews the full body and refreshes an installed block without changing native sources. Fresh default/custom Codex sessions load installed/refreshed bodies and confirm absence after Remove. Actual editor checks cover Cancel/Install, edits, zero/refill, override migration, malformed-source retention, Remove and stale review refusal. The old malformed-scope compiler fails the preserved case; install and refresh no-ops fail their intended native groups. |
 | Memory index, lint and recall integration | FIXED in development for native discovery, lint and semantic recall | Reads the native summary, task registry, rollout summaries and memory skills with exact passage provenance. Raw staging inputs, SQLite and sessions are excluded. Actual later-created sources, diagnostic repair/deletion, search, inspection and BOM selections pass in VS Code. CPU semantic retrieval finds zero-keyword paraphrases across registry, rollout and skill sources; actual rebuild replaces poisoned vectors and missing-model searches visibly fall back to keywords. Three disabled-path controls fail their intended native groups. |
 | Derived guidance for recurring friction | FIXED in development for supported repository-query advice | Current cached Codex managed prompt rules are compared with Codex-only successful run counts. A full-body dialog reviews advice before installation into the active Codex instruction file. Actual Accept/Decline and fresh instruction loading/removal pass; a no-op Accept fails the native check. Counts describe observed runs, not historical prompt dialogs. |
-| "Why did this prompt?" | Implemented for visible local policy | `explainAutoLearnPrompt` (`vscode-extension/extension.js:1923#explainAutoLearnPrompt`) inspects visible rules and cached requirements. Three actual diagnostic dialogs agree with adjacent fresh Codex outcomes: reviewed command allowed, unrelated executable declined, original command declined after Undo. They name the selected rules file and disclose that managed/system policy, session approval state and sandbox restrictions remain outside the check. |
+| "Why did this prompt?" | Implemented for visible local policy | `explainAutoLearnPrompt` (`vscode-extension/extension.js:2018#explainAutoLearnPrompt`) inspects visible rules and cached requirements. Three actual diagnostic dialogs agree with adjacent fresh Codex outcomes: reviewed command allowed, unrelated executable declined, original command declined after Undo. They name the selected rules file and disclose that managed/system policy, session approval state and sandbox restrictions remain outside the check. |
 
 ## September 27-28 runtime evidence
 
@@ -1327,7 +1327,7 @@ either way. **sqlite is a projection, so the reader was not changed.**
 `codexHistoryStoreState` compares the two on every scan and reports `codexHistoryStale`
 plus `codexHistoryInspected`. The current implementation distinguishes `exact`,
 `unavailable`, `partial` and `skipped`: an unavailable SQLite API is not proof of
-healthy storage or of stale history (`src/history-adapters.js:2286#unavailable`). VS Code 1.141.1
+healthy storage or of stale history (`src/history-adapters.js:2349#unavailable`). VS Code 1.141.1
 (Node 24.21.0) loads `node:sqlite`; hosts within the `^1.80` engine floor may not, so the
 `unavailable` tier stays (measured 2026-10-13). This storage check does not detect every
 possible rollout-format change.
@@ -1349,7 +1349,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1788#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1837#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

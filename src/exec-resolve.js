@@ -116,11 +116,61 @@ function commandLaunch(name, args = []) {
   };
 }
 
+// End a child AND everything it started, which on Windows child.kill() does not.
+//
+// The launch above is why it matters. A batch shim runs through the command
+// processor, so the ChildProcess a caller holds is cmd.exe and the CLI is its
+// child; an npm `codex.cmd` adds node under that. child.kill() is
+// TerminateProcess on the one PID, and Windows does not end a process's children
+// with it. Measured 2026-10-14 against the extension's own tracked children: a
+// Codex config worker (node) whose codex was a `.cmd` stand-in that never
+// answers, killed by deactivate's child.kill(), left the stand-in's node running
+// with its parent gone, holding nothing anyone would ever kill. `taskkill /T /F`
+// ends the tree from the PID down, while the parent still exists to anchor it.
+//
+// Resolves once the tree is gone (or the attempt is over), and calls child.kill()
+// after, so the handle records the kill the way callers and tests expect. A child
+// that already exited, or anything that is not a real ChildProcess (one that
+// never started, or a test double carrying a made-up PID that must never reach
+// taskkill or kill(2)), goes straight to child.kill(). Never throws or rejects.
+//
+// POSIX has no taskkill, and a plain kill leaves grandchildren the same way. A
+// caller that wants its tree ended there starts the child `detached`, which makes
+// it a process-group leader, and this signals the group (`-pid`). For a child that
+// is not a leader there is no group with its PID (a PID is never reused while a
+// group still carries it), so that signal fails with ESRCH and the plain kill
+// below is all that happens: the same as before for every other caller.
+function endProcessTree(child) {
+  const fallback = () => { try { child.kill(); } catch { /* already gone */ } };
+  if (!child) return Promise.resolve();
+  // Required here, not at the top: the CLI hook loads this module on every call,
+  // and only a caller that is ending children needs a spawner.
+  const childProcess = require('child_process');
+  if (!(child instanceof childProcess.ChildProcess) || !Number.isInteger(child.pid) || child.exitCode != null) {
+    fallback();
+    return Promise.resolve();
+  }
+  if (process.platform !== 'win32') {
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* not a group leader, or already gone */ }
+    fallback();
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    try {
+      childProcess.execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'],
+        { windowsHide: true, timeout: 5000 }, () => { fallback(); resolve(); });
+    } catch {
+      fallback();
+      resolve();
+    }
+  });
+}
+
 // `fallbackDirectories` is not exported: resolveExecutable is its only caller,
 // and test/exec-resolve.test.js already drives the whole fallback through
 // resolveExecutable with a fake APPDATA — including the case where PATH wins and
 // the case where neither holds the name. A test on the directory LIST would pin
 // less than the tests that already exist.
 module.exports = {
-  resolveExecutable, commandLaunch, quoteForCommandProcessor,
+  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree,
 };

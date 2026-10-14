@@ -1330,6 +1330,11 @@ function parseCodexJsonl(text, options = {}) {
   // identityParts already use, so no observation id moves, and an append slice,
   // seeded with the same in-order session after the head, keys a call and its
   // result the way a full read does (test/codex-session-call-groups.test.js).
+  // ACCEPTED-RECORDED 2026-10-14: a result arriving after a `session_meta` for
+  // another session finds no call (`unknown`, where the id-only key read
+  // `failed`). No rollout Codex writes has that shape -- meta only at the head,
+  // resume appends with none, a fork is a new file; 13 box rollouts surveyed --
+  // and the same test file pins the verdict and checks every sanitized rollout.
   const callGroups = new Map();
   const results = new Map();
   const mcpCalls = new Map();
@@ -1564,7 +1569,7 @@ function normalizeRootEntries(options) {
   return entries;
 }
 
-function findJsonlFiles(root, source, output, failures) {
+function findJsonlFiles(root, source, output, failures, missing) {
   // Transcript roots can contain Windows junctions or symlinked directories.
   // Walking them recursively can revisit the same directory forever and crash
   // the worker with "Maximum call stack size exceeded". Use a real-path set
@@ -1582,7 +1587,33 @@ function findJsonlFiles(root, source, output, failures) {
   // every other root's progress with it, which is the failure mode the per-file
   // try in `scanHistoryFiles` exists to prevent.
   const note = (target, error) => {
-    if (error && error.code === 'ENOENT') return;
+    if (error && error.code === 'ENOENT') {
+      // NOT an error, and still not nothing (2026-10-14). A CONFIGURED ROOT that
+      // is not there is reported on `missing`, a list of its own, so the one
+      // caller that must not read "not enumerated" as "gone" can tell this walk
+      // could not look. The Codex rebuild drops a pending transcript id that a
+      // clean walk no longer finds (auto-learn-manager.js, `scan`), and a
+      // vanished root used to count as clean: its ids were dropped, the rebuild
+      // finished without its history, and auto-safe granted past a failure that
+      // was sitting in the missing folder (the v1.6.2 audit, reproduced in
+      // test/codex-evidence-migration.test.js). Not a `failures` entry, because
+      // everything that reads `files[]` counts it -- the error total, the
+      // blind-scan guard, the Stop hook's warning -- and an absent folder on a
+      // machine without Codex is none of those.
+      //
+      // `link: true` is a root whose own entry exists as a link to a target that
+      // does not: a junction to an unplugged drive, the one way a folder is
+      // absent for a while and then comes back with its files. The caller never
+      // treats that as benign absence. Roots only: below the root, ENOENT is a
+      // directory deleted between `readdirSync` and the `statSync` here, and a
+      // deletion is exactly what the drop is for.
+      if (target === root && Array.isArray(missing)) {
+        let link = false;
+        try { link = fs.lstatSync(target).isSymbolicLink(); } catch { /* not there at all */ }
+        missing.push({ path: path.resolve(target), source, link });
+      }
+      return;
+    }
     if (!Array.isArray(failures)) return;
     const message = (error && error.message) || String(error);
     // `scope: 'root'` distinguishes "could not enumerate this directory" from
@@ -1766,23 +1797,41 @@ function continuedFingerprint(prior, size) {
 // toward the `counts.success` that gates auto-safe apply.
 //
 // So the seed is the in-order state AFTER the head: records are applied in
-// order up to the first record that is not `session_meta`, and blank or
+// order up to the first record that sets no session state, and blank or
 // unparseable lines are skipped exactly as `parseJsonlRecords` skips them.
 // Identity is deliberately NOT re-keyed to the thread id instead: that would
 // move every observation hash already recorded and re-count the whole corpus.
+//
+// "SETS SESSION STATE", NOT "IS session_meta" (2026-10-14). The in-order parse
+// runs applyCodexSessionState on every record, and that takes a top-level
+// `sessionId`, `session_id` or `cwd` from a record of ANY type. The fork fix
+// above ended the head at the first non-`session_meta` record, so such a record
+// in the head -- the first line, or after a `session_meta` -- set the full
+// read's session and not the seed's: the append-slice id diverged from the
+// full-read id, the double count the fork fix was written to stop. The head is
+// now every consecutive record applyCodexSessionState would take something from
+// (any `session_meta`, which it always reads, or a record carrying one of those
+// three as a non-empty string or finite number, `stringValue`'s test), each
+// applied by that same function. No real rollout is known to have the shape:
+// the 13 on the development box and the five sanitized fixtures carry no
+// top-level session field at all. What the seed still cannot see is such a
+// record AFTER the head, between it and the slice start; reaching that would
+// mean reading the whole file the append exists to skip, and no Codex build
+// measured here writes one.
 const SEED_CHUNK_BYTES = 64 * 1024;
 const SEED_MAX_BYTES = 1024 * 1024;
 
 // 'skip' for a line the in-order parse would never hand to its callback, the
-// record itself for a head `session_meta`, and null for the first record past
-// the head.
+// record itself for a head record (one that sets session state), and null for
+// the first record past the head.
 function headRecord(line) {
   const text = line.toString('utf8').replace(/\r$/, '');
   if (!text.trim()) return 'skip';
   let record;
   try { record = JSON.parse(text); } catch { return 'skip'; }
   if (!isObject(record)) return 'skip';
-  return record.type === 'session_meta' ? record : null;
+  if (record.type === 'session_meta') return record;
+  return ['sessionId', 'session_id', 'cwd'].some((name) => stringValue(record[name]) !== undefined) ? record : null;
 }
 
 function codexHeadSeed(file) {
@@ -1986,8 +2035,22 @@ function scanHistoryFiles(options = {}) {
   // an empty corpus. The manager reads this to decide whether the scan has
   // earned the right to replace the cursor map at all.
   const walkFailures = [];
+  // Configured roots that do not exist (`findJsonlFiles` says why they are not
+  // walk failures). Returned beside `files`, never inside it.
+  const missingRoots = [];
+  // Configured roots this walk listed COMPLETELY: present, and not one failure
+  // anywhere under them. `files` then holds every transcript in them, so the
+  // Codex history-store probe can take its first walk from this scan instead of
+  // listing the same folders again (prewalkedRollouts, `options.scan`). A root
+  // that failed or was missing is left out, and the probe walks it itself.
+  const walkedRoots = [];
   for (const root of normalizeRootEntries(options)) {
-    findJsonlFiles(root.path, root.source, found, walkFailures);
+    const failed = walkFailures.length;
+    const absent = missingRoots.length;
+    findJsonlFiles(root.path, root.source, found, walkFailures, missingRoots);
+    if (walkFailures.length === failed && missingRoots.length === absent) {
+      walkedRoots.push({ path: path.resolve(root.path), source: root.source });
+    }
   }
   const unique = new Map();
   for (const entry of found) {
@@ -2252,7 +2315,7 @@ function scanHistoryFiles(options = {}) {
       });
     }
   }
-  return { observations, cursors, files };
+  return { observations, cursors, files, missingRoots, walkedRoots };
 }
 
 // ── Codex history-store staleness ─────────────────────────────────────────────
@@ -2363,14 +2426,45 @@ function canonicalDir(dir) {
 // junction, a root nested inside another) is counted once. `byId` keeps every
 // path a thread id was found at, because the projection check needs the file's
 // size and a thread mid-move can briefly be seen in both places.
-function rolloutIndex(dirs) {
+//
+// `prewalked` (prewalkedRollouts below) is a root the CALLER has already listed:
+// its files are taken from that list and the folder is not read again. `counted`
+// is per FILE, so a listed root and a walked one nested in it cannot count one
+// transcript twice; for walked roots alone it changes nothing, because the
+// realpath set already visits each folder once.
+function rolloutIndex(dirs, prewalked = null) {
   const ids = new Set();
   const byId = new Map();
   const perDir = [];
   let files = 0;
   const seen = new Set();
+  const counted = new Set();
+  const add = (full, name) => {
+    if (prewalked) {
+      const key = dirKey(full);
+      if (counted.has(key)) return false;
+      counted.add(key);
+    }
+    files += 1;
+    const match = THREAD_ID.exec(name);
+    if (!match) return true;
+    const id = match[1].toLowerCase();
+    ids.add(id);
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push(full);
+    return true;
+  };
   for (const root of dirs) {
     let count = 0;
+    const rootKey = dirKey(root);
+    if (prewalked && prewalked.roots.has(rootKey)) {
+      const prefix = rootKey.endsWith(path.sep) ? rootKey : rootKey + path.sep;
+      for (const file of prewalked.files) {
+        if (file.key.startsWith(prefix) && add(file.path, path.basename(file.path))) count += 1;
+      }
+      perDir.push({ dir: root, files: count });
+      continue;
+    }
     const pending = [root];
     while (pending.length) {
       const dir = pending.pop();
@@ -2383,19 +2477,39 @@ function rolloutIndex(dirs) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) { pending.push(full); continue; }
         if (!entry.name.toLowerCase().endsWith('.jsonl')) continue;
-        files += 1;
-        count += 1;
-        const match = THREAD_ID.exec(entry.name);
-        if (!match) continue;
-        const id = match[1].toLowerCase();
-        ids.add(id);
-        if (!byId.has(id)) byId.set(id, []);
-        byId.get(id).push(full);
+        if (add(full, entry.name)) count += 1;
       }
     }
     perDir.push({ dir: root, files: count });
   }
   return { ids, files, byId, perDir };
+}
+
+// The listing a scan just made, taken from its result (`options.scan`, what
+// scanHistoryFiles returned): the Codex roots it names in `walkedRoots`, which it
+// listed completely, that are also among `dirs`, and every Codex transcript in
+// its `files` with the size its stat took then. ONLY `walkedRoots` makes a root
+// usable. A result without it -- an injected scanner's, whose `files` are
+// whatever its test made up -- hands over nothing, and neither does a root that
+// failed or was missing in that walk. Null when nothing is usable, and the probe
+// walks as it always did.
+function prewalkedRollouts(scan, dirs) {
+  if (!isObject(scan) || !Array.isArray(scan.walkedRoots) || !Array.isArray(scan.files)) return null;
+  const wanted = new Set(dirs.map(dirKey));
+  const roots = new Set(scan.walkedRoots
+    .filter((entry) => isObject(entry) && entry.source === 'codex' && typeof entry.path === 'string' && entry.path)
+    .map((entry) => dirKey(entry.path)).filter((key) => wanted.has(key)));
+  if (!roots.size) return null;
+  const files = [];
+  const sizes = new Map();
+  for (const entry of scan.files) {
+    if (!isObject(entry) || entry.source !== 'codex' || entry.scope === 'root') continue;
+    if (typeof entry.path !== 'string' || !entry.path) continue;
+    const key = dirKey(entry.path);
+    files.push({ path: entry.path, key });
+    if (Number.isFinite(entry.size) && entry.size >= 0) sizes.set(key, Math.max(entry.size, sizes.get(key) ?? 0));
+  }
+  return { roots, files, sizes };
 }
 
 // The union of two walks of the same folders. Used only for the re-walk below,
@@ -2535,32 +2649,54 @@ function withReadOnlyDatabase(file, read) {
 // `offsets` is the projection's cursor into each rollout. Read only where the
 // column exists, because a store this reader does not fully know must still
 // supply its thread ids rather than fail the whole comparison on a column.
+//
+// THE PROJECTION TABLE ALONE WHEN IT EXISTS (2026-10-14). This read runs on
+// every scan and every Codex Stop, and it used to take `select distinct
+// thread_id` over `thread_items` and `thread_turns` as well: a walk of every
+// index entry, because the id is only the leading column of a key with one row
+// per item. MEASURED on a synthetic home with Codex 0.161.0's schema (2,000
+// threads, 1,000,000 items, a 736 MB store; median of 7, Node 24.19.0):
+//   distinct thread_items 124 ms   distinct thread_turns 6 ms
+//   thread_history_projection_state 0.6 ms (one row per thread, its PRIMARY KEY)
+// and the same three id sets: on the development box all three tables hold the
+// same 13 ids, and on 0.145.0 (2026-09-24) the projection's 52 rows matched the
+// 52 rollouts exactly. The projection writes the items, so a thread cannot have
+// items without its row except inside the projection's own write. One query
+// now reads ids and offsets together. The other two tables are read only when
+// the projection table is absent, or has no `thread_id`, as a store this reader
+// does not know may.
+//
+// The loose-index-scan CTE (`min(thread_id)` stepped by `thread_id > ?`), 22 ms
+// on the same store, was not taken for that fallback: it is fast only through
+// an index led by `thread_id`, and on a store without one each of its
+// one-per-thread steps scans the table. DISTINCT is the bounded one.
 function readThreadStoreIds(storePath) {
   return withReadOnlyDatabase(storePath, (db, tables, columns) => {
     const ids = new Set();
     const offsets = new Map();
+    const projection = tables.has('thread_history_projection_state')
+      ? columns('thread_history_projection_state') : new Set();
+    if (projection.has('thread_id')) {
+      const withOffset = projection.has('next_rollout_byte_offset');
+      for (const row of db.prepare(`select thread_id as id${withOffset ? ', next_rollout_byte_offset as offset' : ''} `
+        + 'from thread_history_projection_state').all()) {
+        if (!row.id) continue;
+        const id = String(row.id).toLowerCase();
+        ids.add(id);
+        const offset = Number(row.offset);
+        if (withOffset && Number.isFinite(offset)) offsets.set(id, offset);
+      }
+      return { ok: true, ids, offsets };
+    }
     let read = 0;
-    for (const [table, column] of [
-      ['thread_history_projection_state', 'thread_id'],
-      ['thread_items', 'thread_id'],
-      ['thread_turns', 'thread_id'],
-    ]) {
+    for (const table of ['thread_items', 'thread_turns']) {
       if (!tables.has(table)) continue;
-      for (const row of db.prepare(`select distinct ${column} as id from "${table}"`).all()) {
+      for (const row of db.prepare(`select distinct thread_id as id from "${table}"`).all()) {
         if (row.id) ids.add(String(row.id).toLowerCase());
       }
       read += 1;
     }
     if (!read) return { ok: false, reason: `${path.basename(storePath)} holds no known thread-history table` };
-    if (tables.has('thread_history_projection_state')
-        && columns('thread_history_projection_state').has('next_rollout_byte_offset')) {
-      for (const row of db.prepare(
-        'select thread_id as id, next_rollout_byte_offset as offset from thread_history_projection_state',
-      ).all()) {
-        const offset = Number(row.offset);
-        if (row.id && Number.isFinite(offset)) offsets.set(String(row.id).toLowerCase(), offset);
-      }
-    }
     return { ok: true, ids, offsets };
   });
 }
@@ -2685,7 +2821,8 @@ function codexHistoryStoreState(options = {}) {
     : home ? path.join(home, '.codex') : null;
   // `sessionsDirs` is what the manager passes -- every configured root under one
   // Codex home -- and `sessionsDir` is the one-root spelling older callers use.
-  // With neither, the default is the pair Codex itself writes to.
+  // With neither, the default is the pair Codex itself writes to. `scan`, also
+  // from the manager, is the result of the scan it just ran (prewalkedRollouts).
   const listed = Array.isArray(options.sessionsDirs)
     ? options.sessionsDirs.filter((dir) => typeof dir === 'string' && dir) : [];
   const scannedDirs = listed.length ? listed
@@ -2748,7 +2885,19 @@ function codexHistoryStoreState(options = {}) {
     migrationEntries = fs.readdirSync(path.join(codexHome, 'rollout-migrations')).length;
   } catch { migrationEntries = 0; }
 
-  let rollouts = rolloutIndex(accountedDirs);
+  // THE FIRST WALK MAY BE THE CALLER'S (2026-10-14). The manager probes right
+  // after its own scan listed the same folders, and `options.scan` hands that
+  // listing over (scanHistoryFiles `walkedRoots` + `files`): a root in it is not
+  // read again, and a root not in it (the archive when it is not configured, a
+  // root the scan failed on) is walked here as before. MEASURED on the synthetic
+  // 2,000-rollout home in readThreadStoreIds's note: this walk was ~65 ms of the
+  // probe. The listing is OLDER than a walk here would be, and that is safe: a
+  // thread the store names and the listing lacks sends the probe to the re-walk
+  // below, which always reads the disk. The listing also counts what the reader
+  // actually reads (it follows a junction this walk does not), which is the set
+  // "no rollout file the reader consumes" is about.
+  const prewalked = prewalkedRollouts(options.scan, accountedDirs);
+  let rollouts = rolloutIndex(accountedDirs, prewalked);
   const known = new Set();
   // The projection's cursor into each rollout, the LARGEST any store records,
   // because a second store file that lags the first is not evidence of a
@@ -2851,10 +3000,22 @@ function codexHistoryStoreState(options = {}) {
   // grows while Codex writes it, so a cursor read earlier can only be at or
   // behind a size read later; strictly past it means bytes the store consumed
   // are gone from the file. A stat that fails is skipped rather than guessed.
+  //
+  // A SIZE THE CALLER TOOK BEFORE IS A FLOOR, NOT AN ANSWER (2026-10-14). Used AS
+  // the size it would break the rule above: a transcript that grew between the
+  // caller's stat and the store read would put the cursor past the old size, a
+  // false "ahead". As a floor it is sound: the size now is at least that, so a
+  // cursor at or below it cannot be ahead, and only a cursor past it is stat'ed
+  // here, after the read, as before. On the measured box every cursor equals its
+  // file's size, so no transcript is stat'ed twice; these stats were ~110 ms of
+  // the synthetic 2,000-rollout probe. The one thing the floor can miss is a
+  // transcript that SHRANK in the moment between the two, and the next scan,
+  // whose own stat sees the smaller size, reports it.
   const aheadIds = [];
   for (const [id, offset] of offsets) {
     const files = rollouts.byId.get(id);
     if (!files) continue;
+    if (prewalked && files.some((file) => (prewalked.sizes.get(dirKey(file)) ?? -1) >= offset)) continue;
     let size = -1;
     for (const file of files) {
       try { size = Math.max(size, fs.statSync(file).size); } catch { /* moved or gone since the walk */ }

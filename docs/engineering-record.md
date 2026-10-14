@@ -405,7 +405,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1501#runAutoLearnWorker`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1557#runAutoLearnWorker`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 
@@ -1236,9 +1236,9 @@ Unrebased whole-object writers still outstanding:
 | Site | Nature |
 |---|---|
 | `const updated = {` at `src/auto-learn-manager.js:2286-2289#updated`, written `src/auto-learn-manager.js:2343#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2340-2342#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2814#next`, written `src/auto-learn-manager.js:2895#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2848#next`, written `src/auto-learn-manager.js:2929#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
 | `change.before.content` at `src/auto-learn-manager.js:2062#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2058#change.afterHash`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2914#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:2910#item.restored.hash` hash guard. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:2948#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:2944#item.restored.hash` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:266#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:205#readFileSync` read → `src/local-settings.js:266#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -1285,7 +1285,7 @@ holds the full text.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:2904-2906#rides`);
+  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3022-3024#rides`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -1889,7 +1889,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:4614#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:4723#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

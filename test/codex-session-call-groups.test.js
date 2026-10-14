@@ -195,3 +195,54 @@ test('a group spanning an append cursor in a forked rollout reaches the full-rea
       'under the parent session, the full-read id and verdict');
   }
 });
+
+// ACCEPTED-RECORDED 2026-10-14: A RESULT AFTER A SESSION SWITCH DOES NOT REACH
+// THE EARLIER SESSION'S CALL. The v1.6.2 regression audit flagged that a call
+// opened in session A whose `exit 1` arrives after a `session_meta` for B now
+// reads `unknown` where the call-id-only key read `failed`. No rollout Codex
+// writes can interleave that way: a `session_meta` is written only at the head
+// (once, or the fork's then the parent's, before any call), a resume appends to
+// the same file with no new one, and an app-server fork is a new file (measured
+// 2026-10-13, scripts/check-codex-code-mode-runtime.js). A read-only survey on
+// 2026-10-14 of the 13 rollouts on the development box (704 calls, 714 results)
+// found no mid-file `session_meta` and no result after a session switch. Only a
+// concatenation or a hand edit produces the shape, and there the session-scoped
+// key is the one that keeps two sessions' reused call ids apart (the tests above).
+//
+// The first test pins the accepted verdict, so changing it is a decision; the
+// second keeps the measured claim true of every sanitized real rollout in
+// test/fixtures, so a captured rollout with the shape fails here and reopens it.
+test('a result that arrives after a session switch does not bind to the earlier session\'s call (accepted)', () => {
+  const across = parse([meta(SESSION_A), execCall('call_across', 'git status'), meta(SESSION_B), execExit('call_across', 1)]);
+  assert.deepEqual(across.map((item) => [item.session, item.status]), [[SESSION_A, 'unknown']],
+    'the accepted verdict: the result is keyed to session B and finds no call there');
+  const within = parse([meta(SESSION_A), execCall('call_within', 'git status'), execExit('call_within', 1), meta(SESSION_B)]);
+  assert.deepEqual(within.map((item) => [item.session, item.status]), [[SESSION_A, 'failed']],
+    'control: inside its own session the same failure is read');
+});
+
+test('no sanitized real rollout puts a call and its result in different sessions', () => {
+  const dir = path.join(__dirname, 'fixtures');
+  const files = fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
+  assert.ok(files.length >= 5, 'precondition: the sanitized rollouts are here');
+  let results = 0;
+  for (const name of files) {
+    let session = '';
+    const opened = new Map();
+    for (const line of fs.readFileSync(path.join(dir, name), 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const record = JSON.parse(line);
+      if (record.type === 'session_meta') session = record.payload?.id || session;
+      const item = record.type === 'response_item' ? record.payload : null;
+      if (!item?.call_id) continue;
+      if (['function_call', 'custom_tool_call'].includes(item.type)) opened.set(item.call_id, session);
+      if (['function_call_output', 'custom_tool_call_output'].includes(item.type) && opened.has(item.call_id)) {
+        results += 1;
+        assert.equal(opened.get(item.call_id), session,
+          `witness:cross-session-result -- ${name}: ${item.call_id} opened in one session and closed in another; ` +
+          'the accepted call-key rule above no longer matches a real rollout');
+      }
+    }
+  }
+  assert.ok(results > 50, `precondition: the survey saw real results (${results})`);
+});

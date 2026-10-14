@@ -171,3 +171,115 @@ test('a real scan reads the archive, watches it, and logs each Codex reason once
   assert.deepEqual(second, first,
     'witness:scan-log-dedupe -- an unchanged condition was logged again on the next scan');
 });
+
+// THE DEDUPE IS OVER KINDS OF TROUBLE, NOT OVER TEXT (2026-10-14). The signature was
+// the joined lines, counts and all, so a corpus whose unreadable-file count moved
+// between scans appended a line per scan, which is the flood the dedupe exists to
+// stop. And the history NOTES (migrations, archived threads with no transcript, a
+// skipped cross-check) were computed by every scan and shown only in the CLI's
+// JSON. A scripted worker drives the real logScanTrouble through the scan command.
+test('scan trouble is logged when its kinds change, not when a count moves, and history notes are logged as notes', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-ext-trouble-'));
+  t.after(() => { try { fs.rmSync(home, { recursive: true, force: true }); } catch {} });
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: [] } }));
+  const results = [
+    { errors: 3, codexHistoryNotes: ['2 entries in rollout-migrations/: Codex has recorded a rollout migration.'] },
+    { errors: 4, codexHistoryNotes: ['3 entries in rollout-migrations/: Codex has recorded a rollout migration.'] },
+    { errors: 4, unreadable: 1, codexHistoryNotes: ['3 entries in rollout-migrations/: Codex has recorded a rollout migration.'] },
+  ];
+  const disposable = () => ({ dispose() {} });
+  const commands = new Map();
+  const channels = [];
+  const vscode = {
+    StatusBarAlignment: { Left: 1, Right: 2 }, ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    RelativePattern: class RelativePattern { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
+    ThemeColor: class ThemeColor {}, Uri: { file: (p) => ({ fsPath: p }) },
+    commands: { registerCommand(id, handler) { commands.set(id, handler); return disposable(); }, executeCommand() {} },
+    window: {
+      createOutputChannel(name) {
+        const channel = { name, lines: [], appendLine(line) { this.lines.push(line); }, append() {}, show() {},
+          clear() { this.lines.length = 0; }, dispose() {} };
+        channels.push(channel);
+        return channel;
+      },
+      createStatusBarItem() { return { show() {}, hide() {}, dispose() {} }; },
+      registerWebviewViewProvider() { return disposable(); },
+      setStatusBarMessage() {}, showErrorMessage() {}, showWarningMessage() {},
+      showInformationMessage() { return Promise.resolve(undefined); },
+    },
+    workspace: {
+      isTrusted: true, workspaceFolders: [{ uri: { fsPath: home } }],
+      createFileSystemWatcher() { return { onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }; },
+      getConfiguration() { return { get: (key, fallback) => (key === 'autoLearn.enabled' ? false : fallback), inspect: () => ({}), update: async () => {} }; },
+      onDidChangeConfiguration() { return disposable(); }, onDidChangeWorkspaceFolders() { return disposable(); },
+    },
+  };
+  const extensionPath = require.resolve('../vscode-extension/extension');
+  const rootSrc = path.resolve(__dirname, '..', 'src');
+  const originalLoad = Module._load;
+  const originalHomeEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex') });
+  Module._load = function load(request, parent, isMain) {
+    if (request === 'vscode') return vscode;
+    if (request === 'os') return { ...os, homedir: () => home };
+    if (parent?.filename === extensionPath && request === './autoLearnWorkerRunner') {
+      return { createAutoLearnWorkerRunner: () => ({
+        async run(operation) { return operation === 'scan' ? results.shift() : {}; },
+        async deactivate() {},
+      }) };
+    }
+    if (parent?.filename === extensionPath && request.startsWith('./src/')) {
+      return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
+    }
+    if (request === './memoryLint' && parent?.filename === extensionPath) {
+      return {
+        MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
+        memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
+        discoverDirs: () => [],
+      };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  const logged = () => channels.flatMap((channel) => channel.lines).map((line) => line.replace(/^\[[^\]]*\] /, ''));
+  let extension;
+  const after = [];
+  try {
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(rootSrc + path.sep) || key.startsWith(path.dirname(extensionPath) + path.sep)) delete require.cache[key];
+    }
+    extension = require(extensionPath);
+    extension.activate({ subscriptions: [] });
+    for (let scan = 0; scan < 3; scan += 1) {
+      await commands.get('permission-wildcarding.autoLearnScan')();
+      after.push(logged().slice());
+    }
+  } finally {
+    try { await extension?.deactivate?.(); } catch { /* teardown only */ }
+    Module._load = originalLoad;
+    for (const [key, value] of Object.entries(originalHomeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(rootSrc + path.sep) || key.startsWith(path.dirname(extensionPath) + path.sep)) delete require.cache[key];
+    }
+  }
+
+  assert.deepEqual(after[0], [
+    'Auto Learn scan: 3 files could not be read',
+    'Auto Learn scan note: Codex history: 2 entries in rollout-migrations/: Codex has recorded a rollout migration.',
+  ], 'witness:scan-notes -- the first scan logs its trouble and, labelled apart, its history note');
+  // MUTATION: build the signature from the line text again (counts included). The
+  // second scan's "4 files" and "3 entries" are a new set and two lines are appended.
+  // Confirmed 2026-10-14.
+  assert.deepEqual(after[1], after[0], 'witness:scan-kinds -- a moved count re-logged a condition that persists');
+  // MUTATION: drop the codexHistoryNotes loop. The note line is never logged and the
+  // first assertion fails. Confirmed 2026-10-14.
+  assert.deepEqual(after[2].slice(after[1].length), [
+    'Auto Learn scan: 4 files could not be read',
+    'Auto Learn scan: 1 file had an unreadable stretch that was skipped',
+    'Auto Learn scan note: Codex history: 3 entries in rollout-migrations/: Codex has recorded a rollout migration.',
+  ], 'a new KIND of trouble logs the whole current set, with the current counts');
+});

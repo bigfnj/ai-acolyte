@@ -166,9 +166,8 @@ const TEST_ONLY = {
   'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
-  // SETTINGS_ABSENT joined 2026-10-14 (the v1.6.2 audit): vscode-extension/extension.js
-  // destructured it and never read it (since 000e5b0), and that unused binding was its only
-  // "production consumer". test/settings-write.test.js asserts the absent state by it.
+  // Test-only since 2026-10-14: the extension's import of it was unused (since 000e5b0) and
+  // was what made the census count it as a production consumer.
   'src/settings-write.js': ['SETTINGS_ABSENT'],
   'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
   // The VS Code host is the real consumer of these two (package.json `main`); the

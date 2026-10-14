@@ -363,6 +363,13 @@ should opt into on your own machine rather than inherit from a seed:
   scripts) — repopulate per project
 - **`timeout *`, `nohup *` and a bare `command *`** — removed 2026-10-13; see "Wrapper
   entries" below
+- **`export *`** — removed 2026-10-14, after riding along since v1.0.0. `export` is a shell
+  keyword, not a program, so the grant is keyed on grammar: it approves `export PATH=...`,
+  `export GIT_PAGER=...` or `export LD_PRELOAD=...`, each of which changes what the next
+  command on the same line runs, and the dashboard's over-broad-grant count flags it
+  (`reserved-keyword`). A list seeded before this keeps the entry until you remove it; the
+  dashboard links to it. The 13 blanket interpreter grants (`Bash(bash *)`, `PowerShell(& *)`,
+  ...) stay, on the maintainer's call, and that count leaves them out
 
 ### Wrapper entries
 

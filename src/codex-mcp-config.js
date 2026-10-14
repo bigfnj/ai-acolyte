@@ -7,9 +7,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, execFile } = require('node:child_process');
 const { resolveCodexHome } = require('./codex-paths');
-const { commandLaunch } = require('./exec-resolve');
+const { commandLaunch, endProcessTree } = require('./exec-resolve');
 const { writeFileAtomicSync } = require('./permissions');
 
 const MODES = new Set(['auto', 'prompt', 'writes', 'approve']);
@@ -144,6 +144,63 @@ function nativeRpc(requests, options, context) {
   return output.results;
 }
 
+// The same worker as nativeRpc, for a caller that must not block: the extension
+// host (2026-10-14; src/codex-policy.js "THE ASK NEVER RUNS ON THE EXTENSION HOST
+// THREAD" has the measurements that made spawnSync there a defect). Read-only
+// requests only, and bounded by `options.timeoutMs` end to end:
+//
+//   - the worker gets `deadlineMs` = timeoutMs - 3 s for its own Codex calls and,
+//     being read-only, a 1 s grace before it tree-kills its app-server, so a codex
+//     that never answers is ended by the worker that started it;
+//   - this side arms a backstop at timeoutMs that tree-kills the WORKER, for a
+//     worker that is itself wedged. taskkill /T on Windows, because the worker's
+//     codex is a grandchild of this process and child.kill() ends only the child;
+//     an npm `codex.cmd` adds a cmd.exe between them as well.
+//
+// `options.track` receives the child, so the extension's deactivate can end it
+// (and, through the same tree kill, everything under it). Failure messages match
+// nativeRpc's, so callers matching "not reachable" read both alike.
+function nativeRpcAsync(requests, options, context) {
+  return new Promise((resolve, reject) => {
+    if (!requests.every((item) => item?.method === 'config/read')) {
+      throw new Error('The asynchronous Codex config RPC is read-only');
+    }
+    ordinaryParents(context.file);
+    ordinaryParents(path.join(context.home, '.ai-acolyte'));
+    const launch = commandLaunch(options.nodeExecutable || 'node', [__filename, '--rpc-worker']);
+    if (!launch.resolved) throw new Error('A Node executable is required for Codex config RPC');
+    const timeoutMs = Math.min(40000, Math.max(4000, Number(options.timeoutMs) || 10000));
+    let timedOut = false;
+    let backstop = null;
+    // `detached` on POSIX only: it makes the worker a process-group leader, so the
+    // tree kill (endProcessTree) reaches its codex as well. On Windows it would
+    // open a console; the tree kill there is taskkill /T and needs no group.
+    const child = execFile(launch.file, launch.args, { ...launch.options, windowsHide: true, encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024, detached: process.platform !== 'win32' }, (error, stdout) => {
+      clearTimeout(backstop);
+      if (timedOut) { reject(new Error('Codex config RPC is unavailable: the worker timed out')); return; }
+      if (error && !String(stdout || '').trim()) {
+        reject(new Error('Codex config RPC is unavailable: ' + String(error.message || error).slice(0, 600)));
+        return;
+      }
+      let output;
+      try { output = JSON.parse(stdout); } catch { reject(new Error('Codex config RPC returned unreadable data')); return; }
+      if (output.error) { reject(new Error('Codex config RPC refused: ' + String(output.error).slice(0, 600))); return; }
+      if (error) { reject(new Error('Codex config RPC worker failed')); return; }
+      if (!Array.isArray(output.results) || output.results.length !== requests.length) {
+        reject(new Error('Codex config RPC returned incomplete data'));
+        return;
+      }
+      resolve(output.results);
+    });
+    backstop = setTimeout(() => { timedOut = true; endProcessTree(child); }, timeoutMs);
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(JSON.stringify({ requests, home: context.home, codexHome: context.codexHome,
+      codexExecutable: options.codexExecutable || 'codex', deadlineMs: timeoutMs - 3000 }));
+    if (typeof options.track === 'function') options.track(child);
+  });
+}
+
 function rpc(requests, options, context) {
   return (options.rpc || nativeRpc)(requests, options, context);
 }
@@ -173,6 +230,17 @@ function readConfig(options, context) {
 function readCodexConfigLayers(options = {}) {
   const context = paths(options);
   const [response] = rpc([{ method: 'config/read', params: { cwd: options.workspaceRoot || null, includeLayers: true } }], options, context);
+  if (!object(response) || !Array.isArray(response.layers)) throw new Error('Codex config/read did not return layers');
+  return response;
+}
+
+// The same read without blocking the caller (nativeRpcAsync above). An injected
+// `rpc` may return its results or a promise of them; a test uses the promise to
+// hold the answer back.
+async function readCodexConfigLayersAsync(options = {}) {
+  const context = paths(options);
+  const requests = [{ method: 'config/read', params: { cwd: options.workspaceRoot || null, includeLayers: true } }];
+  const [response] = await (options.rpc ? options.rpc(requests, options, context) : nativeRpcAsync(requests, options, context));
   if (!object(response) || !Array.isArray(response.layers)) throw new Error('Codex config/read did not return layers');
   return response;
 }
@@ -377,7 +445,7 @@ function finishPending(request, options = {}) {
 
 module.exports = { inspectCodexMcpTool, planCodexMcpApproval, applyCodexMcpApproval,
   restoreCodexMcpApproval, listCodexMcpApprovals, inspectPending, assertReady, finishPending,
-  readCodexConfigLayers };
+  readCodexConfigLayers, readCodexConfigLayersAsync };
 
 if (require.main === module && process.argv[2] === '--rpc-worker') {
   const readline = require('node:readline');
@@ -387,11 +455,19 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
   process.stdin.on('data', chunk => { input += chunk; if (input.length > 1024 * 1024) process.exit(1); });
   process.stdin.on('end', async () => {
     let child, reader, timeout, closed, closing = false, nextId = 0;
+    // A read-only request with its own deadline also gets a short grace before
+    // its app-server is tree-killed: there is no write to let finish, and the
+    // caller's budget is counted in seconds. Every other request keeps 5 s.
+    let deadlineMs = 25000, graceMs = 5000;
     const pending = new Map();
     try {
       const request = JSON.parse(input);
       if (!Array.isArray(request.requests) || request.requests.length > 4 || request.requests.some(item =>
         !['config/read', 'config/value/write'].includes(item?.method))) throw new Error('Unsupported config worker operation');
+      if (Number.isFinite(request.deadlineMs)) {
+        deadlineMs = Math.min(25000, Math.max(1000, request.deadlineMs));
+        if (request.requests.every(item => item.method === 'config/read')) graceMs = 1000;
+      }
       const launch = commandLaunch(request.codexExecutable, ['app-server', '--stdio']);
       // ONE reason on every platform. commandLaunch resolves only on Windows; on
       // POSIX it hands the name back unchanged because spawn walks PATH itself, so
@@ -431,7 +507,10 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
           else waiting.resolve(message.result);
         } catch (error) { fail(error); }
       });
-      timeout = setTimeout(() => fail(new Error('Codex config operation timed out')), 25000);
+      // 25 s unless the caller set a shorter deadline: the extension's read-only
+      // trust ask does (nativeRpcAsync), so its whole budget, kill included, fits
+      // inside its own backstop. Clamped, so no request can lengthen the write path.
+      timeout = setTimeout(() => fail(new Error('Codex config operation timed out')), deadlineMs);
       await call('initialize', { clientInfo: { name: 'acolyte_mcp_config', version: '1' }, capabilities: { experimentalApi: true } });
       send({ method: 'initialized', params: {} });
       const results = [];
@@ -448,7 +527,7 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
           if (child.exitCode !== null) return;
           if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 });
           else child.kill('SIGTERM');
-        }, 5000);
+        }, graceMs);
         await closed; clearTimeout(kill);
       }
       reader?.close();

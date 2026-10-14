@@ -226,11 +226,23 @@ function chunkFile(file, text, root, maxChars, maxLines) {
   return { sourceId, lineCount: lines.length, hasUtf8Bom, chunks };
 }
 
-// A reference must start a token: line start, whitespace, a backtick, a quote,
-// ( [ or <. The old leading \b also matched any forward-slash path that merely
-// ENDED in skills/<x>/SKILL.md (Doodles/skills/x/SKILL.md), while the backslash
-// spelling of the same path never matched, so slash direction decided the warning.
-const MEMORY_REFERENCE = /(?<![^\s`'"(\[<])(?:rollout_summaries\/[^\s`<>"'()[\]]+\.md|skills\/[^\s`<>"'()[\]/]+\/SKILL\.md)\b/g;
+// A reference must not continue a path: no word character, `.`, `/`, `\` or `-` may
+// precede it. The old leading \b matched any forward-slash path that merely ENDED in
+// skills/<x>/SKILL.md (Doodles/skills/x/SKILL.md), while the backslash spelling of the same
+// path never matched, so slash direction decided the warning. b158f3d (2026-10-13) fixed that
+// by requiring a token start instead (line start, whitespace, a backtick, a quote, ( [ or <),
+// which also silenced the Markdown spellings its \b had checked: `**rollout_summaries/x.md**`,
+// a `|rollout_summaries/x.md|` table cell, `label:rollout_summaries/x.md`,
+// `k=rollout_summaries/x.md`, `./rollout_summaries/x.md`, and on a Related-skill line
+// `**skills/x/SKILL.md**` and `./skills/x/SKILL.md` (measured 2026-10-14 against 0b063ed: each
+// silent, each flagged before b158f3d). The negative lookbehind keeps every rejection b158f3d
+// made (`notes/...`, `docs.rollout_summaries/...`, `notes\rollout_summaries/...`, a URL) and
+// admits those. An explicit `./` is memory-relative too and is accepted in front, outside the
+// captured reference, so `./rollout_summaries/x.md` is checked as `rollout_summaries/x.md`;
+// `../` is not (decided the same day: it leaves the memory root, and resolving it against the
+// citing file is not what this lint models, so it is the project-path case). `|` and `*` end
+// the path, so two table cells written without spaces are two references, not one.
+const MEMORY_REFERENCE = /(?<![\w./\\-])(?:\.\/)?(rollout_summaries\/[^\s`<>"'()[\]|*]+\.md|skills\/[^\s`<>"'()[\]/|*]+\/SKILL\.md)\b/g;
 // Codex routes into generated memory skills from the files it loads first, so a
 // skills/<name>/SKILL.md pointer there is memory-relative. Rollout summaries are
 // session narrative and cite the session's PROJECT files by relative path: the
@@ -258,7 +270,7 @@ function lintFile(result, file, text, selectedPaths) {
   const seen = new Set();
   lines.forEach(({ text: lineText }, line) => {
     const skillPointer = SKILL_POINTER_KINDS.has(file.kind) && SKILL_POINTER_LINE.test(lineText);
-    for (const [reference] of lineText.matchAll(MEMORY_REFERENCE)) {
+    for (const [, reference] of lineText.matchAll(MEMORY_REFERENCE)) {
       if (seen.has(reference) || (reference.startsWith('skills/') && !skillPointer)) continue;
       seen.add(reference);
       if (reference.split('/').some((part) => part === '.' || part === '..')) {

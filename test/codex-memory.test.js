@@ -446,6 +446,56 @@ test('rollout_summaries/ references are checked in every file kind, but only as 
     diagnostic.relativePath === 'rollout_summaries/session.md'));
 });
 
+// b158f3d's token boundary (a reference must follow whitespace, a backtick, a quote, ( [ or <)
+// stopped flagging the Markdown spellings below, which its word boundary had flagged: bold,
+// a table cell, a `label:` or `key=` value, and the explicit `./`. Each is memory-relative.
+// Since 2026-10-14 the boundary is "not part of a path": no word character, `.`, `/`, `\` or
+// `-` before the reference, which still rejects every project path b158f3d was written for.
+test('a memory reference is checked in its common Markdown spellings, and a project path still is not', (t) => {
+  const box = fixture(t);
+  box.write('rollout_summaries/session.md', [
+    '# Session narrative',
+    '- **rollout_summaries/bold.md** and label:rollout_summaries/labelled.md and k=rollout_summaries/keyed.md',
+    '| rollout | |rollout_summaries/cell.md|rollout_summaries/second-cell.md| ./rollout_summaries/dotted.md |',
+    '- ./rollout_summaries/found.md exists, so its `./` must not hide it from the selected set',
+    // Not memory references: a path that only ends in one, a parent-relative path (it leaves
+    // the memory root), a URL, a word-joined name.
+    '- notes/rollout_summaries/x.md ../rollout_summaries/up.md ../x/rollout_summaries/y.md my-rollout_summaries/z.md',
+    '- https://example.invalid/rollout_summaries/web.md', '',
+  ].join('\n'));
+  box.write('rollout_summaries/found.md', '# Synthetic rollout\n');
+  box.write('MEMORY.md', [
+    '# Task Group', '- Related skill: **skills/bold-skill/SKILL.md**', '- Related skill: ./skills/dotted-skill/SKILL.md',
+    '- Related skill: Doodles/skills/project-skill/SKILL.md', '- Related skill: C:\\repo\\skills\\win-skill\\SKILL.md',
+    '- Related skill: ../skills/up-skill/SKILL.md', '',
+  ].join('\n'));
+  const result = readCodexMemory({ codexHome: box.codexHome });
+  // MUTATION: restore b158f3d's lookbehind `(?<![^\s`'"(\[<])`. None of the eight is
+  // flagged and this fails. Confirmed 2026-10-14.
+  // MUTATION: drop the optional `(?:\.\/)?` prefix. `./rollout_summaries/dotted.md` and
+  // `./skills/dotted-skill/SKILL.md` are silent and this fails. Confirmed 2026-10-14.
+  // MUTATION: report the whole match instead of the captured reference. `./rollout_summaries/
+  // found.md` reads as `./...`, is not in the selected set, and is flagged. Confirmed 2026-10-14.
+  // MUTATION: drop `|` from the path class. The two cells read as one reference,
+  // `rollout_summaries/cell.md|rollout_summaries/second-cell.md`. Confirmed 2026-10-14.
+  assert.deepEqual(result.diagnostics.map((diagnostic) => [diagnostic.relativePath, diagnostic.message.split(': ')[1]]), [
+    ['MEMORY.md', 'skills/bold-skill/SKILL.md'],
+    ['MEMORY.md', 'skills/dotted-skill/SKILL.md'],
+    ['rollout_summaries/session.md', 'rollout_summaries/bold.md'],
+    ['rollout_summaries/session.md', 'rollout_summaries/labelled.md'],
+    ['rollout_summaries/session.md', 'rollout_summaries/keyed.md'],
+    ['rollout_summaries/session.md', 'rollout_summaries/cell.md'],
+    ['rollout_summaries/session.md', 'rollout_summaries/second-cell.md'],
+    ['rollout_summaries/session.md', 'rollout_summaries/dotted.md'],
+  ]);
+  assert.ok(result.diagnostics.every((diagnostic) => diagnostic.code === 'missing-reference'));
+  // A `./` reference that traverses is still a traversal, judged on the memory-relative part.
+  const unsafe = fixture(t);
+  unsafe.write('MEMORY.md', '# Task Group\n- see ./rollout_summaries/../raw_memories.md\n');
+  assert.deepEqual(readCodexMemory({ codexHome: unsafe.codexHome }).diagnostics.map((diagnostic) => diagnostic.code),
+    ['unsafe-reference']);
+});
+
 test('lint diagnostics carry the 0-based line of the first mention while storage failures stay line-less', (t) => {
   const box = fixture(t);
   box.write('MEMORY.md', '# Task Group\r\n## Task 1\r\n- rollout_summaries/missing.md\r\n- again rollout_summaries/missing.md\r\n- Related skill: skills/../SKILL.md\r\n');

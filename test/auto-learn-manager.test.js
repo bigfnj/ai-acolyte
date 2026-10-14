@@ -1170,3 +1170,45 @@ test('a key that outlived its candidate does not crash the apply path', (t) => {
   assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')).permissions.allow,
     ['Bash(git status *)']);
 });
+
+// RETIRED OPTION SPELLINGS (2026-10-14). `claudeHistoryPath`, `codexHistoryPath`,
+// `validateCodexRules` and `codexBundlePath` were fallback legs with no supplier
+// anywhere in src, bin, vscode-extension, scripts or test. Each is now ignored,
+// and each control shows the spelling that remains is read where the old one was.
+test('the retired option spellings are ignored and the remaining spelling of each still works', (t) => {
+  const home = tempHome(t);
+  const codexHome = path.join(home, '.codex');
+  const elsewhere = path.join(home, 'elsewhere');
+
+  const retired = createAutoLearnManager({ home, codexHome, claudeHistoryPath: elsewhere, codexHistoryPath: elsewhere });
+  assert.deepEqual(retired.paths.claudeHistory, [path.join(home, '.claude', 'projects')],
+    'witness:retired-option -- `claudeHistoryPath` still chose the Claude history root');
+  assert.deepEqual(retired.paths.codexHistory, [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')],
+    'witness:retired-option -- `codexHistoryPath` still chose the Codex history roots');
+  const canonical = createAutoLearnManager({ home, codexHome, claudeRoots: [elsewhere], codexRoots: [elsewhere] });
+  assert.deepEqual(canonical.paths.claudeHistory, [elsewhere], 'control: `claudeRoots` is read');
+  assert.deepEqual(canonical.paths.codexHistory, [elsewhere], 'control: `codexRoots` is read');
+
+  // The managed bundle: an unsupported one reads `unreadable`, a missing one `absent`.
+  const bundle = path.join(home, 'bundle.json');
+  fs.writeFileSync(bundle, '{}\n');
+  assert.equal(createAutoLearnManager({ home, codexHome, codexBundlePath: bundle }).derivedReview().policies.codex, 'absent',
+    'witness:retired-option -- `codexBundlePath` was still read');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.copyFileSync(bundle, path.join(codexHome, 'cloud-config-bundle-cache.json'));
+  assert.equal(createAutoLearnManager({ home, codexHome }).derivedReview().policies.codex, 'unreadable',
+    'control: the bundle at its one path is read');
+
+  // The validator: an auto-safe scan validates the Codex rules it writes.
+  const validated = (options) => {
+    let calls = 0;
+    const spy = () => { calls += 1; return { valid: true, decision: 'allow' }; };
+    const learn = createAutoLearnManager({ home: tempHome(t), mode: 'auto-safe', threshold: 1,
+      historyScanner: scannerFeed([observed('v1', 'git status')]), ...options(spy) });
+    try { learn.scan(); } catch { /* the default validator has no Codex to run; only the spy matters */ }
+    return calls;
+  };
+  assert.equal(validated((spy) => ({ validateCodexRules: spy, codexExecutable: path.join(home, 'no-such-codex.exe') })), 0,
+    'witness:retired-option -- `validateCodexRules` was still called');
+  assert.ok(validated((spy) => ({ codexValidator: spy })) > 0, 'control: `codexValidator` is called on the same path');
+});

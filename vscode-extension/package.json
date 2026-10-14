@@ -274,7 +274,8 @@
         "permissionWildcarding.autoLearn.codexExecutable": {
           "type": "string",
           "default": "codex",
-          "markdownDescription": "Command name or absolute path used for `codex execpolicy check`. Auto Learn never writes a Codex rule unless this validation succeeds."
+          "scope": "machine",
+          "markdownDescription": "Command name or absolute path of the Codex CLI. The extension runs it without asking: `codex execpolicy check` (Auto Learn never writes a Codex rule unless this validation succeeds), `--version` for the dashboard's version line, and `app-server` to ask which project rule folders Codex trusts. Machine-scoped, so a repository's `.vscode/settings.json` cannot point it at a binary of its own; set it in user settings."
         },
         "permissionWildcarding.autoLearn.workerTimeoutSeconds": {
           "type": "number",

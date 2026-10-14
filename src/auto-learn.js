@@ -1226,4 +1226,10 @@ module.exports = {
   // Consumed by src/policy-exporters.js, which unions it into its own refusal table.
   // Only ever to refuse more: see the comment above SHELL_WRAPPERS there.
   SHELL_WRAPPERS,
+  // Consumed by src/auto-learn-manager.js since 2026-10-14, which held an identical copy until
+  // then. Its candidate loader resets a risk it does not know to 'unknown' on every reload, so
+  // a class added here and not there would have been silently downgraded in the state file,
+  // from 'credential' or 'admin' to the rank below 'complex'. One table, so the classifier
+  // decides which classes exist; test/auto-learn-risk-rank.test.js adds one and reloads it.
+  RISK_RANK,
 };

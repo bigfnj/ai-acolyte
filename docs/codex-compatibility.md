@@ -310,7 +310,7 @@ Evidence is retained in `acolyte-codex-restore-runtime-q6c0KW` and
 `acolyte-codex-restore-runtime-mWJoIr` under the Windows temporary directory.
 
 Derived advice uses current managed policy and per-source evidence
-(`derivedFor`, `src/auto-learn-manager.js:1769`; `src/derived-guidance.js:236`). It offers reuse of
+(`derivedFor`, `src/auto-learn-manager.js:1785`; `src/derived-guidance.js:236`). It offers reuse of
 known Git query results while their scope and repository state remain unchanged.
 It does not infer historical approval dialogs, suggest bypassing managed policy,
 or copy Claude-specific tool advice into Codex. Unreadable or absent policy preserves

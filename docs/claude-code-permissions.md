@@ -194,13 +194,28 @@ What the code does, since 2026-10-13:
   stays verbatim.
 - **The learner** (`deriveBaseInvocation` in `src/auto-learn.js`, importing the same
   list) still steps over every assignment to find the command, so risk is judged on
-  what runs, but an assignment Claude Code keeps adds `environment-not-stripped` and
-  withholds the Claude permission: `LD_PRELOAD=x cat f` no longer proposes
-  `Bash(cat *)`. This section used to say `Bash(cat *)` already covers that command;
-  it does not, because LD_PRELOAD is not on the list. The `environment-prefix`
-  reason stays on every assignment and still bars the automatic path through
-  `isAutoSafeCandidate` and `AUTO_UNSAFE_REASONS`. The Codex exporter, which renders
-  argv prefixes, is unchanged.
+  what runs, but an assignment Claude Code keeps adds `environment-not-stripped`, and
+  `LD_PRELOAD=x cat f` no longer proposes `Bash(cat *)`. This section used to say
+  `Bash(cat *)` already covers that command; it does not, because LD_PRELOAD is not on
+  the list. Since 2026-10-13 such a run is **its own family**, keyed with the
+  assignments it kept (`bash:LD_PRELOAD=x cat`, beside the plain `bash:cat`), and it
+  proposes the rule the wildcarding pass writes for the same approval,
+  `Bash(LD_PRELOAD=x cat *)`, so the plain `cat f` runs keep `Bash(cat *)`. Until then
+  both kinds shared `bash:cat` and the withheld rule of the first nulled the second. An
+  assignment the rule cannot carry (quoted, expanding, credential-shaped, or next to a
+  wrapper Claude Code then stops stripping) is keyed as `NAME=<redacted>` and proposes
+  no rule, so no value of that kind reaches the state file. A family stored before the
+  split keeps its counts, and the first plain run restores its rule. The
+  `environment-prefix` reason stays on every assignment and still bars the automatic
+  path through `isAutoSafeCandidate` and `AUTO_UNSAFE_REASONS`.
+- **The exporter** (`claudePermissionIsSafe` in `src/policy-exporters.js`) judges such a
+  rule by the command after the assignments, offers it under review only, and refuses
+  an assignment that makes the program load code named by its value (`LD_*`, `DYLD_*`,
+  `PATH`, `BASH_ENV`, `ENV`, and the interpreters' start-up options and module paths),
+  so `Bash(LD_PRELOAD=x cat *)` is proposed by the learner and still never rendered.
+  Before, every root table read the assignment as the root, and a reviewed
+  `Bash(FOO=1 rm *)` rendered. The Codex exporter, which renders argv prefixes, is
+  unchanged.
 
 **Not** stripped: `bash -c`, `python -c`, `npx`, `docker exec`, `devbox run`,
 `direnv exec`, `mise exec`. To approve work inside a runner you must name both,

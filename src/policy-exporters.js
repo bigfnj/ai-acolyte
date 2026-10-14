@@ -1437,9 +1437,40 @@ function parseClaudePermission(permission) {
   return { permission: match[0], tool: match[1], root: tokens[0], tokens };
 }
 
+// A Claude rule that opens with `NAME=VALUE` words: the learner's env-led families
+// (src/auto-learn.js candidateKey, 2026-10-13) propose `Bash(FOO=bar git status *)`, the
+// one rule Claude Code matches against a line that opens with an assignment it does not
+// strip. Until then every table below read the ASSIGNMENT as the root, so a reviewed
+// `Bash(FOO=1 rm *)`, `Bash(FOO=1 bash *)` or `Bash(FOO=1 curl *)` rendered (root `foo=1`
+// is on no list; measured 2026-10-13 against b0685b2). Now the command after the
+// assignments is judged by everything here, the rule is reviewable only (the learner's
+// `environment-prefix` reason keeps it off the automatic path as well), and an assignment
+// that makes the program itself load code named by its value is refused outright: the
+// dynamic loader's `LD_*` and `DYLD_*` (ld.so(8), dyld(1)), `PATH` (which file a bare name
+// is), `BASH_ENV` and `ENV` (read and run by a non-interactive bash or sh), and the
+// interpreters' start-up options and module paths. `Bash(LD_PRELOAD=./x.so cat *)` runs
+// whatever `./x.so` holds, as broad as the `Bash(python *)` this module already refuses.
+// Not covered, and recorded: variables that name a program the tool runs later (`PAGER`,
+// `EDITOR`, `GIT_PAGER`, `GIT_SSH_COMMAND`); the rule pins their value.
+const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=/;
+const CODE_LOADING_ENV = new Set([
+  'PATH', 'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'NODE_OPTIONS', 'NODE_PATH',
+  'PERL5OPT', 'PERL5LIB', 'PERLLIB', 'RUBYOPT', 'RUBYLIB', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS',
+]);
+function assignmentLoadsCode(token) {
+  const name = ASSIGNMENT_WORD.exec(token)[1];
+  return CODE_LOADING_ENV.has(name) || /^(?:LD|DYLD)_/.test(name);
+}
+
 function claudePermissionIsSafe(parsed, options) {
   const reviewed = options?.includeReviewed === true;
   if (!parsed || parsed.root === '&') return false;
+  const command = parsed.tokens.findIndex((token) => !ASSIGNMENT_WORD.test(token));
+  if (command !== 0) {
+    if (command < 0 || !reviewed || parsed.tool !== 'Bash') return false;
+    if (parsed.tokens.slice(0, command).some(assignmentLoadsCode)) return false;
+    return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
+  }
   const root = parsed.root.toLowerCase();
   if (DESTRUCTIVE_OR_ADMIN_ROOTS.has(root) || NETWORK_OR_INSTALL_ROOTS.has(root) ||
       STATE_MUTATING_ROOTS.has(root) || SHELL_WRAPPERS.has(root)) return false;

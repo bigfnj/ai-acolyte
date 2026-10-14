@@ -13,7 +13,7 @@ const { spawnSync } = require('child_process');
 const {
   aggregateObservations, isAutoSafeCandidate, COMPLEX_REASONS,
   normalizeCandidateKey, normalizePermissionSpelling, preferredPermissionSpelling,
-  preferredPrefixSpelling,
+  preferredPrefixSpelling, candidateKey,
 } = require('./auto-learn');
 const { isCoveredBy } = require('./permissions');
 const { scanHistoryFiles, codexHistoryStoreState } = require('./history-adapters');
@@ -860,6 +860,21 @@ function mergeCandidate(existing, fresh, threshold) {
   existing.risk = maxRisk(existing.risk, fresh.risk);
   existing.baseAutoSafe = existing.baseAutoSafe && fresh.baseAutoSafe;
   existing.complex = existing.complex || fresh.complex;
+  // A family stored before env-led runs were keyed apart (2026-10-13, src/auto-learn.js
+  // candidateKey). Since then `environment-not-stripped` is raised only by a run whose key
+  // carries its kept assignments, so a family under a PLAIN key that holds the reason is
+  // one of those older families: its evidence mixed `LD_PRELOAD=x cat f` with `cat f`, and
+  // its null rule came from the first kind. No env-led run reaches this key any more, and
+  // the stored counts cannot be split, so the first plain run that brings a rule restores
+  // it, and the reason, its only marker, is consumed with it, so a later disagreement nulls
+  // the rule as for any family. `environment-prefix` stays, which keeps the family off the
+  // automatic path for good (isAutoSafeCandidate): its counts include runs the rule does
+  // not cover, so only a review can grant it.
+  if (existing.claudePermission === null && typeof fresh.claudePermission === 'string' &&
+      existing.reasons.includes('environment-not-stripped') && !fresh.reasons.includes('environment-not-stripped')) {
+    existing.claudePermission = fresh.claudePermission;
+    existing.reasons = existing.reasons.filter((reason) => reason !== 'environment-not-stripped');
+  }
   if (existing.claudePermission !== fresh.claudePermission) {
     // `git` and `git.exe` are two spellings of one grant, not a conflict. Any
     // other disagreement still nulls the permission, as it always has.
@@ -2485,6 +2500,19 @@ function createAutoLearnManager(options = {}) {
         for (const fresh of aggregateObservations([observation], { threshold: 1 })) {
           const id = observationHash(observation, fresh.key);
           const previous = state.observationHashes[id];
+          // An env-led run (src/auto-learn.js candidateKey, 2026-10-13) that a state from
+          // before the split already counted, under the plain key its family had then. The
+          // hash is keyed by family, so without this a re-read of that call (the scan's
+          // overlap, or a cursor reset) would count it a second time, in the new family.
+          // One call is one count: it stays where it was counted, and a new family is not
+          // created from it. Plain runs keep their key, so their hashes never change.
+          if (!previous) {
+            const unsplit = candidateKey({ ...fresh, environmentLead: [] });
+            if (unsplit && unsplit !== fresh.key && state.observationHashes[observationHash(observation, unsplit)]) {
+              accepted = true;
+              continue;
+            }
+          }
           const next = observedOutcome(fresh);
           // An unanswered call is not execution evidence. It is neither persisted
           // nor allowed to create a candidate; a later correlated result can add it.

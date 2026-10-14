@@ -1183,6 +1183,87 @@ Not measured: an approval answered `cancel` rather than `decline`, a Guardian or
 auto-review denial of an MCP call, and a server that dies mid-call. Their messages are not
 the measured decline, so they still read `failed`.
 
+## Codex 0.161.0 follow-up, October 13, 2026: Codex evidence revision 4
+
+Added after the section above; it amends the matrix row "Shell history scan and outcome
+learning" ("Revision 3 replays old Codex evidence once") and replaces nothing else.
+
+**Already-scanned Codex history is re-read once with the 2026-10-13 parser corrections.**
+None of them raised `CODEX_EVIDENCE_REVISION` (`src/auto-learn-manager.js`): 0.161.0 MCP
+outcomes, session-scoped call groups, the code-mode join with its "not found" and refusal
+handling, the MCP decline, and the fork head seed. So a transcript scanned before them
+kept the older parser's verdicts. Revision 4 uses the mechanism revision 3 used for the
+`write_stdin` fix. On load, the Codex counts are reset to the Claude ones and the Codex
+observation hashes are dropped. Each Codex cursor becomes a pending file read again from
+byte 0. Claude counts, hashes and cursors, grants, reviewed sets, Codex targets and the
+Undo transaction are untouched. The rebuild-pending flag pauses automatic application
+until the re-read completes, and clears on a clean walk (the pending-leak rule of
+`9abc330`). The dashboard shows its existing "rebuilding older Codex evidence" note.
+
+**A second rebuild had to stop one historical failure counting twice.** A grant that a
+rebuild preserves keeps a failure baseline: the retained Claude failures, plus each Codex
+failure the replay re-reads. A revision-3 record's baseline already holds its replay's
+Codex failures, and revision 4 resets the Codex counts and replays them again. Left as it
+was, the baseline held them twice and would absorb a genuinely new failure: measured in
+the new test, where a Claude failure after the rebuild did not revoke the grant. So a
+revision-3 record that still preserves its grant restarts from the retained Claude
+failures, and its definitions are kept. One that a newer, unreconciled failure had already
+outgrown is dropped rather than refreshed into grandfathering it, so the grant meets the
+normal rules at the next apply, as it already would have; the migration itself revokes
+nothing. The undated-failure tally restarts too, because the replay recounts it. Records
+for families with no Codex evidence, and the `legacyCodexEvidence` audit archive (the
+first archive is kept), are as revision 3 left them.
+
+The tests are in `test/codex-evidence-migration.test.js`. The transcript uses the record
+shapes 0.161.0 was measured to write. The re-read moves a joined cell from unknown to
+success, and a refused cell and a declined MCP call from failed to unknown. A
+revision-3 state re-reads once and keeps every Claude count, hash, cursor and grant.
+Undo still works, a second scan and a fresh load start nothing, and a revision-4 state
+hands its Codex cursors to the scanner as they are. A preserved grant keeps its
+protection once, and a new failure after the rebuild revokes it; an outgrown record is
+dropped. The two revision-pinned assertions name the current revision.
+
+- Against the manager before this change, the three new tests fail along with the two
+  revision-pinned ones, and the control passes.
+- Mutation: eight manager mutants were each killed. They were the revision left at 3;
+  the bump alone (a revision-3 record kept as it was); an outgrown record refreshed or
+  kept; a preserving record dropped; the undated tally not restarted; a current state
+  rebuilt on every load; and Claude counts not retained.
+
+**Measured on a copy of this machine's real history** by the new
+`scripts/measure-codex-evidence-rebuild.js`. The copy covers 13 rollouts (371 MB) plus
+`session_index.jsonl`, `thread_history_1.sqlite` and `state_5.sqlite`, all copied into a
+fresh temp tree. The process's home points at the copy, the originals are hashed before
+and after (unchanged), and the copy is deleted at the end. Claude history was not copied,
+so no Claude evidence could arrive. Two revision-3 Auto Learn states exist, both
+workspace-scoped (their roots recovered from their ids) and both in `recommend` mode:
+
+- *The state last scanned on October 7* (8 Codex families, 14 Codex runs, 5 Claude
+  grants, 1 preserved grant).
+  - The rebuild was pending on load with 6 files and took 3 scans; the large rollouts
+    are read across scans by the ingest budget, and the pending flag held all 3.
+  - It re-read 40 Codex calls: the 14 already counted plus 26 written since. After it,
+    13 families held 17 successes and 23 failures.
+  - A control on the same copy and the same parser, with the revision held at 3, ends
+    in identical Codex families: 0 of 13 differ. So on this corpus the corrections move
+    no verdict already counted; the change is the history written since the last scan,
+    which a plain catch-up also reads.
+  - All 446 Claude families' counts were unchanged, and so were the Claude cursors, the
+    5 Claude grants, the reviewed sets and Undo. The preserved grant kept baseline 0
+    with 0 failures.
+  - The 20,000-hash cap evicted 26 Claude dedupe hashes (19,986 to 19,960) to make room
+    for the re-read Codex ones. The control evicts the same 26, so it is the cap's
+    ordinary work, and no count moved.
+- *Today's state* (0 Codex families).
+  - The rebuild was pending on load with 9 files and took 3 scans.
+  - No Codex call falls under its workspace before or after.
+  - Claude counts, all 9,825 hashes, cursors and grants were unchanged.
+
+In both, a fresh load afterwards started nothing and one more scan re-counted nothing.
+The only `codexTargets` difference is the copy's own Codex rules file, which sits under
+the copy's home and so registers as a new, empty target; every target the state already
+had is unchanged.
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,

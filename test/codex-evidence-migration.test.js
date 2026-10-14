@@ -8,6 +8,11 @@ const path = require('node:path');
 const { createAutoLearnManager } = require('../src/auto-learn-manager');
 const { scanHistoryFiles } = require('../src/history-adapters');
 
+// The current Codex evidence revision (src/auto-learn-manager.js,
+// CODEX_EVIDENCE_REVISION). Pinned by value rather than imported, so a change that
+// lowered it, or forgot it, fails here. 4 since 2026-10-13.
+const CURRENT_REVISION = 4;
+
 test('MCP parser revision reopens unchanged cursors once and preserves policy while replacing false shell evidence', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-evidence-revision-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -39,7 +44,7 @@ test('MCP parser revision reopens unchanged cursors once and preserves policy wh
   const result = current.scan({ platform: 'win32' });
   assert.equal(result.codexEvidence.pending, false);
   const rebuilt = JSON.parse(fs.readFileSync(previous.paths.state));
-  assert.equal(rebuilt.codexEvidenceRevision, 3);
+  assert.equal(rebuilt.codexEvidenceRevision, CURRENT_REVISION);
   assert.equal(rebuilt.candidates['powershell:git status'].counts.success, 0, 'WITNESS namespaced MCP no longer supplies shell successes');
   const mcp = rebuilt.candidates['codex-mcp:["Case.Server","exec_command"]'];
   assert.equal(mcp.kind, 'tool');
@@ -86,7 +91,7 @@ test('separate-wait parser revision reopens completed cursors once without rewri
   const result = current.scan({ platform: 'win32' });
   assert.equal(result.codexEvidence.pending, false);
   const rebuilt = JSON.parse(fs.readFileSync(previous.paths.state));
-  assert.equal(rebuilt.codexEvidenceRevision, 3);
+  assert.equal(rebuilt.codexEvidenceRevision, CURRENT_REVISION);
   assert.equal(rebuilt.candidates['powershell:git status'].counts.success, 2, 'WITNESS exactly one terminal Codex success plus retained Claude success');
   assert.equal(rebuilt.candidates['powershell:git log'].counts.failed, 1, 'WITNESS terminal wait failure is replayed');
   assert.deepEqual(fs.readFileSync(previous.paths.codexRules), policy);
@@ -383,4 +388,210 @@ test('preserving a migrated family does not freeze another applied family altern
   learn.scan();
   assert.ok(JSON.parse(fs.readFileSync(f.settingsFile, 'utf8')).permissions.allow.includes('PowerShell(git.exe ls-files *)'),
     'WITNESS an unrelated existing grant can still add an observed spelling');
+});
+
+// REVISION 4 (2026-10-13): one re-read of Codex history with that day's parser
+// corrections. The transcript holds the record shapes Codex 0.161.0 was measured to
+// write (scripts/check-codex-code-mode-runtime.js, scripts/check-codex-mcp-runtime.js),
+// one per correction whose verdict a revision-3 state still carries:
+//   a code-mode cell finished by `wait`, exit 0     revision 3: unknown  now: success
+//   a cell whose nested command Codex refused       revision 3: failed   now: unknown
+//   a declined MCP call (0.161.0 McpToolCall)       revision 3: failed   now: unknown
+//   a direct exec_command that exited 1 (optional)  failed either way, dated history
+// The revision-3 verdicts are what the previous manager is fed, the way the revision-2
+// and revision-3 tests above feed theirs; the re-read uses the real scanner.
+const REFUSED = 'approval policy is Never; reject command \u2014 you cannot ask for escalated permissions if the approval policy is Never';
+function revisionFourTranscript({ directFailure = false } = {}) {
+  const at = '2026-01-01T00:00:00Z';
+  const item = (payload) => ({ timestamp: at, type: 'response_item', payload });
+  const cell = (callId, command, extra = '') => item({ type: 'custom_tool_call', name: 'exec', call_id: callId,
+    input: `// @exec: {"yield_time_ms": 500}\nconst result = await tools.exec_command({ cmd: "${command}", ${extra}yield_time_ms: 30000 });\ntext(result);\n` });
+  return [
+    { type: 'session_meta', payload: { id: 'revision-four-session', cwd: 'C:\\src\\example' } },
+    cell('cell-joined', 'git status'),
+    item({ type: 'custom_tool_call_output', call_id: 'cell-joined', output: 'Script running with cell ID 1\nWall time 1.0 seconds\nOutput:\n' }),
+    item({ type: 'function_call', name: 'wait', call_id: 'wait-1', arguments: JSON.stringify({ cell_id: '1', yield_time_ms: 10000 }) }),
+    item({ type: 'function_call_output', call_id: 'wait-1', output: [{ type: 'input_text', text: 'Script completed\nWall time 1.0 seconds\nOutput:\n' },
+      { type: 'input_text', text: JSON.stringify({ chunk_id: 'c0ffee', wall_time_seconds: 1.0, exit_code: 0, original_token_count: 7, output: 'fixture\n' }) }] }),
+    cell('cell-refused', 'git log', 'sandbox_permissions: "require_escalated", justification: "fixture", '),
+    item({ type: 'custom_tool_call_output', call_id: 'cell-refused', output: [{ type: 'input_text', text: 'Script failed\nWall time 0.0 seconds\nOutput:\n' },
+      { type: 'input_text', text: `Script error:\n${REFUSED}` }] }),
+    { timestamp: at, type: 'event_msg', payload: { type: 'item_completed', thread_id: 'revision-four-session', turn_id: 'turn', item: {
+      type: 'McpToolCall', id: 'mcp-declined', server: 'fixture', tool: 'succeed', arguments: {}, readOnlyHint: false,
+      status: 'failed', error: { message: 'user rejected MCP tool call' }, duration: { secs: 0, nanos: 0 } } } },
+    ...(directFailure ? [
+      item({ type: 'function_call', name: 'exec_command', call_id: 'direct-failed', arguments: JSON.stringify({ cmd: 'git status' }) }),
+      item({ type: 'function_call_output', call_id: 'direct-failed',
+        output: 'Chunk ID: c0ffee\nWall time: 1.0 seconds\nProcess exited with code 1\nOriginal token count: 7\nOutput:\nfixture\n' }),
+    ] : []),
+  ];
+}
+
+// A revision-3 state as the previous release left it after its own complete re-read:
+// the given verdicts, Claude evidence beside them, auto-safe grants applied, a Claude
+// cursor, revision 3. `edit` adjusts the written state before it is reloaded.
+function revisionThree(t, { directFailure = false, oldObservations, edit } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-evidence-revision-four-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const sessions = path.join(home, '.codex', 'sessions');
+  fs.mkdirSync(sessions, { recursive: true });
+  const transcript = path.join(sessions, 'rollout-revision-four.jsonl');
+  fs.writeFileSync(transcript, revisionFourTranscript({ directFailure }).map((value) => JSON.stringify(value)).join('\n') + '\n');
+  const scanned = scanHistoryFiles({ codexRoots: [sessions], platform: 'win32' });
+  const claudeCursor = 'path-sha256:222222222222222222222222';
+  const options = { home, claudeRoots: [], codexRoots: [sessions], threshold: 1,
+    codexValidator: () => ({ valid: true, decision: 'allow' }),
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }) };
+  const claude = [
+    { id: 'claude-status-1', source: 'claude', tool: 'PowerShell', command: 'git status', status: 'success' },
+    { id: 'claude-status-2', source: 'claude', tool: 'PowerShell', command: 'git status', status: 'success' },
+  ];
+  // What revision 3's parser made of the transcript: the join, the refusal and the
+  // MCP decline are its verdicts, not today's.
+  const revisionThreeVerdicts = oldObservations || scanned.observations.map((entry) => ({ ...entry,
+    status: entry.callId === 'cell-joined' ? 'unknown' : ['cell-refused', 'mcp-declined'].includes(entry.callId) ? 'failed' : entry.status }));
+  const previous = createAutoLearnManager({ ...options, historyScanner: () => ({ ...scanned,
+    observations: [...claude, ...revisionThreeVerdicts],
+    cursors: { ...scanned.cursors, [claudeCursor]: { source: 'claude', size: 90, offset: 90, mtimeMs: 1 } } }) });
+  previous.scan();
+  previous.apply();
+  const read = () => JSON.parse(fs.readFileSync(previous.paths.state, 'utf8'));
+  const state = read();
+  state.codexEvidenceRevision = 3;
+  state.mode = 'auto-safe';
+  if (edit) edit(state);
+  fs.writeFileSync(previous.paths.state, JSON.stringify(state, null, 2) + '\n');
+  return { options, paths: previous.paths, read, before: read(), claudeCursor, transcript };
+}
+
+test('revision 4 re-reads a revision-3 state\'s Codex history once and keeps Claude evidence, grants and Undo', (t) => {
+  const f = revisionThree(t);
+  const { before } = f;
+  // Preconditions: the revision-3 verdicts are in the state, and a grant was made.
+  assert.equal(before.candidates['powershell:git status'].counts.success, 2, 'precondition: Claude successes only');
+  assert.equal(before.candidates['powershell:git log'].counts.failed, 1, 'precondition: the refusal counted as a failure');
+  assert.equal(before.candidates['codex-mcp:["fixture","succeed"]'].counts.failed, 1, 'precondition: the decline counted as a failure');
+  assert.ok(before.applied.claude.includes('powershell:git status') && before.lastApplication, 'precondition: an automatic grant and its Undo');
+  assert.ok(Object.values(before.cursors).some((entry) => entry.source === 'codex'), 'precondition: a completed Codex cursor');
+  const policy = [f.paths.codexRules, f.paths.claudeSettings].map((file) => fs.readFileSync(file, 'utf8'));
+
+  const learn = createAutoLearnManager(f.options);
+  assert.equal(learn.status().codexEvidence.pending, true, 'WITNESS a revision-3 state starts a rebuild on load');
+  assert.equal(learn.status().codexEvidence.revision, CURRENT_REVISION);
+  const first = learn.scan({ platform: 'win32' });
+  assert.equal(first.codexEvidence.pending, false, 'the rebuild completes on a clean walk');
+  assert.equal(first.application, null, 'the rebuilding scan applies nothing, auto-safe mode or not');
+  const rebuilt = f.read();
+  assert.equal(rebuilt.codexEvidenceRevision, CURRENT_REVISION);
+  assert.equal(rebuilt.codexEvidenceRebuildPending, false);
+  assert.deepEqual(rebuilt.codexEvidencePendingFiles, []);
+  // The corrections, re-read: the joined cell's success arrives, the refusal and the
+  // decline are no longer failures.
+  assert.deepEqual(rebuilt.candidates['powershell:git status'].counts, { success: 3, failed: 0, unknown: 0, total: 3 });
+  assert.deepEqual(rebuilt.candidates['powershell:git status'].sourceCounts.codex, { success: 1, failed: 0, unknown: 0, total: 1 });
+  assert.equal(rebuilt.candidates['powershell:git log'].counts.failed, 0, 'WITNESS the refused cell is no longer a failure');
+  assert.equal(rebuilt.candidates['codex-mcp:["fixture","succeed"]'].counts.failed, 0, 'WITNESS the declined MCP call is no longer a failure');
+  // Nothing of Claude's, and no policy, moved.
+  assert.deepEqual(rebuilt.candidates['powershell:git status'].sourceCounts.claude, before.candidates['powershell:git status'].sourceCounts.claude);
+  assert.deepEqual(rebuilt.cursors[f.claudeCursor], before.cursors[f.claudeCursor]);
+  for (const [id, entry] of Object.entries(before.observationHashes)) if (entry.source === 'claude') {
+    assert.deepEqual(rebuilt.observationHashes[id], entry, 'a Claude observation hash survives');
+  }
+  assert.deepEqual(rebuilt.applied, before.applied);
+  assert.deepEqual(rebuilt.reviewed, before.reviewed);
+  assert.deepEqual(rebuilt.codexTargets, before.codexTargets);
+  assert.deepEqual(rebuilt.lastApplication, before.lastApplication);
+  assert.deepEqual([f.paths.codexRules, f.paths.claudeSettings].map((file) => fs.readFileSync(file, 'utf8')), policy);
+  // Once: a second scan, and a fresh load, find nothing to rebuild or re-count.
+  const second = learn.scan({ platform: 'win32' });
+  assert.equal(second.newObservations, 0, 'the re-read is not repeated');
+  assert.equal(second.codexEvidence.pending, false);
+  assert.equal(f.read().codexEvidenceRebuildStartedAt, rebuilt.codexEvidenceRebuildStartedAt, 'no second rebuild began');
+  assert.equal(createAutoLearnManager(f.options).status().codexEvidence.pending, false);
+  assert.deepEqual(f.read().candidates['powershell:git status'].counts, rebuilt.candidates['powershell:git status'].counts);
+  assert.equal(learn.undo().undone, true, 'the pre-rebuild Undo still works');
+});
+
+test('control: a revision-4 state does not rebuild, and its Codex cursors are handed to the scanner as they are', (t) => {
+  const f = revisionThree(t, { edit: (state) => { state.codexEvidenceRevision = CURRENT_REVISION; } });
+  const codexCursors = Object.entries(f.before.cursors).filter(([, entry]) => entry.source === 'codex');
+  assert.ok(codexCursors.length, 'precondition: Codex cursors to keep');
+  const learn = createAutoLearnManager({ ...f.options, historyScanner: (options) => {
+    assert.deepEqual(Object.entries(options.cursors).filter(([, entry]) => entry.source === 'codex'), codexCursors,
+      'WITNESS the Codex cursors were not invalidated');
+    return { observations: [], cursors: options.cursors, files: [{ source: 'codex', mode: 'full', path: f.transcript }] };
+  } });
+  assert.equal(learn.status().codexEvidence.pending, false);
+  learn.scan();
+  const state = f.read();
+  assert.equal(state.codexEvidenceRebuildPending, false);
+  assert.equal(state.codexEvidenceRebuildStartedAt, f.before.codexEvidenceRebuildStartedAt);
+  assert.deepEqual(state.candidates['powershell:git log'].counts, f.before.candidates['powershell:git log'].counts,
+    'a current state keeps the verdicts it has; only a revision bump re-reads');
+});
+
+// A SECOND REBUILD MUST NOT COUNT A HISTORICAL FAILURE TWICE. A grant the revision-3
+// rebuild preserved carries a baseline that already holds that rebuild's replayed
+// Codex failure (here, a dated direct exec_command that exited 1). Revision 4 resets
+// the Codex counts and replays the failure again; a baseline left as it was would
+// hold it twice and absorb a genuinely new failure.
+function preservedByRevisionThree(t, { newerUnreconciledFailure = false } = {}) {
+  // The grant is made on the Claude successes alone (a family with a failure is not
+  // auto-safe), and the edit below then records what the revision-3 replay found.
+  return revisionThree(t, { directFailure: true, oldObservations: [], edit: (state) => {
+    const key = 'powershell:git status';
+    const item = state.candidates[key];
+    // Revision 3's re-read had counted the historical Codex failure, and preserved
+    // the grant across it: baseline = 0 Claude failures + 1 replayed.
+    item.counts.failed += 1; item.counts.total += 1;
+    item.sourceCounts.codex = { success: 0, failed: 1, unknown: 0, total: 1 };
+    item.sources = ['claude', 'codex'];
+    state.observationHashes['c'.repeat(64)] = { key, outcome: 'failed', source: 'codex' };
+    if (newerUnreconciledFailure) {
+      // And a Claude failure since, which no apply has reconciled yet.
+      item.counts.failed += 1; item.counts.total += 1;
+      item.sourceCounts.claude.failed += 1; item.sourceCounts.claude.total += 1;
+    }
+    state.preservedEvidenceGrants[key] = { ...item, failureCountAtRebuild: 1 };
+    state.codexEvidenceUntimedFailureRuns = 1;
+  } });
+}
+
+test('a grant revision 3 preserved keeps its protection once, and a new failure after revision 4 still revokes it', (t) => {
+  const key = 'powershell:git status';
+  // The control: no new failure, so the grant survives the rebuild and what follows.
+  const kept = preservedByRevisionThree(t);
+  const learn = createAutoLearnManager(kept.options);
+  assert.equal(learn.scan({ platform: 'win32' }).codexEvidence.pending, false);
+  const rebuilt = kept.read();
+  assert.equal(rebuilt.candidates[key].counts.failed, 1, 'precondition: the historical Codex failure was replayed once');
+  assert.equal(rebuilt.preservedEvidenceGrants[key].failureCountAtRebuild, 1,
+    'WITNESS the baseline holds the replayed failure once, not twice');
+  assert.equal(rebuilt.codexEvidenceUntimedFailureRuns, 0, 'the undated tally restarts with the rebuild that recounts it');
+  learn.scan({ platform: 'win32' });
+  assert.deepEqual(kept.read().applied, kept.before.applied, 'control: with no new failure the preserved grant stays');
+
+  // A genuinely new failure after the rebuild: one more than the baseline revokes.
+  const fresh = preservedByRevisionThree(t);
+  createAutoLearnManager(fresh.options).scan({ platform: 'win32' });
+  createAutoLearnManager({ ...fresh.options, historyScanner: (options) => ({
+    observations: [{ id: 'new-claude-failure', source: 'claude', tool: 'PowerShell', command: 'git status', status: 'failed',
+      timestamp: new Date(Date.now() + 60000).toISOString() }],
+    cursors: options.cursors, files: [{ source: 'claude', mode: 'full' }] }) }).scan();
+  assert.equal(fresh.read().candidates[key].counts.failed, 2);
+  assert.equal(fresh.read().applied.claude.includes(key), false, 'WITNESS a failure after the rebuild is not absorbed by a doubled baseline');
+});
+
+test('a preserved grant that a newer failure had already outgrown is not re-preserved by revision 4', (t) => {
+  const key = 'powershell:git status';
+  const f = preservedByRevisionThree(t, { newerUnreconciledFailure: true });
+  assert.ok(f.before.candidates[key].counts.failed > f.before.preservedEvidenceGrants[key].failureCountAtRebuild,
+    'precondition: the revision-3 record no longer preserves the grant');
+  const learn = createAutoLearnManager(f.options);
+  assert.equal(learn.status().codexEvidence.pending, true);
+  learn.scan({ platform: 'win32' });
+  assert.equal(f.read().preservedEvidenceGrants[key], undefined, 'WITNESS the outgrown record is dropped, not refreshed');
+  assert.deepEqual(f.read().applied, f.before.applied, 'the migration itself revokes nothing');
+  learn.scan({ platform: 'win32' });
+  assert.equal(f.read().applied.claude.includes(key), false, 'the next apply holds the grant to the normal rules, as it already would have');
 });

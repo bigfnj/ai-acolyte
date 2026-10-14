@@ -21,6 +21,13 @@ const Module = require('node:module');
 
 function disposable() { return { dispose() {} }; }
 
+// The Codex executable every harness here is configured with unless a test names
+// one: a name nothing resolves (2026-10-14). The default `codex` resolved on PATH
+// on any machine with Codex installed, so every push with a Codex home spawned the
+// real `codex --version`, and since the probe now pushes once when it lands, that
+// push would arrive at a moment no test chose.
+const NO_CODEX = 'acolyte-no-such-codex-dashboard';
+
 // Captured at module load, BEFORE any harness installs its unref'ing override of
 // global.setTimeout. Without this, `settle()` schedules through that override, its
 // timer is unref'd, and nothing is left holding the event loop open while a test
@@ -152,9 +159,13 @@ function harness(tempHome, opts = {}) {
           // populated; empty for every other, so the default below is unchanged.
           get: (key, fallback) => {
             if (opts.settings && key in opts.settings) return opts.settings[key];
+            if (key === 'autoLearn.codexExecutable') return NO_CODEX;
             return key === 'autoLearn.enabled' ? false : fallback;
           },
-          inspect: () => ({}),
+          // The Codex executable answers on this door too, so the value is the same
+          // whichever one the extension reads it through.
+          inspect: (key) => (key === 'autoLearn.codexExecutable'
+            ? { globalValue: opts.settings && key in opts.settings ? opts.settings[key] : NO_CODEX } : {}),
           update: async () => {},
         };
       },
@@ -278,7 +289,7 @@ function harness(tempHome, opts = {}) {
   // local-drain-extension.test.js already does this, for the same reason.
   //
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:55#autoLearnUi,
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:56#autoLearnUi,
   // extension.js:10#createAutoLearnWorkerRunner), so leaving them cached leaves a second
   // harness holding the first one's instances.
   const extensionDir = path.dirname(extensionPath) + path.sep;
@@ -758,7 +769,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:2970#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3024#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.

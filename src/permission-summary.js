@@ -10,10 +10,14 @@ const { parseCodexRules } = require('./codex-rule-inventory');
 // borrowing it keeps this module's promise above: no learner state, no transaction.
 const { extractInvocations, classifyInvocation } = require('./auto-learn');
 
+// `options` go to codexRuleFileSet unchanged; the dashboard passes
+// `projectTrust: 'cached'` so this read never spawns. `pending` then says the
+// trusted-project folders are not counted YET (2026-10-14), which the panel shows
+// as a lower bound rather than as a complete count.
 function readCodexPermissionSummary(options = {}) {
   const set = codexRuleFileSet(options);
   const result = { allow: 0, prompt: 0, forbidden: 0, total: 0, files: [], allowRules: [], complete: true,
-    issues: [], directories: set.directories, blindSpots: set.blindSpots };
+    pending: set.projectPending === true, issues: [], directories: set.directories, blindSpots: set.blindSpots };
   const issue = (file, reason) => {
     result.complete = false;
     result.issues.push({ path: file, reason });

@@ -295,3 +295,56 @@ test('MCP intent rechecks exact bytes immediately before native write', t => {
   assert.ok(api.inspectPending(f.options));
   assert.match(fs.readFileSync(f.file, 'utf8'), /concurrent after intent/);
 });
+
+// THE ASYNCHRONOUS READ (2026-10-14): the extension host's trust ask, launched with
+// execFile instead of spawnSync. Driven through the REAL worker against a stand-in
+// codex that starts and then never answers, which is the case that blocked the host
+// for 31 s on the synchronous route. Bounded end to end by `timeoutMs`, and the
+// worker's own deadline kills its codex, so nothing is left behind even with no
+// deactivate to end it.
+function hangingCodex(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-hang-'));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  const pidFile = path.join(dir, 'pid');
+  const script = path.join(dir, 'hang.js');
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`);
+  if (process.platform === 'win32') {
+    const shim = path.join(dir, 'codex.cmd');
+    fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+    return { executable: shim, pidFile };
+  }
+  const shim = path.join(dir, 'codex');
+  fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, { mode: 0o755 });
+  return { executable: shim, pidFile };
+}
+
+test('the asynchronous layers read does not block, is bounded, hands its child over, and leaves no codex running', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-async-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const codex = hangingCodex(t);
+  const tracked = [];
+  const started = Date.now();
+  const reading = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
+    timeoutMs: 4000, track: child => tracked.push(child) });
+  assert.ok(Date.now() - started < 1000, 'the call returned before Codex answered: nothing here waits synchronously');
+  assert.equal(tracked.length, 1, 'the worker is handed to the caller, so a deactivate can end it');
+  // The WORKER's deadline, not this side's backstop: the worker is the one that
+  // can end its own codex gracefully, so it has to be the one that fires first.
+  // MUTATION: drop `deadlineMs` from the worker request. The worker waits its 25 s
+  // default, the 4 s backstop tree-kills it instead, and the reason reads
+  // "unavailable: the worker timed out". Confirmed 2026-10-14.
+  await assert.rejects(reading, /refused: Codex config operation timed out/,
+    'a codex that never answers ends as the worker timing it out, not as a hang');
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 6000, `bounded by its 4 s budget plus a kill: took ${elapsed} ms`);
+  const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  let alive = true;
+  for (let wait = 0; wait < 40 && alive; wait += 1) {
+    try { process.kill(pid, 0); await new Promise(resolve => setTimeout(resolve, 50)); } catch { alive = false; }
+  }
+  assert.equal(alive, false, 'the worker tree-killed the codex it started');
+  await assert.rejects(api.readCodexConfigLayersAsync({ home, codexHome, codexExecutable: codex.executable,
+    rpc: () => Promise.resolve([{ config: {} }]) }), /did not return layers/, 'an injected route is checked like the real one');
+});

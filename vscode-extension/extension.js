@@ -21,7 +21,7 @@ const {
 } = require('./src/policy-lock');
 const {
   readEnterpriseBundle, allowedApprovalPolicies, enterprisePolicyAssessment,
-  codexRuleFileSet,
+  codexRuleFileSet, refreshProjectTrust, abandonProjectTrustRefreshes,
 } = require('./src/codex-policy');
 const {
   CODEX_CONFIG, LEGACY_CLAUDE_STATE_FILE, LEGACY_CODEX_STATE_FILE,
@@ -34,7 +34,8 @@ const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
-const { commandLaunch } = require('./src/exec-resolve');
+const { commandLaunch, endProcessTree } = require('./src/exec-resolve');
+const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
 const { CodexMemoryLint } = require('./codexMemoryLint');
@@ -158,11 +159,19 @@ function trackChild(child) {
   return child;
 }
 
+// The whole TREE under each child, not the child alone (2026-10-14). On Windows
+// child.kill() ends one PID, and the children here are routinely not the program
+// that matters: an npm `codex.cmd` runs as cmd.exe -> node, and the Codex trust
+// worker is node -> (cmd.exe ->) codex. Measured: deactivate's child.kill() on a
+// trust worker whose stand-in codex never answered left that codex running,
+// orphaned, after the extension was gone. endProcessTree (src/exec-resolve.js)
+// runs taskkill /T /F and then child.kill(); POSIX keeps the plain kill. Returns
+// a promise for the reaping, which deactivate awaits, bounded, after it has
+// dropped its retainers.
 function killLiveChildren() {
-  for (const child of [...liveChildren]) {
-    try { child.kill(); } catch { /* already gone */ }
-  }
+  const reaped = [...liveChildren].map((child) => endProcessTree(child));
   liveChildren.clear();
+  return Promise.all(reaped);
 }
 
 // ── settings.json helpers ─────────────────────────────────────────────────────
@@ -1062,7 +1071,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2547#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2601#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1316,7 +1325,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5212#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5294#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1541,12 +1550,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5232#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5324#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2335#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2389#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -1784,12 +1793,51 @@ function execFileCaptured(executable, args) {
   });
 }
 
+// The one spelling of "which rule set this window describes", for the dashboard
+// count, its trust refresh and "Why did this prompt?". One function, because the
+// trust cache is keyed on these fields: a push and a refresh that spelled them
+// differently would settle one entry and keep reading the other.
+function codexRuleSetOptions(cfg) {
+  return { home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null,
+    workspaceRoot: cfg.workspaceRoot, codexExecutable: cfg.codexExecutable };
+}
+
 // One definition of "the set Codex evaluates", shared with the pre-write validator
 // (src/codex-policy.js), so "Why did this prompt?" cannot name a cause the write never
 // checked. The workspace root adds the trusted project folders, which that check omits.
-function codexRuleFileSetFor(cfg) {
-  return codexRuleFileSet({ home: os.homedir(), codexHome: CODEX_HOME_DIR, target: cfg.codexRulesPath || null,
-    workspaceRoot: cfg.workspaceRoot, codexExecutable: cfg.codexExecutable });
+//
+// ASYNC since 2026-10-14. It was a synchronous codexRuleFileSet, which on a trust
+// cache miss spawnSync'd `codex app-server` on the extension host with a 40 s
+// ceiling (src/codex-policy.js, "THE ASK NEVER RUNS ON THE EXTENSION HOST THREAD").
+// The trust verdict is now settled off-thread and awaited, and the set is read
+// from the cache. If the refresh could not settle it (torn down mid-ask), the set
+// says the project folders are still being checked rather than guessing them.
+async function codexRuleFileSetFor(cfg) {
+  const options = codexRuleSetOptions(cfg);
+  await refreshProjectTrust({ ...options, track: trackChild });
+  return codexRuleFileSet({ ...options, projectTrust: 'cached' });
+}
+
+// The dashboard's half: one refresh at a time, and a push when it lands, so a
+// cold panel shows the project rules a second later without waiting for some
+// unrelated event. Bounded by construction: a refresh that lands makes the next
+// read fresh, so the push it causes finds nothing pending and starts nothing.
+// The generation check keeps a predecessor's late answer from pushing to, or
+// clearing the latch of, a same-realm successor.
+let projectTrustRefreshing = false;
+// A late continuation's push, for this activation only.
+const settledFor = (generation) => () => {
+  if (!deactivated && generation === activationGeneration) dashboard?.refresh();
+};
+function refreshProjectTrustForDashboard(cfg) {
+  if (projectTrustRefreshing || deactivated) return;
+  projectTrustRefreshing = true;
+  const generation = activationGeneration;
+  refreshProjectTrust({ ...codexRuleSetOptions(cfg), track: trackChild }).then((landed) => {
+    if (generation !== activationGeneration) return;
+    projectTrustRefreshing = false;
+    if (landed) dashboard?.refresh();
+  });
 }
 
 // `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
@@ -2043,7 +2091,10 @@ async function explainAutoLearnPrompt() {
     return;
   }
 
-  const ruleSet = codexRuleFileSetFor(cfg);
+  const ruleSet = await codexRuleFileSetFor(cfg);
+  // The await can outlive the host: deactivate kills the trust worker, and a
+  // modal raised after that lands on the successor's window or on nothing.
+  if (deactivated) return;
   const rules = ruleSet.files;
   const unreadable = ruleSet.failures.length
     ? `\n\nDEGRADED: ${ruleSet.failures.map((f) => `${f.path} (${f.code})`).join(', ')} could not be ` +
@@ -2319,6 +2370,9 @@ function activate(context) {
   activationGeneration += 1;
   // A re-activate logs to a fresh channel, so current trouble is not "seen" yet.
   lastScanTroubleLog = '';
+  // A predecessor's trust refresh was abandoned by its deactivate and will never
+  // release this latch (its continuation checks the generation), so release it.
+  projectTrustRefreshing = false;
   // The busy latch, released unconditionally here. deactivate() only clears it
   // when it is still the current generation — correctly, because a successor's
   // in-flight scan must not have its latch cleared by a predecessor's
@@ -4062,11 +4116,16 @@ class WildcardingViewProvider {
       const entries = settings?.permissions?.[key];
       return entries === undefined || (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'));
     });
-    // Counts trusted project rules too: given a .codex folder, one cached ~1 s Codex config/read per config edit.
+    // Counts trusted project rules too, from the CACHED trust verdict only: this
+    // read never spawns (2026-10-14). Measured on v1.6.2, where it asked Codex
+    // synchronously: a cold push blocked the host 1,106 ms, one after a config.toml
+    // touch 980 ms, and one against a codex that never answers 31,331 ms. A miss now
+    // posts the user-scope count marked `pending`, starts one off-thread refresh,
+    // and the refresh's own push brings the project rules in.
     const codexSummaryConfig = autoLearnConfig();
-    const codexPermissions = readCodexPermissionSummary({ home: os.homedir(), codexHome: CODEX_HOME_DIR,
-      target: codexSummaryConfig.codexRulesPath, workspaceRoot: codexSummaryConfig.workspaceRoot,
-      codexExecutable: codexSummaryConfig.codexExecutable });
+    const codexPermissions = readCodexPermissionSummary({ ...codexRuleSetOptions(codexSummaryConfig),
+      projectTrust: 'cached' });
+    if (codexPermissions.pending) refreshProjectTrustForDashboard(codexSummaryConfig);
     // Saved shell approvals that are one-off scripts (src/permission-summary.js says what
     // counts and why). Off the SAME `allow` this push already read, per the note above:
     // a second readSettings() here would bring back the duplicate read it removed.
@@ -4152,9 +4211,13 @@ class WildcardingViewProvider {
         // window. INFORMATION ONLY (src/codex-version.js): cached per binary,
         // probed in the background, never a reason for a warning badge. No
         // Codex home, no probe: a Claude-only machine gets no Codex line and
-        // spawns nothing. Required here, not at the top, so no line above moved.
-        cli: fs.existsSync(CODEX_HOME_DIR) ? require('./src/codex-version')
-          .dashboardCodexVersion({ executable: autoLearnConfig().codexExecutable, track: trackChild }) : null,
+        // spawns nothing.
+        // `onSettled` (2026-10-14): the probe this push started asks for one push
+        // when it has an answer, so a quiet window does not show a blank line until
+        // something unrelated refreshes it. Generation-checked, like every late
+        // continuation here, so a predecessor's probe cannot push to a successor.
+        cli: fs.existsSync(CODEX_HOME_DIR) ? dashboardCodexVersion({ executable: codexSummaryConfig.codexExecutable,
+          track: trackChild, onSettled: settledFor(activationGeneration) }) : null,
       },
       local: localCardData(),
       guidance: guidanceCardData(),
@@ -4598,12 +4661,21 @@ class WildcardingViewProvider {
     else setState('stLocal', 'drained');
 
     const complete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable'
-      && d.codexPermissions?.complete === true;
+      && codexCounted(d.codexPermissions);
     const known = (d.savedPermissions || []).length;
     // No tone for the one-off count: it is a note, not a warning (see oneOffApprovals).
     const oneOff = oneOffApprovals(d);
     setState('wcount', (complete ? known + ' total' : (known ? known + '+' : '?') + ' known')
       + (oneOff ? ' · ' + oneOff + ' one-off' : ''));
+  }
+
+  // The Codex count is whole only when every file was read AND the trusted-project
+  // folders have been settled. While Codex is still being asked which project
+  // folders it trusts (codexPermissions.pending, 2026-10-14), the user-scope count
+  // is a lower bound and renders as one ('N+'). The status pill keeps reading
+  // .complete alone: a check in progress is not a read that failed.
+  function codexCounted(codex) {
+    return !!codex && codex.complete === true && codex.pending !== true;
   }
 
   // Shared by the Saved permissions badge above and the line in its body below, the way
@@ -5043,8 +5115,8 @@ class WildcardingViewProvider {
     const claudeComplete = d.claudePermissionsComplete !== false && d.settingsState !== 'unreadable';
     const countText = (count, complete) => complete ? String(count) : count ? count + '+' : '?';
     $('claudeTotal').textContent = countText(d.total, claudeComplete);
-    $('codexTotal').textContent = countText(codex.allow, codex.complete);
-    $('total').textContent = countText(d.total + codex.allow, claudeComplete && codex.complete);
+    $('codexTotal').textContent = countText(codex.allow, codexCounted(codex));
+    $('total').textContent = countText(d.total + codex.allow, claudeComplete && codexCounted(codex));
     $('total').title = 'Saved Claude allow entries plus local Codex shell allow declarations; not a count of commands or effective access.';
     $('claudeTotal').title = d.wildcardCount + ' wildcards; ' + d.specificCount + ' specific entries';
     $('codexTotal').title = (codex.prompt || 0) + ' prompt and ' + (codex.forbidden || 0)
@@ -5052,6 +5124,7 @@ class WildcardingViewProvider {
     $('permissionCoverage').textContent = [
       !claudeComplete ? 'Claude count incomplete.' : '',
       !codex.complete ? 'Codex count incomplete.' : '',
+      codex.pending ? 'Checking which project rule folders Codex trusts…' : '',
     ].filter(Boolean).join(' ');
     $('permissionCoverage').title = (codex.issues || []).map((issue) => issue.reason).join(' · ');
     const list = $('list');
@@ -5175,7 +5248,16 @@ async function deactivate() {
   // A cleared timer only stops a spawn that had not started. These four had, and
   // nothing retained them, so a reload left up to a 180s python child running
   // against a torn-down host — and the gate compile's callback wrote policy.
-  killLiveChildren();
+  // Started here, before anything is awaited; awaited (bounded) below, after the
+  // retainers are dropped, so a slow taskkill never holds a slot a successor needs.
+  const reaped = killLiveChildren();
+  // The trust worker among those children was just killed, and its refresh will
+  // settle with "the worker failed". Abandoned, so that answer is never cached as
+  // the verdict a same-realm re-activate reads (src/codex-policy.js).
+  abandonProjectTrustRefreshes();
+  // The same for a Codex version probe the kill just ended: abandoned, so it is not
+  // cached as a 60 s "timed out" that a same-realm re-activate would show first.
+  abandonCodexVersionProbes();
   // The fifth in-flight job, and the one this pair of calls used to miss: the
   // 32MB recall-model download is not a ChildProcess, so `liveChildren` never
   // held it and nothing here could stop it. It ran to completion and renamed a
@@ -5213,7 +5295,17 @@ async function deactivate() {
   autoLearnManagerKey = null;
   autoLearnCardCache = null;
 
-  if (autoLearnWorkerRunner) await autoLearnWorkerRunner.deactivate();
+  // The drain is STARTED here, synchronously, exactly where it always was: a
+  // same-realm activate() can run during the first await below, and it decides
+  // whether to drop a stranded runner by whether this one is already deactivating.
+  // Awaiting anything before this call let the successor keep the runner the old
+  // teardown then drained (test/extension-lifecycle-async.test.js, "a re-activate
+  // during the drain keeps its own dashboard and memory lint").
+  const drained = autoLearnWorkerRunner ? autoLearnWorkerRunner.deactivate() : null;
+  // The tree kills started above. Bounded: taskkill has its own 5 s ceiling, and a
+  // teardown must not wait longer than that on a process that refuses to die.
+  await Promise.race([reaped, new Promise((resolve) => setTimeout(resolve, 6000).unref?.())]);
+  if (drained) await drained;
   // This one DOES have to come after the drain, so nothing shortens it.
   // `deactivating` inside the runner is sticky and its public API has no reset,
   // while getAutoLearnWorkerRunner() only builds one when the slot is empty — so

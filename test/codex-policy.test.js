@@ -19,6 +19,8 @@ const {
   enterpriseDecisionFor,
   codexRuleFileSet,
   codexRulesArguments,
+  refreshProjectTrust,
+  abandonProjectTrustRefreshes,
 } = require('../src/codex-policy');
 
 // A real enterprise requirements bundle, in the shape Codex caches it. These
@@ -518,6 +520,27 @@ test('Codex is asked only when a .codex folder it could load exists', (t) => {
   assert.equal(home.calls, 0, 'CODEX_HOME is not a candidate project folder');
 });
 
+// 2026-10-14. A layer only ever adds `<folder>/rules`, so a `.codex` holding only
+// config.toml or hooks cannot change the answer, and on the v1.6.2 tree it still
+// cost an app-server start per config edit (about a second on the host thread).
+test('a .codex folder with no rules folder is not asked about, and one that gains rules is', (t) => {
+  const box = projectFixture(t);
+  fs.rmSync(box.projectRules, { recursive: true });
+  fs.writeFileSync(path.join(box.workspace, '.codex', 'config.toml'), 'model = "x"\n');
+  fs.mkdirSync(path.join(box.workspace, '.codex', 'hooks'));
+  const rpc = countingRpc();
+  const ask = () => codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc });
+  // MUTATION: test `directoryExists(folder)` instead of `<folder>/rules` in
+  // projectCandidates. This counts 1. Confirmed 2026-10-14.
+  assert.deepEqual(ask().files, [box.userFile]);
+  assert.equal(rpc.calls, 0, 'config.toml and hooks alone are not a reason to start an app-server');
+  // The control: the same folder with a rules folder IS asked about, without any
+  // config.toml edit, because the candidate signature moved.
+  fs.mkdirSync(box.projectRules);
+  ask();
+  assert.equal(rpc.calls, 1, 'a rules folder appearing is asked about');
+});
+
 // The shape found on the development box: a home directory whose `.git` holds
 // only a credentials file. Codex did not treat it as a repository (measured), and
 // counting it would put every workspace under the home inside one "repository".
@@ -585,11 +608,166 @@ test('Codex is asked again only when config.toml or the candidate folders change
   assert.equal(ask().files.includes(box.projectFile), false, 'an edited config.toml is asked about again');
   assert.equal(calls.length, 2);
 
-  // A .codex folder that appears is asked about too, with config.toml untouched:
-  // otherwise it stays invisible until the next config edit.
+  // A .codex/rules folder that appears is asked about too, with config.toml
+  // untouched: otherwise it stays invisible until the next config edit. A bare
+  // `.codex` is not (2026-10-14): it cannot add a rule.
   fs.mkdirSync(path.join(box.base, '.codex'));
   ask();
+  assert.equal(calls.length, 2, 'a .codex with no rules folder changes nothing');
+  fs.mkdirSync(path.join(box.base, '.codex', 'rules'));
+  ask();
   assert.equal(calls.length, 3);
+});
+
+// THE HOST'S DOORS (2026-10-14): `projectTrust: 'cached'` never asks, and
+// refreshProjectTrust settles a miss asynchronously. The extension uses exactly
+// these two (vscode-extension/extension.js codexRuleSetOptions and its callers).
+function deferredRpc(layersFor) {
+  const rpc = (requests) => {
+    rpc.calls += 1;
+    return new Promise((resolve, reject) => {
+      rpc.pending.push({
+        answer: () => resolve(requests.map((request) => ({ config: {}, layers: layersFor(request.params.cwd) }))),
+        fail: (error) => reject(error),
+      });
+    });
+  };
+  rpc.calls = 0;
+  rpc.pending = [];
+  return rpc;
+}
+
+test('the cached read never asks Codex: a miss is pending, says so, and leaves the project out', (t) => {
+  const box = projectFixture(t);
+  const rpc = countingRpc();
+  // MUTATION: drop the `projectTrust === 'cached'` branch in projectRuleDirectories.
+  // The sync ask runs and this counts 1. Confirmed 2026-10-14.
+  const set = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc, projectTrust: 'cached' });
+  assert.equal(rpc.calls, 0, 'the host door never starts an app-server');
+  assert.equal(set.projectPending, true);
+  assert.deepEqual(set.files, [box.userFile], 'project rules are left out, never guessed');
+  assert.ok(set.blindSpots.some((note) => /still being checked/.test(note)), 'and the set says why');
+  // No candidate at all is not pending: there is nothing to ask, so nothing waits.
+  fs.rmSync(box.projectRules, { recursive: true });
+  const none = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc, projectTrust: 'cached' });
+  assert.equal(none.projectPending, false);
+  assert.equal(rpc.calls, 0);
+});
+
+test('one refresh settles the cached read, concurrent refreshes share it, and a fresh one does nothing', async (t) => {
+  const box = projectFixture(t);
+  const rpc = deferredRpc((cwd) => [projectLayer(path.join(cwd, '.codex'))]);
+  const options = { home: box.home, workspaceRoot: box.workspace, rpc };
+  const first = refreshProjectTrust(options);
+  const second = refreshProjectTrust(options);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(rpc.calls, 1, 'two refreshes of one entry share one ask');
+  assert.equal(codexRuleFileSet({ ...options, projectTrust: 'cached' }).projectPending, true,
+    'still pending while Codex has not answered');
+  rpc.pending[0].answer();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  const settled = codexRuleFileSet({ ...options, projectTrust: 'cached' });
+  assert.equal(settled.projectPending, false);
+  assert.deepEqual(settled.files, [box.userFile, box.projectFile].sort(), 'the trusted project rule is counted now');
+  assert.equal(await refreshProjectTrust(options), false, 'a fresh verdict needs no refresh');
+  assert.equal(rpc.calls, 1);
+});
+
+test('a refresh that fails falls back to config.toml, and one abandoned mid-ask stores nothing', async (t) => {
+  const box = projectFixture(t);
+  box.trust(box.workspace);
+  const failing = deferredRpc(() => []);
+  const options = { home: box.home, workspaceRoot: box.workspace, rpc: failing };
+  const refused = refreshProjectTrust(options);
+  await new Promise((resolve) => setImmediate(resolve));
+  failing.pending[0].fail(new Error('Codex config RPC refused: Codex executable is not reachable'));
+  assert.equal(await refused, true);
+  const fallback = codexRuleFileSet({ ...options, projectTrust: 'cached' });
+  assert.ok(fallback.files.includes(box.projectFile), 'the exact trusted entry counts, as on the sync route');
+  assert.ok(fallback.blindSpots.some((note) => /Codex could not be asked/.test(note)));
+
+  // Abandoned: the extension's deactivate killed the worker, so whatever the ask
+  // settles with is "the worker was killed" and must never become the verdict.
+  const killed = deferredRpc(() => []);
+  const fresh = { home: box.home, workspaceRoot: box.workspace, rpc: killed };
+  const inFlight = refreshProjectTrust(fresh);
+  await new Promise((resolve) => setImmediate(resolve));
+  abandonProjectTrustRefreshes();
+  killed.pending[0].fail(new Error('Codex config RPC is unavailable: Command failed'));
+  // MUTATION: drop the epoch check in refreshProjectTrust. The killed ask is
+  // cached as the fallback and this reads false. Confirmed 2026-10-14.
+  assert.equal(await inFlight, false);
+  assert.equal(codexRuleFileSet({ ...fresh, projectTrust: 'cached' }).projectPending, true,
+    'nothing was stored, so the next activation asks again');
+});
+
+test('a config.toml edited while the ask runs does not let the old answer stand for the new file', async (t) => {
+  const box = projectFixture(t);
+  const rpc = deferredRpc((cwd) => [projectLayer(path.join(cwd, '.codex'))]);
+  const options = { home: box.home, workspaceRoot: box.workspace, rpc };
+  const asked = refreshProjectTrust(options);
+  await new Promise((resolve) => setImmediate(resolve));
+  // A different size, so the signature moves even within one mtime tick.
+  box.writeConfig('# edited while Codex was being asked\n[features]\nplugins = false\n');
+  rpc.pending[0].answer();
+  assert.equal(await asked, true, 'the caller is told to look again');
+  assert.equal(codexRuleFileSet({ ...options, projectTrust: 'cached' }).projectPending, true,
+    'the verdict about the old config was not stored for the new one');
+});
+
+// THE CACHE SHAPE (2026-10-14). The key held config.toml's size+mtime, so each
+// edit added an entry and the old ones stayed until LRU eviction: 100 edits held
+// 32 entries, each carrying the whole config.toml text (630 KiB measured, every
+// copy holding an MCP server token). One entry per workspace now, checked against
+// the signature it stores, and holding the parsed trust entries only.
+test('config.toml edits replace one trust entry instead of piling up and evicting others', (t) => {
+  const box = projectFixture(t);
+  // A second profile, so its edits are not edits of the first one's config.toml.
+  const otherHome = path.join(box.base, 'other-home');
+  fs.mkdirSync(path.join(otherHome, '.codex'), { recursive: true });
+  const otherConfig = path.join(otherHome, '.codex', 'config.toml');
+  const steady = countingRpc();
+  const busy = countingRpc();
+  const askSteady = () => codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc: steady });
+  askSteady();
+  assert.equal(steady.calls, 1, 'precondition: the steady workspace is cached');
+  for (let edit = 0; edit < 40; edit += 1) {
+    fs.writeFileSync(otherConfig, `# edit ${edit}\n${'x'.repeat(edit)}\n`);
+    codexRuleFileSet({ home: otherHome, workspaceRoot: box.workspace, rpc: busy });
+  }
+  assert.equal(busy.calls, 40, 'precondition: every edit was asked about');
+  // MUTATION: put fileSignature(configFile) back into the key. Forty edits are
+  // forty entries, the steady one is evicted, and this counts 2. Confirmed 2026-10-14.
+  askSteady();
+  assert.equal(steady.calls, 1, 'forty edits elsewhere left the steady entry cached');
+});
+
+test('a cached trust entry keeps none of config.toml\'s text', async (t) => {
+  const box = projectFixture(t);
+  // Never held whole by this test: the halves are joined only in the file, so a
+  // heap that contains the joined token got it from what the cache kept.
+  const left = crypto.randomBytes(16).toString('hex');
+  const right = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(box.config, Buffer.concat([
+    Buffer.from(`[mcp_servers.fixture]\ncommand = "x"\nenv = { TOKEN = "`), Buffer.from(left),
+    Buffer.from(right), Buffer.from(`" }\n\n[projects.'${box.workspace}']\ntrust_level = "trusted"\n`),
+  ]));
+  const set = codexRuleFileSet({ home: box.home, workspaceRoot: box.workspace, rpc: codexAbsent() });
+  assert.ok(set.files.includes(box.projectFile), 'precondition: the fallback read the trusted entry');
+  // V8 keeps the subject of the last successful regex match (RegExp.input), and
+  // the parser's last match was on a line sliced out of config.toml, which pins
+  // the whole text until any other match replaces it. Transient and not the
+  // cache, so replace it before looking: found without this line, gone with it.
+  /flush/.exec('flush the last-match slot');
+  // A heap snapshot collects garbage first, so what is left is what is retained.
+  const v8 = require('node:v8');
+  const chunks = [];
+  for await (const chunk of v8.getHeapSnapshot()) chunks.push(chunk);
+  const heap = Buffer.concat(chunks).toString('utf8');
+  assert.ok(heap.includes(left), 'precondition: the snapshot does contain strings this test holds');
+  // MUTATION: keep `text` on the entry again (or drop the JSON round trip, so a
+  // sliced key pins its parent). The token is found. Confirmed 2026-10-14.
+  assert.equal(heap.includes(left + right), false, 'the config.toml text, token and all, is still retained');
 });
 
 test('codex absent: config.toml is read directly, and the set says so', (t) => {

@@ -387,6 +387,12 @@ function codexRuleDirectories(options = {}) {
 // beside it: validating the candidate as an extra file leaves the old copy
 // visible too, and two files carrying the same prefix rule is not the state the
 // write produces.
+//
+// `projectTrust: 'cached'` is the extension host's door (2026-10-14): it never
+// asks Codex, and a trust verdict not yet cached comes back as
+// `projectPending: true` with the project folders left out and a blind-spot note
+// saying so. refreshProjectTrust below settles it off the host thread. See
+// "project rule directories" for why the synchronous ask must not run there.
 function codexRuleFileSet(options = {}) {
   const project = projectRuleDirectories(options, resolveCodexHome(options), options.platform || process.platform);
   const directories = [
@@ -414,7 +420,7 @@ function codexRuleFileSet(options = {}) {
     }
   }
   // ONE IDENTITY PER FILE, and on Windows that identity ignores case. The target
-  // is a hard-coded lowercase name (`let` at vscode-extension/extension.js:1162#codexRulesPath;
+  // is a hard-coded lowercase name (`let` at vscode-extension/extension.js:1171#codexRulesPath;
   // `const` at bin/wildcard-perms:329-330#codexRulesPath) while readdirSync
   // returns whatever spelling is on disk, and the three comparisons below used
   // raw strings. Measured 2026-10-13 with an on-disk
@@ -457,6 +463,8 @@ function codexRuleFileSet(options = {}) {
     // Which members are a trusted project's rather than the user's, for the
     // rule-store inventory: it lists them read-only and never backs them up.
     projectDirectories: project.directories.slice(),
+    // True only under `projectTrust: 'cached'` while Codex has not answered yet.
+    projectPending: project.pending === true,
     failures,
     // Local rule files are one input. Say so wherever the set is reported.
     blindSpots: [
@@ -531,15 +539,59 @@ function codexRulesArguments(files) {
 // that project would block user-scope maintenance everywhere. Project rules
 // belong to the explanation and the inventory, which describe what a session in
 // THIS workspace obeys, not to the check of a file that is not theirs.
+//
+// THE ASK NEVER RUNS ON THE EXTENSION HOST THREAD (2026-10-14). d5200f9 had the
+// dashboard push and "Why did this prompt?" reach the ask synchronously, and the
+// ask is a spawnSync of the worker with a 40 s ceiling. Measured on the v1.6.2
+// tree with a stand-in codex in an isolated profile: a cold push blocked the host
+// for 1,106 ms, a push after any config.toml touch for 980 ms, and a codex that
+// never answers for 31,331 ms. Every extension in the window froze for that long,
+// and a spawnSync child is out of reach of deactivate's kill. So the host asks
+// for `projectTrust: 'cached'`, which reads the verdict and never spawns, and
+// settles a miss with refreshProjectTrust: the same worker, launched with
+// execFile, handed to the caller's `track` so deactivate can end it, bounded at
+// PROJECT_TRUST_ASYNC_TIMEOUT_MS. The synchronous ask stays for the CLI and the
+// Auto Learn worker thread, where blocking is the caller's own business.
+//
+// AND A `.codex` FOLDER WITH NO `rules` FOLDER IS NOT ASKED ABOUT. A layer can
+// only add `<folder>/rules` to the set, so a `.codex` holding only config.toml or
+// hooks cannot change the answer, and starting an app-server to find out was the
+// whole cost of the ask for nothing. projectCandidates filters on it; a `rules`
+// folder created later changes the candidate signature and is asked about then.
+//
+// CACHE SHAPE (2026-10-14). One entry per (which Codex, which profile, which
+// workspace, platform); config.toml's size+mtime is checked ON the entry and a
+// mismatch replaces it. It used to be part of the KEY, so every edit left the
+// previous entry behind until LRU eviction: 100 edits held 32 entries, and each
+// held the whole config.toml text (measured 630 KiB, every one carrying the MCP
+// server token that file held). An entry now keeps only what the fallback reads:
+// the parsed `[projects]` trust entries and whether `project_root_markers` is
+// mentioned.
 
 const PROJECT_TRUST_CACHE = new Map();
 const PROJECT_TRUST_CACHE_LIMIT = 32;
+// One refresh per (entry, config, candidate set) at a time; see refreshProjectTrust.
+const PROJECT_TRUST_INFLIGHT = new Map();
+// Bumped by abandonProjectTrustRefreshes(). A refresh that settles under an older
+// epoch stores nothing: the extension calls it from deactivate, right after it
+// killed the worker, so an answer that is only "the worker was killed" can never
+// become the cached verdict a same-realm re-activate reads.
+let projectTrustEpoch = 0;
+// The whole budget of one read-only ask from the host, worker deadline and its
+// app-server's kill included (src/codex-mcp-config.js readCodexConfigLayersAsync).
+// The write path keeps its 25 s deadline; a cold read measured 1.1 s here.
+const PROJECT_TRUST_ASYNC_TIMEOUT_MS = 10000;
 const injectedRpcIds = new WeakMap();
 let nextInjectedRpcId = 0;
 
 const USER_SCOPE_ONLY_NOTE =
   'Project rule folders (<project>/.codex/rules, which Codex loads only for a ' +
   'project it trusts) are not part of this set: it holds the user-scope rules alone.';
+
+const PROJECT_TRUST_PENDING_NOTE =
+  'Project rule folders (<project>/.codex/rules) are still being checked: Codex is being ' +
+  'asked which of them it trusts in this workspace, so only the user-scope rules are ' +
+  'counted until it answers.';
 
 function fileSignature(file) {
   try {
@@ -568,10 +620,12 @@ function repositoryMarker(dir) {
   } catch { return false; }
 }
 
-// The `.codex` folders a session whose cwd is `root` could load. This only
-// decides whether Codex needs asking at all, so it errs WIDE: a custom
+// The `.codex` folders a session whose cwd is `root` could load RULES from. This
+// only decides whether Codex needs asking at all, so it errs WIDE: a custom
 // `project_root_markers` (any spelling, any table) widens it to every ancestor.
-// Too wide costs one cached app-server start; too narrow would hide rules.
+// Too wide costs one cached app-server start; too narrow would hide rules. The
+// `rules` test is not a narrowing of that: both verdicts below only ever add
+// `<folder>/rules`, and a folder that does not exist contributes no file.
 function projectCandidates(root, codexHome, wide, fold) {
   const chain = [];
   let repository = false;
@@ -584,7 +638,7 @@ function projectCandidates(root, codexHome, wide, fold) {
   }
   return (wide || repository ? chain : [root])
     .map((dir) => path.join(dir, '.codex'))
-    .filter((folder) => fold(folder) !== fold(codexHome) && directoryExists(folder));
+    .filter((folder) => fold(folder) !== fold(codexHome) && directoryExists(path.join(folder, 'rules')));
 }
 
 // Codex's answer, or null when the reply has a shape this cannot read, which
@@ -665,17 +719,23 @@ function projectTrustEntries(text) {
       else if (/^\s*trust_level\b/.test(line)) other = true;
     } else if (topLevel && /^\s*["']?projects["']?\s*[.=]/.test(line)) other = true;
   }
-  return { entries, other };
+  // Round-tripped through JSON so every key is a FRESH string. A regex capture
+  // or a split line can be a slice that pins its whole parent in memory, and the
+  // parent here is config.toml, MCP tokens and all; the cache keeps this result,
+  // so a slice would keep the text this shape exists to drop.
+  return JSON.parse(JSON.stringify({ entries, other }));
 }
 
-function configVerdict(root, candidates, text, reason, platform, fold) {
+// `trust` is projectTrustEntries' result for the config.toml the entry was read
+// from: the fallback never needs the text itself.
+function configVerdict(root, candidates, trust, reason, platform, fold) {
   const foldText = (value) => (platform === 'win32' ? String(value).toLowerCase() : String(value));
   const notes = [`Codex could not be asked which project folders it trusts (${String(reason).slice(0, 200)}), ` +
     'so config.toml was read directly, and more narrowly than Codex reads it.'];
   const directories = [];
   const own = path.join(root, '.codex');
   const ownRules = path.join(own, 'rules');
-  const { entries, other } = projectTrustEntries(text);
+  const { entries, other } = trust;
   if (candidates.some((folder) => fold(folder) === fold(own))) {
     // Both spellings Codex was measured to accept for a cwd: the path as given,
     // and its canonical long-name form, which is also the one Codex's own
@@ -706,55 +766,146 @@ function configVerdict(root, candidates, text, reason, platform, fold) {
   return { directories, notes };
 }
 
-function projectRuleDirectories(options, codexHome, platform) {
-  if (!options.workspaceRoot) return { directories: [], notes: [USER_SCOPE_ONLY_NOTE] };
+// Everything the sync ask, the cached read and the async refresh share: the
+// cache entry for this (Codex, profile, workspace, platform), replaced when
+// config.toml's signature moved, and the candidate folders as they are NOW.
+// Cheap: a stat and, on a config change, one read; no spawn.
+function projectTrustLookup(options, codexHome, platform) {
   const root = path.resolve(String(options.workspaceRoot));
   const fold = (file) => (platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file));
   const configFile = path.join(codexHome, 'config.toml');
   const rpc = typeof options.rpc === 'function' ? options.rpc : null;
   if (rpc && !injectedRpcIds.has(rpc)) injectedRpcIds.set(rpc, ++nextInjectedRpcId);
   // Everything that can change the answer without changing config.toml is in
-  // the key too: which Codex (and which injected test route) was asked, and for
-  // which profile, workspace and platform.
+  // the key: which Codex (and which injected test route) was asked, and for
+  // which profile, workspace and platform. config.toml itself is checked on the
+  // entry (see "CACHE SHAPE" above), so an edit replaces the entry in place.
   const key = JSON.stringify([rpc ? injectedRpcIds.get(rpc) : 0, String(options.codexExecutable || 'codex'),
     String(options.nodeExecutable || 'node'), options.home == null ? null : path.resolve(String(options.home)),
-    fold(codexHome), fold(root), platform, fileSignature(configFile)]);
+    fold(codexHome), fold(root), platform]);
+  const config = fileSignature(configFile);
   let entry = PROJECT_TRUST_CACHE.get(key);
-  if (!entry) {
+  if (!entry || entry.config !== config) {
     let text = '';
     try { text = fs.readFileSync(configFile, 'utf8'); } catch {}
-    entry = { text, wide: /project_root_markers/.test(text), signature: null, verdict: null };
-  }
-  // Re-evaluated when the folder set changes even though config.toml did not: a
-  // `.codex` folder created after the first ask is otherwise invisible until the
-  // next config edit, which can be never.
-  const candidates = projectCandidates(root, codexHome, entry.wide, fold);
-  const signature = JSON.stringify(candidates.map(fold));
-  if (entry.signature !== signature) {
-    entry.verdict = candidates.length ? askCodexOrConfig() : { directories: [], notes: [] };
-    entry.signature = signature;
+    entry = { config, wide: /project_root_markers/.test(text), trust: projectTrustEntries(text),
+      signature: null, verdict: null };
   }
   PROJECT_TRUST_CACHE.delete(key);
   PROJECT_TRUST_CACHE.set(key, entry);
   while (PROJECT_TRUST_CACHE.size > PROJECT_TRUST_CACHE_LIMIT) {
     PROJECT_TRUST_CACHE.delete(PROJECT_TRUST_CACHE.keys().next().value);
   }
-  return { directories: entry.verdict.directories.slice(), notes: entry.verdict.notes.slice() };
+  // Re-evaluated when the folder set changes even though config.toml did not: a
+  // `.codex/rules` folder created after the first ask is otherwise invisible
+  // until the next config edit, which can be never.
+  const candidates = projectCandidates(root, codexHome, entry.wide, fold);
+  const signature = JSON.stringify(candidates.map(fold));
+  const ask = { home: options.home, codexHome, workspaceRoot: root,
+    codexExecutable: options.codexExecutable || 'codex', nodeExecutable: options.nodeExecutable, rpc };
+  return { key, entry, root, fold, platform, codexHome, candidates, signature, ask,
+    fresh: entry.verdict !== null && entry.signature === signature };
+}
 
-  function askCodexOrConfig() {
-    let reason;
-    try {
-      // Required here, not at the top: the MCP module pulls in the policy
-      // writer, and nothing that never passes a workspace root should load it.
-      const { readCodexConfigLayers } = require('./codex-mcp-config');
-      const response = readCodexConfigLayers({ home: options.home, codexHome, workspaceRoot: root,
-        codexExecutable: options.codexExecutable || 'codex', nodeExecutable: options.nodeExecutable, rpc });
-      const verdict = layersVerdict(response, path.join(codexHome, 'rules'), fold);
-      if (verdict) return verdict;
-      reason = 'Codex returned project layers in a shape this tool cannot read';
-    } catch (error) { reason = String((error && error.message) || error); }
-    return configVerdict(root, candidates, entry.text, reason, platform, fold);
+// What Codex said, read into a verdict, or the narrow config.toml fallback when
+// it could not be asked or said something unreadable. `asked` is the reply or
+// the error; the sync ask and the async refresh both end here, so the two can
+// never disagree about the same reply.
+function verdictFrom(state, asked) {
+  let reason;
+  if (asked instanceof Error) reason = String(asked.message || asked);
+  else {
+    const verdict = layersVerdict(asked, path.join(state.codexHome, 'rules'), state.fold);
+    if (verdict) return verdict;
+    reason = 'Codex returned project layers in a shape this tool cannot read';
   }
+  return configVerdict(state.root, state.candidates, state.entry.trust, reason, state.platform, state.fold);
+}
+
+// Stores only into the entry that is still cached: a config edit while the ask
+// ran replaced it, and an answer about the old config must not stand for the new.
+function settleProjectTrust(state, verdict) {
+  if (PROJECT_TRUST_CACHE.get(state.key) !== state.entry) return;
+  state.entry.verdict = verdict;
+  state.entry.signature = state.signature;
+}
+
+const asError = (error) => (error instanceof Error ? error : new Error(String(error)));
+
+function projectRuleDirectories(options, codexHome, platform) {
+  if (!options.workspaceRoot) return { directories: [], notes: [USER_SCOPE_ONLY_NOTE] };
+  const state = projectTrustLookup(options, codexHome, platform);
+  if (!state.fresh) {
+    if (!state.candidates.length) settleProjectTrust(state, { directories: [], notes: [] });
+    else if (options.projectTrust === 'cached') {
+      // The host's door: nothing cached for this config and folder set, so the
+      // project folders are left OUT (never guessed) and the set says why. The
+      // caller settles it with refreshProjectTrust and asks again.
+      return { directories: [], notes: [PROJECT_TRUST_PENDING_NOTE], pending: true };
+    } else {
+      let asked;
+      try {
+        // Required here, not at the top: the MCP module pulls in the policy
+        // writer, and nothing that never passes a workspace root should load it.
+        const { readCodexConfigLayers } = require('./codex-mcp-config');
+        asked = readCodexConfigLayers(state.ask);
+      } catch (error) { asked = asError(error); }
+      settleProjectTrust(state, verdictFrom(state, asked));
+    }
+  }
+  // Settled above if it was not fresh: a synchronous ask cannot race the entry
+  // being replaced, so settle never refuses on this path.
+  const { verdict } = state.entry;
+  return { directories: verdict.directories.slice(), notes: verdict.notes.slice() };
+}
+
+// Settle the trust verdict the cached read is missing, OFF the calling thread:
+// the same worker as the synchronous ask, launched asynchronously, bounded at
+// PROJECT_TRUST_ASYNC_TIMEOUT_MS, and handed to `options.track` (the extension's
+// trackChild, so deactivate ends it). Resolves `true` when something landed that
+// a fresh read should show, `false` when there was nothing to do or the refresh
+// was abandoned. Never rejects. Concurrent calls for one entry, config and
+// folder set share one worker.
+function refreshProjectTrust(options = {}) {
+  try {
+    if (!options.workspaceRoot) return Promise.resolve(false);
+    const state = projectTrustLookup(options, resolveCodexHome(options), options.platform || process.platform);
+    if (state.fresh) return Promise.resolve(false);
+    if (!state.candidates.length) {
+      settleProjectTrust(state, { directories: [], notes: [] });
+      return Promise.resolve(true);
+    }
+    const flight = `${state.key}\0${state.entry.config}\0${state.signature}`;
+    if (PROJECT_TRUST_INFLIGHT.has(flight)) return PROJECT_TRUST_INFLIGHT.get(flight);
+    const epoch = projectTrustEpoch;
+    const promise = Promise.resolve()
+      .then(() => require('./codex-mcp-config').readCodexConfigLayersAsync({ ...state.ask,
+        track: options.track, timeoutMs: PROJECT_TRUST_ASYNC_TIMEOUT_MS }))
+      .then((response) => response, asError)
+      .then((asked) => {
+        if (epoch !== projectTrustEpoch) return false;
+        settleProjectTrust(state, verdictFrom(state, asked));
+        // True even when the entry moved on meanwhile: the caller's next read is
+        // then a miss again, and asks again, which is the right answer to a
+        // config.toml that changed under the question.
+        return true;
+      })
+      .catch(() => false)
+      .finally(() => { if (PROJECT_TRUST_INFLIGHT.get(flight) === promise) PROJECT_TRUST_INFLIGHT.delete(flight); });
+    PROJECT_TRUST_INFLIGHT.set(flight, promise);
+    return promise;
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+// The extension's deactivate, right after it killed every tracked child: any
+// refresh still in flight stores nothing when it settles (its answer would be
+// "the worker was killed"), and the next activation starts its own. Verdicts
+// already cached stay; nothing about them depended on the activation.
+function abandonProjectTrustRefreshes() {
+  projectTrustEpoch += 1;
+  PROJECT_TRUST_INFLIGHT.clear();
 }
 
 // CODEX_RULE_EXTENSION, MANAGED_POLICY_BLIND_SPOTS, codexRuleDirectories and
@@ -777,4 +928,8 @@ module.exports = {
   enterpriseDecisionFor,
   codexRuleFileSet,
   codexRulesArguments,
+  // The extension host's two doors onto the trust lookup (2026-10-14); see
+  // "THE ASK NEVER RUNS ON THE EXTENSION HOST THREAD" above.
+  refreshProjectTrust,
+  abandonProjectTrustRefreshes,
 };

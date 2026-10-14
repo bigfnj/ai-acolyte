@@ -34,7 +34,7 @@ const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
-const { commandLaunch, endProcessTree } = require('./src/exec-resolve');
+const { commandLaunch, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
 const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
@@ -1024,7 +1024,7 @@ async function rebuildRecall() {
     { location: vscode.ProgressLocation.Notification, title: 'ai-acolyte: rebuilding recall index…' },
     () => new Promise((resolve) => {
       const env = { ...process.env, RECALL_MODEL_DIR: st.modelDir, RECALL_MEMORY_DIR: dir, RECALL_REEXEC: '1' };
-      trackChild(execFile(st.py, [script, '--rebuild'], { env, timeout: 180000 }, (err, _stdout, stderr) => {
+      endTreeAfter(trackChild(execFile(st.py, [script, '--rebuild'], { env }, (err, _stdout, stderr) => {
         // A 180s rebuild easily outlives a reload, and deactivate kills it — so
         // the error this reports would be the teardown's own SIGTERM.
         if (deactivated) { resolve(); return; }
@@ -1036,7 +1036,7 @@ async function rebuildRecall() {
         }
         dashboard?.refresh();
         resolve();
-      }));
+      })), 180000);
     })
   );
 }
@@ -1067,7 +1067,7 @@ function autoSyncRecallIfStale() {
     if (!recallIndexStatus(dir).stale) return; // cache already matches the corpus
     recallRebuildAt = Date.now();
     const env = { ...process.env, RECALL_MODEL_DIR: st.modelDir, RECALL_MEMORY_DIR: dir, RECALL_REEXEC: '1' };
-    trackChild(execFile(st.py, [script, '--list'], { env, timeout: 180000 }, (err, _stdout, stderr) => {
+    endTreeAfter(trackChild(execFile(st.py, [script, '--list'], { env }, (err, _stdout, stderr) => {
       if (deactivated) return;
       if (!err) {
         const n = recallIndexCount(dir);
@@ -1078,7 +1078,7 @@ function autoSyncRecallIfStale() {
         console.error('ai-acolyte: auto recall sync failed —', (stderr || err.message || '').trim().slice(0, 300));
       }
       dashboard?.refresh();
-    }));
+    })), 180000);
   } catch (err) {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
@@ -1826,8 +1826,8 @@ function execFileCaptured(executable, args) {
   // PATH check finds can still be unlaunchable when it resolves to a shim.
   const launch = commandLaunch(executable, args);
   return new Promise((resolve, reject) => {
-    trackChild(execFile(launch.file, launch.args, {
-      windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024, ...launch.options,
+    endTreeAfter(trackChild(execFile(launch.file, launch.args, {
+      windowsHide: true, maxBuffer: 1024 * 1024, ...launch.options,
     }, (error, stdout, stderr) => {
       if (error) {
         error.detail = String(stderr || stdout || error.message).trim();
@@ -1835,7 +1835,7 @@ function execFileCaptured(executable, args) {
         return;
       }
       resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
-    }));
+    })), 30000);
   });
 }
 
@@ -3574,7 +3574,7 @@ function compileGates({ quiet = false } = {}) {
   const { dir } = memoryReport();
   return new Promise((resolve) => {
     const env = { ...process.env, RECALL_REEXEC: '1', ...(dir ? { RECALL_MEMORY_DIR: dir } : {}) };
-    trackChild(execFile(st.py, [script, '--gates-compile'], { env, timeout: 60000 }, (err, _out, stderr) => {
+    endTreeAfter(trackChild(execFile(st.py, [script, '--gates-compile'], { env }, (err, _out, stderr) => {
       // Resolve false rather than true, so no caller chains into a policy write
       // on the strength of a compile the teardown just cancelled.
       if (deactivated) { resolve(false); return; }
@@ -3586,7 +3586,7 @@ function compileGates({ quiet = false } = {}) {
         return;
       }
       resolve(true);
-    }));
+    })), 60000);
   });
 }
 

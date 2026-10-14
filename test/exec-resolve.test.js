@@ -308,3 +308,95 @@ test('the tree kill runs System32\'s taskkill, not one planted in the current di
   try { assert.equal(taskkillPath(), path.join('D:\\WinRoot', 'System32', 'taskkill.exe')); }
   finally { process.env.SystemRoot = before; }
 });
+
+// A launcher and the program under it: cmd.exe -> node on Windows (an npm shim's
+// shape, and a venv python.exe's, whose interpreter is its child), sh -> node on
+// POSIX. The node writes its pid and waits for ever.
+function launcherChain(dir, name) {
+  const pidFile = path.join(dir, `${name}.pid`);
+  const script = path.join(dir, `${name}.js`);
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`);
+  if (windows) {
+    const shim = path.join(dir, `${name}.cmd`);
+    fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}"\r\n`);
+    return { launch: commandLaunch(shim, []), pidFile };
+  }
+  const shim = path.join(dir, name);
+  fs.writeFileSync(shim, `#!/bin/sh\n"${process.execPath}" "${script}"\n`, { mode: 0o755 });
+  return { launch: { file: shim, args: [], options: {} }, pidFile };
+}
+
+// EXECFILE'S OWN TIMEOUT ENDED THE LAUNCHER AND LEFT THE PROGRAM (2026-10-14). Its
+// kill is child.kill() on the one PID it holds. The extension's four execFile sites
+// (the 30 s execpolicy check through an npm codex.cmd, and three venv-python runs of
+// 60 s and 180 s) now take their deadline from endTreeAfter, which tree-kills the
+// root while it is still alive. The deadline is fired by hand once the program is
+// up, so the test neither waits 30 s nor races the launcher's own start.
+test('a deadline from endTreeAfter ends the program under a launcher, which killing the launcher alone leaves running', async (t) => {
+  const { endTreeAfter } = require('../src/exec-resolve');
+  const { execFile } = require('node:child_process');
+  const dir = scratch('deadline');
+  const pids = [];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } });
+  // Every wait is bounded. A program that outlives its launcher still holds the
+  // stdio pipes it inherited, so execFile's callback does not come until it dies.
+  const within = (promise, ms) => Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve('pending'), ms))]);
+  const start = async (name, bound) => {
+    const chain = launcherChain(dir, name);
+    let answered;
+    const answer = new Promise((resolve) => { answered = resolve; });
+    const child = execFile(chain.launch.file, chain.launch.args, { ...chain.launch.options, windowsHide: true },
+      (error) => answered(error));
+    pids.push(child.pid);
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    const armed = bound(child);
+    assert.ok(await waitUntil(() => fs.existsSync(chain.pidFile) && fs.readFileSync(chain.pidFile, 'utf8').trim(), 10000),
+      `precondition: the program under the ${name} launcher started`);
+    const program = Number(fs.readFileSync(chain.pidFile, 'utf8'));
+    pids.push(program);
+    return { child, armed, answer, exited, program };
+  };
+
+  // The control is what execFile's timeout does when it fires: child.kill().
+  const control = await start('control', () => null);
+  control.child.kill();
+  await within(control.exited, 5000);
+  if (windows) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(alive(control.program), true,
+      'precondition: ending the launcher alone leaves the program under it running');
+  }
+  try { process.kill(control.program, 'SIGKILL'); } catch {}
+
+  const realSetTimeout = global.setTimeout;
+  const fixed = await start('fixed', (child) => {
+    let armed = null;
+    global.setTimeout = (fn, ms) => {
+      const handle = realSetTimeout(() => {}, 2 ** 31 - 1);
+      armed = { fn, ms, handle };
+      return handle;
+    };
+    try { endTreeAfter(child, 30000); } finally { global.setTimeout = realSetTimeout; }
+    return armed;
+  });
+  assert.equal(fixed.armed?.ms, 30000, 'endTreeAfter arms a deadline of the length it was given');
+  fixed.armed.fn();
+  if (!windows) {
+    await within(fixed.exited, 5000);
+    try { process.kill(fixed.program, 'SIGKILL'); } catch {}
+    const error = await within(fixed.answer, 5000);
+    assert.match(String(error?.message), /^Command failed:/, 'the callback reads the kill as execFile reports any failed command');
+    // POSIX: endProcessTree reaches a whole tree only through a process group, and
+    // execFile cannot start a leader, so the sh alone is ended. Recorded in
+    // src/exec-resolve.js; the extension's sites have no grandchild there.
+    t.diagnostic('POSIX: the deadline ends the launcher only; a grandchild is out of reach without a process group');
+    return;
+  }
+  // MUTATION: make endTreeAfter's timer call child.kill() instead of
+  // endProcessTree(child), which is execFile's own timeout. The node under cmd.exe
+  // is still running here. Confirmed 2026-10-14.
+  assert.equal(await waitUntil(() => !alive(fixed.program), 5000), true,
+    'the program under the launcher outlived the deadline');
+  const error = await within(fixed.answer, 5000);
+  assert.match(String(error?.message), /^Command failed:/, 'the callback reads the kill as execFile reports any failed command');
+});

@@ -200,11 +200,44 @@ function endProcessTree(child) {
   });
 }
 
+// A DEADLINE THAT ENDS THE WHOLE TREE, in place of execFile's `timeout` (2026-10-14).
+// execFile's own timeout kills the one child it holds, and on Windows that child is
+// routinely a launcher: an npm `codex.cmd` is cmd.exe -> node, and a venv's
+// Scripts\python.exe is a redirector whose interpreter is its child (measured on
+// the development box: the interpreter's parent pid was the pid execFile returned).
+// Ended that way the program that matters keeps running, and nothing can reach it
+// afterwards, because endProcessTree finds a tree by its root and the root is gone.
+// This is the version probe's pattern (src/codex-version.js, "ITS OWN TIMER"): a
+// timer that tree-kills the root while it is still alive. Returns the child, so a
+// call site reads `endTreeAfter(trackChild(execFile(...)), ms)`. Cleared on 'exit';
+// endProcessTree's own guard refuses an exited child as well. Unref'd, because the
+// child is what keeps a process alive while it runs, exactly as before.
+//
+// The callback sees the kill as the child's exit: on Windows taskkill /F leaves exit
+// code 1, on POSIX the SIGTERM. Either way execFile's error reads "Command failed:
+// <command>" plus its stderr, which is all any caller here reports.
+//
+// POSIX IS UNCHANGED, AND THAT IS RECORDED, NOT FIXED. endProcessTree reaches a
+// whole tree there only through a process group, and execFile cannot start a group
+// leader (it drops `detached`; see src/codex-mcp-config.js "SPAWN, NOT execFile"),
+// so this ends the child alone, as execFile's option did. The sites that use it have
+// no grandchild on POSIX: a venv's python is the interpreter itself, recall.py's own
+// re-run is suppressed by RECALL_REEXEC=1, and a native codex is one process.
+function endTreeAfter(child, ms) {
+  const deadline = Number(ms);
+  if (!child || !(deadline > 0)) return child;
+  const timer = setTimeout(() => { endProcessTree(child); }, deadline);
+  if (typeof timer.unref === 'function') timer.unref();
+  const listen = typeof child.once === 'function' ? 'once' : typeof child.on === 'function' ? 'on' : null;
+  if (listen) child[listen]('exit', () => clearTimeout(timer));
+  return child;
+}
+
 // `fallbackDirectories` is not exported: resolveExecutable is its only caller,
 // and test/exec-resolve.test.js already drives the whole fallback through
 // resolveExecutable with a fake APPDATA — including the case where PATH wins and
 // the case where neither holds the name. A test on the directory LIST would pin
 // less than the tests that already exist.
 module.exports = {
-  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath,
+  resolveExecutable, commandLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
 };

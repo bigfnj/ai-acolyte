@@ -404,6 +404,11 @@ test('a codex that never answers costs the push nothing, and deactivate ends it 
     // MUTATION: make killLiveChildren call child.kill() alone again. On Windows the
     // stand-in (worker -> cmd.exe -> node) outlives the extension and this times
     // out. Confirmed 2026-10-14.
+    // On POSIX the same kill is a group signal, and it reaches the stand-in only
+    // because the worker leads its own group. MUTATION: spawn the worker with
+    // `detached: false` in nativeRpcAsync (src/codex-mcp-config.js), which is what
+    // execFile made of `detached: true` until 2026-10-14. This times out on Linux,
+    // as it did on every Ubuntu leg of CI run 38525363435. Confirmed 2026-10-14.
     await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, 5000,
       'the hung codex to be killed with the worker that started it');
     pid = null;

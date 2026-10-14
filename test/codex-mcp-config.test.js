@@ -348,3 +348,49 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   await assert.rejects(api.readCodexConfigLayersAsync({ home, codexHome, codexExecutable: codex.executable,
     rpc: () => Promise.resolve([{ config: {} }]) }), /did not return layers/, 'an injected route is checked like the real one');
 });
+
+const gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };
+async function waitFor(predicate, ms) {
+  const start = Date.now();
+  while (!predicate() && Date.now() - start < ms) await new Promise(resolve => setTimeout(resolve, 50));
+  return predicate();
+}
+
+// THE TREE KILL REACHES THE CODEX ON POSIX TOO (2026-10-14). The worker's
+// `detached` went through execFile, which drops it, so the worker never led a
+// process group, endProcessTree's group signal failed with ESRCH, and the kill
+// deactivate makes ended the worker alone: on every Ubuntu CI leg of run
+// 38525363435 the hung codex outlived it. Driven through the real worker and the
+// real endProcessTree, which is deactivate's own path (killLiveChildren). The
+// worker's deadline here is its 25 s ceiling, so within the 3 s this waits only
+// the kill can have ended the codex.
+test('a tree kill of the asynchronous worker ends the codex it started, on every platform', async t => {
+  const { endProcessTree } = require('../src/exec-resolve');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-tree-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const codex = hangingCodex(t);
+  const tracked = [];
+  const outcome = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
+    timeoutMs: 40000, track: child => tracked.push(child) }).then(() => 'answered', error => error.message);
+  t.after(() => { for (const child of tracked) { try { child.kill('SIGKILL'); } catch {} } });
+  assert.ok(await waitFor(() => fs.existsSync(codex.pidFile) && fs.readFileSync(codex.pidFile, 'utf8').trim(), 10000),
+    'precondition: the worker started the stand-in codex');
+  const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.equal(gone(pid), false, 'precondition: the stand-in codex is running');
+  if (process.platform !== 'win32') {
+    // MUTATION: spawn the worker with `detached: false`, which is what execFile
+    // made of `detached: true`. No group carries the worker's PID and this throws
+    // ESRCH. Confirmed 2026-10-14.
+    assert.doesNotThrow(() => process.kill(-tracked[0].pid, 0), 'the worker leads a process group of its own');
+  }
+  await endProcessTree(tracked[0]);
+  // MUTATION: spawn the app-server `detached` in the worker. It leads a group of
+  // its own, the host's group signal misses it, and it is still running here.
+  // Confirmed 2026-10-14.
+  assert.equal(await waitFor(() => gone(pid), 3000), true, 'the codex under the worker was ended with it');
+  assert.match(await outcome, /^Codex config RPC is unavailable: Command failed: the worker exited/,
+    'a killed worker reads as unavailable, the way the execFile route reported it');
+});

@@ -165,9 +165,9 @@ function trackChild(child) {
 // worker is node -> (cmd.exe ->) codex. Measured: deactivate's child.kill() on a
 // trust worker whose stand-in codex never answered left that codex running,
 // orphaned, after the extension was gone. endProcessTree (src/exec-resolve.js)
-// runs taskkill /T /F and then child.kill(); POSIX keeps the plain kill. Returns
-// a promise for the reaping, which deactivate awaits, bounded, after it has
-// dropped its retainers.
+// runs taskkill /T /F, then child.kill(); on POSIX it signals the group of a child
+// that leads one (the trust worker, spawned detached for this). Returns a promise
+// for the reaping, which deactivate awaits, bounded, after dropping its retainers.
 function killLiveChildren() {
   const reaped = [...liveChildren].map((child) => endProcessTree(child));
   liveChildren.clear();

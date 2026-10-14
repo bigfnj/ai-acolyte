@@ -140,6 +140,12 @@ function commandLaunch(name, args = []) {
 // is not a leader there is no group with its PID (a PID is never reused while a
 // group still carries it), so that signal fails with ESRCH and the plain kill
 // below is all that happens: the same as before for every other caller.
+//
+// `detached` HAS TO GO TO spawn ITSELF (2026-10-14). execFile copies a fixed list
+// of options to spawn and drops `detached` silently, so a child started through
+// execFile is never a leader and takes the ESRCH branch: the trust worker did,
+// and every Ubuntu CI leg left its hung codex running (src/codex-mcp-config.js,
+// "SPAWN, NOT execFile").
 function endProcessTree(child) {
   const fallback = () => { try { child.kill(); } catch { /* already gone */ } };
   if (!child) return Promise.resolve();

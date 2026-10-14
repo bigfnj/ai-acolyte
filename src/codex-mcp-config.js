@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync, execFile } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 const { resolveCodexHome } = require('./codex-paths');
 const { commandLaunch, endProcessTree } = require('./exec-resolve');
 const { writeFileAtomicSync } = require('./permissions');
@@ -160,6 +160,20 @@ function nativeRpc(requests, options, context) {
 // `options.track` receives the child, so the extension's deactivate can end it
 // (and, through the same tree kill, everything under it). Failure messages match
 // nativeRpc's, so callers matching "not reachable" read both alike.
+//
+// SPAWN, NOT execFile (2026-10-14). This launched the worker with
+// `execFile(..., { detached })`, and execFile passes spawn a fixed list of its
+// options (cwd, env, gid, shell, signal, uid, windowsHide,
+// windowsVerbatimArguments) and drops every other one without a word. So the
+// worker was never a process-group leader on POSIX, endProcessTree's `-pid`
+// signal failed with ESRCH, and only the worker died: on all three Ubuntu CI
+// legs (run 38525363435) deactivate left the hung stand-in codex running, which
+// is exactly where a Linux or macOS user's real `codex app-server` would have
+// been left, orphaned, holding its stdio. spawn honours `detached`, so the
+// output is gathered here instead, with execFile's 16 MiB bound and the same
+// failure shapes. The worker does not detach its app-server (see the worker
+// below), so the group the host signals is the whole tree.
+const WORKER_OUTPUT_LIMIT = 16 * 1024 * 1024;
 function nativeRpcAsync(requests, options, context) {
   return new Promise((resolve, reject) => {
     if (!requests.every((item) => item?.method === 'config/read')) {
@@ -172,14 +186,16 @@ function nativeRpcAsync(requests, options, context) {
     const timeoutMs = Math.min(40000, Math.max(4000, Number(options.timeoutMs) || 10000));
     let timedOut = false;
     let backstop = null;
-    // `detached` on POSIX only: it makes the worker a process-group leader, so the
-    // tree kill (endProcessTree) reaches its codex as well. On Windows it would
-    // open a console; the tree kill there is taskkill /T and needs no group.
-    const child = execFile(launch.file, launch.args, { ...launch.options, windowsHide: true, encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024, detached: process.platform !== 'win32' }, (error, stdout) => {
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let overflow = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(backstop);
       if (timedOut) { reject(new Error('Codex config RPC is unavailable: the worker timed out')); return; }
-      if (error && !String(stdout || '').trim()) {
+      if (error && !stdout.trim()) {
         reject(new Error('Codex config RPC is unavailable: ' + String(error.message || error).slice(0, 600)));
         return;
       }
@@ -192,7 +208,26 @@ function nativeRpcAsync(requests, options, context) {
         return;
       }
       resolve(output.results);
+    };
+    // `detached` on POSIX only: it makes the worker a process-group leader, so the
+    // tree kill (endProcessTree) reaches its codex as well. On Windows it would
+    // open a console; the tree kill there is taskkill /T and needs no group.
+    const child = spawn(launch.file, launch.args, { ...launch.options, windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (overflow) return;
+      stdout += chunk;
+      if (stdout.length > WORKER_OUTPUT_LIMIT) { overflow = true; endProcessTree(child); }
     });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { if (stderr.length < 4096) stderr += chunk; });
+    // A launch failure emits 'error' and may never emit 'close'; `settled` keeps
+    // whichever comes second from answering twice.
+    child.once('error', finish);
+    child.once('close', (code, signal) => finish(code === 0 && !overflow ? null
+      : new Error(overflow ? `worker output passed ${WORKER_OUTPUT_LIMIT} bytes`
+        : `Command failed: the worker exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)));
     backstop = setTimeout(() => { timedOut = true; endProcessTree(child); }, timeoutMs);
     child.stdin?.on('error', () => {});
     child.stdin?.end(JSON.stringify({ requests, home: context.home, codexHome: context.codexHome,
@@ -449,7 +484,6 @@ module.exports = { inspectCodexMcpTool, planCodexMcpApproval, applyCodexMcpAppro
 
 if (require.main === module && process.argv[2] === '--rpc-worker') {
   const readline = require('node:readline');
-  const { spawn } = require('node:child_process');
   let input = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => { input += chunk; if (input.length > 1024 * 1024) process.exit(1); });
@@ -484,6 +518,10 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
       const env = { ...process.env, HOME: request.home, USERPROFILE: request.home, CODEX_HOME: request.codexHome };
       for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL',
         'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT']) delete env[key];
+      // NOT detached, deliberately: the app-server stays in this worker's process
+      // group, which nativeRpcAsync makes a group of its own on POSIX, so the
+      // host's group signal (endProcessTree) ends it with the worker. A detached
+      // app-server would lead a group of its own and escape that signal.
       child = spawn(launch.file, launch.args, { ...launch.options, windowsHide: true, cwd: request.home,
         env, stdio: ['pipe', 'pipe', 'pipe'] });
       closed = new Promise(resolve => child.once('close', resolve));

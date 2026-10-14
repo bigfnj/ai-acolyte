@@ -1558,3 +1558,29 @@ test('a node option naming an OpenSSL or node config file is broad, like --env-f
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} still renders`);
   }
 });
+
+// `deno x` is deno's npx, and `dx` its alias (src/policy-exporters.js INTERPRETER_GRAMMAR and
+// RUNNER_ALIASES). Each row's verdict at b11038d is in the commit that added this test.
+const DENO_X_BROAD = [['deno', 'x'], ['deno', 'x', 'sh'], ['deno', 'x', 'node'], ['deno', 'x', 'python', '-c', 'x'],
+  ['deno', 'x', 'timeout', '5', 'sh'], ['deno', 'x', '--preload', 'p.js', 'tsc'], ['deno', 'x', '-c', 'deno.json', 'tsc'],
+  ['deno', 'x', '--env-file', 'x', 'tsc'], ['dx'], ['dx', 'sh'], ['dx.exe', 'node'],
+  // deno run is unchanged: any option after `run` is broad (pins).
+  ['deno', 'run', '-A', 'npm:cowsay'], ['deno', 'run']];
+const DENO_X_NARROW = [['deno', 'x', 'tsc'], ['deno', 'x', 'npm:create-vite'], ['deno', 'x', 'jsr:@std/http/file-server'],
+  ['dx', 'tsc'], ['deno', 'run', 'x.ts'], ['deno', 'run', 'npm:cowsay'], ['deno', 'test'], ['deno', 'fmt']];
+
+test('deno x and dx are judged by the command they name, and deno run keeps its pinned target', () => {
+  for (const prefix of DENO_X_BROAD) {
+    // MUTATION: drop `exec: ['x']` from deno's subcommands. Any named target pins `deno x` again
+    // and `["deno", "x", "sh"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop the `dx` entry from RUNNER_ALIASES. `["dx", "sh"]` is a wrapper with no
+    // grammar of its own and renders. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs any package bin or a broad command`);
+  }
+  for (const prefix of DENO_X_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names a narrow command and still renders`);
+  }
+  for (const permission of ['Bash(dx tsc *)', 'Bash(deno x tsc *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+});

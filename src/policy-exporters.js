@@ -84,7 +84,8 @@ const OWN_SHELL_WRAPPERS = [
   'zsh', 'zsh.exe',
   // bunx and pnpx, the short names of `bun x` and `pnpm dlx` (2026-10-14, RUNNER_ALIASES). The
   // learner lists them too; they are spelled here as well so the refusal does not hang on it.
-  'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe',
+  // `dx` is `deno x`'s alias, here only (RUNNER_ALIASES says why).
+  'bunx', 'bunx.exe', 'pnpx', 'pnpx.exe', 'dx', 'dx.exe',
   ...['busybox', 'builtin', 'chroot', 'chrt', 'doas', 'firejail', 'flock', 'gdb', 'ionice',
     'ltrace', 'nice', 'nocorrect', 'noglob', 'nohup', 'nsenter', 'pkexec', 'runas', 'runuser',
     'script', 'setsid', 'stdbuf', 'strace', 'su', 'sudo', 'systemd-run', 'taskset', 'time',
@@ -641,7 +642,15 @@ function execWrapperInner(grammar, prefix) {
 // judged by the command it names (`exec` below): `["bun", "x", "tsc"]` renders and `["bun",
 // "x", "sh"]` does not. Until then any named target pinned it, so `["bun", "x", "sh"]` and
 // `["bun", "x", "python", "-c", "x"]` rendered while `["npx", "sh"]` was refused (measured
-// against e6d227c). deno's `x` is left a target: not measured, recorded.
+// against e6d227c).
+//
+// deno's `x` joined it later the same day: deno 2.9.5's own help reads "Execute a binary from npm
+// or jsr, like npx" (`deno x --help`, read on the box; not run, because it fetches packages), so
+// `["deno", "x", "tsc"]` renders and `["deno", "x", "sh"]` does not; until then any named target
+// pinned it (measured against b11038d). Every option deno x takes before the binary
+// (`--preload FILE`, `-c/--config FILE`, `--env-file`, `--allow-scripts`, ...) is unmodelled, so
+// broad, the governing principle in the header. `deno run SCRIPT` is unchanged: the target is
+// the script or `npm:`/`jsr:` specifier it runs, and any option after `run` is broad.
 const DEFAULT_INFO = new Set(['--version', '-V', '--help', '-h']);
 const SHELL_INFO = new Set(['--version', '--help']);
 const POSIX_SHELL_GRAMMAR = {
@@ -726,7 +735,7 @@ const INTERPRETER_GRAMMAR = new Map(Object.entries({
     fused: /^--(?:debug|debug-output|features|profile)=/,
   },
   bun: { info: DEFAULT_INFO, subcommands: { target: ['run', 'x', 'create'], exec: ['x'], broad: ['exec', 'repl'] } },
-  deno: { info: DEFAULT_INFO, subcommands: { target: ['run', 'serve', 'compile', 'x'], broad: ['repl', 'eval'] } },
+  deno: { info: DEFAULT_INFO, subcommands: { target: ['run', 'serve', 'compile', 'x'], exec: ['x'], broad: ['repl', 'eval'] } },
 }));
 
 function interpreterIsBroad(base, prefix) {
@@ -1274,7 +1283,12 @@ const RUNNER_GRAMMAR = new Map(Object.entries({
 // named, and `["pnpx", "create-vite"]` is `["pnpm", "dlx", "create-vite"]`, narrow. Both are
 // OWN_SHELL_WRAPPERS too, so the Claude half refuses them at any depth as it refuses bun and
 // pnpm, and the learner lists them as wrappers.
-const RUNNER_ALIASES = new Map([['bunx', ['bun', 'x']], ['pnpx', ['pnpm', 'dlx']]]);
+//
+// `dx` is `deno x` (added later the same day): `deno x --install-alias` "Creates a dx alias so
+// you can run dx <command> instead of deno x <command>" (deno 2.9.5's help). It is an
+// OWN_SHELL_WRAPPERS entry only, not a learner one, because the name is also Android's old
+// dex tool, and on this exporter's side refusing that one too is the safe failure.
+const RUNNER_ALIASES = new Map([['bunx', ['bun', 'x']], ['pnpx', ['pnpm', 'dlx']], ['dx', ['deno', 'x']]]);
 
 // The index of the first token at or after `k` that is not one of `grammar`'s options, or
 // -1 at an option it does not list. `grammar` may be undefined: nothing is modelled, so

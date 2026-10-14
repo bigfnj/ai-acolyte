@@ -20,14 +20,32 @@
 // THE CENSUS USED TO COVER THREE MODULES. src/recall-index.js, src/tool-learn.js and
 // vscode-extension/memoryLint.js — so a dead export removed from src/auto-learn-manager.js
 // was invisible to it, and nothing stopped it coming back. It now covers every module in
-// src/ and vscode-extension/.
+// src/ and vscode-extension/, and since 2026-10-14 every top-level module in scripts/ that
+// exports anything: the v1.6.2 audit found five dead exports there that nothing could see,
+// because scripts/ was read only as a CONSUMER. A script's export counts as consumed by
+// another script, a test, or a doc (a recipe in a .md may call one); the subdirectories
+// hold VS Code test-runner entry points, loaded by path, which no scan can follow.
 //
 // AND THE METHOD MATTERS. A destructure-only scan is wrong here and was already disproven:
 // bin/wildcard-perms does `const cache = require('../src/fixed-point-cache')` and then
 // reaches members off it on the hook's hot path, so a scan that only reads
 // `const { a, b } = require(...)` calls every one of that module's exports dead. Four
-// consumer shapes are counted: destructured require, namespace alias plus member access,
-// `require(...).name` inline, and an ESM named import (scripts/ is .mjs).
+// consumer shapes are counted: destructured require (or `await import`), namespace alias
+// plus member access, `require(...).name` inline, and an ESM named import. The module
+// can be named by a string literal, by a path.join/resolve or pathToFileURL whose pieces
+// end in it (`require(path.join(extensionDir, 'src', 'history-adapters.js'))`), or by a
+// const holding such a path (`const SCRIPT = path.join(...); require(SCRIPT)`).
+//
+// AN IMPORT IS NOT A USE (2026-10-14, the v1.6.2 audit). vscode-extension/extension.js
+// destructured SETTINGS_ABSENT from src/settings-write.js and never referenced it again
+// (since 000e5b0), and that unused binding was the only thing calling the export
+// "consumed". A destructured or named import now counts only when its LOCAL name occurs
+// again in the importing file, outside the import itself and outside comments.
+//
+// AND THE TREE IS GIT'S, not the disk's (also 2026-10-14). The walk this replaced read the
+// gitignored vscode-extension/src/ that scripts/package.mjs stages, so on a box that had
+// packaged, a stale staged copy still importing a name counted as its consumer: a dead
+// export passed here and failed on CI, where no such copy exists.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -35,30 +53,25 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+const { execFileSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEST_DIR = path.join(ROOT, 'test') + path.sep;
 
 // Held on purpose, and structurally: these have no consumer a static scan can find and
 // never will. The key is the export; the value is why, and is printed on failure.
+//
+// 2026-10-14: pickPrimaryDir, and extension.js's activate and deactivate, left this list
+// for TEST_ONLY, because the census now follows a require through a path.join and so sees
+// the tests that load them that way. fastLint is still reached only through a loader that
+// takes the module path as an argument.
 const HELD = {
   'vscode-extension/memoryLint.js': {
     fastLint:
       'test-only, not dead, and invisible here: test/memory-line-cap.test.js reaches it '
       + 'through loadLint(), which re-requires the module by resolved path, so no require '
       + 'site names it. Those calls are what make the line-cap off-by-one falsifiable.',
-    pickPrimaryDir:
-      'test-only, not dead, same dynamic loader: test/memory-lint-watchers.test.js and '
-      + 'test/recall-index.test.js pin the store-selection rule through it, against '
-      + 'recall.py as the authority.',
-  },
-  'vscode-extension/extension.js': {
-    activate:
-      'the VS Code entry point. package.json `main` names this file and the host calls '
-      + 'activate() itself; no file in the repo requires it by name.',
-    deactivate:
-      'the other half of the VS Code contract, called by the host on teardown. The '
-      + 'lifecycle tests call it off a required module object, not off a named import.',
   },
 };
 
@@ -109,8 +122,12 @@ const PENDING_REMOVAL = {};
 // adding one is a deliberate act and so that a name QUIETLY losing its last production
 // caller shows up here instead of looking unchanged.
 const TEST_ONLY = {
-  'src/agent-gates.js': ['GATES_BEGIN', 'GATES_END', 'makeGatesBlock'],
-  'src/agent-guidance.js': ['BEGIN', 'END', 'GUIDANCE_BODY', 'applyGuidance', 'guidanceBlock', 'guidanceStatus', 'hasGuidance', 'instructionLockPath', 'isCurrent', 'setGuidance'],
+  // 2026-10-14: agent-gates.js left this list, and agent-guidance.js, derived-guidance.js
+  // and history-adapters.js shrank, when the census learned to follow a require through a
+  // path.join. scripts/check-codex-runtime.js and scripts/vscode-acceptance/ load the STAGED
+  // copies of these modules that way (`require(path.join(extensionDir, 'src', ...))`),
+  // and nothing used to see them.
+  'src/agent-guidance.js': ['guidanceBlock', 'guidanceStatus', 'instructionLockPath', 'setGuidance'],
   'src/auto-learn-manager.js': ['migrateStateTo'],
   'src/auto-learn-worker.js': ['run'],
   // These are exercised inside their own production modules; exporting them
@@ -128,11 +145,11 @@ const TEST_ONLY = {
   // state as well as the decision. Both are kept as a stable surface and both are
   // exercised; this census is what noticed, on the merge.
   'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRules', 'enterpriseRequirements'],
-  'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'markersFor', 'reconcileDerived', 'renderMitigation'],
+  'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'reconcileDerived'],
   // resolveExecutable left this list 2026-10-13: src/codex-version.js keys its cache on it.
   'src/exec-resolve.js': ['quoteForCommandProcessor'],
   'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
-  'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl', 'parseCodexJsonl'],
+  'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl'],
   'src/legacy-backup-cleanup.js': ['parseBackupText'],
   'src/legacy-max-cleanup.js': ['LEGACY_ALLOW_CORE', 'legacyApproveCommandFor', 'legacyGeneratedAllow'],
   'src/local-settings.js': ['localBackupPath', 'partitionLocal', 'planPromotions', 'promotionFor', 'redundantUnder'],
@@ -146,47 +163,134 @@ const TEST_ONLY = {
   'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
   'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
+  // SETTINGS_ABSENT joined 2026-10-14 (the v1.6.2 audit): vscode-extension/extension.js
+  // destructured it and never read it (since 000e5b0), and that unused binding was its only
+  // "production consumer". test/settings-write.test.js asserts the absent state by it.
+  'src/settings-write.js': ['SETTINGS_ABSENT'],
   'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
+  // The VS Code host is the real consumer of these two (package.json `main`); the
+  // lifecycle tests load the module by path and call both. Off HELD 2026-10-14.
+  'vscode-extension/extension.js': ['activate', 'deactivate'],
+  // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
+  'vscode-extension/memoryLint.js': ['pickPrimaryDir'],
+  // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
+  // drives a command-line tool through; the tools themselves are run by hand or by CI.
+  'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],
+  'scripts/auto-mode-audit.js': ['audit', 'main', 'parseArgs', 'readAllow', 'render', 'stripCredentials'],
+  'scripts/check-claude-strip-model.js': ['check', 'defaultBinary', 'main'],
+  'scripts/check-codex-runtime.js': ['PROVENANCE_ROOTS', 'localRequireClosure'],
+  'scripts/check-line-refs.js': ['anchorLines', 'anchorsFrom', 'checkBounds', 'checkVacuous', 'collectRefs', 'fixAnchored', 'isVacuousSpan', 'stripRefs', 'tracked'],
+  'scripts/mirror-pack.js': ['NEVER_MIRROR', 'mirrorTargets'],
 };
 
-// Every file that could plausibly consume one of these modules.
-function sourceFiles() {
+// The tree as git sees it, repo-relative with forward slashes: tracked files, plus new ones
+// that are not ignored, so an export added and imported in a file not yet staged still
+// counts. Ignored files are out, which is the point: vscode-extension/src/ and
+// vscode-extension/memory/ are generated by scripts/package.mjs and can be stale. A path
+// listed but gone from disk (deleted, not yet staged) is dropped. Without git, as in a
+// source tarball, a walk stands in, minus the generated directories .gitignore names.
+function treeFiles() {
+  try {
+    const out = execFileSync('git', ['-C', ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 26 });
+    // An unmerged path is listed once per index stage.
+    const listed = [...new Set(out.split('\0').filter(Boolean))];
+    if (listed.length) return listed.filter((rel) => fs.existsSync(path.join(ROOT, rel)));
+  } catch { /* not a git checkout: walk instead */ }
+  const GENERATED = new Set(['vscode-extension/src', 'vscode-extension/memory']);
   const out = [];
-  const walk = (dir) => {
+  const walk = (rel) => {
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = fs.readdirSync(path.join(ROOT, rel), { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
-      const full = path.join(dir, entry.name);
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules') continue;
-        walk(full);
-      } else if (/\.(js|mjs|cjs)$/.test(entry.name)) {
-        out.push(full);
-      }
+        if (entry.name === 'node_modules' || entry.name === '.git' || GENERATED.has(child)) continue;
+        walk(child);
+      } else out.push(child);
     }
   };
-  for (const dir of ['src', 'test', 'vscode-extension', 'scripts']) walk(path.join(ROOT, dir));
-  // Extensionless, so the walk above cannot see it, and it is the highest-frequency
-  // consumer of src/ in the repo.
-  out.push(path.join(ROOT, 'bin', 'wildcard-perms'));
+  walk('');
   return out;
 }
+const TREE = treeFiles();
 
-const FILES = sourceFiles();
+// Every file that could plausibly consume one of these modules. bin/wildcard-perms is
+// extensionless and is the highest-frequency consumer of src/ in the repo.
+const FILES = TREE
+  .filter((rel) => /^(src|test|vscode-extension|scripts)\/.+\.(js|mjs|cjs)$/.test(rel) || rel === 'bin/wildcard-perms')
+  .map((rel) => path.join(ROOT, rel));
+// Docs, consulted only for scripts/ subjects (see the header).
+const DOCS = TREE.filter((rel) => rel.endsWith('.md')).map((rel) => path.join(ROOT, rel));
 const TEXTS = new Map();
-for (const file of FILES) {
+for (const file of [...FILES, ...DOCS]) {
   try { TEXTS.set(file, fs.readFileSync(file, 'utf8')); } catch { /* unreadable: no consumer */ }
 }
 
+// The text with every comment blanked to spaces, so each index still lines up with the
+// original. Used only to ask whether an imported name is ever used: a comment that
+// mentions it is not a use. A scanner rather than two regexes, because a regex for
+// `/* ... */` starts a "comment" inside the string '**/*.md', which extension.js holds,
+// and blanked a third of the file the first time this ran. Strings, template literals
+// and regex literals are skipped whole; a `/` is a regex when the last significant
+// character could not end an operand. That heuristic can misread a division, and the
+// only cost is a few characters of code read as a regex, never a comment kept as code.
+function stripComments(text) {
+  const out = text.split('');
+  const wipe = (from, to) => { for (let k = from; k < to; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  let last = '';   // the last significant (non-space, non-comment) character
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === '/' && next === '/') {
+      const end = text.indexOf('\n', i);
+      const stop = end === -1 ? text.length : end;
+      wipe(i, stop);
+      i = stop;
+    } else if (c === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      wipe(i, stop);
+      i = stop;
+    } else if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c) j += text[j] === '\\' ? 2 : 1;
+      i = j + 1;
+      last = c;
+    } else if (c === '/' && (last === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(last))) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < text.length && text[j] !== '\n') {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === '[') inClass = true;
+        else if (text[j] === ']') inClass = false;
+        else if (text[j] === '/' && !inClass) break;
+        j += 1;
+      }
+      i = j + 1;
+      last = '/';
+    } else {
+      if (!/\s/.test(c)) last = c;
+      i += 1;
+    }
+  }
+  return out.join('');
+}
+const CODE = new Map();
+const codeOnly = (file) => {
+  if (!CODE.has(file)) CODE.set(file, stripComments(TEXTS.get(file) || ''));
+  return CODE.get(file);
+};
+
+// A module defined in scripts/ is a census subject only if it exports something; most
+// are command-line tools with nothing to export.
+const SCRIPT_EXPORTS = /^\s*(?:module\.exports\s*=|export\s)/m;
+
 function censusModules() {
-  const out = [];
-  for (const name of fs.readdirSync(path.join(ROOT, 'src'))) {
-    if (name.endsWith('.js')) out.push(`src/${name}`);
-  }
-  for (const name of fs.readdirSync(path.join(ROOT, 'vscode-extension'))) {
-    if (name.endsWith('.js')) out.push(`vscode-extension/${name}`);
-  }
-  return out;
+  return TREE.filter((rel) => /^(src|vscode-extension)\/[^/]+\.js$/.test(rel)
+    || (/^scripts\/[^/]+\.(js|mjs)$/.test(rel) && SCRIPT_EXPORTS.test(TEXTS.get(path.join(ROOT, rel)) || '')))
+    .sort();
 }
 
 // memoryLint.js and extension.js require 'vscode' at module scope, and extension.js also
@@ -260,62 +364,160 @@ function vscodeStub() {
   };
 }
 
-// name -> Set of files that consume it. Four shapes, because one is demonstrably not enough.
-function consumers(moduleFile, exported) {
-  const stem = path.basename(moduleFile, '.js');
-  const absolute = path.join(ROOT, moduleFile);
-  const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // No backreference for the quote: folded into a longer pattern the group number moves,
-  // and `\1` then matched the destructure body instead. That single character read every
-  // module in the tree as having no consumers at all — a clean sweep, which is a harness
-  // bug and never a result.
-  const req = String.raw`\(\s*['"](?:[^'"]*\/)?` + esc + String.raw`(?:\.js)?['"]\s*\)`;
-  const destructure = new RegExp(String.raw`(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require` + req, 'g');
-  const alias = new RegExp(String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require` + req, 'g');
-  const inline = new RegExp(String.raw`require` + req + String.raw`\s*\.\s*([A-Za-z_$][\w$]*)`, 'g');
-  const esmNamed = new RegExp(
-    String.raw`import\s*\{([^}]*)\}\s*from\s*['"](?:[^'"]*\/)?` + esc + String.raw`(?:\.js)?['"]`, 'g');
+// The exported names, sorted. An .mjs cannot be require()d on every supported Node, so it
+// is imported; only a scripts/ module that statically exports reaches here (censusModules),
+// and the three that do are imported by tests already, side-effect free.
+async function exportsOf(moduleFile) {
+  if (moduleFile.endsWith('.mjs')) {
+    return Object.keys(await import(pathToFileURL(path.join(ROOT, moduleFile)).href)).sort();
+  }
+  return loadModule(moduleFile);
+}
 
-  const found = new Map();
-  const add = (name, file) => {
-    if (!found.has(name)) found.set(name, new Set());
-    found.get(name).add(file);
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const IDENT = String.raw`[A-Za-z_$][\w$]*`;
+
+// Each `require(` or `import(` call in `text`: where the keyword starts, where the closing
+// paren ends, and the argument between them. Parens are balanced, so a path.join(...)
+// argument comes back whole. `require.resolve(` is not a load and does not match.
+function loadCalls(text) {
+  const out = [];
+  const opener = /\b(?:require|import)\s*\(/g;
+  let match;
+  while ((match = opener.exec(text)) !== null) {
+    let depth = 1;
+    let i = opener.lastIndex;
+    for (; i < text.length && depth; i += 1) {
+      if (text[i] === '(') depth += 1;
+      else if (text[i] === ')') depth -= 1;
+    }
+    if (depth) continue;
+    out.push({ start: match.index, end: i, arg: text.slice(opener.lastIndex, i - 1) });
+  }
+  return out;
+}
+
+// `name` standing alone in `code`: not inside a longer identifier, and not `x.name` or
+// `x?.name`, which is some other object's property of the same name. A spread, `...name`,
+// IS a use (the first version missed `...codexFeatureStatus(...)` and called a live
+// import unused).
+function standsAlone(code, name) {
+  const re = new RegExp(String.raw`(?<![\w$])` + escapeRe(name) + String.raw`(?![\w$])`, 'g');
+  let match;
+  while ((match = re.exec(code)) !== null) {
+    const before = code.slice(Math.max(0, match.index - 3), match.index);
+    if (!before.endsWith('.') || before === '...') return true;
+  }
+  return false;
+}
+
+// Is `local` used anywhere in `file` outside [start, end), the import statement itself?
+// Comments do not count (codeOnly).
+function usedOutside(file, start, end, local) {
+  const code = codeOnly(file);
+  return standsAlone(code.slice(0, start) + ' ' + code.slice(end), local);
+}
+
+// `a`, `a: b` or `a = 1` from a destructure, `a` or `a as b` from an ESM import:
+// [the exported name, the local binding].
+function bindings(list, esm) {
+  return list.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+    if (esm) {
+      const [name, local = name] = part.split(/\s+as\s+/).map((s) => s.trim());
+      return [name, local];
+    }
+    const [name, rest] = part.split(':').map((s) => s.trim());
+    return [name.split('=')[0].trim(), (rest || name).split('=')[0].trim()];
+  }).filter(([name, local]) => name && local && !name.startsWith('...'));
+}
+
+// { used, imported }: name -> Set of files. `used` decides the verdicts; `imported` also
+// holds bindings that are never used, so an import of a name the module stopped exporting
+// still fails the over-pruning check below. `only` narrows the files read, for the
+// synthetic test of this machinery at the end of the file.
+function consumers(moduleFile, exported, only = null) {
+  const stem = path.basename(moduleFile, path.extname(moduleFile));
+  const absolute = path.join(ROOT, moduleFile);
+  // A string literal naming the module: a spec with a directory in it ('../src/permissions',
+  // './codexFeaturesUi.js'), or a path piece WITH its extension ('history-adapters.js'). A
+  // bare 'codex-memory' is neither: it is how scripts/check-codex-memory-runtime.js lists
+  // three modules in one array and loads them by index, which no scan can attribute. No
+  // backreference for the quote: folded into a longer pattern the group number moves, and
+  // `\1` once matched the destructure body instead, which read every module in the tree as
+  // having no consumers at all.
+  const named = new RegExp(String.raw`['"](?:[^'"\n]*[\\/]` + escapeRe(stem) + String.raw`(?:\.m?js)?|`
+    + escapeRe(stem) + String.raw`\.m?js)['"]`);
+  // An argument with its string literals blanked, so a holder's name inside a string
+  // ('derived-guidance.js' holds `guidance`) is not read as the holder.
+  const outsideStrings = (arg) => arg.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, '""');
+
+  const used = new Map();
+  const imported = new Map();
+  const add = (map, name, file) => {
+    if (!map.has(name)) map.set(name, new Set());
+    map.get(name).add(file);
   };
-  for (const file of FILES) {
+  const sources = only || (moduleFile.startsWith('scripts/') ? [...FILES, ...DOCS] : FILES);
+  for (const file of sources) {
     if (path.resolve(file) === absolute) continue;
     const text = TEXTS.get(file);
-    if (!text) continue;
-    let match;
-    destructure.lastIndex = 0;
-    while ((match = destructure.exec(text)) !== null) {
-      // `cfg: memoryConf` binds under a local alias; the EXPORT is the left half.
-      for (const part of match[1].split(',')) {
-        const name = part.split(':')[0].trim();
-        if (name) add(name, file);
+    if (!text || !text.includes(stem)) continue;
+
+    // Consts holding a PATH to the module, for `require(SCRIPT)` and `import(gateUrl)`. A
+    // const holding the loaded module itself (`const guidance = require(...)`) is an
+    // alias, handled below, and must not become a holder.
+    const holders = [];
+    for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s+(${IDENT})\s*=\s*([^;]*);`, 'g'))) {
+      if (named.test(m[2]) && !/^\s*(?:await\s+)?(?:require|import)\s*\(/.test(m[2])) {
+        holders.push(new RegExp(String.raw`(?<![\w$.])` + escapeRe(m[1]) + String.raw`(?![\w$])`));
       }
     }
-    esmNamed.lastIndex = 0;
-    while ((match = esmNamed.exec(text)) !== null) {
-      for (const part of match[1].split(',')) {
-        const name = part.split(/\s+as\s+/)[0].trim();
-        if (name) add(name, file);
+    const refersHere = (arg) => named.test(arg) || holders.some((holder) => holder.test(outsideStrings(arg)));
+
+    // ESM: import { a, b as c } from '...'.
+    for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*(['"][^'"\n]+['"])/g)) {
+      if (!named.test(m[2])) continue;
+      for (const [name, local] of bindings(m[1], true)) {
+        add(imported, name, file);
+        if (usedOutside(file, m.index, m.index + m[0].length, local)) add(used, name, file);
       }
     }
-    inline.lastIndex = 0;
-    while ((match = inline.exec(text)) !== null) add(match[1], file);
-    // Namespace alias: `const cache = require('../src/fixed-point-cache')` followed by
-    // `cache.readFixedPoint(...)`. This is the shape a destructure-only scan misses, and
-    // bin/wildcard-perms uses it on the hook's hot path.
-    alias.lastIndex = 0;
-    const aliases = [];
-    while ((match = alias.exec(text)) !== null) aliases.push(match[1]);
-    for (const local of aliases) {
-      for (const name of exported) {
-        if (new RegExp(String.raw`\b${local}\s*\.\s*${name}\b`).test(text)) add(name, file);
+
+    for (const call of loadCalls(text)) {
+      if (!refersHere(call.arg)) continue;
+      // require(...).name, whatever it is assigned to: checked first, because
+      // `const other = require(...).name` also looks like an alias.
+      const inline = new RegExp(String.raw`^\s*\.\s*(${IDENT})`).exec(text.slice(call.end));
+      if (inline) {
+        add(imported, inline[1], file);
+        add(used, inline[1], file);
+        continue;
+      }
+      const before = text.slice(Math.max(0, call.start - 4000), call.start);
+      const offset = call.start - before.length;
+      // const { a, b: c } = require(...)   /   = await import(...)
+      const destructure = new RegExp(String.raw`(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:await\s+)?$`).exec(before);
+      if (destructure) {
+        for (const [name, local] of bindings(destructure[1], false)) {
+          add(imported, name, file);
+          if (usedOutside(file, offset + destructure.index, call.end, local)) add(used, name, file);
+        }
+        continue;
+      }
+      // const helper = require(...), then helper.name
+      const alias = new RegExp(String.raw`(?:const|let|var)\s+(${IDENT})\s*=\s*(?:await\s+)?$`).exec(before);
+      if (alias) {
+        // `(?<![\w$])`, not `\b`-plus-no-dot: `...cleanup.LEGACY_ALLOW_CORE` is a use.
+        for (const name of exported) {
+          if (new RegExp(String.raw`(?<![\w$])` + escapeRe(alias[1]) + String.raw`\s*\??\.\s*` + escapeRe(name) + String.raw`(?![\w$])`).test(text)) {
+            add(imported, name, file);
+            add(used, name, file);
+          }
+        }
       }
     }
   }
-  return found;
+  return { used, imported };
 }
 
 const declaredFor = (moduleFile) => ({
@@ -329,20 +531,26 @@ const declaredFor = (moduleFile) => ({
 // long way, never by one.
 const CONSUMED_FLOOR = 100;
 
-test('the export census actually scanned the tree', () => {
+test('the export census actually scanned the tree', async () => {
   assert.ok(FILES.length > 60, `precondition: only ${FILES.length} source files were found`);
-  assert.ok(TEXTS.size === FILES.length,
-    `precondition: ${FILES.length - TEXTS.size} source file(s) could not be read`);
+  assert.ok([...FILES, ...DOCS].every((file) => TEXTS.has(file)),
+    'precondition: a source or doc file could not be read');
+  assert.ok(!TREE.some((rel) => rel.startsWith('vscode-extension/src/')),
+    'precondition: the generated vscode-extension/src/ is not part of the tree the census reads');
   const modules = censusModules();
-  assert.ok(modules.length >= 24,
-    `precondition: only ${modules.length} modules in the census; src/ or vscode-extension/ moved`);
+  assert.ok(modules.length >= 30,
+    `precondition: only ${modules.length} modules in the census; src/, vscode-extension/ or scripts/ moved`);
+  // WITNESS for the scripts/ half: the ones the v1.6.2 audit read, CommonJS and ESM both.
+  for (const name of ['scripts/check-codex-runtime.js', 'scripts/mirror-pack.js', 'scripts/sync-version.mjs']) {
+    assert.ok(modules.includes(name), `precondition: ${name} is not in the census`);
+  }
 
   let consumed = 0;
   for (const moduleFile of modules) {
-    const exported = loadModule(moduleFile);
-    const found = consumers(moduleFile, exported);
+    const exported = await exportsOf(moduleFile);
+    const { used } = consumers(moduleFile, exported);
     for (const name of exported) {
-      const files = found.get(name);
+      const files = used.get(name);
       if (!files) continue;
       if ([...files].some((file) => !path.resolve(file).startsWith(TEST_DIR))) consumed += 1;
     }
@@ -353,9 +561,9 @@ test('the export census actually scanned the tree', () => {
 });
 
 for (const moduleFile of censusModules()) {
-  test(`${moduleFile} exports nothing it cannot account for`, () => {
-    const exported = loadModule(moduleFile);
-    const found = consumers(moduleFile, exported);
+  test(`${moduleFile} exports nothing it cannot account for`, async () => {
+    const exported = await exportsOf(moduleFile);
+    const { used: found, imported } = consumers(moduleFile, exported);
     const declared = declaredFor(moduleFile);
 
     assert.ok(exported.length > 0, 'precondition: the module was loaded and does export');
@@ -387,7 +595,9 @@ for (const moduleFile of censusModules()) {
       + '  listed name gained a production consumer and should come off the list.');
 
     // The other direction of the contract, so over-pruning fails here rather than at runtime.
-    for (const name of found.keys()) {
+    // Every import counts here, used or not: binding a name the module no longer exports is
+    // still a mistake, even where nothing reads it.
+    for (const name of imported.keys()) {
       assert.ok(exported.includes(name),
         `something imports ${name} from ${moduleFile}, which no longer exports it`);
     }
@@ -401,3 +611,40 @@ for (const moduleFile of censusModules()) {
     }
   });
 }
+
+// The consumer scan itself, on a synthetic importer, so each rule above has an assertion
+// that fails when the rule does. Every shape in it is one the real tree uses. The file is
+// registered in TEXTS only, never written to disk.
+test('the consumer scan counts a use, not an import, through every shape it claims to read', () => {
+  const fixture = path.join(ROOT, 'test', 'census-synthetic-importer.js');
+  TEXTS.set(fixture, [
+    "const { used, inComment, unused, spread: local, usedAsProperty } = require('../src/census-fixture');",
+    // A glob in a string holds `/*`, which a regex for block comments reads as one, and
+    // it would blank the call to used() below.
+    "const glob = '**/*.md'; // inComment is named here, which is not a use",
+    'used();',
+    '/* unused, in a block comment */',
+    'const all = [...local];',
+    'const other = config.usedAsProperty + config?.usedAsProperty;',
+    "const value = require('../src/census-fixture').inline;",
+    "const ns = require('../src/census-fixture'); ns.member();",
+    "const SUBJECT = path.join(__dirname, '..', 'src', 'census-fixture.js');",
+    'const { viaHolder } = require(SUBJECT); viaHolder();',
+    "const { viaJoin } = require(path.join(root, 'src', 'census-fixture.js')); viaJoin();",
+    // Not this module: a path piece without its extension, and a holder named inside a string.
+    "const { notOurs } = require(path.join(root, 'src', 'census-fixture-gates.js')); notOurs();",
+  ].join('\n'));
+  try {
+    const exported = ['used', 'inComment', 'unused', 'spread', 'usedAsProperty', 'inline', 'member',
+      'viaHolder', 'viaJoin', 'notOurs'];
+    const { used, imported } = consumers('src/census-fixture.js', exported, [fixture]);
+    assert.deepEqual([...used.keys()].sort(), ['inline', 'member', 'spread', 'used', 'viaHolder', 'viaJoin'],
+      'a use is a use in code, a spread included; a comment, a property of the same name and a bare import are not');
+    assert.deepEqual([...imported.keys()].sort(),
+      ['inComment', 'inline', 'member', 'spread', 'unused', 'used', 'usedAsProperty', 'viaHolder', 'viaJoin'],
+      'every binding still counts as an IMPORT, for the over-pruning check');
+  } finally {
+    TEXTS.delete(fixture);
+    CODE.delete(fixture);
+  }
+});

@@ -1614,6 +1614,18 @@ function claudePermissionIsSafe(parsed, options) {
   return !prefixIsKnownRisky(parsed.tokens);
 }
 
+// The learner's reasons for withholding a Claude rule from a run it does NOT call complex
+// (2026-10-14; candidateClaudePermission below has the history). Only one exists:
+// `environment-not-stripped` on a family whose kept assignment cannot be written into its
+// rule. Every other learner null comes with a complexity reason, which refuses the candidate
+// outright. test/auto-learn-info-flags.test.js holds the learner to that, so a new
+// non-complex withholding has to add its reason here or fail there.
+const CLAUDE_WITHHOLDING_REASONS = new Set(['environment-not-stripped']);
+function candidateWithholdsClaudeRule(candidate) {
+  return (Array.isArray(candidate?.reasons) ? candidate.reasons : [])
+    .some((reason) => CLAUDE_WITHHOLDING_REASONS.has(String(reason)));
+}
+
 function candidateClaudePermission(candidate, options) {
   if (typeof candidate === 'string') return candidate;
   const reviewed = options?.includeReviewed === true;
@@ -1625,16 +1637,33 @@ function candidateClaudePermission(candidate, options) {
   }
   if ((!isAutoSafe(candidate) && !reviewed) || candidateIsComplex(candidate) ||
       (!reviewed && (candidateRiskIsUnsafe(candidate) || candidateHasAutomaticBlock(candidate)))) return null;
-  // An explicit `claudePermission: null` is a rule the learner WITHHELD, not a field it
-  // left out, so it is not re-derived from the prefix below. Added 2026-10-13 with the
-  // learner's `environment-not-stripped` reason, the first withholding reason that is not
-  // also a complexity reason: every earlier one (path, quoted or dynamic executable,
-  // reserved word, call operator, unknown family subcommand, a prefix conflict) makes the
-  // candidate complex, which the line above already refuses. Without this, `LD_PRELOAD=x
-  // cat f` re-acquired the `Bash(cat *)` the learner had just declined to propose. A
-  // candidate built by hand, with no such field, is synthesized exactly as before.
+  // An explicit `claudePermission: null` is a rule the learner WITHHELD only when the
+  // candidate also carries the reason that withheld it (CLAUDE_WITHHOLDING_REASONS); any
+  // other null is re-derived from the prefix below, as every null was through v1.6.1.
+  //
+  // Corrected 2026-10-14. a9e2adf (2026-10-13) honoured EVERY explicit null, on the premise
+  // that `environment-not-stripped` was the first withholding reason that is not also a
+  // complexity reason, every earlier one (path, quoted or dynamic executable, reserved word,
+  // call operator, unknown family subcommand, a prefix conflict) making the candidate complex,
+  // which the line above already refuses. That premise was false: the learner also nulled the
+  // rule for an informational family, `[root, --version|--help|-h|-V]`, with `complex: false`,
+  // because permissionFor would not write a non-bare word (src/auto-learn.js INFO_PREFIX_FLAGS
+  // has the history). Reproduced against 9467b09 (v1.6.2): three successes each of `cargo
+  // --version`, `df -h` and `git status` rendered `Bash(cargo --version *)`, `Bash(df -h *)` and
+  // `Bash(git status *)` under review at c09daab (v1.6.1) and only `Bash(git status *)` at
+  // v1.6.2, while the Codex half rendered all three in both. Worse, the state file already held
+  // those families with the null v1.6.1 wrote, so the first v1.6.2 scan+apply dropped them from
+  // the retained set (auto-learn-manager applyUnlocked asks claudeEligible again) and removed
+  // the applied reviewed `Bash(cargo --version *)`, `Bash(df -h *)` and `Bash(docker --version
+  // *)` from `allow`, in auto-safe mode with no user action. The learner writes those rules
+  // itself now; this gate is what keeps the families already stored with a null rendering.
+  //
+  // What a9e2adf wanted still holds: an env-led run whose kept assignment the rule cannot
+  // carry (`FOO="two words" git status`, redacted, or one ahead of a wrapper) is keyed apart
+  // and carries the reason, so it does not re-acquire the `Bash(git status *)` Claude Code never
+  // matches against it. A candidate built by hand, with no such field, is synthesized as before.
   if (candidate && Object.prototype.hasOwnProperty.call(candidate, 'claudePermission')
-      && candidate.claudePermission === null) return null;
+      && candidate.claudePermission === null && candidateWithholdsClaudeRule(candidate)) return null;
   if (typeof candidate.claudePermission === 'string') return candidate.claudePermission;
   if (typeof candidate.claude_permission === 'string') return candidate.claude_permission;
 

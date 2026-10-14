@@ -449,7 +449,7 @@ function prefixFor(root, args) {
   if (normalized === 'rg' && SAFE_RG_MODES.has(first)) return [root, first];
   const knownFamily = FAMILY_SUBCOMMANDS.get(normalized);
   if (knownFamily?.has(first.toLowerCase())) return [root, first];
-  if (['--help', '--version', '-h', '-V'].includes(first)) return [root, first];
+  if (INFO_PREFIX_FLAGS.has(first)) return [root, first];
   return [root];
 }
 
@@ -532,7 +532,7 @@ function containsScriptSyntax(command, shell) {
 function permissionFor(shell, prefix, blocked, lead = []) {
   const tool = permissionToolFor(shell);
   const root = normalizeRoot(prefix[0]);
-  const validPart = (part, index) => isBareCommandPart(part) ||
+  const validPart = (part, index) => isBareCommandPart(part) || (index === 1 && INFO_PREFIX_FLAGS.has(String(part))) ||
     (index > 0 && root === 'rg' && SAFE_RG_MODES.has(String(part)));
   if (blocked || !tool || !prefix.length || !prefix.every(validPart)) return null;
   return `${tool}(${[...lead, ...prefix].join(' ')} *)`;
@@ -1144,6 +1144,30 @@ function aggregateObservations(observations, options = {}) {
   }
   return candidates.sort((a, b) => a.key.localeCompare(b.key));
 }
+
+// The informational second words a family keys on (prefixFor: `cargo --version`, `df -h`,
+// `docker --help`), and since 2026-10-14 the one class of non-bare word permissionFor writes
+// into a rule at index 1. Defined here, below both consumers, so that the line references
+// other files make into the tables and functions above do not move; neither runs while the
+// module loads.
+//
+// Until that date permissionFor refused the word (it is not a bare command part), so such a
+// family carried `claudePermission: null` with `complex: false`. The exporter re-derived
+// `Bash(cargo --version *)` from the prefix through v1.6.1; a9e2adf made it honour an explicit
+// null as "withheld" on the premise that every earlier withholding was also a complexity
+// refusal, which this case disproved, so v1.6.2 stopped producing the rule and revoked the
+// ones already applied (reproduced 2026-10-14 against 9467b09: `cargo --version`, `df -h` and
+// `git status`, three successes each, rendered all three reviewed rules at c09daab and only
+// `Bash(git status *)` at v1.6.2). The learner now writes the rule itself, so an explicit null
+// from it means withheld again (the exporter still checks why: CLAUDE_WITHHOLDING_REASONS).
+//
+// Not every one of these words is informational to every program: `df -h` and `sort -h` are
+// human-readable output and `tar -h` follows symlinks. The rule is still exactly the prefix
+// the evidence keyed on, it reaches policy only through a review unless the root is one the
+// automatic path already trusts with ANY argument (AUTO_SUFFIX_CLOSED_ROOTS above, plus rg's
+// modes, which always took this word), and there `Bash(uname --version *)` is a strict subset
+// of the `Bash(uname *)` that path already grants.
+const INFO_PREFIX_FLAGS = new Set(['--help', '--version', '-h', '-V']);
 
 module.exports = {
   isLearnableTool,

@@ -6,7 +6,7 @@
 // That override used to write the tag into vscode-extension/package.json and nothing
 // else, leaving the root manifest behind. The root manifest is what
 // `bin/wildcard-perms --version` prints and the extension manifest is what the sidebar
-// badge shows, so one build reported two different versions. installers.test.js:465
+// badge shows, so one build reported two different versions. installers.test.js:511#manifests
 // already asserts the two agree, and was structurally blind to this: it ran before the
 // step that broke them.
 //
@@ -298,8 +298,8 @@ test('a quarantine that cannot remove a file still reports the gate, and still r
 
 // PowerShell source with comments stripped and backtick line-continuations folded, so a
 // wrapped statement reads as one line and the prose above it cannot satisfy a guard. Sibling
-// of installers.test.js:66 -- both comment forms, blocks first, because the interior lines of
-// a <# #> block do not start with # and a line-only filter sails straight past them.
+// of installers.test.js:66#psCodeOnly -- both comment forms, blocks first, because the interior
+// lines of a <# #> block do not start with # and a line-only filter sails straight past them.
 const psStatements = (body) => body
   .replace(/<#[\s\S]*?#>/g, ' ')
   .split('\n')
@@ -309,7 +309,8 @@ const psStatements = (body) => body
 
 test('verify-release.ps1 captures STDERR from --gates refresh, or it cannot see it fail', () => {
   // `--gates refresh` reports its one interesting failure -- recall.py's compile step failing,
-  // so a stale block is installed on every invocation -- on STDERR (bin/wildcard-perms:641).
+  // so a stale block is installed on every invocation -- on STDERR
+  // (bin/wildcard-perms:874#process.stderr.write).
   // The assertion beside it says "refresh is silent when nothing changed". Capture stdout
   // only and that sentence is TRUE in precisely the state it exists to report: the warning
   // goes to the console, the captured text is empty, and the board prints PASS.

@@ -264,11 +264,11 @@ test('a derived block never disturbs the static shell-style block', () => {
 // It is read from `~/.claude/remote-settings.json`, a local client-refreshed
 // cache, and it lands inside a code span in the user's own instruction file. The
 // two sources that feed `costliestRules` disagreed about sanitising it: the
-// managed-hits side cleans it (`auto-learn-manager.js:2575`, and :2470 in its
-// recount), the inert-family
-// side reaches `addCost` at :1598 as `String(rule)`. So any local process able to
-// write that cache could choose text that closed the code span, broke the block,
-// or forged a marker line.
+// managed-hits side cleans it (`auto-learn-manager.js:2575#observation.managedRule`, and
+// `auto-learn-manager.js:2470#observation.managedRule` in its recount), while the inert-family
+// side reached `addCost` raw (`auto-learn-manager.js:1767#family.rule`; addCost has cleaned it
+// too since 20959d2). So any local process able to write that cache could choose text
+// that closed the code span, broke the block, or forged a marker line.
 
 test('the rule text is cleaned before it can reach a code span', () => {
   assert.equal(cleanRule('Edit(**/*.ps1)'), 'Edit(**/*.ps1)', 'an ordinary rule is untouched');
@@ -360,7 +360,7 @@ test('the rule length cap holds after escaping, not just before it', () => {
   // and its mutation survives.
   //
   // `{0,3}`, not `{1,3}`, and that zero is the whole point. Production strips
-  // `/&[a-z]{0,3}$/i` (src/derived-guidance.js:68), so a cut that leaves a BARE
+  // `/&[a-z]{0,3}$/i` (src/derived-guidance.js:68#escaped.slice), so a cut that leaves a BARE
   // trailing `&` — no letters after it — is stripped too, and an assertion
   // written `{1,3}` cannot see that case. It is reachable: pad 3 puts the
   // second 200-character cut one character into `&lt;!--`, leaving exactly `&`.

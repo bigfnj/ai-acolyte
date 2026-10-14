@@ -21,10 +21,11 @@ function disposable() { return { dispose() {} }; }
 //
 // `delete require.cache[extensionPath]` alone was all this file did, and it is not
 // isolation. The top-level require above caches src/auto-learn-manager.js holding the
-// REAL `os` (src/auto-learn-manager.js:9), and its home default is read at CALL time
-// (`:998`), so the extension loaded underneath the mock was handed a manager that
-// resolves the developer's own ~/.claude for any call that omits `options.home`. Same
-// implementation as test/extension-activation.test.js and test/policy-backup.test.js.
+// REAL `os` (src/auto-learn-manager.js:9#os), and its home default is read at CALL time
+// (`src/auto-learn-manager.js:1364#os.homedir`), so the extension loaded underneath the
+// mock was handed a manager that resolves the developer's own ~/.claude for any call that
+// omits `options.home`. Same implementation as test/extension-activation.test.js and
+// test/policy-backup.test.js.
 function purgeProjectModules(extensionPath, rootSrc) {
   const extensionDir = path.dirname(extensionPath) + path.sep;
   for (const key of Object.keys(require.cache)) {

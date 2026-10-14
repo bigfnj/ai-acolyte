@@ -231,7 +231,7 @@ test('install.sh registers the hook command bare, with no shell wrapper', (t) =>
   //           +17.6 ms, `powershell.exe -Command node ...` +1059 ms, which is 18x
   //           the whole hook.
   //   undo  — both uninstallers recover the hook path by unwrapping
-  //           `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:49) and otherwise
+  //           `^node\s+(.+)$` (uninstall.ps1:28#match, uninstall.sh:49#wrapped) and otherwise
   //           compare the command verbatim against the bare path. A wrapped
   //           registration matches NEITHER branch, so it is never recognised as
   //           ours: the hook becomes UN-UNINSTALLABLE, `./uninstall.sh` reports
@@ -258,7 +258,7 @@ test('install.sh registers the hook command bare, with no shell wrapper', (t) =>
   // so no false-reject surface at all.
   //
   // And note what the POSIX shape IS — the bare path, with NO `node` prefix. The
-  // shebang plus install.sh:8's `chmod +x` carries it, and README.md documents
+  // shebang plus the `chmod +x` at install.sh:8#chmod carries it, and README.md documents
   // the two spellings the two installers use. A repo-wide `^node ` requirement
   // would reject this perfectly correct registration, which is why the predicate
   // for each registrar is kept separate.
@@ -321,7 +321,7 @@ test('both PowerShell installers fail closed on an unreadable settings.json', ()
   // satisfied by some other line — install.ps1 has two more `exit 1`s and
   // uninstall.ps1 one — leaving warn-then-write, which is the exact shape that
   // ate a settings.json. Worse, uninstall.ps1's `could not be parsed` probe was
-  // answered by a COMMENT (uninstall.ps1:45, the -AsHashtable post-mortem), so
+  // answered by a COMMENT (uninstall.ps1:45#parsed, the -AsHashtable post-mortem), so
   // it survived deleting the live branch outright. Comments are stripped first,
   // like the -AsHashtable guard above.
   for (const name of ['install.ps1', 'uninstall.ps1']) {
@@ -351,7 +351,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   // Banned: `cmd /c node ...` (+17.6 ms per tool call) and
   // `powershell.exe -Command node ...` (+1059 ms, 18x the whole hook). The
   // stronger reason is undo, not speed: both uninstallers recover the hook path
-  // with `^node\s+(.+)$` (uninstall.ps1:28, uninstall.sh:49), a wrapped command
+  // with `^node\s+(.+)$` (uninstall.ps1:28#match, uninstall.sh:49#wrapped), a wrapped command
   // matches neither that nor the bare-path comparison, and the hook would become
   // UN-UNINSTALLABLE while still firing on every tool call.
   //
@@ -415,8 +415,8 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   //
   // Case-insensitive, deliberately, and this is where the two halves of the guard
   // used to disagree with each other and with the contract they cite. The
-  // uninstallers are the contract: uninstall.sh:49 matches `/^node\s+(.+)$/i` and
-  // uninstall.ps1:28 uses `-match`, which is case-insensitive in PowerShell. Both
+  // uninstallers are the contract: uninstall.sh:49#wrapped matches `/^node\s+(.+)$/i` and
+  // uninstall.ps1:28#match uses `-match`, which is case-insensitive in PowerShell. Both
   // recover the hook path from `NODE "…"` perfectly well. The twin case in
   // scripts/verify-installers.ps1 has always matched case-insensitively for that
   // reason; this half rejected what all three accept.

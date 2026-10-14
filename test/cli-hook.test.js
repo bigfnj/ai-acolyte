@@ -862,7 +862,7 @@ test('a hook event over the cap says so and skips the drain instead of truncatin
 // already returning the real counts. The two agree until a concurrent settings
 // write lands between the caller's read and the writer's — which is the only
 // case where anyone reads the line, because it is the case where something
-// surprising happened. src/settings-write.js:212-214 names the failure: a caller
+// surprising happened. src/settings-write.js:219-221#measured names the failure: a caller
 // reporting its own intent announced "+299 restored" over a file that already
 // had them.
 //

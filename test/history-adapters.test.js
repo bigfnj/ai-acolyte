@@ -671,7 +671,7 @@ test('a nested exec reports one status per execution, not one per mention of it'
 // extractor is the only route from a `custom_tool_call` to an observation, a
 // current transcript produced NOTHING in every mode -- and silently, because
 // an empty command list is also what a script that ran no shell looks like.
-// `src/auto-learn.js:8-11` has known both names all along, so the two modules
+// `src/auto-learn.js:8-11#COMMAND_TOOLS` has known both names all along, so the two modules
 // simply disagreed.
 test('nested exec extraction accepts the exec_command spelling too', () => {
   const source = [

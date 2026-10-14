@@ -120,7 +120,7 @@ test('the key follows the code, so a checkout invalidates it without a version b
   // mtime alone, with the size untouched. `git checkout` of a single file in place
   // is the motivating case — it is what someone bisecting the generalizer does, it
   // can leave the size identical, and a hand-maintained VERSION constant (the
-  // src/auto-learn-manager.js:37 shape) cannot see it at all. Without this the
+  // src/auto-learn-manager.js:41#VERSION shape) cannot see it at all. Without this the
   // cache would report a stale fixed point for the whole bisect.
   stamp(first, T2);
   const touched = keyAt();
@@ -272,7 +272,7 @@ test('the module source requires nothing but fs, os and path', () => {
     .map((match) => match[1]);
 
   // The hook's whole latency budget rests on the lazy-require discipline at
-  // bin/wildcard-perms:11-26, and this module is consulted on the hot path before
+  // bin/wildcard-perms:7-29#NOTE, and this module is consulted on the hot path before
   // anything else loads — so it is the one file where a new top-level require
   // cannot be traded for convenience. Note the ban covers the comments too: the
   // prose above deliberately writes "a crypto load" rather than the call, because

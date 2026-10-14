@@ -14,7 +14,7 @@
 //   - `autoLearnBusy` left true, which short-circuits every later scan.
 //
 // Its own mocks, again: this needs to count spawns, kills and watcher callbacks,
-// and the standing decision in this suite (test/extension-activation.test.js:311)
+// and the standing decision in this suite (test/extension-activation.test.js:311#sharing)
 // is that duplicating a mock is cheaper than breaking one that works.
 
 const test = require('node:test');
@@ -1593,7 +1593,7 @@ test('a worker still wedged at teardown is failed on its deadline and then reape
     // per reload, plus a `context.subscriptions` that never drains.
     //
     // Terminating earlier is not the fix and is not what this asserts. The
-    // drain-before-terminate order is deliberate (autoLearnWorkerRunner.js:151-154):
+    // drain-before-terminate order is deliberate (autoLearnWorkerRunner.js:151-154#instant):
     // a worker between two policy writes must reach its own result or the
     // manager's JS rollback is lost. The deadline settles the JOB as a failure,
     // which is all the drain needs, and leaves the reaping exactly where it was.

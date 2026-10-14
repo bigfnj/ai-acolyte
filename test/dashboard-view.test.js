@@ -58,7 +58,7 @@ function settle(ms = 140) {
 }
 
 // Copied from test/policy-backup.test.js rather than shared. That is a standing
-// decision in this suite (test/extension-activation.test.js:311: "Kept as its
+// decision in this suite (test/extension-activation.test.js:311#sharing: "Kept as its
 // own mock rather than sharing the one above… duplicating a mock is far cheaper
 // than breaking the activation test that already works"), and this file needs two
 // things that one does not: the provider instance, and a count of how many times
@@ -278,8 +278,9 @@ function harness(tempHome, opts = {}) {
   // local-drain-extension.test.js already does this, for the same reason.
   //
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:10, :47), so
-  // leaving them cached leaves a second harness holding the first one's instances.
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:55#autoLearnUi,
+  // extension.js:10#createAutoLearnWorkerRunner), so leaving them cached leaves a second
+  // harness holding the first one's instances.
   const extensionDir = path.dirname(extensionPath) + path.sep;
   for (const cached of Object.keys(require.cache)) {
     if (cached.startsWith(rootSrc + path.sep) || cached.startsWith(extensionDir)) {
@@ -732,7 +733,7 @@ test('one push per burst, and the wildcarding pass is not repeated for it', asyn
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:2876 -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:2971#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -1544,7 +1545,7 @@ test('a concurrent write inside the lock is not flattened by a stale delta', asy
   // away rather than handed to writeAllow.
   //
   // writeAllow replays a delta computed against the CALLER's snapshot onto a
-  // fresh read. Its own note (src/settings-write.js:166-172) says that is "WRONG
+  // fresh read. Its own note (src/settings-write.js:173-179#reusing) says that is "WRONG
   // for one whose whole output is a function of the list it read", and names the
   // wildcarding pass as exactly that caller. Until the probe moved out of the
   // lock, runWildcarding satisfied that precondition only BY ACCIDENT, because
@@ -1759,7 +1760,7 @@ test('the change toast counts what the WRITE landed, not what the locked read pl
     // between our locked read and writeAllow's own re-read, and writeAllow
     // rebases onto the latter.
     //
-    // `removedAllow` was added to src/settings-write.js:232 for exactly this, with
+    // `removedAllow` was added to src/settings-write.js:232#removedAllow for exactly this, with
     // a note saying a caller computing a removal count from its own pre-write
     // snapshot is doing the thing the measurement exists to replace. The caller
     // was never switched over, so the toast kept reporting the plan.
@@ -1987,7 +1988,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:2214-2216 records — a file that failed every
+// defect src/auto-learn-manager.js:2772-2774#errors records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which
@@ -2120,11 +2121,11 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
   //
   // pruneObservationHashes holds every hash belonging to a family below the success
   // threshold, whatever its age, because re-reading a trimmed transcript would inflate
-  // the counts that gate an auto-safe apply. The protected set has no bound of its own,
-  // so a high threshold on a big corpus can hold MORE than the cap allows, and the map
-  // then stays over its limit after the prune has done all it can
-  // (src/auto-learn-manager.js:790-793 documents the trade and promises the overflow is
-  // "REPORTED as retainedObservations on every scan rather than absorbed in silence").
+  // the counts that gate an auto-safe apply. That protected set has had a ceiling of its
+  // own since 455ab97, but a family carrying a human decision is never evicted to meet
+  // it, so the map can still stay over its limit after the prune has done all it can
+  // (src/auto-learn-manager.js:1045-1048#evictable, which also says that residue is all
+  // `retainedObservations` reports now; before 455ab97 the set had no bound at all).
   //
   // It was reported to the state file and to the CLI. The panel, which is the only UI
   // most users of this extension open, never saw it: autoLearnScanHealth copied eight

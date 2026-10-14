@@ -54,15 +54,25 @@ mkdir -p "$(dirname "$SETTINGS")"
 
 # ── 1. Register PostToolUse hook ──────────────────────────────────────────────
 HOOK_CMD="$HOOK_CMD" HOOK_VIA_NODE="$HOOK_VIA_NODE" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
-import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, statSync } from 'fs';
 import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
 const hookCmd      = process.env.HOOK_CMD;
 // The command written into settings.json: the bare path, or on Windows (see the
 // uname block at the top) `node "<path>"`, exactly install.ps1's spelling.
+//
+// A bare path with whitespace in it is QUOTED, found 2026-10-14. Claude Code hands
+// `command` to a shell, `sh -c` on Linux and macOS and Git Bash on Windows
+// (code.claude.com/docs/en/hooks, "Exec form and shell form", read 2026-10-14), and
+// a shell splits an unquoted path at its space: `/Users/Jo Doe/acolyte/bin/wildcard-perms`
+// runs `/Users/Jo` and fails on every tool call. This script registered exactly that
+// from v1.0.0 on, from any checkout under such a path. Single quotes, because nothing
+// inside them is special to sh; a path that itself holds a `'` gets double quotes.
+// A path without whitespace keeps the bare spelling byte for byte.
 const viaNode      = process.env.HOOK_VIA_NODE === '1';
-const hookCommand  = viaNode ? `node "${hookCmd}"` : hookCmd;
+const shellQuoted  = (p) => (!/\s/.test(p) ? p : p.includes("'") ? `"${p}"` : `'${p}'`);
+const hookCommand  = viaNode ? `node "${hookCmd}"` : shellQuoted(hookCmd);
 
 // `catch {}` here meant that ANY read failure fell through to `cfg = {}` and
 // the write below replaced the user's whole settings.json with just this hook.
@@ -126,17 +136,30 @@ cfg.hooks.PostToolUse ??= [];
 // spelling is exactly what this script used to write from Git Bash, and it
 // makes Windows ask how to open the file on every hook fire, so "already
 // registered" would leave the defect standing. A `node ...` spelling of this
-// checkout, in any casing or slash direction, is left exactly as it is.
+// checkout, in any casing or slash direction, is left exactly as it is. And
+// on every platform, this checkout registered UNQUOTED with whitespace in its
+// path is rewritten to the quoted form (see hookCommand above): it is the
+// spelling this script wrote there before 2026-10-14, and a shell splits it.
 const onWindows = process.platform === 'win32';
 
 // The path a hook command runs, if and only if it runs THIS tool: `node <path>`
 // or a bare `<path>`, the path optionally quoted whole, ending in a `bin`
 // directory holding a file named exactly `wildcard-perms`. Strict, because a
-// false match REWRITES somebody else's hook: extra arguments, a wrapper, an
-// unquoted path containing a space, `wildcard-perms.js`, `wildcard-perms-audit`
-// or a command that merely mentions the name all return null. Case and `\` are
-// folded only on Windows; on POSIX a backslash is a filename character and
-// `BIN/` is a different directory.
+// false match REWRITES somebody else's hook: extra arguments, a wrapper,
+// `wildcard-perms.js`, `wildcard-perms-audit` or a command that merely mentions
+// the name all return null. Case and `\` are folded only on Windows; on POSIX a
+// backslash is a filename character and `BIN/` is a different directory.
+//
+// An UNQUOTED path with whitespace in it is ambiguous on its face, and was
+// refused outright until 2026-10-14. To a person `/opt/my tools/acolyte/bin/wildcard-perms`
+// is one path; to a shell it is two words, and `/usr/bin/env node /x/bin/wildcard-perms`
+// has exactly that shape and is a wrapper. Refusing all of them meant the
+// registration this script itself wrote from a checkout under such a path (see
+// hookCommand) was never recognised again: a reinstall from a moved or re-cloned
+// checkout APPENDED a second entry beside it, the defect this scan exists to stop,
+// and both uninstallers could neither remove nor name it. So it counts only when it
+// provably names ONE file (namesOneFile): this checkout, or a file by exactly that
+// name. A wrapper's whole command line is never the name of a file.
 const toolTarget = (command) => {
   if (typeof command !== 'string') return null;
   // The old exact match stays THIS checkout, whatever the grammar makes of it.
@@ -146,19 +169,34 @@ const toolTarget = (command) => {
   if (wrapped) text = wrapped[1].trim();
   const quoted = /^"([^"]+)"$/.exec(text) || /^'([^']+)'$/.exec(text);
   if (quoted) text = quoted[1];
-  else if (/\s/.test(text)) return null;
   const tail = onWindows ? /[\\/]bin[\\/]wildcard-perms$/i : /\/bin\/wildcard-perms$/;
-  return tail.test(text) ? text : null;
+  if (!tail.test(text)) return null;
+  if (!quoted && /\s/.test(text) && !namesOneFile(text)) return null;
+  return text;
+};
+
+// Called only from toolTarget, so only from the scan below, after every const it
+// reads has been initialised.
+const namesOneFile = (text) => {
+  const p = nativePath(text);
+  if (!isAbsolute(p)) return false;
+  if (comparable(text) === comparable(hookCmd)) return true;
+  try { return statSync(p).isFile(); } catch { return false; }
 };
 
 // On Windows one path has several spellings: `\` or `/`, /d/repo (Git Bash's
-// own) or D:/repo (install.ps1, and this script, whose HOOK_CMD reaches node in
-// that form there), any casing.
+// own), /cygdrive/d/repo (Cygwin's) or D:/repo (install.ps1, and this script,
+// whose HOOK_CMD reaches node in that form there), any casing. The /cygdrive/
+// form was not folded until 2026-10-14, and the cost was in the WORDS: node
+// resolves /cygdrive/c/x to C:\cygdrive\c\x, which never exists, so this
+// checkout spelled that way was "repointed from another checkout ... (the old
+// path no longer exists)", and a live other checkout was "gone" to the
+// uninstallers and removed as one.
 const nativePath = (p) => {
   if (!onWindows) return p;
   const text = p.replace(/\\/g, '/');
-  const drive = /^\/([A-Za-z])\//.exec(text);
-  return drive ? `${drive[1]}:/${text.slice(3)}` : text;
+  const drive = /^(?:\/cygdrive)?\/([A-Za-z])\//i.exec(text);
+  return drive ? `${drive[1]}:/${text.slice(drive[0].length)}` : text;
 };
 // One file can have more than one spelling even after that folding, found
 // 2026-10-13: an 8.3 short path (C:/Users/SHORTN~1.EXT/...) and its long form
@@ -190,6 +228,9 @@ for (const entry of cfg.hooks.PostToolUse) {
       target,
       current: comparable(target) === current,
       bare: !/^node\s/i.test(hook.command.trim()),
+      // Unquoted, with whitespace in the path: what a shell splits. The grammar
+      // admits a quoted path only when the quotes close the command.
+      split: /\s/.test(target) && !/["']$/.test(hook.command.trim()),
       matcher: typeof entry.matcher === 'string' ? entry.matcher : '',
     });
   }
@@ -219,6 +260,12 @@ for (const f of found) {
     const old = f.hook.command;
     f.hook.command = hookCommand;
     notices.push(`✓ wildcard-perms hook now runs through node, because Windows cannot run the bare path: ${old} -> ${hookCommand}`);
+  } else if (f.split) {
+    // This checkout, unquoted with a space in its path: what this script wrote
+    // there before 2026-10-14, and what a shell runs as two words. In place.
+    const old = f.hook.command;
+    f.hook.command = hookCommand;
+    notices.push(`✓ wildcard-perms hook path quoted, because a shell splits an unquoted path at its space: ${old} -> ${hookCommand}`);
   }
 }
 

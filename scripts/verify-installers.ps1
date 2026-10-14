@@ -115,8 +115,11 @@ function New-Box {
         scriptblock taking the hook path, because the script under test derives
         that path from its OWN location -- a fixture naming the repo's path would
         never match, which cost one debugging round the first time. #>
-    param([string]$Source, [scriptblock]$Content, [switch]$NoFile, [string]$ScriptName = 'under-test.ps1')
-    $box = Join-Path $script:SandboxRoot ('pw-inst-' + [guid]::NewGuid().ToString('N'))
+    # -Suffix names the box `pw-inst-<guid><suffix>`: ' spaced' gives a checkout
+    # under a path with a space (install case 18), and the prefix stays the one
+    # the cleanup below, and anyone sweeping %TEMP%, recognises.
+    param([string]$Source, [scriptblock]$Content, [switch]$NoFile, [string]$ScriptName = 'under-test.ps1', [string]$Suffix = '')
+    $box = Join-Path $script:SandboxRoot ('pw-inst-' + [guid]::NewGuid().ToString('N') + $Suffix)
     $null = $script:boxesMade.Add($box)
     $null = New-Item -Path (Join-Path $box '.claude') -ItemType Directory -Force
     $hookPath = (Join-Path $box 'bin\wildcard-perms') -replace '\\', '/'
@@ -278,8 +281,8 @@ if (-not $install) {
     #    a reconstructed spelling, and from a stale path under the sandbox that
     #    does not exist on disk -- the likelier case, and the notice says so.
     function New-SeededInstallBox {
-        param([scriptblock]$Content)
-        $box = New-Box -Source $install -NoFile
+        param([scriptblock]$Content, [string]$Suffix = '')
+        $box = New-Box -Source $install -NoFile -Suffix $Suffix
         $real = Get-RealHookCommand -InstallSource $install -BoxDir $box.dir
         if (-not $real) { return $null }
         $box.real = $real
@@ -542,6 +545,118 @@ if (-not $install) {
             Remove-Box $box
         }
     }
+
+    # 16-19. Unquoted paths with a space, and Cygwin's /cygdrive/ spelling (the
+    #    v1.6.2 audit, fixed 2026-10-14; the long form is beside the twin cases at
+    #    the end of test/installers.test.js). An unquoted path with a space was
+    #    refused outright, so a registration in that shape was never recognised
+    #    and a reinstall appended a second entry beside it; now it counts when it
+    #    provably names one file. /cygdrive/c/... was not folded, so it read as a
+    #    path that "no longer exists".
+    #
+    # 16. Another checkout that EXISTS, under a path with a space, unquoted behind
+    #    `node`, with a timeout beside it: repointed in place, one registration.
+    $spacedOther = {
+        param($real, $stale, $dir)
+        $other = ($dir -replace '\\', '/') + '/other checkout/bin/wildcard-perms'
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json ('node ' + $other)) + ', "timeout": 30 } ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $spacedOther
+    if (-not $box) {
+        Add-Result 'install: repoints an unquoted spaced checkout' $false 'could not learn the installed hook command'
+    } else {
+        $otherFile = Join-Path $box.dir 'other checkout\bin\wildcard-perms'
+        $null = New-Item -Path (Split-Path -Parent $otherFile) -ItemType Directory -Force
+        [System.IO.File]::WriteAllText($otherFile, '')
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        $tool = Get-ToolHooks $after
+        Add-Result 'install: repoints an unquoted spaced checkout' `
+        ($r.code -eq 0 -and $ptu.Count -eq 1 -and $tool.Count -eq 1 -and $ptu[0].hooks[0].command -eq $box.real `
+                -and $ptu[0].hooks[0].timeout -eq 30 -and $r.output -match 'repointed' -and $r.output -notmatch 'no longer exists') `
+            "PostToolUse=$($ptu.Count) toolHooks=$($tool.Count) command=$($ptu[0].hooks[0].command)"
+        Remove-Box $box
+    }
+
+    # 17. Control: unquoted with a space but naming NO file, and a wrapper around a
+    #    file that does exist. Neither provably names one file, so both are left
+    #    byte-for-byte and ours is appended.
+    $spacedLookalikes = {
+        param($real, $stale, $dir)
+        $base = ($dir -replace '\\', '/')
+        $hooks = @(('node ' + $base + '/gone checkout/bin/wildcard-perms'),
+            ('C:/tools/run.exe ' + $base + '/bin/wildcard-perms')) |
+            ForEach-Object { '{ "type": "command", "command": ' + (ConvertTo-Json $_) + ' }' }
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash", "hooks": [ ' + ($hooks -join ', ') + ' ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $spacedLookalikes
+    if (-not $box) {
+        Add-Result 'install: leaves unprovable spaced commands' $false 'could not learn the installed hook command'
+    } else {
+        $null = New-Item -Path (Join-Path $box.dir 'bin') -ItemType Directory -Force
+        [System.IO.File]::WriteAllText((Join-Path $box.dir 'bin\wildcard-perms'), '')
+        $wanted = @((Get-Content $box.settings -Raw | ConvertFrom-Json).hooks.PostToolUse[0].hooks | ForEach-Object { $_.command })
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        $kept = @($ptu[0].hooks | ForEach-Object { $_.command })
+        $same = ($kept.Count -eq 2 -and $kept[0] -ceq $wanted[0] -and $kept[1] -ceq $wanted[1])
+        Add-Result 'install: leaves unprovable spaced commands' `
+        ($r.code -eq 0 -and $same -and $ptu.Count -eq 2 -and $ptu[1].hooks[0].command -eq $box.real `
+                -and $r.output -notmatch 'repointed' -and $r.output -notmatch 'quoted') `
+            "PostToolUse=$($ptu.Count) untouched=$same"
+        Remove-Box $box
+    }
+
+    # 18. THIS checkout under a path with a space, registered unquoted behind
+    #    `node`: a shell splits it, so it is quoted in place and reported as this
+    #    checkout; a second run is then "already registered".
+    $spacedCurrent = {
+        param($real, $stale)
+        $bare = ($real -replace '^node\s+"?', '') -replace '"$', ''
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json ('node ' + $bare)) + ', "timeout": 30 } ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $spacedCurrent -Suffix ' spaced'
+    if (-not $box) {
+        Add-Result 'install: quotes this checkout''s spaced path' $false 'could not learn the installed hook command'
+    } else {
+        $r = Invoke-Box $box
+        $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+        $ptu = @($after.hooks.PostToolUse)
+        $again = Invoke-Box $box
+        Add-Result 'install: quotes this checkout''s spaced path' `
+        ($r.code -eq 0 -and $box.real -match ' spaced/' -and $ptu.Count -eq 1 -and $ptu[0].hooks[0].command -eq $box.real `
+                -and $ptu[0].hooks[0].timeout -eq 30 -and $r.output -match 'path quoted' -and $r.output -notmatch 'another checkout' `
+                -and $again.output -match 'already registered') `
+            "command=$($ptu[0].hooks[0].command) second=$(if ($again.output -match 'already registered') { 'no-op' } else { 'rewrote' })"
+        Remove-Box $box
+    }
+
+    # 19. THIS checkout spelled /cygdrive/c/...: one checkout, two spellings, so
+    #    "already registered" and no write.
+    $cygCurrent = {
+        param($real, $stale)
+        $bare = ($real -replace '^node\s+"?', '') -replace '"$', ''
+        $cyg = '/cygdrive/' + $bare.Substring(0, 1).ToLowerInvariant() + '/' + $bare.Substring(3)
+        '{ "model": "x", "hooks": { "PostToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' `
+            + (ConvertTo-Json ('node "' + $cyg + '"')) + ' } ] } ] } }'
+    }
+    $box = New-SeededInstallBox -Content $cygCurrent
+    if (-not $box) {
+        Add-Result 'install: this checkout under /cygdrive/' $false 'could not learn the installed hook command'
+    } else {
+        $before = [System.IO.File]::ReadAllBytes($box.settings)
+        $r = Invoke-Box $box
+        $identical = ([Convert]::ToBase64String($before) -eq [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($box.settings)))
+        Add-Result 'install: this checkout under /cygdrive/' `
+        ($r.code -eq 0 -and $identical -and [System.Text.Encoding]::UTF8.GetString($before) -match '/cygdrive/[a-z]/' `
+                -and $r.output -match 'already registered' -and $r.output -notmatch 'another checkout') `
+            "identical=$identical exit=$($r.code)"
+        Remove-Box $box
+    }
 }
 
 # ── uninstall.ps1 ─────────────────────────────────────────────────────────────
@@ -781,6 +896,54 @@ if (-not $uninstall) {
             "PostToolUse=$($ptu.Count) survivor=$($ptu[0].hooks[0].command) exit=$($r.code)"
         Remove-Box $box
     }
+
+    # 12-13. Unquoted paths with a space and /cygdrive/ (install cases 16-19).
+    #
+    # 12. This checkout beside ANOTHER live checkout under a path with a space,
+    #    registered unquoted behind `node`. Ours goes; the other is left and NAMED.
+    #    Before, the grammar refused it, so it was neither removed nor reported.
+    $box = New-Box -Source $uninstall -NoFile
+    $mine = ($box.dir -replace '\\', '/') + '/bin/wildcard-perms'
+    $otherFile = Join-Path $box.dir 'other checkout\bin\wildcard-perms'
+    $null = New-Item -Path (Split-Path -Parent $otherFile) -ItemType Directory -Force
+    [System.IO.File]::WriteAllText($otherFile, '')
+    $otherSpelled = 'node ' + ($otherFile -replace '\\', '/')
+    [System.IO.File]::WriteAllText($box.settings, ('{ "model": "x", "hooks": { "PostToolUse": [
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $mine + '"')) + ' },
+    { "type": "command", "command": ' + (ConvertTo-Json $otherSpelled) + ' } ] }
+] } }'))
+    $r = Invoke-Box $box
+    $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+    $ptu = @($after.hooks.PostToolUse)
+    Add-Result 'uninstall: names a live unquoted spaced checkout' `
+    ($r.code -eq 0 -and $r.output -match 'removed 1' -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 1 `
+            -and $ptu[0].hooks[0].command -ceq $otherSpelled -and $r.output.Contains('left ' + ($otherFile -replace '\\', '/'))) `
+        "exit=$($r.code) survivor=$($ptu[0].hooks[0].command)"
+    Remove-Box $box
+
+    # 13. /cygdrive/c/...: this checkout spelled that way is removed AS this
+    #    checkout (never "a checkout that no longer exists"), and a live other
+    #    checkout spelled that way is left and named, not removed as gone.
+    $box = New-Box -Source $uninstall -NoFile
+    $toCyg = { param($p) '/cygdrive/' + $p.Substring(0, 1).ToLowerInvariant() + '/' + $p.Substring(3) }
+    $mineCyg = & $toCyg (($box.dir -replace '\\', '/') + '/bin/wildcard-perms')
+    $otherFile = Join-Path $box.dir 'other\bin\wildcard-perms'
+    $null = New-Item -Path (Split-Path -Parent $otherFile) -ItemType Directory -Force
+    [System.IO.File]::WriteAllText($otherFile, '')
+    $otherCyg = & $toCyg ($otherFile -replace '\\', '/')
+    [System.IO.File]::WriteAllText($box.settings, ('{ "model": "x", "hooks": { "PostToolUse": [
+  { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $mineCyg + '"')) + ' },
+    { "type": "command", "command": ' + (ConvertTo-Json ('node "' + $otherCyg + '"')) + ' } ] }
+] } }'))
+    $r = Invoke-Box $box
+    $after = Get-Content $box.settings -Raw | ConvertFrom-Json
+    $ptu = @($after.hooks.PostToolUse)
+    Add-Result 'uninstall: /cygdrive/ is this checkout or a live one' `
+    ($r.code -eq 0 -and $r.output -match 'removed 1' -and $r.output -notmatch 'no longer exists' `
+            -and $ptu.Count -eq 1 -and @($ptu[0].hooks).Count -eq 1 -and $ptu[0].hooks[0].command -ceq ('node "' + $otherCyg + '"') `
+            -and $r.output.Contains('left ' + $otherCyg)) `
+        "exit=$($r.code) survivor=$($ptu[0].hooks[0].command)"
+    Remove-Box $box
 }
 
 # -- cleanup ----------------------------------------------------------------------
@@ -819,10 +982,11 @@ Write-Host ("{0} pass, {1} fail" -f ($total - $failed), $failed)
 # A floor, because without one this harness passes by doing nothing. An empty
 # results array prints "0 pass, 0 fail" and exits 0, and the CI job that runs
 # this would go green having verified nothing at all -- which is the failure
-# this whole script exists to prevent, turned on itself. It records 28 cases
-# today on a box with Git for Windows and an 8.3 %TEMP%, 25 with neither (16
+# this whole script exists to prevent, turned on itself. It records 34 cases
+# today on a box with Git for Windows and an 8.3 %TEMP%, 31 with neither (16
 # until the other-checkout cases landed 2026-10-13, then 23, 24 with the
-# sandbox-cleanup case, 26 with the Git Bash pair); the floor sits
+# sandbox-cleanup case, 26 with the Git Bash pair, 28 with the 8.3 pair, 34
+# with the spaced-path and /cygdrive/ cases on 2026-10-14); the floor sits
 # below that so adding or reordering a case does not break it, but no
 # plausible breakage leaves more than a handful behind.
 $MinimumCases = 18

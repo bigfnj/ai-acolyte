@@ -231,7 +231,7 @@ test('install.sh registers the hook command bare, with no shell wrapper', (t) =>
   //           +17.6 ms, `powershell.exe -Command node ...` +1059 ms, which is 18x
   //           the whole hook.
   //   undo  — both uninstallers recover the hook path by unwrapping
-  //           `^node\s+(.+)$` (uninstall.ps1:28#match, uninstall.sh:49#wrapped) and otherwise
+  //           `^node\s+(.+)$` (uninstall.ps1:30#match, uninstall.sh:54#wrapped) and otherwise
   //           compare the command verbatim against the bare path. A wrapped
   //           registration matches NEITHER branch, so it is never recognised as
   //           ours: the hook becomes UN-UNINSTALLABLE, `./uninstall.sh` reports
@@ -321,7 +321,7 @@ test('both PowerShell installers fail closed on an unreadable settings.json', ()
   // satisfied by some other line — install.ps1 has two more `exit 1`s and
   // uninstall.ps1 one — leaving warn-then-write, which is the exact shape that
   // ate a settings.json. Worse, uninstall.ps1's `could not be parsed` probe was
-  // answered by a COMMENT (uninstall.ps1:45#parsed, the -AsHashtable post-mortem), so
+  // answered by a COMMENT (uninstall.ps1:46#parsed, the -AsHashtable post-mortem), so
   // it survived deleting the live branch outright. Comments are stripped first,
   // like the -AsHashtable guard above.
   for (const name of ['install.ps1', 'uninstall.ps1']) {
@@ -351,7 +351,7 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   // Banned: `cmd /c node ...` (+17.6 ms per tool call) and
   // `powershell.exe -Command node ...` (+1059 ms, 18x the whole hook). The
   // stronger reason is undo, not speed: both uninstallers recover the hook path
-  // with `^node\s+(.+)$` (uninstall.ps1:28#match, uninstall.sh:49#wrapped), a wrapped command
+  // with `^node\s+(.+)$` (uninstall.ps1:30#match, uninstall.sh:54#wrapped), a wrapped command
   // matches neither that nor the bare-path comparison, and the hook would become
   // UN-UNINSTALLABLE while still firing on every tool call.
   //
@@ -415,8 +415,8 @@ test('install.ps1 builds a bare `node` hook command, not a shell-wrapped one', (
   //
   // Case-insensitive, deliberately, and this is where the two halves of the guard
   // used to disagree with each other and with the contract they cite. The
-  // uninstallers are the contract: uninstall.sh:49#wrapped matches `/^node\s+(.+)$/i` and
-  // uninstall.ps1:28#match uses `-match`, which is case-insensitive in PowerShell. Both
+  // uninstallers are the contract: uninstall.sh:54#wrapped matches `/^node\s+(.+)$/i` and
+  // uninstall.ps1:30#match uses `-match`, which is case-insensitive in PowerShell. Both
   // recover the hook path from `NODE "…"` perfectly well. The twin case in
   // scripts/verify-installers.ps1 has always matched case-insensitively for that
   // reason; this half rejected what all three accept.
@@ -908,10 +908,10 @@ const NO_BASH = BASH ? false
 // A fake checkout with copies of both scripts, the real starter pack and a stub
 // bin/wildcard-perms (install.sh only chmods it, because "n" declines the seed),
 // plus an empty home, so install.sh's own mkdir of ~/.claude runs too.
-function shCheckout(t) {
+function shCheckout(t, name = 'checkout') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-installer-sh-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const checkout = path.join(root, 'checkout');
+  const checkout = path.join(root, name);
   fs.mkdirSync(path.join(checkout, 'bin'), { recursive: true });
   fs.mkdirSync(path.join(checkout, 'patterns'));
   for (const name of ['install.sh', 'uninstall.sh']) {
@@ -1182,3 +1182,215 @@ test('install and uninstall: this checkout under its 8.3 short path is this chec
   assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
   assert.doesNotMatch(un.stdout, /another checkout/);
 });
+
+// ── Unquoted paths with a space, and Cygwin's /cygdrive/ spelling ────────────
+//
+// Found by the v1.6.2 audit, fixed 2026-10-14, in all four scripts.
+//
+// (1) install.sh registered the BARE path on Linux and macOS unquoted, so from a
+// checkout under a path with a space it wrote a command a shell splits at the
+// space (Claude Code runs `command` through `sh -c`, or Git Bash on Windows). And
+// the strict grammar refused EVERY unquoted path with a space, so that
+// registration was never recognised again: a reinstall from a moved checkout
+// appended a second entry beside it, and the uninstallers could neither remove
+// nor name it. Such a command now counts only when it provably names one file;
+// a fresh registration of a spaced path is quoted, and this checkout's old
+// unquoted one is quoted in place.
+//
+// (2) /cygdrive/c/... was not folded on Windows, so this checkout spelled that way
+// was "another checkout" whose path "no longer exists", and a live other checkout
+// was "gone" to the uninstallers.
+//
+// The .ps1 twins are install cases 16-18 and uninstall cases 12-13 in
+// scripts/verify-installers.ps1.
+
+// A real bin/wildcard-perms under a directory whose name has a space.
+function spacedCheckout(t, name = 'old checkout') {
+  const settingsPath = sandbox(t);
+  const dir = path.dirname(path.dirname(settingsPath));
+  const file = path.join(dir, name, 'bin', 'wildcard-perms');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '#!/usr/bin/env node\n');
+  return { settingsPath, dir, file, spelled: fwd(fs.realpathSync.native(file)) };
+}
+
+test('install: another checkout registered unquoted under a path with a space is repointed, not duplicated', (t) => {
+  // The bare spelling install.sh wrote on POSIX, and the `node` one a hand edit or
+  // an older Windows install leaves. Both name a file that exists.
+  for (const spell of [(p) => p, (p) => `node ${p}`]) {
+    const box = spacedCheckout(t);
+    const stale = spell(box.spelled);
+    assert.match(stale, /\s.*wildcard-perms$/, 'the fixture must really be unquoted with a space');
+    fs.writeFileSync(box.settingsPath, settingsWith([
+      { matcher: 'Bash|PowerShell', hooks: [hook(stale, { timeout: 30 })] },
+    ]));
+
+    const run = runInstaller(box.settingsPath, embeddedModule());
+    assert.equal(run.code, 0, run.stderr);
+    const after = JSON.parse(run.after);
+    // The defect, asserted directly: before the fix this was two entries.
+    assert.deepEqual(after.hooks.PostToolUse,
+      [{ matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD, { timeout: 30 })] }], stale);
+    assert.ok(run.stdout.includes(`${box.spelled} -> ${HOOK_CMD}`), run.stdout);
+    assert.doesNotMatch(run.stdout, /no longer exists/, 'it exists, so the notice must not say otherwise');
+    assertNeighboursKept(after);
+  }
+});
+
+test('install: an unquoted command with a space that does not name one file is left alone', (t) => {
+  // The control for the case above. A path that does not exist proves nothing
+  // about a command a shell would split, and the other two are a wrapper and an
+  // extra argument around a file that DOES exist: none of them is ours to rewrite.
+  const box = spacedCheckout(t);
+  const absent = fwd(path.join(box.dir, 'gone checkout', 'bin', 'wildcard-perms'));
+  const lookalikes = [absent, `node ${absent}`, `/usr/bin/env node ${box.spelled}`, `node --inspect ${box.spelled}`];
+  fs.writeFileSync(box.settingsPath, settingsWith([
+    { matcher: 'Bash', hooks: lookalikes.map((command) => hook(command)) },
+  ]));
+
+  const run = runInstaller(box.settingsPath, embeddedModule());
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.after).hooks.PostToolUse, [
+    { matcher: 'Bash', hooks: lookalikes.map((command) => hook(command)) },
+    { matcher: 'Bash|PowerShell', hooks: [hook(HOOK_CMD)] },
+  ], 'every lookalike untouched and in order, and ours appended as if none were there');
+  assert.doesNotMatch(run.stdout, /repointed|duplicate|quoted/);
+});
+
+test("install: a path with a space is registered quoted, and this checkout's unquoted registration is quoted in place", (t) => {
+  const box = spacedCheckout(t, 'my checkout');
+  const hookCmd = box.spelled;
+
+  // Fresh: single quotes, which sh takes literally.
+  const fresh = sandbox(t);
+  const first = runInstaller(fresh, embeddedModule(), hookCmd);
+  assert.equal(first.code, 0, first.stderr);
+  assert.deepEqual(commandsIn(first.after), [`'${hookCmd}'`]);
+
+  // What the old install.sh wrote from this checkout, with a field beside
+  // `command` and a neighbour in the same entry: rewritten where it stands, and
+  // never called another checkout.
+  fs.writeFileSync(box.settingsPath, settingsWith([
+    { matcher: 'Bash|PowerShell', hooks: [hook(hookCmd, { timeout: 30 }), hook('neighbour-tool')] },
+  ]));
+  const run = runInstaller(box.settingsPath, embeddedModule(), hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.after).hooks.PostToolUse, [
+    { matcher: 'Bash|PowerShell', hooks: [hook(`'${hookCmd}'`, { timeout: 30 }), hook('neighbour-tool')] },
+  ]);
+  assert.ok(run.stdout.includes(`${hookCmd} -> '${hookCmd}'`), run.stdout);
+  assert.match(run.stdout, /path quoted/);
+  assert.doesNotMatch(run.stdout, /another checkout/);
+
+  // Idempotent: the quoted form is this checkout, already registered.
+  const again = runInstaller(box.settingsPath, embeddedModule(), hookCmd);
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(again.after, run.after, 'no second rewrite');
+  assert.match(again.stdout, /already registered/);
+
+  // Under Windows (HOOK_VIA_NODE), `node <unquoted>` becomes install.ps1's form.
+  const win = sandbox(t);
+  fs.writeFileSync(win, settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node ${hookCmd}`)] }]));
+  const viaNode = runInstaller(win, embeddedModule(), hookCmd, VIA_NODE);
+  assert.equal(viaNode.code, 0, viaNode.stderr);
+  assert.deepEqual(commandsIn(viaNode.after), [`node "${hookCmd}"`]);
+  assert.match(viaNode.stdout, /path quoted/);
+
+  // A path that itself holds a `'` gets double quotes instead.
+  const apostrophe = sandbox(t);
+  const odd = "/Users/Jo O'Neil/acolyte/bin/wildcard-perms";
+  const oddRun = runInstaller(apostrophe, embeddedModule(), odd);
+  assert.equal(oddRun.code, 0, oddRun.stderr);
+  assert.deepEqual(commandsIn(oddRun.after), [`"${odd}"`]);
+});
+
+test("uninstall: a quoted or unquoted path with a space is this checkout's, and a live one elsewhere is named", (t) => {
+  const mine = spacedCheckout(t, 'my checkout');
+  const otherFile = path.join(mine.dir, 'other checkout', 'bin', 'wildcard-perms');
+  fs.mkdirSync(path.dirname(otherFile), { recursive: true });
+  fs.writeFileSync(otherFile, '');
+  const other = fwd(fs.realpathSync.native(otherFile));
+  const absent = fwd(path.join(mine.dir, 'gone checkout', 'bin', 'wildcard-perms'));
+  fs.writeFileSync(mine.settingsPath, settingsWith([
+    // This checkout as install.sh now writes it, beside another live checkout
+    // and an unquoted path to nothing, which proves nothing and is left.
+    { matcher: 'Bash|PowerShell', hooks: [hook(`'${mine.spelled}'`), hook(`node ${other}`), hook(absent)] },
+    // This checkout unquoted behind `node`.
+    { matcher: 'Bash', hooks: [hook(`node ${mine.spelled}`)] },
+  ]));
+
+  const run = runInstaller(mine.settingsPath, embeddedUninstaller(), mine.spelled);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /removed 2 wildcard-perms PostToolUse hooks/);
+  assert.deepEqual(JSON.parse(run.after).hooks.PostToolUse,
+    [{ matcher: 'Bash|PowerShell', hooks: [hook(`node ${other}`), hook(absent)] }]);
+  assert.ok(run.stdout.includes(`left ${other} registered`), run.stdout);
+  assert.ok(!run.stdout.includes(absent), `an unprovable command is neither removed nor named:\n${run.stdout}`);
+});
+
+test('install and uninstall, Windows: /cygdrive/c/... is the same path as C:/...', (t) => {
+  if (process.platform !== 'win32') return t.skip('/cygdrive/ is a Windows spelling; on POSIX it is just a directory');
+  const cyg = (p) => p.replace(/^([A-Za-z]):\//, (_, drive) => `/cygdrive/${drive.toLowerCase()}/`);
+
+  // This checkout, spelled the Cygwin way: already registered, and removed as
+  // this checkout, never "a checkout that no longer exists".
+  const box = realCheckout(t);
+  const before = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${cyg(box.hookCmd)}"`)] }]);
+  assert.match(before, /\/cygdrive\/[a-z]\//, 'the fixture must really be the Cygwin spelling');
+  fs.writeFileSync(box.settingsPath, before);
+  const run = runInstaller(box.settingsPath, embeddedModule(), box.hookCmd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.after, before, 'one checkout, two spellings: no write');
+  assert.doesNotMatch(run.stdout, /another checkout/);
+  const un = runInstaller(box.settingsPath, embeddedUninstaller(), box.hookCmd);
+  assert.equal(un.code, 0, un.stderr);
+  assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+  assert.doesNotMatch(un.stdout, /no longer exists/);
+
+  // A live OTHER checkout spelled that way: left and named by the uninstaller,
+  // not removed as gone; repointed by the installer without "no longer exists".
+  const elsewhere = realCheckout(t);
+  const otherFile = path.join(elsewhere.dir, 'other', 'bin', 'wildcard-perms');
+  fs.mkdirSync(path.dirname(otherFile), { recursive: true });
+  fs.writeFileSync(otherFile, '');
+  const other = cyg(fwd(fs.realpathSync.native(otherFile)));
+  const live = settingsWith([{ matcher: 'Bash|PowerShell', hooks: [hook(`node "${other}"`)] }]);
+  fs.writeFileSync(elsewhere.settingsPath, live);
+  const left = runInstaller(elsewhere.settingsPath, embeddedUninstaller(), elsewhere.hookCmd);
+  assert.equal(left.code, 0, left.stderr);
+  assert.equal(left.after, live, 'not this checkout and not gone, so nothing removed');
+  assert.ok(left.stdout.includes(`left ${other} registered`), left.stdout);
+  const moved = runInstaller(elsewhere.settingsPath, embeddedModule(), elsewhere.hookCmd);
+  assert.equal(moved.code, 0, moved.stderr);
+  assert.ok(moved.stdout.includes(`${other} -> ${elsewhere.hookCmd}`), moved.stdout);
+  assert.doesNotMatch(moved.stdout, /no longer exists/, 'it exists, so the notice must not say otherwise');
+});
+
+test('install.sh end to end: from a checkout under a path with a space, the registration is quoted and uninstall.sh removes it',
+  { skip: NO_BASH }, (t) => {
+    // The shell half too: SCRIPT_DIR with a space must reach node whole, on the
+    // POSIX branch (shimmed on Windows) and the Git Bash one alike.
+    for (const posix of [true, false]) {
+      if (!posix && process.platform !== 'win32') continue; // the MINGW branch needs a real cygpath
+      const box = shCheckout(t, 'my checkout');
+      const shimDir = posix && process.platform === 'win32' ? shims(box, { uname: "echo 'Linux'" }) : null;
+      const run = runSh(box, 'install.sh', shimDir);
+      assert.equal(run.error, undefined, String(run.error));
+      assert.equal(run.code, 0, run.stderr);
+      const registered = commandsIn(run.after);
+      assert.equal(registered.length, 1, JSON.stringify(registered));
+      const file = fs.realpathSync.native(path.join(box.checkout, 'bin', 'wildcard-perms'));
+      if (posix) {
+        const unquoted = /^'(.+)'$/.exec(registered[0]);
+        assert.ok(unquoted, `bare, but quoted: ${registered[0]}`);
+        assert.equal(fs.realpathSync.native(unquoted[1]), file);
+      } else {
+        assert.equal(registered[0], `node "${fwd(file)}"`);
+      }
+      const again = runSh(box, 'install.sh', shimDir);
+      assert.match(again.stdout, /already registered/);
+      const un = runSh(box, 'uninstall.sh', shimDir);
+      assert.equal(un.code, 0, un.stderr);
+      assert.match(un.stdout, /removed 1 wildcard-perms PostToolUse hook\b/);
+    }
+  });

@@ -138,34 +138,62 @@ if (-not $cfg["hooks"].Contains("PostToolUse")) {
 # `node <path>` or a bare `<path>`, the path optionally quoted whole, ending in
 # a `bin` directory holding a file named exactly `wildcard-perms`. Strict on
 # purpose, because a false match REWRITES somebody else's hook: extra
-# arguments, a shell wrapper, an unquoted path with a space in it, another
-# filename (`wildcard-perms.js`, `wildcard-perms-audit`) or a command that only
-# mentions the name all return $null. `-match` is case-insensitive, as a
-# Windows path is.
+# arguments, a shell wrapper, another filename (`wildcard-perms.js`,
+# `wildcard-perms-audit`) or a command that only mentions the name all return
+# $null. `-match` is case-insensitive, as a Windows path is.
+#
+# An UNQUOTED path with whitespace in it counts only when it provably names one
+# file (Test-NamesOneFile): this checkout, or a file by exactly that name. It
+# was refused outright until 2026-10-14, which is install.sh's case too (its
+# toolTarget comment has the whole of it): `node C:/Users/Jo Doe/x/bin/wildcard-perms`
+# from an older or hand-made registration was never recognised, so a reinstall
+# from a moved checkout appended a second entry beside it. A wrapper such as
+# `C:/tools/run.exe C:/x/bin/wildcard-perms` has the same shape, and its whole
+# command line is never the name of a file.
 function Get-WildcardPermsTarget {
     param([object] $Command)
     if ($Command -isnot [string]) { return $null }
     $text = $Command.Trim()
     if ($text -match '^node\s+(.+)$') { $text = $Matches[1].Trim() }
+    $quoted = $false
     if ($text -match '^"([^"]+)"$') {
         $text = $Matches[1]
+        $quoted = $true
     } elseif ($text -match "^'([^']+)'$") {
         $text = $Matches[1]
-    } elseif ($text -match '\s') {
-        return $null
+        $quoted = $true
     }
     if ($text -notmatch '[\\/]bin[\\/]wildcard-perms$') { return $null }
+    if (-not $quoted -and $text -match '\s' -and -not (Test-NamesOneFile $text)) { return $null }
     return $text
 }
 
+# Called only from Get-WildcardPermsTarget, so only from the scan below, after
+# $currentPath is set. IsPathRooted and Exists throw on .NET Framework for `"`,
+# `<`, `>` or `|`; such a path proves nothing.
+function Test-NamesOneFile {
+    param([string] $Path)
+    $native = ConvertTo-WindowsPath $Path
+    try {
+        if (-not [System.IO.Path]::IsPathRooted($native)) { return $false }
+        if ((Resolve-LongPath $native) -ieq $currentPath) { return $true }
+        return [System.IO.File]::Exists($native)
+    } catch {
+        return $false
+    }
+}
+
 # One path, several spellings: backslashes or forward slashes, /d/repo (Git
-# Bash's own) or D:/repo (this script, and install.sh run from Git Bash).
-# Compare the results with -ieq; casing is folded there, not here, so the notice
-# prints the path as the user wrote it.
+# Bash's own), /cygdrive/d/repo (Cygwin's) or D:/repo (this script, and
+# install.sh run from Git Bash). Compare the results with -ieq; casing is folded
+# there, not here, so the notice prints the path as the user wrote it. The
+# /cygdrive/ form was not folded until 2026-10-14: .NET reads /cygdrive/c/x as
+# C:\cygdrive\c\x, which never exists, so this checkout spelled that way was
+# "repointed from another checkout ... (the old path no longer exists)".
 function ConvertTo-WindowsPath {
     param([string] $Path)
     $text = $Path.Replace("\", "/")
-    if ($text -match '^/([A-Za-z])/(.*)$') { $text = "$($Matches[1]):/$($Matches[2])" }
+    if ($text -match '^(?:/cygdrive)?/([A-Za-z])/(.*)$') { $text = "$($Matches[1]):/$($Matches[2])" }
     return $text.TrimEnd("/")
 }
 
@@ -220,8 +248,12 @@ for ($i = 0; $i -lt $entries.Count; $i++) {
         # $hookCommand exists to avoid. It is still this checkout -- never
         # "another checkout" -- but it is rewritten to $hookCommand below rather
         # than left as "already registered". A `node ...` spelling of it, any
-        # casing or slash direction, is left exactly as it is.
-        $respell = $isCurrent -and ($command -notmatch '^\s*node\s')
+        # casing or slash direction, is left exactly as it is -- unless it is
+        # UNQUOTED with whitespace in its path ($split), which Git Bash, the shell
+        # Claude Code runs a hook command through on Windows, splits at the space.
+        $bare = $command -notmatch '^\s*node\s'
+        $split = ($target -match '\s') -and ("$command".Trim() -notmatch '["'']$')
+        $respell = $isCurrent -and ($bare -or $split)
         # "$i/$j" identifies the hook for the rebuild below; indices rather than
         # object identity, which PowerShell's PSObject wrapping makes unreliable.
         $found += [pscustomobject]@{
@@ -231,6 +263,7 @@ for ($i = 0; $i -lt $entries.Count; $i++) {
             target  = $target
             current = $isCurrent
             respell = $respell
+            bare    = $bare
             matcher = "$($entry['matcher'])"
         }
     }
@@ -267,7 +300,11 @@ foreach ($f in $found) {
     } elseif ($f.respell) {
         # In place, like a repoint: same entry, matcher, position and fields.
         $f.hook["command"] = $hookCommand
-        $notices += "[OK] wildcard-perms hook now runs through node, because Windows cannot run the bare path: $($f.command) -> $hookCommand"
+        if ($f.bare) {
+            $notices += "[OK] wildcard-perms hook now runs through node, because Windows cannot run the bare path: $($f.command) -> $hookCommand"
+        } else {
+            $notices += "[OK] wildcard-perms hook path quoted, because a shell splits an unquoted path at its space: $($f.command) -> $hookCommand"
+        }
     }
 }
 

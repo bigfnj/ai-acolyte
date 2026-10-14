@@ -18,7 +18,7 @@ case "$(uname -s)" in
 esac
 
 HOOK_CMD="$HOOK_CMD" SETTINGS="$SETTINGS" node --input-type=module <<'EOF'
-import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, statSync } from 'fs';
 import { isAbsolute } from 'path';
 
 const settingsPath = process.env.SETTINGS;
@@ -44,15 +44,22 @@ catch (error) {
 // because Windows has no shebang support and a bare extensionless path pops a "How do
 // you want to open this file?" dialog on every hook fire (older Git Bash installs left
 // exactly that bare path). So match on the PATH, not on the spelling that wraps it.
+//
+// The quotes come off a BARE path too, since 2026-10-14: install.sh now registers a
+// path with whitespace in it quoted, `'/Users/Jo Doe/acolyte/bin/wildcard-perms'`,
+// because a shell splits it otherwise, and only a `node`-wrapped path was unquoted
+// here, so this checkout's own quoted registration would have read as somebody else's.
 const hookPath = (value) => {
   let text = String(value ?? '').trim();
   const wrapped = /^node\s+(.+)$/i.exec(text);
-  if (wrapped) text = wrapped[1].trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+  if (wrapped) text = wrapped[1].trim();
+  text = text.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
   text = text.replace(/\\/g, '/');
-  // Git Bash spells D:\repo as /d/repo where PowerShell writes D:/repo — one path,
-  // two spellings — and a Windows path is case-insensitive besides.
-  const drive = /^\/([A-Za-z])\//.exec(text);
-  if (drive) text = `${drive[1]}:/${text.slice(3)}`;
+  // Git Bash spells D:\repo as /d/repo and Cygwin as /cygdrive/d/repo where
+  // PowerShell writes D:/repo — one path, three spellings — and a Windows path is
+  // case-insensitive besides.
+  const drive = /^(?:\/cygdrive)?\/([A-Za-z])\//i.exec(text);
+  if (drive) text = `${drive[1]}:/${text.slice(drive[0].length)}`;
   return canonical(text).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 };
 
@@ -96,6 +103,12 @@ const isThisCheckout = (hook) => hookPath(hook?.command) === target;
 // command that runs a `bin/wildcard-perms` file and nothing else is ours, so
 // `wildcard-perms-audit` or a command that merely mentions the name never is.
 // A relative path cannot be checked for existence, so it counts as still there.
+// An UNQUOTED path with whitespace in it is ours only if a file by exactly that
+// name exists (install.sh's toolTarget comment has why; this checkout's own is
+// decided by isThisCheckout before this is asked). So one of those is never
+// "gone": an absent file proves nothing about a command a shell would split, and
+// it may be `/usr/bin/env node /x/bin/wildcard-perms`, which is not ours to remove.
+// /cygdrive/d/... folds like /d/... (install.sh's nativePath has the cost of not).
 const onWindows = process.platform === 'win32';
 const toolTarget = (command) => {
   if (typeof command !== 'string') return null;
@@ -104,15 +117,20 @@ const toolTarget = (command) => {
   if (wrapped) text = wrapped[1].trim();
   const quoted = /^"([^"]+)"$/.exec(text) || /^'([^']+)'$/.exec(text);
   if (quoted) text = quoted[1];
-  else if (/\s/.test(text)) return null;
   const tail = onWindows ? /[\\/]bin[\\/]wildcard-perms$/i : /\/bin\/wildcard-perms$/;
-  return tail.test(text) ? text : null;
+  if (!tail.test(text)) return null;
+  if (!quoted && /\s/.test(text) && !isExistingFile(nativePath(text))) return null;
+  return text;
+};
+const isExistingFile = (p) => {
+  if (!isAbsolute(p)) return false;
+  try { return statSync(p).isFile(); } catch { return false; }
 };
 const nativePath = (p) => {
   if (!onWindows) return p;
   const text = p.replace(/\\/g, '/');
-  const drive = /^\/([A-Za-z])\//.exec(text);
-  return drive ? `${drive[1]}:/${text.slice(3)}` : text;
+  const drive = /^(?:\/cygdrive)?\/([A-Za-z])\//i.exec(text);
+  return drive ? `${drive[1]}:/${text.slice(drive[0].length)}` : text;
 };
 const isGone = (hook) => {
   const found = toolTarget(hook?.command);

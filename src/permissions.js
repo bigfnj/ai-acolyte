@@ -24,9 +24,9 @@ function sleepSync(ms) {
 // the newly written temp) open — a structural race here because Claude Code
 // itself writes settings.json, and that write is what triggers wildcarding.
 // Retry the rename with backoff (as write-file-atomic / graceful-fs do), then
-// fall back to an in-place write so a transient lock never silently drops the
-// update. Cleans up its own temp file on every path.
-function writeFileAtomicSync(target, content) {
+// write in place, or under `inPlaceFallback: false` throw SETTINGS_CONTENDED_CODE
+// and leave the target untouched (the note after the loop). Cleans up its own temp.
+function writeFileAtomicSync(target, content, { inPlaceFallback = true } = {}) {
   // Unique per-writer temp name so the hook and the VS Code extension (or two
   // extension hosts) never collide on one shared *.wc.tmp.
   const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.wc.tmp`;
@@ -48,6 +48,9 @@ function writeFileAtomicSync(target, content) {
     try { fs.unlinkSync(tmp); } catch { /* never created, or already gone */ }
     throw err;
   }
+  // A writer KILLED between here and its unlink leaves its temp for good. Old ones
+  // are swept now (sweepOrphanedTemps, below); this call's own is seconds old.
+  sweepOrphanedTemps(target);
 
   const MAX_ATTEMPTS = RENAME_RETRY_ATTEMPTS;
   let lastErr;
@@ -66,10 +69,41 @@ function writeFileAtomicSync(target, content) {
     }
   }
 
-  // Rename kept failing: the target stayed held for the whole window. Write in
-  // place as a last resort — non-atomic, but settings.json is small and losing
-  // the update is worse than a brief window where a reader might see a partial
-  // file (both readers here already tolerate a failed parse).
+  // Rename kept failing: the target stayed held for the whole window, or the rename
+  // failed for a reason no retry fixes. What happens next depends on the caller.
+  //
+  // THE IN-PLACE WRITE IS NOT SAFE FOR EVERY WRITER (2026-10-14). It truncates the
+  // target and then fills it. Measured by an audit on 2026-10-14: it ran in 0 of 380
+  // uncontended writes, and on EVERY write while another process held the target
+  // open for 0.9 s or more, even a holder that shares delete. The truncating open
+  // waits ~90-120 ms in the endpoint scanner, then the file reads 0 bytes for p50
+  // 0.36 ms, max 1.2 ms. A process killed inside that window leaves settings.json
+  // EMPTY, with deny rules, hooks and env gone. This comment used to say losing the
+  // update is worse than a brief partial window. That holds only for a writer that is
+  // not killed mid-write and whose update nobody would redo.
+  //
+  // The PostToolUse hook is the opposite on both counts, so it passes
+  // `inPlaceFallback: false`. The installers register it `"async": true`, and
+  // `claude -p` kills a still-running async hook at teardown; and its pass is
+  // idempotent, so the next tool call recomputes and rewrites whatever this one could
+  // not. It gets the SETTINGS_CONTENDED_CODE throw below with the target byte-identical
+  // and the temp gone, and treats it like a busy policy lock. The fallback stays for
+  // every other caller: the extension, the user-invoked CLI verbs (--bypass, --max off,
+  // --seed, --drain), and the guidance, Codex config and backup writers. No teardown
+  // kills them mid-pass, and an update they drop would not be redone by itself.
+  if (!inPlaceFallback) {
+    try { fs.unlinkSync(tmp); } catch { /* held by a scanner: sweepOrphanedTemps, later */ }
+    // A failure no retry fixes (EXDEV, ENOENT) is not contention. Say what it was.
+    if (!RETRYABLE_RENAME_CODES.has(lastErr.code)) throw lastErr;
+    const err = new Error(`${target} stayed held through ${MAX_ATTEMPTS} rename attempts `
+      + `(${lastErr.code}), so nothing was written; the next run retries`);
+    err.code = SETTINGS_CONTENDED_CODE;
+    err.cause = lastErr;
+    throw err;
+  }
+
+  // Everyone else: write in place as a last resort (both readers here tolerate a
+  // failed parse, which is what a reader sees inside the window).
   // lastErr was assigned on every failed attempt and read on NO path, so a
   // non-retryable rename failure fell silently into the in-place write with the
   // original cause discarded. Say what went wrong: this is the branch where the
@@ -845,12 +879,12 @@ function applyBypass(settings, on) {
 
 // BYPASS_MODE and BYPASS_STATE_FILE came off this list and stayed in the file.
 // Both are internal to the four bypass functions below them, and so is prunePermissions,
-// whose only caller is processAllowList at src/permissions.js:775#prunePermissions.
+// whose only caller is processAllowList at src/permissions.js:809#prunePermissions.
 //
 // readBypassState is the one this comment got WRONG, and the correction is worth
 // the space. It used to be named here as one of the functions "the CLI, the
 // extension and the tests have always reached the behaviour" through. Nothing reached
-// it, in any of the three: it is called at src/permissions.js:841#readBypassState and
+// it, in any of the three: it is called at src/permissions.js:875#readBypassState and
 // nowhere else in the repository. The claim then argued AGAINST its own test —
 // "applyBypass's own round trip does not already pin" was false, because no test ever
 // turned bypass OFF. Mutating this function to `return {}` left all 696 tests green. It is
@@ -886,10 +920,59 @@ function applyBypass(settings, on) {
 const RENAME_RETRY_ATTEMPTS = 10;
 const renameRetryDelayMs = (failures) => 20 * failures;
 
+// "Another writer held the file, nothing was written, retry on the next trigger." DEFINED
+// here since 2026-10-14, because writeFileAtomicSync now throws it and this module may
+// require nothing but ./permission-match (the closure above). src/settings-write.js, where
+// it used to live, imports it from here and re-exports it, so there is ONE definition and
+// every reader that takes it from settings-write is unchanged.
+const SETTINGS_CONTENDED_CODE = 'SETTINGS_CONTENDED';
+
+// ORPHANED TEMPS. Every exit from writeFileAtomicSync unlinks its temp, but a process
+// that is KILLED never reaches an exit: the hook killed at `claude -p` teardown inside
+// its 0.9 s rename retry, a crash, a power cut. What it leaves is
+// `<target>.<pid>.<base36>.wc.tmp`, a full copy of settings.json, and until 2026-10-14
+// nothing ever removed one.
+//
+// So each write sweeps its target's own orphans: one readdir of the target's directory,
+// paid only when a write actually happens. A file goes only when ALL of these hold:
+//   - its name is exactly `<basename of target>.<digits>.<base36>.wc.tmp`. Matched as a
+//     literal prefix and suffix plus a pattern for the middle, so no character of the
+//     basename is ever read as regex syntax and `settings.json` cannot match
+//     `settingsXjson...`. Another target's temps, the target itself and every unrelated
+//     file fail this test;
+//   - it is a regular file (lstat, so a link or a directory of that name stays);
+//   - its mtime is more than ORPHAN_TEMP_MIN_AGE_MS old. A live writer's temp exists
+//     for about a second (the write, the 0.9 s retry, an in-place write), so ten
+//     minutes leaves a margin of hundreds. A writer suspended past that loses its temp
+//     and its rename fails ENOENT, which no retry treats as transient: the default path
+//     writes in place and the hook's path throws. Neither corrupts anything.
+// Every error is swallowed. This is housekeeping, and the write it rides on must never
+// fail because of it.
+const ORPHAN_TEMP_MIN_AGE_MS = 10 * 60 * 1000;
+const ORPHAN_TEMP_MIDDLE = /^\d+\.[0-9a-z]+$/;
+
+function sweepOrphanedTemps(target) {
+  try {
+    const dir = path.dirname(target);
+    const prefix = `${path.basename(target)}.`;
+    const suffix = '.wc.tmp';
+    const cutoff = Date.now() - ORPHAN_TEMP_MIN_AGE_MS;
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+      if (!ORPHAN_TEMP_MIDDLE.test(name.slice(prefix.length, -suffix.length))) continue;
+      try {
+        const file = path.join(dir, name);
+        const stat = fs.lstatSync(file);
+        if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(file);
+      } catch { /* gone already, or held: the next write tries again */ }
+    }
+  } catch { /* an unlistable directory costs the sweep, never the write */ }
+}
+
 module.exports = {
   generalizePermission, BASH_SCRIPT_KEYWORDS, isPowerShellCommandName, claudeStripsAssignment,
   claudeWrapperPrefix,
-  isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync,
+  isCoveredBy, createCoverIndex, processAllowList, writeFileAtomicSync, SETTINGS_CONTENDED_CODE,
   RETRYABLE_RENAME_CODES, RENAME_RETRY_ATTEMPTS, renameRetryDelayMs,
   coverKeyCacheStats, coverIndexKeyCacheStats,
   currentMode, isBypassOn, applyBypass, readBypassState,

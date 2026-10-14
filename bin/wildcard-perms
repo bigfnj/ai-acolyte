@@ -380,9 +380,9 @@ function readSettings() {
 // when it has actually decided to write. No backup hook: the extension owns the
 // high-water mark, and giving the CLI one here would be a behaviour change
 // smuggled in beside a correctness fix.
-function settingsWriter() {
+function settingsWriter(options) {
   const { createSettingsWriter } = require('../src/settings-write');
-  return createSettingsWriter({ settingsPath: SETTINGS });
+  return createSettingsWriter({ settingsPath: SETTINGS, ...options });
 }
 
 // readSettings() collapses "absent" and "unreadable" into null, which is right
@@ -474,7 +474,7 @@ function run(input) {
   // Record the key ONLY for a verified fixed point, and only for the bytes we
   // actually read and checked. Never for bytes we believe we wrote: writeAllow
   // re-reads and rebases inside itself, returns counts rather than the written
-  // text, and can fall back to a non-atomic in-place write — so the post-write
+  // text, and may refuse a held file having written nothing — so the post-write
   // content is a file state this process never saw. One wasted miss after a
   // write is the correct price, and the cache converges on the next call because
   // what writeAllow leaves behind is itself a fixed point (verified: 0 of 400
@@ -515,7 +515,7 @@ function finish(input, wildcardPending) {
       if (wildcardPending) wildcardUnderLock();
       if (drainPending) drainUnderLock(cwd);
     });
-  } catch { /* busy, or an unreadable project — the next hook run retries */ }
+  } catch { /* busy, held (contended), or an unreadable project — the next hook run retries */ }
   process.exit(0);
 }
 
@@ -558,9 +558,19 @@ function hookCwd(input) {
 // additive only, and every unrelated top-level field — model, effortLevel, env,
 // hooks — comes from the newest file instead of a stale spread. Those fields,
 // not deny, are the common casualty: Claude Code rewrites them constantly.
+//
+// The hook NEVER writes settings.json in place. A file held through the whole
+// rename retry used to be truncated and rewritten, and the hook is the one writer
+// that can be killed mid-write: registered `"async": true`, `claude -p` kills it at
+// teardown, and a kill inside that window left settings.json empty. So every
+// writer this path reaches is built with `inPlaceFallback: false` (here, in
+// drainUnderLock, and through it the drain's snapshot and prune), and a held file
+// comes back as SETTINGS_CONTENDED_CODE, which is handled like a busy lock: nothing
+// written, nothing said, exit 0, and the next tool call redoes the pass.
+// writeFileAtomicSync in src/permissions.js records the measurement.
 function wildcardUnderLock() {
   const { processAllowList } = require('../src/permissions');
-  const writer = settingsWriter();
+  const writer = settingsWriter({ inPlaceFallback: false });
   const state = writer.readSettingsState();
   const fresh = state.settings;
   if (!fresh) return; // absent or mid-write; the next hook run retries
@@ -584,16 +594,19 @@ function wildcardUnderLock() {
       + `${written.allow.length} entries\n`
     );
   } catch (err) {
-    // SETTINGS_UNREADABLE is "come back in a moment", not a failure to shout
-    // about — and the hook path is quiet by design either way.
-    if (err?.code !== 'SETTINGS_UNREADABLE') {
+    // SETTINGS_UNREADABLE and SETTINGS_CONTENDED are "come back in a moment", not
+    // failures to shout about, and the hook path is quiet by design either way.
+    // Required here, in a catch, as the verbs do: settingsWriter() above already
+    // loaded the module, so this is a require.cache hit.
+    const { SETTINGS_UNREADABLE_CODE, SETTINGS_CONTENDED_CODE } = require('../src/settings-write');
+    if (err?.code !== SETTINGS_UNREADABLE_CODE && err?.code !== SETTINGS_CONTENDED_CODE) {
       process.stderr.write(`wildcard-perms: write error: ${err.message}\n`);
     }
   }
 }
 
 function drainUnderLock(cwd) {
-  const report = drainWorkspace(cwd);
+  const report = drainWorkspace(cwd, { inPlaceFallback: false });
   if (!report.changed) return;
   process.stderr.write(
     `wildcard-perms: local drain — promoted ${report.promoted.length}, ` +
@@ -604,7 +617,7 @@ function drainUnderLock(cwd) {
 // Merge entries into the user-scope allow list, generalizing and pruning the
 // result exactly as the hook pass would, so a promoted permission is
 // indistinguishable from one approved directly.
-function mergeUserAllow(entries) {
+function mergeUserAllow(entries, writeOptions) {
   // Through the rebasing writer, and computed from ITS read, so the rebase
   // degenerates to identity. This was the third unrebased read-modify-write in
   // this file, and the one that ran on the hook path immediately after the
@@ -612,20 +625,24 @@ function mergeUserAllow(entries) {
   // The extension's half of the drain already routed through writeAllow
   // (vscode-extension/extension.js applyUserAllow); the CLI's was left behind.
   const { processAllowList } = require('../src/permissions');
-  const writer = settingsWriter();
+  const writer = settingsWriter(writeOptions);
   const fresh = writer.readSettingsState().settings ?? {};
   const existing = Array.isArray(fresh?.permissions?.allow) ? fresh.permissions.allow : [];
   const merged = processAllowList([...new Set([...existing, ...entries])]);
   writer.writeAllow(fresh, merged);
 }
 
-function drainWorkspace(workspaceRoot, { dryRun = false } = {}) {
+// `inPlaceFallback: false` is the hook's (see the note above wildcardUnderLock). The
+// --drain verb keeps the default: a user ran it and is watching, nothing kills it at
+// a teardown, and a held file would otherwise make the verb fail where it used to work.
+function drainWorkspace(workspaceRoot, { dryRun = false, inPlaceFallback = true } = {}) {
   const { drainLocalSettings } = require('../src/local-settings');
   return drainLocalSettings({
     workspaceRoot,
     readUserSettings: readSettings,
-    applyUserAllow: mergeUserAllow,
+    applyUserAllow: (entries) => mergeUserAllow(entries, { inPlaceFallback }),
     dryRun,
+    inPlaceFallback,
   });
 }
 

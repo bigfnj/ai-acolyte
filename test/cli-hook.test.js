@@ -1048,3 +1048,185 @@ test('a hook event that does not parse says so instead of skipping the drain in 
   // fails on the stderr match — with every other assertion still passing, which
   // is exactly how the silent version survived.
 });
+
+// ── the hook never writes a held file in place (2026-10-14) ──────────────────
+//
+// writeFileAtomicSync used to fall back to an in-place write once its 0.9 s of
+// rename retries ran out, and an audit measured that fallback running on EVERY write
+// while another process held the file. The in-place write truncates before it fills,
+// and the hook, registered `"async": true`, is killed by `claude -p` at teardown, so a
+// kill inside that window left settings.json EMPTY. The hook now builds every writer
+// it reaches with `inPlaceFallback: false`, and a held file comes back as
+// SETTINGS_CONTENDED, handled like a busy lock: exit 0, nothing said, nothing written,
+// and the next call redoes the pass.
+//
+// The hold is a `--require` preload that refuses `renameSync(<temp>, <destination>)`
+// with EPERM, Windows' answer for a held destination, whenever the destination's
+// basename matches PW_HELD_NAME. Deterministic on every platform; the Windows-only
+// test after these holds the file with a real process instead.
+function heldRenameShim(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-wildcarding-held-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const shim = path.join(dir, 'held-rename.js');
+  fs.writeFileSync(shim, [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    'const held = new RegExp(process.env.PW_HELD_NAME);',
+    'const real = fs.renameSync;',
+    'fs.renameSync = function (from, to, ...rest) {',
+    "  if (String(from).endsWith('.wc.tmp') && held.test(path.basename(String(to)))) {",
+    "    throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });",
+    '  }',
+    '  return real.call(this, from, to, ...rest);',
+    '};',
+  ].join('\n') + '\n');
+  return shim;
+}
+
+function runHookHeld(t, home, event, heldName) {
+  const root = path.parse(home).root;
+  return spawnSync(process.execPath, ['--require', heldRenameShim(t), CLI], {
+    cwd: home, encoding: 'utf8', windowsHide: true,
+    input: JSON.stringify(event ?? {}),
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+      PW_HELD_NAME: heldName,
+    },
+  });
+}
+
+const tempsIn = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((name) => name.endsWith('.wc.tmp'));
+
+// Pinned with a deny rule, a hook and a model: the three things an emptied
+// settings.json loses and nothing else would notice.
+const POLICY = {
+  model: 'claude-opus-5',
+  hooks: { PostToolUse: [{ matcher: 'Bash|PowerShell', hooks: [{ type: 'command', command: 'node x' }] }] },
+  permissions: { allow: ['Bash(git status)', 'Bash(git diff)'], deny: ['Bash(rm -rf /*)'] },
+};
+
+test('a settings.json held through every rename is left byte-identical, and the next call applies the pass', (t) => {
+  const home = tempHome(t, POLICY);
+  const file = path.join(home, '.claude', 'settings.json');
+  const before = fs.readFileSync(file);
+
+  const held = runHookHeld(t, home, { cwd: home }, '^settings\\.json$');
+  assert.equal(held.status, 0, `the hook must exit 0 under contention; stderr: ${held.stderr}`);
+  assert.equal(held.stdout, '');
+  assert.equal(held.stderr, '',
+    'contention is "come back later", reported like a busy lock: not at all. The old '
+    + 'fallback printed the PermissionWildcardingAtomicFallback warning and the write line here');
+  assert.ok(fs.readFileSync(file).equals(before),
+    'settings.json must be byte-identical: the in-place write is the one that can be cut short');
+  assert.deepEqual(tempsIn(path.dirname(file)), [], 'and the refused write left no temp behind');
+  assert.notEqual(cache.readFixedPoint({ home }), cache.fixedPointKey(before),
+    'bytes the pass still owes work on must never be recorded as a fixed point');
+
+  // The hold ends; the next tool call fires the hook again, and the pass is idempotent.
+  const next = runHook(home, { cwd: home });
+  assert.equal(next.status, 0, next.stderr);
+  assert.match(next.stderr, /^wildcard-perms: \+2 -2 → 2 entries$/m);
+  const after = settingsOf(home);
+  assert.deepEqual(after.permissions.allow, ['Bash(git status *)', 'Bash(git diff *)']);
+  assert.deepEqual(after.permissions.deny, POLICY.permissions.deny);
+  assert.deepEqual(after.hooks, POLICY.hooks);
+  assert.equal(after.model, POLICY.model);
+
+  // MUTATION: drop `{ inPlaceFallback: false }` from wildcardUnderLock and the held run
+  // rewrites settings.json in place, failing the byte-identical assertion.
+});
+
+test('the hook does not prune a held settings.local.json in place either', (t) => {
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status *)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+  const localFile = path.join(workspace, '.claude', 'settings.local.json');
+  const before = fs.readFileSync(localFile);
+
+  const held = runHookHeld(t, home, { cwd: workspace }, '^settings\\.local\\.json$');
+  assert.equal(held.status, 0, held.stderr);
+  assert.equal(held.stderr, '', 'the drain reports nothing for a pass it did not finish');
+  assert.ok(fs.readFileSync(localFile).equals(before),
+    'Claude Code writes this file too; a truncated one loses the project\'s approvals');
+  assert.deepEqual(tempsIn(path.dirname(localFile)), []);
+  // Promote, re-read, prune: the promotion is a different file and landed, which is
+  // what makes stopping before the prune safe. Nothing was lost, only deferred.
+  assert.ok(settingsOf(home).permissions.allow.includes('Bash(tokei *)'));
+
+  const next = runHook(home, { cwd: workspace });
+  assert.equal(next.status, 0, next.stderr);
+  assert.deepEqual(localAllowOf(workspace), [], 'the next call finishes the drain');
+  assert.match(next.stderr, /local drain — promoted 0, pruned 1, kept 0/);
+
+  // MUTATION: drop `{ inPlaceFallback }` from the prune's writeFileAtomicSync in
+  // src/local-settings.js, or `{ inPlaceFallback: false }` from drainUnderLock, and
+  // the held run prunes the file in place.
+});
+
+test('a held drain snapshot stops the prune, so the paper trail never misses a round', (t) => {
+  // The snapshot is the only record of what a project had approved once its local file
+  // shrinks. Pruning without it would lose that record for this round; writing it in
+  // place could empty the whole history. Under the hook, a held snapshot stops the drain
+  // before the prune, and the next call does both.
+  const home = tempHome(t, { permissions: { allow: ['Bash(git status *)'] } });
+  const workspace = workspaceWithLocalApproval(home);
+  const localFile = path.join(workspace, '.claude', 'settings.local.json');
+  const before = fs.readFileSync(localFile);
+  const { localBackupPath } = require('../src/local-settings');
+  const snapshot = localBackupPath(workspace, path.join(home, '.claude', 'backups'));
+
+  const held = runHookHeld(t, home, { cwd: workspace }, '^settings\\.local\\.[0-9a-f]{12}\\.json$');
+  assert.equal(held.status, 0, held.stderr);
+  assert.equal(held.stderr, '');
+  assert.ok(fs.readFileSync(localFile).equals(before), 'no prune without its snapshot');
+  assert.equal(fs.existsSync(snapshot), false, 'precondition: the snapshot write really was refused');
+  assert.deepEqual(tempsIn(path.dirname(snapshot)), []);
+
+  const next = runHook(home, { cwd: workspace });
+  assert.equal(next.status, 0, next.stderr);
+  assert.deepEqual(localAllowOf(workspace), []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(snapshot, 'utf8')).allow, ['Bash(tokei .)'],
+    'and the snapshot records what was pruned');
+
+  // MUTATION: remove the SETTINGS_CONTENDED rethrow in backupLocalAllow and the held run
+  // prunes with no snapshot; drop `{ inPlaceFallback }` from its call and the snapshot is
+  // written in place before the prune.
+});
+
+test('a settings.json a real process holds open is left alone, and written once it lets go', {
+  skip: process.platform !== 'win32' && 'only Windows refuses to replace a file another process holds open',
+}, async (t) => {
+  // The measured case itself, with no stub: a second process holds settings.json open
+  // through Node's own open, which shares read, write AND delete. Windows still refuses
+  // the replace for the whole retry budget, which is what sent every such write in place.
+  const home = tempHome(t, POLICY);
+  const file = path.join(home, '.claude', 'settings.json');
+  const before = fs.readFileSync(file);
+  const holder = spawn(process.execPath, ['-e', [
+    "const fs = require('fs');",
+    `const fd = fs.openSync(${JSON.stringify(file)}, 'r');`,
+    "process.stdout.write('held');",
+    "process.stdin.resume().on('end', () => { fs.closeSync(fd); process.exit(0); });",
+  ].join('\n')], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  const exited = new Promise((resolve) => holder.once('exit', resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      holder.stdout.once('data', resolve);
+      holder.once('exit', (code) => reject(new Error(`the holder exited (${code}) before holding`)));
+    });
+
+    const held = runHook(home, { cwd: home });
+    assert.equal(held.status, 0, held.stderr);
+    assert.equal(held.stderr, '');
+    assert.ok(fs.readFileSync(file).equals(before), 'byte-identical while the holder has it open');
+    assert.deepEqual(tempsIn(path.dirname(file)), []);
+  } finally {
+    holder.stdin.end();
+    await exited;
+  }
+
+  const next = runHook(home, { cwd: home });
+  assert.equal(next.status, 0, next.stderr);
+  assert.deepEqual(settingsOf(home).permissions.allow, ['Bash(git status *)', 'Bash(git diff *)']);
+  assert.deepEqual(settingsOf(home).permissions.deny, POLICY.permissions.deny);
+});

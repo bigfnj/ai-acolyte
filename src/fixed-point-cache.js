@@ -186,11 +186,11 @@ function readFixedPoint(options = {}) {
 }
 
 // Did the key land? Best-effort like readBypassState/writeBypassState in
-// src/permissions.js:799-810#readBypassState, and for the same reason: total loss of
+// src/permissions.js:833-844#readBypassState, and for the same reason: total loss of
 // this file costs exactly one cache miss.
 //
 // Plain writeFileSync, NOT writeFileAtomicSync. That helper's rename retry loop
-// (src/permissions.js:52-67#MAX_ATTEMPTS) is sleepSync(20 * (attempt + 1)) between 10
+// (src/permissions.js:55-70#MAX_ATTEMPTS) is sleepSync(20 * (attempt + 1)) between 10
 // attempts, where sleepSync is Atomics.wait — an unyieldable thread block totalling
 // ~900 ms worst case, on EPERM/EACCES/EBUSY/ETXTBSY, which is exactly what a brand-new
 // temp file in ~/.claude attracts from Defender. Importing a second of stall onto the

@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 
-const { writeFileAtomicSync } = require('./permissions');
+const { writeFileAtomicSync, SETTINGS_CONTENDED_CODE } = require('./permissions');
 
 // `defaultSettingsPath(home)` used to live here. It was exported and imported
 // nowhere, and its one internal caller was `settingsPath || defaultSettingsPath()`
@@ -35,9 +35,9 @@ const SETTINGS_ABSENT = 'absent';
 const SETTINGS_PRESENT = 'present';
 const SETTINGS_UNREADABLE = 'unreadable';
 const SETTINGS_UNREADABLE_CODE = 'SETTINGS_UNREADABLE';
-// Coded like the lock and the unreadable case: a caller should report this and
-// let its next trigger retry, not treat it as a hard failure.
-const SETTINGS_CONTENDED_CODE = 'SETTINGS_CONTENDED';
+// SETTINGS_CONTENDED_CODE is coded like the lock and the unreadable case: report it and
+// let the next trigger retry. DEFINED in src/permissions.js, whose writer throws it too
+// and may not require this module; imported above and re-exported, so one definition.
 
 // THE classifier for settings.json bytes. Both entry points below delegate to
 // it, and that is load-bearing rather than tidy: they each used to carry their
@@ -145,7 +145,7 @@ function deniesLost(before, after) {
 // the two, because the thing it silently defaulted to is the developer's REAL
 // ~/.claude/settings.json. A writer constructed without a target should say so,
 // not pick the most dangerous file on the machine.
-function createSettingsWriter({ settingsPath, onWrite }) {
+function createSettingsWriter({ settingsPath, onWrite, inPlaceFallback = true }) {
   if (!settingsPath) throw new TypeError('createSettingsWriter requires a settingsPath');
   const target = settingsPath;
 
@@ -212,9 +212,9 @@ function createSettingsWriter({ settingsPath, onWrite }) {
     // Don't introduce an empty deny key where the user never had one.
     if (denyMalformed || rebasedDeny.length || Array.isArray(rawDeny)) permissions.deny = rebasedDeny;
     const updated = { ...latest, permissions };
-    // Atomic write with Windows-safe rename retry + in-place fallback. The naive
-    // renameSync raced Claude Code's own settings.json writes → intermittent EPERM.
-    writeFileAtomicSync(target, JSON.stringify(updated, null, 2) + '\n');
+    // Atomic write with Windows-safe rename retry (a naive renameSync raced Claude Code's
+    // own writes: EPERM). The hook passes inPlaceFallback: false and gets CONTENDED instead.
+    writeFileAtomicSync(target, JSON.stringify(updated, null, 2) + '\n', { inPlaceFallback });
     if (typeof onWrite === 'function') onWrite(rebasedAllow, rebasedDeny);
     // What actually landed, measured against the file this write rebased onto — not
     // against the caller's older snapshot. A caller that reports its own intent
@@ -368,7 +368,7 @@ function createSettingsWriter({ settingsPath, onWrite }) {
         );
       }
 
-      writeFileAtomicSync(target, JSON.stringify(result.settings, null, 2) + '\n');
+      writeFileAtomicSync(target, JSON.stringify(result.settings, null, 2) + '\n', { inPlaceFallback });
       // Deliberately NOT calling onWrite. A whole-object transform can remove
       // entries intentionally, while the high-water backup only grows. Callers
       // that remove retired generated entries reconcile the backup explicitly.

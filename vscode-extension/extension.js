@@ -222,15 +222,15 @@ const writeAllow = (settings, allow, denyAdditions) =>
 // On-disk shape is { allow, deny }. A bare array is the pre-1.12 allow-only
 // backup and is still read, so an existing file upgrades in place on first write.
 //
-// Read late rather than at module load: a settings change must not need a window
-// reload to take effect, and a config read at require time runs before the
-// mocked workspace exists in tests. Falls back to the default when unset or
-// blank, and `~` is expanded so a hand-typed setting behaves as it reads.
+// Read late rather than at module load: a settings change must not need a window reload to
+// take effect, and a config read at require time runs before the mocked workspace exists in
+// tests. USER settings only (machine-scoped, F7, 2026-10-14): a workspace must not choose where
+// the allow and deny lists are copied. Unset or blank is the default; `~` is expanded.
 function mirrorBackupPath() {
   let configured;
   try {
     configured = vscode.workspace.getConfiguration('permissionWildcarding')
-      .get('backupMirrorPath', '');
+      .inspect('backupMirrorPath')?.globalValue ?? ''; // as codexExecutableSetting reads its key
   } catch { configured = ''; }
   if (typeof configured !== 'string' || !configured.trim()) return MIRROR_BACKUP_DEFAULT;
   const raw = configured.trim();
@@ -623,7 +623,7 @@ function toolboxPython() {
 }
 
 // Absolute path to recall.py, resolved in order:
-//   1. the configured override (permissionWildcarding.memory.recallScript)
+//   1. the configured override (memory.recallScript), from USER settings only: machine-scoped (F7)
 //   2. the copy bundled into the VSIX by scripts/package.mjs — the normal case for an
 //      installed extension, and why a fresh install no longer needs a checkout at all
 //   3. the dev layout — vscode-extension/ sits next to memory/ (running from the repo, e.g. F5)
@@ -634,7 +634,7 @@ function toolboxPython() {
 // Empty string when none resolve — the rebuild button then guides the user to set it, while
 // the passive status probe keeps working regardless.
 function recallScriptPath() {
-  const c = vscode.workspace.getConfiguration('permissionWildcarding').get('memory.recallScript');
+  const c = vscode.workspace.getConfiguration('permissionWildcarding').inspect?.('memory.recallScript')?.globalValue;
   if (typeof c === 'string' && c.trim() && fs.existsSync(c.trim())) return c.trim();
 
   const hit = (p) => (p && fs.existsSync(p) ? p : '');
@@ -1432,7 +1432,7 @@ function autoLearnEvidence(cfg) {
 // that DID return, reporting that part of the corpus was unreadable, and they
 // were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
 // every one of them. That is the exact shape of the defect that sat unnoticed for
-// eight days (src/auto-learn-manager.js:2772-2774#errors: "`errors` was computed here
+// eight days (src/auto-learn-manager.js:2774-2776#errors: "`errors` was computed here
 // all along and then not returned, so a file that failed every scan for eight
 // days was invisible"). Surfacing it in the CLI and not in the panel most users
 // live in only moves where it hides.
@@ -4734,11 +4734,11 @@ class WildcardingViewProvider {
       + (oneOff ? ' · ' + oneOff + ' one-off' : ''));
   }
 
-  // The Codex count is whole only when every file was read AND the trusted-project
-  // folders have been settled. While Codex is still being asked which project
-  // folders it trusts (codexPermissions.pending, 2026-10-14), the user-scope count
-  // is a lower bound and renders as one ('N+'). The status pill keeps reading
-  // .complete alone: a check in progress is not a read that failed.
+  // The Codex count is whole only when every file was read AND the trusted-project folders
+  // have been settled. While Codex is still being asked which project folders it trusts
+  // (codexPermissions.pending, 2026-10-14), the user-scope count is a lower bound ('N+'), and
+  // the Saved permissions list says so rather than "No saved permissions yet" (F4). The status
+  // pill keeps reading .complete alone: a check in progress is not a read that failed.
   function codexCounted(codex) {
     return !!codex && codex.complete === true && codex.pending !== true;
   }
@@ -5195,7 +5195,7 @@ class WildcardingViewProvider {
     const list = $('list');
     list.innerHTML = '';
     const saved = d.savedPermissions || [];
-    if (!saved.length && countsComplete) {
+    if (!saved.length && countsComplete && codexCounted(codex)) {
       const li = document.createElement('li');
       li.className = 'empty';
       li.textContent = 'No saved permissions yet: approve some commands, or click Optimize permissions.';
@@ -5241,10 +5241,10 @@ class WildcardingViewProvider {
         list.appendChild(li);
       }
     }
-    if (!countsComplete) {
+    if (!countsComplete || !codexCounted(codex)) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'Saved permissions incomplete. Open View / remove permissions for details.';
+      li.textContent = countsComplete ? 'Codex project rules not listed yet: checking which project rule folders Codex trusts.' : 'Saved permissions incomplete. Open View / remove permissions for details.';
       list.appendChild(li);
     }
     renderDeadApprovals(d);

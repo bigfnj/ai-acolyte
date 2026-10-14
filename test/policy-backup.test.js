@@ -48,7 +48,11 @@ function assertFreshProjectCache(extensionPath, rootSrc) {
 // `options.settings` overrides configuration keys by name. Nothing in this file
 // needed one until the mirror path itself became configurable evidence: every
 // other test here relies on the DEFAULT mirror location, so the map is empty for
-// them and the fallback below is unchanged.
+// them and the fallback below is unchanged. A value there is a USER setting, so
+// inspect() reports it as `globalValue` (backupMirrorPath is machine-scoped and read
+// from that tier alone since F7, 2026-10-14). `options.tiers` maps a key to the
+// whole per-tier object instead, and `get` then merges the way VS Code does, folder
+// over workspace over user, which is the value a machine-scoped read must refuse.
 function harness(tempHome, options = {}) {
   const commands = new Map();
   const warnings = [];
@@ -91,10 +95,12 @@ function harness(tempHome, options = {}) {
         return {
           // Auto Learn off: these tests are about the backup, not the learner.
           get: (key, fallback) => {
+            const tier = options.tiers?.[key];
+            if (tier) return tier.workspaceFolderValue ?? tier.workspaceValue ?? tier.globalValue ?? fallback;
             if (key in settings) return settings[key];
             return key === 'autoLearn.enabled' ? false : fallback;
           },
-          inspect: () => ({}),
+          inspect: (key) => options.tiers?.[key] || (key in settings ? { globalValue: settings[key] } : {}),
           update: async () => {},
         };
       },
@@ -547,6 +553,40 @@ test('a ~-prefixed mirror path still resolves against the home directory', async
       'a configured mirror path was ignored in favour of the default');
   } finally {
     await app.dispose();
+  }
+});
+
+// F7 of the v1.6.3 confirmation audit (2026-10-14): `backupMirrorPath` chooses where the
+// extension writes a copy of the user's allow AND deny lists, and it was window-scoped, so a
+// repository's .vscode/settings.json could point that write anywhere, a path inside the
+// repository included. Machine-scoped now, and read from inspect().globalValue alone, the way
+// autoLearn.codexExecutable is (codexExecutableSetting).
+test('a workspace-level backup mirror path is ignored, and a user-level one is honoured', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(rg *)'], deny: DENY } });
+  const planted = path.join(env.tempHome, 'workspace', 'loot', 'allow-list.json');
+  const app = harness(env.tempHome, { tiers: { backupMirrorPath: { workspaceValue: planted } } });
+  try {
+    await app.commands.get('permission-wildcarding.runNow')();
+    // MUTATION: read the key with cfg.get() again in mirrorBackupPath. The copy lands at the
+    // repository's path and this fails. Confirmed 2026-10-14.
+    assert.ok(!fs.existsSync(planted), 'a workspace settings file chose where the allow and deny lists are written');
+    assert.ok(fs.existsSync(env.mirrorPath), 'the mirror still went to the default');
+  } finally {
+    await app.dispose();
+  }
+
+  // The control: the same kind of path in USER settings is where the mirror goes.
+  const user = setup(t);
+  user.write({ permissions: { allow: ['Bash(rg *)'], deny: DENY } });
+  const chosen = path.join(user.tempHome, 'elsewhere', 'mirror.json');
+  const control = harness(user.tempHome, { tiers: { backupMirrorPath: { globalValue: chosen, workspaceValue: '' } } });
+  try {
+    await control.commands.get('permission-wildcarding.runNow')();
+    assert.ok(fs.existsSync(chosen), `the user-level mirror path was ignored: nothing at ${chosen}`);
+    assert.ok(!fs.existsSync(user.mirrorPath), 'the default was written instead of the configured path');
+  } finally {
+    await control.dispose();
   }
 });
 

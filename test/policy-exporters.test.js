@@ -1443,6 +1443,52 @@ test('a make or just override that names the recipe shell or a program is broad,
   // before the first recipe), so it is the recipe's business, as `["just", "build", "x"]` is.
 });
 
+// The programs make's own rules run (2026-10-14, F6 of the v1.6.3 confirmation audit;
+// src/policy-exporters.js MAKE_PROGRAM_VARIABLES and MAKE_COMMAND_VARIABLE, which cite GNU make's
+// default variable table and the GNU Coding Standards). Every row of MAKE_PROGRAM_BROAD rendered
+// at 7cbba2b except the three envNameIsUnsafe already refused (CC, CXX, MAKE).
+const MAKE_PROGRAM_NAMES = ['AR', 'AS', 'OBJC', 'CO', 'CPP', 'FC', 'F77', 'GET', 'LD', 'LEX', 'LINT', 'M2C', 'PC',
+  'YACC', 'MAKEINFO', 'TEX', 'TEXI2DVI', 'WEAVE', 'CWEAVE', 'TANGLE', 'CTANGLE', 'RM', 'BISON', 'FLEX', 'INSTALL',
+  'INSTALL_PROGRAM', 'INSTALL_DATA', 'LDCONFIG', 'RANLIB', 'TEXI2PDF'];
+const MAKE_PROGRAM_BROAD = [
+  ...MAKE_PROGRAM_NAMES.map((name) => ['make', `${name}=./x`, 'all']),
+  ['make', 'RM=./x', 'clean'], ['make', 'INSTALL=./x', 'install'], ['make', 'AR :=./x', 'lib'], ['make', 'LD?=./x', 'all'],
+  ['make', 'all', 'AR=./x'], ['make', '-k', 'test', 'RM=./x'],
+  ['make', 'COMPILE.c=./x', 'all'], ['make', 'LINK.o=./x', 'all'], ['make', 'COMPILE.cc=./x', 'all'],
+  ['make', 'PREPROCESS.S=./x', 'all'], ['make', 'LEX.l=./x', 'all'], ['make', 'YACC.y=./x', 'all'],
+  ['make', 'LINT.c=./x', 'all'], ['make', 'CHECKOUT,v=./x', 'all'],
+];
+// Data: the flags variables, the install locations and the usual switches, which must still render.
+const MAKE_DATA_NARROW = [
+  ['make', 'VERBOSE=1', 'all'], ['make', 'V=1', 'test'], ['make', 'PREFIX=/usr/local', 'install'],
+  ['make', 'prefix=/usr/local', 'install'], ['make', 'DESTDIR=/tmp/stage', 'install'], ['make', 'CFLAGS=-O2', 'all'],
+  ['make', 'CXXFLAGS=-O2', 'all'], ['make', 'CPPFLAGS=-DX', 'all'], ['make', 'LDFLAGS=-s', 'all'],
+  ['make', 'ARFLAGS=rv', 'lib'], ['make', 'LDLIBS=-lm', 'all'], ['make', 'bindir=/opt/bin', 'install'],
+  ['make', 'INSTALLDIR=/opt', 'install'], ['make', 'RMDIR=x', 'clean'], ['make', 'COMPILE=x', 'all'],
+  ['make', 'install', 'DESTDIR=/tmp/stage'],
+  // just: no built-in variable names a program, so an override that envNameIsUnsafe does not
+  // refuse is the justfile's own business (measured; MAKE_PROGRAM_VARIABLES says how).
+  ['just', 'PYTHON=python3', 'test'], ['just', 'AR=x', 'build'],
+];
+
+test('a make override of a program its own rules run is broad, and data overrides still render', () => {
+  for (const prefix of MAKE_PROGRAM_BROAD) {
+    // MUTATION: drop `MAKE_PROGRAM_VARIABLES.has(name) ||` from MAKE's unsafeVariable. Every
+    // program row renders. Confirmed 2026-10-14.
+    // MUTATION: drop `MAKE_COMMAND_VARIABLE.test(name) ||`. The COMPILE.c, LINK.o, ... and
+    // CHECKOUT,v rows render. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses a program make's rules run`);
+  }
+  for (const prefix of MAKE_DATA_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
+  }
+  // Case matters to make: `cc` is not the compiler variable, CC is. MUTATION: look the name up
+  // upper-cased in MAKE_PROGRAM_VARIABLES. `["make", "cc=x", "all"]` is refused and this fails.
+  // Confirmed 2026-10-14.
+  assert.equal(codexRuleCount(['make', 'cc=x', 'all']), 1);
+  assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
+});
+
 // bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each
 // row's verdict at e6d227c is in the commit that added this test.
 const ALIAS_BROAD = [['bunx'], ['bunx', 'sh'], ['bunx', 'node'], ['bunx', '--bun', 'vite'], ['bunx.exe', 'sh'],

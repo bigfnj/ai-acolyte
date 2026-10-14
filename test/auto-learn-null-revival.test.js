@@ -1,6 +1,8 @@
 'use strict';
 
-// A family stored by v1.6.x with no Claude rule gets one back from its next run (2026-10-14).
+// A family stored by v1.6.x with no Claude rule gets one back (2026-10-14): from its next run
+// as first fixed (b4643ed), and since F1 of the v1.6.3 confirmation audit on load, with no run
+// at all (takeExporterRule in src/auto-learn-manager.js; the last two tests below).
 // Through v1.6.2 the learner wrote no rule for an informational family (`cargo --version`, `df
 // -h`; src/auto-learn.js INFO_PREFIX_FLAGS has the history), so the state file holds those
 // families with `claudePermission: null`. The exporter now derives their rule (3417398), but the
@@ -72,8 +74,9 @@ test('a stored family with no rule regains it from one fresh run, and the deny a
   const { learn, settings } = setup(t);
   learn.scan();
   const byKey = Object.fromEntries(learn.listCandidates().map((item) => [item.key, item]));
-  // MUTATION: delete the revival (the `else if (revivesNullRule(...))` in mergeCandidate).
-  // Both stay null and this fails. Confirmed 2026-10-14.
+  // MUTATION: delete takeExporterRule's call on refresh's first line (src/auto-learn-manager.js).
+  // Both stay null and this fails. Confirmed 2026-10-14. (Until F1 the revival was
+  // revivesNullRule in mergeCandidate, from this run; F1 replaced it.)
   assert.equal(byKey['bash:cargo --version'].claudePermission, 'Bash(cargo --version *)');
   assert.equal(byKey['bash:df -h'].claudePermission, 'Bash(df -h *)');
   assert.deepEqual(byKey['bash:df -h'].permissions, ['Bash(df -h *)'], 'its spelling list follows the rule');
@@ -100,13 +103,90 @@ test('a withheld, a withholding-marked or a complex stored family keeps its null
   const byKey = Object.fromEntries(learn.listCandidates().map((item) => [item.key, item]));
   // The redacted env-led family: every run under its key withholds, so nothing revives it.
   assert.equal(byKey['bash:FOO=<redacted> git status'].claudePermission, null);
-  // MUTATION: drop the withholding-reason test from revivesNullRule. `Bash(FOO=1 cat *)`
-  // revives here and this fails. Confirmed 2026-10-14. Only the legacy block above it, which
-  // needs a fresh run WITHOUT the marker and consumes it, may restore such a family.
+  // MUTATION: drop `candidateWithholdsClaudeRule(candidate)` from the explicit-null check in
+  // candidateClaudePermission (src/policy-exporters.js), the derivation takeExporterRule uses.
+  // `Bash(FOO=1 cat *)` revives here and this fails. Confirmed 2026-10-14 (and against
+  // revivesNullRule's own copy of that test before F1). Only the legacy block in mergeCandidate,
+  // which needs a fresh run WITHOUT the marker and consumes it, may restore such a family.
   assert.equal(byKey['bash:FOO=1 cat'].claudePermission, null);
-  // MUTATION: drop `!existing.complex` from revivesNullRule. `Bash(cat *)` revives on a
-  // family whose stored runs include a path executable that rule does not match. Confirmed
-  // 2026-10-14.
+  // MUTATION: drop `candidateIsComplex(candidate)` from candidateClaudePermission's refusal.
+  // `Bash(cat *)` revives on a family whose stored runs include a path executable that rule
+  // does not match. Confirmed 2026-10-14 (and against revivesNullRule's `!existing.complex`
+  // before F1).
   assert.equal(byKey['bash:cat'].claudePermission, null);
   assert.equal(byKey['bash:cat'].complex, true, 'precondition: re-derived from its stored reasons');
+});
+
+// F1 of the v1.6.3 confirmation audit (2026-10-14): the same two families with NO run after the
+// load. Until a family was re-observed, its stored rule stayed null, and the managed-inert and
+// user-deny checks in applyUnlocked (and the listing's clone) judged that null while the write
+// rendered the rule the exporter derives from the prefix. So a reviewed apply of stored state
+// alone wrote `Bash(cargo --version *)` past the user's deny and `Bash(df -h *)` past the
+// managed ask. The load now gives a null-rule family the rule the exporter would write, so every
+// reader judges the rule that lands.
+function storedOnly(t, { deny = [], ask = [] } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-null-stored-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const settings = path.join(home, '.claude', 'settings.json');
+  writeJson(settings, { permissions: { allow: ['WebSearch'], deny } });
+  writeJson(path.join(home, '.claude', 'remote-settings.json'), { permissions: { ask, allow: [], deny: [] } });
+  const statePath = path.join(home, '.claude', 'wildcarding', 'auto-learn-state.json');
+  const candidates = [
+    stored('bash:cargo --version', ['cargo', '--version'], ['unknown-command']),
+    stored('bash:df -h', ['df', '-h'], ['unknown-command']),
+  ];
+  writeJson(statePath, {
+    version: 3, mode: 'recommend', threshold: 3, candidates: Object.fromEntries(candidates.map((item) => [item.key, item])),
+    observationHashes: {}, cursors: {}, applied: { claude: [], codex: [] }, reviewed: { claude: [], codex: [] },
+    codexTargets: {}, managedClaude: {}, lastScanAt: null, lastScanStats: null, lastApplication: null,
+  });
+  const learn = createAutoLearnManager({
+    home, statePath, threshold: 3, codexRulesPath: null, codexValidator: () => ({ valid: true, decision: 'allow' }),
+    // No scan runs in these tests; one that did would bring the fresh rules this test excludes.
+    historyScanner: () => { throw new Error('no scan may run'); },
+  });
+  const apply = () => {
+    const byKey = Object.fromEntries(learn.listCandidates().map((item) => [item.key, item]));
+    const picked = [byKey['bash:cargo --version'], byKey['bash:df -h']];
+    return {
+      byKey,
+      application: learn.applyClaude({
+        keys: picked.map((item) => item.key), includeReviewed: true,
+        expectedFingerprints: Object.fromEntries(picked.map((item) => [item.key, item.fingerprint])),
+      }),
+      allow: JSON.parse(fs.readFileSync(settings, 'utf8')).permissions.allow,
+    };
+  };
+  return { apply };
+}
+
+test('stored state alone: a user deny and a managed ask withhold a null-rule family the write would render', (t) => {
+  const { apply } = storedOnly(t, { deny: ['Bash(cargo --version *)'], ask: ['Bash(df -h:*)'] });
+  const { byKey, application, allow } = apply();
+  // MUTATION: delete takeExporterRule's call on refresh's first line (src/auto-learn-manager.js),
+  // which is the tree before F1. The listing reads both rules as null and the managed ask as
+  // `unknown`, and the apply writes both entries and withholds neither: this fails. Confirmed
+  // 2026-10-14; so does passing `includeReviewed: false` to the derivation there.
+  assert.equal(byKey['bash:cargo --version'].claudePermission, 'Bash(cargo --version *)');
+  assert.equal(byKey['bash:df -h'].claudePermission, 'Bash(df -h *)');
+  // MUTATION: drop takeExporterRule's `item.permissions` line. The spelling list (which the
+  // fingerprint covers) stays empty beside a rule and this fails. Confirmed 2026-10-14.
+  assert.deepEqual(byKey['bash:df -h'].permissions, ['Bash(df -h *)'], 'its spelling list follows the rule');
+  assert.equal(byKey['bash:df -h'].policy, 'inert');
+  assert.ok(!byKey['bash:df -h'].eligibleTargets.includes('claude'), JSON.stringify(byKey['bash:df -h'].eligibleTargets));
+  assert.deepEqual(application.withheldByPolicy.map(({ key, permission, decision }) => [key, permission, decision]), [
+    ['bash:cargo --version', 'Bash(cargo --version *)', 'deny'],
+    ['bash:df -h', 'Bash(df -h *)', 'ask'],
+  ]);
+  assert.deepEqual(application.appliedKeys, []);
+  assert.deepEqual(allow, ['WebSearch']);
+});
+
+// The control: the fix withholds only what a rule beats. Passes with and without F1.
+test('stored state alone: the same null-rule families with no deny and no managed ask are applied', (t) => {
+  const { apply } = storedOnly(t);
+  const { application, allow } = apply();
+  assert.deepEqual(application.withheldByPolicy, []);
+  assert.deepEqual(application.appliedKeys, ['bash:cargo --version', 'bash:df -h']);
+  assert.deepEqual(allow, ['WebSearch', 'Bash(cargo --version *)', 'Bash(df -h *)']);
 });

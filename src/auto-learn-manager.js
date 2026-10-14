@@ -35,7 +35,7 @@ const {
 } = require('./derived-guidance');
 const {
   renderCodexRules, validateCodexRulesText, renderClaudePermissions, mergeClaudeAllow,
-  mergeGeneratedCodexRules, CLAUDE_WITHHOLDING_REASONS,
+  mergeGeneratedCodexRules, candidateClaudePermission,
 } = require('./policy-exporters');
 
 const VERSION = 3;
@@ -239,7 +239,7 @@ function sourceCounts(value, total, sources = []) {
   return sources.length === 1 ? { [sources[0]]: counts(total) } : null;
 }
 function refresh(candidate, threshold) {
-  candidate.threshold = threshold;
+  takeExporterRule(candidate); candidate.threshold = threshold;
   candidate.counts.total = candidate.counts.success + candidate.counts.failed + candidate.counts.unknown;
   candidate.successfulRuns = candidate.counts.success;
   candidate.failedRuns = candidate.counts.failed;
@@ -902,7 +902,7 @@ function mergeCandidate(existing, fresh, threshold) {
       existing.reasons.includes('environment-not-stripped') && !fresh.reasons.includes('environment-not-stripped')) {
     existing.claudePermission = fresh.claudePermission;
     existing.reasons = existing.reasons.filter((reason) => reason !== 'environment-not-stripped');
-  } else if (revivesNullRule(existing, fresh)) existing.claudePermission = fresh.claudePermission;
+  }
   if (existing.claudePermission !== fresh.claudePermission) {
     // `git` and `git.exe` are two spellings of one grant, not a conflict. Any
     // other disagreement still nulls the permission, as it always has.
@@ -2656,6 +2656,7 @@ function createAutoLearnManager(options = {}) {
           if (safe) state.cursors[id] = safe;
         }
       }
+      let rebuildHeldOpen = null; // rebuildHeldOpenReason, below createAutoLearnManager
       if (rebuildingCodex) {
         const codexFiles = scannedFiles.filter((entry) => entry.source === 'codex');
         const incomplete = codexFiles.filter((entry) =>
@@ -2718,13 +2719,14 @@ function createAutoLearnManager(options = {}) {
         // returns or leaves the configuration: gone and unplugged look alike, and
         // guessing "gone" is how the audit's grant-then-revoke happened.
         const benignAbsence = normalizedPath(path.join(codexHome, 'archived_sessions'));
-        const missingCodexRoot = (Array.isArray(result.missingRoots) ? result.missingRoots : []).some((entry) =>
+        const missingCodexRoots = (Array.isArray(result.missingRoots) ? result.missingRoots : []).filter((entry) =>
           entry?.source === 'codex' && (entry.link === true || normalizedPath(entry.path) !== benignAbsence));
-        if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoot) {
+        if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoots.length) {
           for (const id of [...pendingFiles]) if (!enumerated.has(id)) pendingFiles.delete(id);
         }
         state.codexEvidencePendingFiles = [...pendingFiles].sort();
         state.codexEvidenceRebuildPending = codexFiles.length === 0 || incomplete.length > 0 || pendingFiles.size > 0;
+        rebuildHeldOpen = rebuildHeldOpenReason(missingCodexRoots, [...pendingFiles].filter((id) => !enumerated.has(id)).length);
       }
       refreshEvidenceStatus(state);
       // Enforce the cap on the way out, so one scan cannot leave the file
@@ -2793,7 +2795,7 @@ function createAutoLearnManager(options = {}) {
         // No `codexEvidence` copy: `status()` and the return below compute it live (see `scanStats`).
         codexHistoryStale: codexHistory.stale === true,
         codexHistoryInspected: codexHistory.inspected,
-        codexHistoryReasons: codexHistory.reasons,
+        codexHistoryReasons: rebuildHeldOpen ? [rebuildHeldOpen, ...codexHistory.reasons] : codexHistory.reasons,
         codexHistoryNotes: codexHistory.notes,
         codexHistoryFindings: codexHistory.findings ?? null,
       };
@@ -3001,27 +3003,69 @@ function createAutoLearnManager(options = {}) {
   };
 }
 
-// mergeCandidate's second way to restore a stored null rule (2026-10-14), defined down here so
-// that no line other files cite into this module moves. A family stored with no Claude rule takes
-// the one its next run brings when nothing withheld it: neither side is complex and neither
-// carries a withholding reason (CLAUDE_WITHHOLDING_REASONS, src/policy-exporters.js, which reads
-// an explicit null the same way). Through v1.6.2 the learner wrote no rule for an informational
-// family (`cargo --version`, `df -h`; src/auto-learn.js INFO_PREFIX_FLAGS), so the state file
-// holds those families with a null, and preferredPermissionSpelling(null, x) is null, so no later
-// run could ever replace it. The exporter derives their rule since 3417398, but the managed-inert
-// and user-deny checks in applyUnlocked and the listing's clone read `item.claudePermission`, so
-// they could not see that rule. MEASURED against 08978d9 with two stored null families and one
-// fresh run each: the listing offered the managed-inert `Bash(df -h *)` to Claude, and a reviewed
-// apply wrote it and the user-denied `Bash(cargo --version *)` into `allow`, withholding neither.
+// A family whose stored rule is null takes the rule the exporter would write for it, on every
+// refresh, so the field every reader judges is the rule that lands (2026-10-14, F1 of the v1.6.3
+// confirmation audit). Defined down here, and called from refresh's first line edited in place, so
+// that no line other files cite into this module moves.
 //
-// Not revived, on purpose: a complex family (its null came from a run the rule would not match,
-// such as a path executable), and a family that carries the withholding reason (an env-led run
-// whose kept assignment the rule cannot carry). The legacy-key block in mergeCandidate stays the
-// only path for the second kind: it needs a fresh run without the marker and consumes it.
-function revivesNullRule(existing, fresh) {
-  return existing.claudePermission === null && typeof fresh.claudePermission === 'string' &&
-    !existing.complex && !fresh.complex &&
-    ![...existing.reasons, ...(fresh.reasons || [])].some((reason) => CLAUDE_WITHHOLDING_REASONS.has(String(reason)));
+// Through v1.6.2 the learner wrote no rule for an informational family (`cargo --version`, `df
+// -h`; src/auto-learn.js INFO_PREFIX_FLAGS), so state files hold those families with a null, and
+// preferredPermissionSpelling(null, x) is null, so no later run could replace it. The exporter
+// derives their rule since 3417398, while the managed-inert and user-deny checks in applyUnlocked,
+// the listing's clone and the managed summary read `item.claudePermission`. b4643ed restored the
+// field from the family's NEXT run (revivesNullRule, in mergeCandidate), which left the window the
+// audit found: until a family ran again, those checks judged the null while the write rendered
+// the derived rule. MEASURED against 7cbba2b with the two families stored with a null and NO run
+// after the load, a user deny of `Bash(cargo --version *)` and a managed ask of `Bash(df -h:*)`:
+// the listing reported policy `unknown`, and a reviewed apply wrote both rules into `allow` and
+// withheld neither.
+//
+// Deriving here, rather than judging each rendered permission at every check, keeps one source
+// of truth: candidateClaudePermission in src/policy-exporters.js, the function the write itself
+// calls, with the reviewed flag the write passes. revivesNullRule is gone with it: it took the
+// rule from a different source (the run) under a copy of the same conditions, and after this
+// change it was reachable only for a family the exporter itself derives no rule for, where it
+// stored a rule the write would never derive. The exporter returns null for a complex family, a tool family, a wrapper root, a
+// credential-shaped prefix and a family carrying a withholding reason
+// (CLAUDE_WITHHOLDING_REASONS), so those keep their null, and the legacy-key block in
+// mergeCandidate still sees it. The stored field is the bare rule, not a verdict on it: the
+// exporter's safety gate still decides whether it is written, exactly as for a rule the learner
+// wrote. Called before refresh computes `autoSafe`, because isAutoSafeCandidate (src/auto-learn.js)
+// requires a rule: a family stored with a null whose other fields make it auto-safe is auto-safe
+// on load, as it would have been after its next run.
+function takeExporterRule(item) {
+  if (item.claudePermission !== null) return;
+  const rule = candidateClaudePermission(item, { includeReviewed: true });
+  if (typeof rule !== 'string') return;
+  item.claudePermission = rule;
+  item.permissions = permissionSpellings(item.permissions, rule);
+}
+
+// Why the Codex evidence rebuild is still open, when the answer is a configured history root that
+// is not there (2026-10-14, F3 of the v1.6.3 confirmation audit). 7ce6217 made a missing root hold
+// the rebuild open (scan, `missingCodexRoots`) and said so nowhere: the card read "rebuilding older
+// Codex evidence: N transcripts still need a complete read" for as long as the folder stayed
+// away, and nothing named it. Only when the root is what holds the rebuild: a pending transcript
+// this walk did not enumerate, whose id the drop would otherwise have released. A pending file the
+// walk did find is catching up on its own, and the folder's absence is not why it waits.
+//
+// A REASON, not a note, because it blocks something: while the rebuild is open every family with
+// Codex evidence is `evidencePending`, which keeps it off the auto-safe path (refresh) and out of
+// a reviewed apply (applyUnlocked refuses it, and the listing offers it no target). Reasons reach
+// the scan-health hover and the output channel as trouble; notes reach only the channel. It does
+// not set `codexHistoryStale`, which means the history store diverged, and nothing did. Folder
+// NAMES only, the probe's own convention (dirNames in src/history-adapters.js): reasons are
+// persisted in lastScanStats, and the state file holds no transcript or history-root path
+// (test/auto-learn-integration.test.js).
+function rebuildHeldOpenReason(roots, owed) {
+  if (!roots.length || owed <= 0) return null;
+  const names = [...new Set(roots.map((entry) => `${path.basename(path.resolve(String(entry.path)))}/${
+    entry.link === true ? ' (a link to a missing target)' : ''}`))];
+  const one = names.length === 1;
+  return `The Codex evidence rebuild is held open: the configured history folder${one ? '' : 's'} ` +
+    `${names.join(', ')} ${one ? 'is' : 'are'} missing, and ${owed} transcript(s) still owed a complete read ` +
+    'may be there. Families with Codex evidence are not applied, automatically or from Review, until ' +
+    `${one ? 'it returns or is' : 'they return or are'} no longer a configured history root.`;
 }
 
 // Exported for independent coverage of the version floor and missing steps.

@@ -215,7 +215,8 @@
         "permissionWildcarding.backupMirrorPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Where to mirror the allow/deny high-water-mark backup, in addition to `~/.claude/backups/allow-list.latest.json`. Empty uses `~/.permission-wildcarding/allow-list.latest.json`. The primary copy lives inside `~/.claude`, so it cannot survive that directory being recreated rather than merely rewritten — the mirror is the copy that can. Set it to a path on another volume to survive more than a reset. Written second and best-effort, so a bad path can never cost you the primary backup; restore reads the primary first and falls back to the mirror."
+          "scope": "machine",
+          "markdownDescription": "Where to mirror the allow/deny high-water-mark backup, in addition to `~/.claude/backups/allow-list.latest.json`. Empty uses `~/.permission-wildcarding/allow-list.latest.json`. The primary copy lives inside `~/.claude`, so it cannot survive that directory being recreated rather than merely rewritten — the mirror is the copy that can. Set it to a path on another volume to survive more than a reset. Written second and best-effort, so a bad path can never cost you the primary backup; restore reads the primary first and falls back to the mirror. Machine-scoped, so a repository's `.vscode/settings.json` cannot choose where your allow and deny lists are written; set it in user settings."
         },
         "permissionWildcarding.autoLearn.enabled": {
           "type": "boolean",
@@ -327,7 +328,8 @@
         "permissionWildcarding.memory.recallScript": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to your permission-wildcarding repo's `memory/recall.py`. Enables the dashboard Memory card's **Rebuild recall index** button (a CPU bge-small re-embed of the memory dir). Leave empty to auto-detect the repo layout; the passive CPU-LLM status probe works either way."
+          "scope": "machine",
+          "markdownDescription": "Absolute path to your permission-wildcarding repo's `memory/recall.py`. Enables the dashboard Memory card's **Rebuild recall index** button (a CPU bge-small re-embed of the memory dir). Leave empty to auto-detect the repo layout; the passive CPU-LLM status probe works either way. Machine-scoped, because the extension runs this script: a repository's `.vscode/settings.json` cannot point it at a script of its own; set it in user settings."
         }
       }
     }

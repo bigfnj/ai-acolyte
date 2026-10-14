@@ -320,7 +320,7 @@ function render(html, data) {
   const api = new Function('document', 'window', 'acquireVsCodeApi', 'console', `${script}\nreturn { render };`)(
     document, { addEventListener() {} }, () => ({ postMessage() {}, getState() {}, setState() {} }), console);
   api.render(data);
-  return (id) => node(id).textContent;
+  return Object.assign((id) => node(id).textContent, { items: (id) => node(id).children.map((child) => child.textContent) });
 }
 
 const codexLabels = (data) => data.savedPermissions.filter((entry) => entry.agent === 'codex').map((entry) => entry.label);
@@ -385,6 +385,68 @@ test('a .codex folder with no rules folder starts no refresh, and nothing is pen
     assert.equal(data.codexPermissions.pending, false);
     assert.equal(layers.calls.length, 0, 'config.toml and hooks alone are no reason to ask Codex');
     assert.equal(render(app.provider._html(), data)('codexTotal'), '1');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// F4 of the v1.6.3 confirmation audit (2026-10-14). The Saved permissions card said "No saved
+// permissions yet" while the trust verdict was pending and the only rules were a project's: the
+// push lists user scope alone until Codex has said which project folders it trusts, and the
+// card's empty test read `codexPermissions.complete`, which a pending check leaves true. The
+// counts above it already read the pending flag (codexCounted); the list now does too.
+test('a pending trust verdict over project-only Codex rules renders as pending, not as no saved permissions', async (t) => {
+  const box = fixture(t);
+  fs.rmSync(path.join(box.codexHome, 'rules', 'user.rules'));
+  const layers = deferredLayers();
+  const app = harness(box, { layers });
+  try {
+    app.open();
+    await settle();
+    const cold = app.posted.at(-1);
+    assert.equal(cold.codexPermissions.pending, true, 'precondition: the verdict is pending');
+    assert.equal(cold.codexPermissions.complete, true, 'precondition: a pending check is not a failed read');
+    assert.deepEqual(cold.savedPermissions, [], 'precondition: nothing is listed yet, the project rule exists');
+    const coldView = render(app.provider._html(), cold);
+    // MUTATION: drop `&& codexCounted(codex)` from the empty-list test in the panel's render.
+    // The card says "No saved permissions yet" over a project rule and this fails.
+    // Confirmed 2026-10-14.
+    assert.ok(!coldView.items('list').some((text) => /No saved permissions yet/.test(text)),
+      `a pending verdict rendered as empty: ${JSON.stringify(coldView.items('list'))}`);
+    // MUTATION: drop `|| !codexCounted(codex)` from the test for the list's closing note. The
+    // list is silent about why it is empty and this fails. Confirmed 2026-10-14.
+    assert.deepEqual(coldView.items('list'),
+      ['Codex project rules not listed yet: checking which project rule folders Codex trusts.']);
+    assert.equal(coldView('codexTotal'), '?', 'and the count says it does not know yet');
+
+    // The control: the verdict settles, the project rule is listed, and nothing says pending.
+    const before = app.posted.length;
+    layers.pending[0].answer();
+    await until(() => app.posted.length > before, 3000, 'the push the settled refresh asks for');
+    const warm = app.posted.at(-1);
+    assert.equal(warm.codexPermissions.pending, false);
+    const warmView = render(app.provider._html(), warm);
+    assert.deepEqual(warmView.items('list').filter((text) => /No saved permissions yet|not listed yet/.test(text)), []);
+    assert.deepEqual(codexLabels(warm), ['["fd"]']);
+    assert.equal(warmView('codexTotal'), '1');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The other control: with no rules anywhere and nothing to ask about, the card still says empty.
+test('with no rules anywhere and no verdict pending, the card still says no saved permissions', async (t) => {
+  const box = fixture(t, { projectRules: false });
+  fs.rmSync(path.join(box.codexHome, 'rules', 'user.rules'));
+  const layers = deferredLayers();
+  const app = harness(box, { layers });
+  try {
+    app.open();
+    await settle();
+    const data = app.posted.at(-1);
+    assert.equal(data.codexPermissions.pending, false, 'precondition: nothing to ask about');
+    assert.deepEqual(render(app.provider._html(), data).items('list'),
+      ['No saved permissions yet: approve some commands, or click Optimize permissions.']);
   } finally {
     await app.dispose();
   }

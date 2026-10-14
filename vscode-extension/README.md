@@ -322,7 +322,10 @@ Separately, the gate compiler spawns
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
-dev/source layout is auto-detected. The status probe works regardless of the path.
+dev/source layout is auto-detected. The status probe works regardless of the path. It is
+**machine-scoped**, like `backupMirrorPath`: the extension runs that script, and writes the
+mirror of your allow and deny lists where that path says, so both are read from user settings
+only and a repository's `.vscode/settings.json` cannot set either.
 
 ### Native Codex memory
 
@@ -482,7 +485,7 @@ set, the setting wins. An edit applies to the next scan, with no reload.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `backupMirrorPath` | `""` | Off-tree copy of the allow/deny backup. Empty means `~/.permission-wildcarding/allow-list.latest.json`; point it at another volume to survive more than a `~/.claude` reset |
+| `backupMirrorPath` | `""` | Off-tree copy of the allow/deny backup. Empty means `~/.permission-wildcarding/allow-list.latest.json`; point it at another volume to survive more than a `~/.claude` reset. Machine-scoped: a workspace value is ignored |
 | `autoLearn.enabled` | `true` | Scan history at all |
 | `autoLearn.mode` | `"recommend"` | `observe` / `recommend` / `auto-safe` |
 | `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies |
@@ -499,4 +502,4 @@ set, the setting wins. An edit applies to the next scan, with no reload.
 | `memory.lineBudget` | `300` | Characters one index hook line may use |
 | `memory.maxLines` | `200` | Lines Claude Code actually loads from `MEMORY.md` |
 | `memory.totalBudget` | `12000` | Byte budget for the whole always-loaded index |
-| `memory.recallScript` | `""` | Override the `recall.py` path; checked before the bundled copy |
+| `memory.recallScript` | `""` | Override the `recall.py` path; checked before the bundled copy. Machine-scoped: a workspace value is ignored |

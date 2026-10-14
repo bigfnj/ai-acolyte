@@ -549,7 +549,7 @@ function codexRulesArguments(files) {
 // and a spawnSync child is out of reach of deactivate's kill. So the host asks
 // for `projectTrust: 'cached'`, which reads the verdict and never spawns, and
 // settles a miss with refreshProjectTrust: the same worker, launched with
-// execFile, handed to the caller's `track` so deactivate can end it, bounded at
+// spawn, handed to the caller's `track` so deactivate can end it, bounded at
 // PROJECT_TRUST_ASYNC_TIMEOUT_MS. The synchronous ask stays for the CLI and the
 // Auto Learn worker thread, where blocking is the caller's own business.
 //

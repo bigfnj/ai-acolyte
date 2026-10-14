@@ -297,7 +297,7 @@ test('MCP intent rechecks exact bytes immediately before native write', t => {
 });
 
 // THE ASYNCHRONOUS READ (2026-10-14): the extension host's trust ask, launched with
-// execFile instead of spawnSync. Driven through the REAL worker against a stand-in
+// spawn instead of spawnSync. Driven through the REAL worker against a stand-in
 // codex that starts and then never answers, which is the case that blocked the host
 // for 31 s on the synchronous route. Bounded end to end by `timeoutMs`, and the
 // worker's own deadline kills its codex, so nothing is left behind even with no

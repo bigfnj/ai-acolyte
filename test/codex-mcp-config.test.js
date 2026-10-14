@@ -343,15 +343,25 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   // before the deadline became a time, and again after).
   await assert.rejects(reading, /refused: Codex config operation timed out/,
     'a codex that never answers ends as the worker timing it out, not as a hang');
+  // Read at the moment the answer landed, before anything else awaits.
+  const workerLiveAtAnswer = tracked[0].exitCode === null && tracked[0].signalCode === null;
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 10000, `bounded by its 8 s budget plus a kill: took ${elapsed} ms`);
   // A worker that still started past its deadline spawned nothing; that path is pinned by "a worker
   // that starts after its deadline answers before the host's backstop". Here, only a codex that
   // was started has to be shown dead.
   if (fs.existsSync(codex.pidFile)) {
+    // THE ANSWER IS THE LINE, NOT THE EXIT (2026-10-14). A worker that started a codex spends
+    // its 1 s grace and a tree kill after its answer, so the answer lands while it is still
+    // alive. MUTATION: drop the `answer(...)` call in nativeRpcAsync's stdout handler, so the
+    // call settles only on 'close'. The worker has exited by then and this fails; on a slow
+    // runner the backstop also wins (CI run 38600144147). Confirmed 2026-10-14.
+    assert.equal(workerLiveAtAnswer, true, 'the answer settled the call before the worker finished its cleanup');
     const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
     let alive = true;
-    for (let wait = 0; wait < 40 && alive; wait += 1) {
+    // 10 s, not 2: the call now settles before the cleanup, so the kill still has its grace
+    // and a taskkill to run.
+    for (let wait = 0; wait < 200 && alive; wait += 1) {
       try { process.kill(pid, 0); await new Promise(resolve => setTimeout(resolve, 50)); } catch { alive = false; }
     }
     assert.equal(alive, false, 'the worker tree-killed the codex it started');

@@ -107,7 +107,7 @@ Version 1.6.0 also adds **Restore Codex rules**
 (`vscode-extension/extension.js:3825#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1416#codexBackupPath`). Codex derived guidance has separate policy and run
-evidence (`src/auto-learn-manager.js:1827#derivedFor`); observed runs are not reported as measured
+evidence (`src/auto-learn-manager.js:1851#derivedFor`); observed runs are not reported as measured
 approval prompts. Actual restore and guidance controls now pass in a staged VS Code
 host, with deliberate no-op controls that fail the intended checks. The detailed
 development evidence and supported boundaries remain in the compatibility document.

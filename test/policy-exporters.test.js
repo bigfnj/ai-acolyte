@@ -1331,8 +1331,9 @@ test('the .cmd and .bat spellings of a risky root are refused like the root, on 
 });
 
 test('on the Codex half an env assignment that names or loads a program is refused, as it is on the Claude half', () => {
-  // 520103d: "The Codex exporter is unaffected", true of a LEADING assignment, which never
-  // reaches a prefix; env carries its assignments as arguments. Each row rendered at 09df009.
+  // 520103d: "The Codex exporter is unaffected". Not so: env carries its assignments as
+  // arguments, and a reviewed prefix can even open with one (J1, BUILD_PROGRAM_BROAD below).
+  // Each row rendered at 09df009.
   for (const prefix of [['env', 'GIT_PAGER=x', 'git', 'log'], ['env', 'LD_PRELOAD=./x.so', 'cat'],
     ['env', 'PATH=/tmp', 'ls'], ['env', '-i', 'EDITOR=x', 'git', 'commit'], ['env', 'FOO=1', 'GIT_SSH_COMMAND=x', 'git', 'fetch'],
     ['env', 'NODE_OPTIONS=--require=./x', 'npm', 'test'], ['env', 'DYLD_INSERT_LIBRARIES=x', 'ls'], ['env', '--', 'PAGER=x', 'man'],
@@ -1466,17 +1467,21 @@ const MAKE_DATA_NARROW = [
   ['make', 'ARFLAGS=rv', 'lib'], ['make', 'LDLIBS=-lm', 'all'], ['make', 'bindir=/opt/bin', 'install'],
   ['make', 'INSTALLDIR=/opt', 'install'], ['make', 'RMDIR=x', 'clean'], ['make', 'COMPILE=x', 'all'],
   ['make', 'install', 'DESTDIR=/tmp/stage'],
-  // just: no built-in variable names a program, so an override that envNameIsUnsafe does not
-  // refuse is the justfile's own business (measured; MAKE_PROGRAM_VARIABLES says how).
-  ['just', 'PYTHON=python3', 'test'], ['just', 'AR=x', 'build'],
+  // just: no built-in variable names a program, so an override the environment judgment does
+  // not refuse is the justfile's own business (measured; MAKE_PROGRAM_VARIABLES says how).
+  // `["just", "AR=x", "build"]` stood here until J1 (2026-10-14): under `set export` a just
+  // override is an environment assignment, and the Codex export's environment judgment now
+  // holds the build programs, so it is broad (BUILD_PROGRAM_BROAD below).
+  ['just', 'PYTHON=python3', 'test'],
 ];
 
 test('a make override of a program its own rules run is broad, and data overrides still render', () => {
   for (const prefix of MAKE_PROGRAM_BROAD) {
-    // MUTATION: drop `MAKE_PROGRAM_VARIABLES.has(name) ||` from MAKE's unsafeVariable. Every
-    // program row renders. Confirmed 2026-10-14.
-    // MUTATION: drop `MAKE_COMMAND_VARIABLE.test(name) ||`. The COMPILE.c, LINK.o, ... and
-    // CHECKOUT,v rows render. Confirmed 2026-10-14.
+    // MUTATION: drop `MAKE_PROGRAM_VARIABLES.has(name) ||` from MAKE's unsafeVariable (since J1,
+    // from codexEnvNameIsUnsafe, which MAKE's unsafeVariable calls). Every program row renders.
+    // Confirmed 2026-10-14.
+    // MUTATION: drop `MAKE_COMMAND_VARIABLE.test(name) ||` (likewise). The COMPILE.c, LINK.o, ...
+    // and CHECKOUT,v rows render. Confirmed 2026-10-14.
     assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses a program make's rules run`);
   }
   for (const prefix of MAKE_DATA_NARROW) {
@@ -1487,6 +1492,120 @@ test('a make override of a program its own rules run is broad, and data override
   // Confirmed 2026-10-14.
   assert.equal(codexRuleCount(['make', 'cc=x', 'all']), 1);
   assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
+});
+
+// J1 (2026-10-14): the build programs join the Codex export's environment judgment
+// (src/policy-exporters.js codexEnvNameIsUnsafe, which cites GNU make's manual and the Cargo
+// Book for each name). Measured against 7d08ced: 114 of BUILD_PROGRAM_BROAD's 124 rows
+// rendered. The other ten were the two env rows that end at a bare `make`, broad already, and the eight credential-provider rows, which the secret filter refuses
+// for the word in their name (candidateContainsSecret); the bare `-e NAME` row is the spelling
+// that filter cannot see. Until J1 a prefix that opens with an assignment was judged by no table
+// at all, so even `["CC=./x", "make"]`, `["LD_PRELOAD=./x.so", "cat"]` and `["FOO=1", "bash"]`
+// rendered.
+const CARGO_PROGRAM_ROWS = [
+  ['RUSTC', 'build'], ['RUSTC_WRAPPER', 'build'], ['RUSTC_WORKSPACE_WRAPPER', 'build'], ['RUSTDOC', 'doc'],
+  ['RUSTFMT', 'fmt'], ['CARGO_BUILD_RUSTC', 'build'], ['CARGO_BUILD_RUSTC_WRAPPER', 'build'],
+  ['CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'build'], ['CARGO_BUILD_RUSTDOC', 'doc'],
+  ['CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER', 'build'], ['CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER', 'test'],
+  ['CARGO_REGISTRY_CREDENTIAL_PROVIDER', 'build'], ['CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS', 'build'],
+  ['CARGO_REGISTRIES_MY_REGISTRY_CREDENTIAL_PROVIDER', 'build'], ['CARGO_CREDENTIAL_ALIAS_MINE', 'build'],
+  ['CARGO_DOC_BROWSER', 'doc'],
+];
+const BUILD_PROGRAM_BROAD = [
+  // The rows the lead named, in the two spellings an assignment can lead a Codex prefix with.
+  ['AR=./x', 'make'], ['LD=./x', 'make', 'all'], ['RANLIB=./x', 'make'],
+  ['env', 'AR=./x', 'make'], ['env', 'LD=./x', 'make', 'all'], ['env', 'RANLIB=./x', 'make'],
+  // Every F6 program name, before a command that renders on its own (so the name is what refuses).
+  ...MAKE_PROGRAM_NAMES.flatMap((name) => [[`${name}=./x`, 'make', 'all'], ['env', `${name}=./x`, 'make', 'all']]),
+  ['env', 'COMPILE.c=./x', 'make', 'all'], ['env', 'LINK.o=./x', 'make', 'all'],
+  ['env', 'MAKEFLAGS=--eval=x', 'make', 'all'], ['env', 'MAKEFILES=x.mk', 'make', 'all'],
+  ['MAKEFLAGS=--eval=x', 'make', 'all'], ['RANLIB=./x', 'make', 'lib'], ['FOO=1', 'AR=./x', 'make', 'all'],
+  // cargo's program names.
+  ...CARGO_PROGRAM_ROWS.flatMap(([name, sub]) => [['env', `${name}=./x`, 'cargo', sub], [`${name}=./x`, 'cargo', sub]]),
+  // The other places the Codex export reads an assignment.
+  ['docker', 'exec', '-e', 'AR=./x', 'ctr', 'make', 'all'], ['podman', 'run', '-e', 'RANLIB=./x', 'img', 'make', 'lib'],
+  ['docker', 'exec', '--env=RUSTC=./x', 'ctr', 'cargo', 'build'], ['docker', 'exec', '-eLD=./x', 'ctr', 'make', 'all'],
+  ['docker', 'exec', '-e', 'CARGO_REGISTRY_CREDENTIAL_PROVIDER', 'ctr', 'cargo', 'build'],
+  ['just', 'AR=x', 'build'], ['just', '--set', 'LD', './x', 'build'], ['make', 'RUSTC=./x', 'all'],
+  ['make', 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=./x', 'all'], ['timeout', '5', 'env', 'AR=./x', 'make', 'all'],
+  // A leading assignment of the classes env was already judged for, now judged in this spelling too.
+  ['CC=./x', 'make', 'all'], ['LD_PRELOAD=./x.so', 'cat'], ['GIT_PAGER=x', 'git', 'log'], ['PATH=.', 'cat'],
+  ['FOO=1', 'bash'], ['FOO=1', 'sh', '-c'], ['FOO=1', 'env', 'AR=./x', 'make', 'all'], ['FOO=1'], ['FOO=1', 'BAR=2'],
+];
+// Data, and names nobody reads as a program: these still render.
+const BUILD_DATA_NARROW = [
+  ['env', 'CFLAGS=-O2', 'make', 'all'], ['env', 'LDFLAGS=-s', 'make', 'all'], ['env', 'ARFLAGS=rv', 'make', 'lib'],
+  ['env', 'PREFIX=/usr/local', 'make', 'install'], ['env', 'DESTDIR=/tmp/stage', 'make', 'install'],
+  ['env', 'VERBOSE=1', 'make', 'all'], ['env', 'V=1', 'make', 'test'], ['env', 'LDLIBS=-lm', 'make', 'all'],
+  ['CFLAGS=-O2', 'make', 'all'], ['LDFLAGS=-s', 'make', 'all'], ['PREFIX=/usr/local', 'make', 'install'],
+  ['DESTDIR=/tmp/stage', 'make', 'install'], ['VERBOSE=1', 'make', 'all'], ['FOO=1', 'CFLAGS=-O2', 'make', 'all'],
+  ['env', 'RUSTFLAGS=-Copt-level=3', 'cargo', 'build'], ['env', 'CARGO_TARGET_DIR=t', 'cargo', 'build'],
+  ['env', 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-g', 'cargo', 'build'], ['RUST_LOG=debug', 'cargo', 'test'],
+  ['env', 'CARGO_INCREMENTAL=0', 'cargo', 'build'], ['env', 'RUSTC_BOOTSTRAP=1', 'cargo', 'build'],
+  ['docker', 'exec', '-e', 'CFLAGS=-O2', 'ctr', 'make', 'all'], ['just', 'PYTHON=python3', 'test'],
+  ['make', 'RUSTFLAGS=-g', 'all'], ['FOO=1', 'cat'], ['LANG=C', 'git', 'log'], ['FOO=1', 'make', 'all'],
+];
+
+test('J1: a build program named by an assignment makes a Codex prefix broad wherever the export reads one', () => {
+  // Precondition: each command renders alone, so a refusal below is the assignment's.
+  for (const prefix of [['make', 'all'], ['make', 'lib'], ['cat'], ['git', 'log'], ['cargo', 'build'], ['cargo', 'test'],
+    ['cargo', 'doc'], ['cargo', 'fmt'], ['just', 'build']]) {
+    assert.equal(codexRuleCount(prefix), 1, `precondition: ${JSON.stringify(prefix)} renders`);
+  }
+  for (const prefix of BUILD_PROGRAM_BROAD) {
+    // MUTATION: revert J1 in src/policy-exporters.js. Every row renders but the ten named above.
+    // Confirmed 2026-10-14.
+    // MUTATION: drop MAKE_PROGRAM_VARIABLES from codexEnvNameIsUnsafe. The F6-name rows render.
+    // MUTATION: drop CARGO_PROGRAM_ENV or CARGO_PROGRAM_ENV_PATTERN. The cargo rows render.
+    // MUTATION: delete the leading-assignment block in candidateEligibleForCodex. Every row that
+    // opens with an assignment renders.
+    // MUTATION: judge env's assignments by assignmentIsUnsafe again. `["env", "AR=./x", "make",
+    // "all"]` renders.
+    // MUTATION: restore envNameIsUnsafe in envAssignmentIsUnsafe or in JUST's unsafeVariable. The
+    // docker and podman rows, or the two just rows, render. All confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} names a program a build runs`);
+  }
+  for (const prefix of BUILD_DATA_NARROW) {
+    // MUTATION: add 'CFLAGS' to CARGO_PROGRAM_ENV. The CFLAGS rows fail. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
+  }
+  // Case-exact, as F6's names are. To make, `ar` is not the archiver variable; a POSIX
+  // environment is case-sensitive too. MUTATION: look the name up upper-cased in
+  // codexEnvNameIsUnsafe. Every row here is refused and this fails. Confirmed 2026-10-14.
+  // (A native Windows program reads its environment case-insensitively, measured with node: that
+  // residual is recorded in docs/engineering-record.md, J1, and this pins the decision as made.)
+  for (const prefix of [['env', 'ar=./x', 'make', 'all'], ['env', 'Ar=./x', 'make', 'all'], ['ar=./x', 'make', 'all'],
+    ['env', 'ranlib=./x', 'make', 'lib'], ['env', 'rustc=./x', 'cargo', 'build'],
+    ['env', 'CARGO_TARGET_x86_64_unknown_linux_gnu_LINKER=./x', 'cargo', 'build'], ['just', 'ar=x', 'build']]) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is not the variable the tool reads`);
+  }
+});
+
+test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led build-program rule still renders', () => {
+  // A control, passing before and after J1: G4(b) accepts these because the rule keeps the
+  // literal value the user ran. MUTATION: judge claudePermissionIsSafe's leading assignments by
+  // codexEnvNameIsUnsafe. Every rule in the first loop is refused and this fails. Confirmed
+  // 2026-10-14.
+  for (const permission of ['Bash(AR=x cargo build *)', 'Bash(LD=./ld cargo build *)', 'Bash(RANLIB=x cargo build *)',
+    'Bash(RUSTC=x cargo build *)', 'Bash(RUSTC_WRAPPER=sccache cargo build *)', 'Bash(MAKEFLAGS=-j4 cargo build *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], permission);
+  }
+  // PROGRAM_NAMING_ENV itself is unchanged: CC, CXX and MAKE are still refused there.
+  for (const permission of ['Bash(CC=x cargo build *)', 'Bash(CXX=x cargo build *)', 'Bash(MAKE=x cargo build *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+});
+
+test('J1: the Codex validator judges a pattern that opens with assignments by the command after them', () => {
+  // MUTATION: delete the `lead` lines in patternSafetyErrors. `["FOO=1", "curl"]` and the two
+  // assignment-only patterns validate, and this fails. Confirmed 2026-10-14.
+  for (const pattern of [['FOO=1', 'curl'], ['FOO=1', 'python'], ['FOO=1', 'BAR=2', 'git'], ['FOO=1', 'pwsh'],
+    ['FOO=1'], ['FOO=1', 'BAR=2']]) {
+    assert.equal(validateCodexRulesText(manualRule(pattern)).valid, false, JSON.stringify(pattern));
+  }
+  for (const pattern of [['FOO=1', 'cat'], ['FOO=1', 'git', 'status'], ['FOO=1', 'curl', '--version']]) {
+    assert.equal(validateCodexRulesText(manualRule(pattern)).valid, true, JSON.stringify(pattern));
+  }
 });
 
 // bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each

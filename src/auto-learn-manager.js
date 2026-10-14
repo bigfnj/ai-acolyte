@@ -1651,11 +1651,24 @@ function createAutoLearnManager(options = {}) {
   const approveCodexMcp = (request) => locked(() => mcpReview.apply(request));
   const undoCodexMcp = (request) => locked(() => mcpReview.restore(request));
   const recoverCodexMcp = (request) => locked(() => mcpReview.recover(request));
+  // Why one permission cannot pay off, or null: a managed rule makes it inert, or the user's
+  // own deny covers it. Built once per listing (candidatesFrom) and once per application
+  // (applyUnlocked), from one read of each policy, and read by the listing's `clone`, by
+  // applyUnlocked's gate on a family's rule and by its write for each spelling, so none of the
+  // three can judge by a different rule.
+  function refusalFor(policy, userDeny) {
+    return (permission) => {
+      if (assessPermission(policy, permission) === 'inert') return overridingRule(policy, permission) || {};
+      const denied = userDeny.find((rule) => coversPermission(rule, permission));
+      return denied ? { decision: 'deny', rule: denied, source: 'user-deny' } : null;
+    };
+  }
   // `policy` is a PARAMETER rather than a `managedPolicy()` call, because this
   // runs once per candidate and `managedPolicy()` stats the policy file to
   // check its cache stamp: 36.2 us each, so a listing did N stats where one
-  // would do. The verdict cannot change within a single listing anyway.
-  function clone(item, known, policy, removals) {
+  // would do. The verdict cannot change within a single listing anyway. The
+  // same holds for `refusal`, which also carries the user's deny list.
+  function clone(item, known, policy, removals, refusal) {
     const codexSuppressed = codexRuleStore.suppressed(item.prefix, removals);
     const to = [
       ...(known.claude.has(item.key) ? ['claude'] : []),
@@ -1668,9 +1681,19 @@ function createAutoLearnManager(options = {}) {
     // eligibility, only to withhold it. The verdict is the family RULE's, on
     // purpose: an ask covering only an alternate spelling leaves the family
     // eligible, and the write withholds that spelling alone (applyUnlocked, G2).
+    //
+    // And the user's OWN deny, by the same refusal() the write uses (J2, 2026-10-14). Until
+    // then this judged the managed verdict alone, while applyUnlocked's gate also withholds a
+    // rule a user deny covers. So a family the user had denied listed `eligibleTargets:
+    // ['claude']` and stayed pending for ever: the dashboard read "1 to review" (or "1 safe to
+    // apply") with its warning state, Review offered it, and applying it wrote nothing and
+    // reported it withheld (reproduced on 7d08ced). The Codex target is untouched: a Claude
+    // deny says nothing about a Codex rule. `policy` stays the managed verdict alone, which is
+    // what managedSummary and the blocked-family report mean by it.
     const policyVerdict = assessPermission(policy, item.claudePermission);
+    const claudeRefused = Boolean(claudeSettingsPath && item.claudePermission && refusal(item.claudePermission));
     const eligibleTargets = [
-      ...(claudeSettingsPath && policyVerdict !== 'inert' && claudeEligible(item, true) ? ['claude'] : []),
+      ...(claudeSettingsPath && !claudeRefused && claudeEligible(item, true) ? ['claude'] : []),
       ...(codexRulesPath && !codexSuppressed && !removals.pending && codexEligible(item, true) ? ['codex'] : []),
     ];
     return {
@@ -1689,8 +1712,9 @@ function createAutoLearnManager(options = {}) {
   }
   function candidatesFrom(state, query = {}) {    const known = { claude: new Set(state.applied.claude), codex: new Set(state.applied.codex) };
     const policy = managedPolicy();
+    const refusal = refusalFor(policy, readUserDeny());
     const removals = codexRuleStore.read();
-    let result = Object.values(state.candidates).map((item) => clone(item, known, policy, removals));
+    let result = Object.values(state.candidates).map((item) => clone(item, known, policy, removals, refusal));
     if (query.autoSafe === true) result = result.filter((item) => item.autoSafe);
     if (query.pending === true) result = result.filter((item) => item.pendingTargets.length > 0);
     if (query.disposition) {
@@ -2209,14 +2233,9 @@ function createAutoLearnManager(options = {}) {
     // gate above was added to fix. Read once per application, for the reason
     // given above.
     const userDeny = useClaude ? readUserDeny() : [];
-    // Why one permission cannot pay off, or null: a managed rule makes it inert, or the user's
-    // own deny covers it. One verdict for the family's rule here and for each of its spellings
-    // at the write below, so the two can never judge by different rules.
-    const refusal = (permission) => {
-      if (assessPermission(policy, permission) === 'inert') return overridingRule(policy, permission) || {};
-      const denied = userDeny.find((rule) => coversPermission(rule, permission));
-      return denied ? { decision: 'deny', rule: denied, source: 'user-deny' } : null;
-    };
+    // One verdict for the family's rule here and for each of its spellings at the write below,
+    // and the listing's (refusalFor), so none of them can judge by a different rule.
+    const refusal = refusalFor(policy, userDeny);
     if (useClaude) for (const item of selected) {
       if (!claudeEligible(item, includeReviewed)) continue;
       const refused = refusal(item.claudePermission);

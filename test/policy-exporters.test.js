@@ -1487,10 +1487,12 @@ test('a make override of a program its own rules run is broad, and data override
   for (const prefix of MAKE_DATA_NARROW) {
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
   }
-  // Case matters to make: `cc` is not the compiler variable, CC is. MUTATION: look the name up
-  // upper-cased in MAKE_PROGRAM_VARIABLES. `["make", "cc=x", "all"]` is refused and this fails.
-  // Confirmed 2026-10-14.
-  assert.equal(codexRuleCount(['make', 'cc=x', 'all']), 1);
+  // F6 pinned `["make", "cc=x", "all"]` rendering here, because `cc` is not make's compiler
+  // variable. L1 (2026-10-14, the lead's decision) refuses it: make also puts a command-line
+  // variable into every recipe line's environment, and a Windows child reading CC sees `cc`
+  // there, since a Windows environment name folds case. The L1 test below has the rows.
+  // MUTATION: judge MAKE's unsafeVariable by codexEnvNameIsUnsafe again. This fails.
+  assert.equal(codexRuleCount(['make', 'cc=x', 'all']), 0);
   assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
 });
 
@@ -1569,11 +1571,10 @@ test('J1: a build program named by an assignment makes a Codex prefix broad wher
     // MUTATION: add 'CFLAGS' to CARGO_PROGRAM_ENV. The CFLAGS rows fail. Confirmed 2026-10-14.
     assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
   }
-  // J1 pinned every assignment case-exact here. K1 (2026-10-14) folds case wherever the export
-  // reads an ENVIRONMENT assignment (the K1 tests below); a just override keeps J1's exact
-  // match, because just's variable names are case-sensitive. MUTATION: look the name up
-  // upper-cased in codexEnvNameIsUnsafe. This row is refused and this fails. Confirmed 2026-10-14.
-  assert.equal(codexRuleCount(['just', 'ar=x', 'build']), 1, 'to just, `ar` is not the variable AR');
+  // J1 pinned every assignment case-exact here. K1 (2026-10-14) folded case wherever the export
+  // reads an ENVIRONMENT assignment and kept a just override exact; L1 (the same day) folds the
+  // override too, because under `set export` it is an environment assignment (the L1 test below).
+  assert.equal(codexRuleCount(['just', 'ar=x', 'build']), 0, 'under `set export`, a Windows child reads `ar` as AR');
 });
 
 // K1 (2026-10-14, the lead's decision): an ENVIRONMENT name folds case on Windows, so the Codex
@@ -1617,12 +1618,6 @@ const K1_DATA_NARROW = [
   ['cflags=-O2', 'make', 'all'], ['foo=1', 'cat'], ['docker', 'exec', '-e', 'foo=bar', 'ctr', 'ls'],
   ['docker', 'exec', '-e', 'ci', 'ctr', 'ls'], ['docker', 'exec', '--env=tz=UTC', 'ctr', 'date'],
 ];
-// make's and just's own overrides keep F6's exact match (the lead's decision; its premise is
-// recorded as unverified in docs/engineering-record.md, K1).
-const K1_OVERRIDE_EXACT = [
-  ['make', 'cc=x', 'all'], ['make', 'ar=./x', 'lib'], ['make', 'Ranlib=./x', 'lib'], ['make', 'compile.c=./x', 'all'],
-  ['just', 'ar=x', 'build'], ['just', 'rustc=./x', 'build'],
-];
 
 test('K1: an environment assignment is judged case-insensitively wherever the Codex export reads one', () => {
   for (const prefix of K1_FOLDED_BROAD) {
@@ -1643,13 +1638,46 @@ test('K1: an environment assignment is judged case-insensitively wherever the Co
   }
 });
 
-test('K1, the control: make and just overrides keep their exact match', () => {
-  // Passes with and without K1. MUTATION: judge MAKE's unsafeVariable by
-  // codexFoldedEnvNameIsUnsafe. The make rows are refused and this fails. MUTATION: the same
-  // for JUST. The just rows are refused and this fails. Both confirmed 2026-10-14.
-  for (const prefix of K1_OVERRIDE_EXACT) {
-    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} sets no variable the tool reads by that name`);
+// L1 (2026-10-14, the lead's decision, reversing F6's and K1's exact match for make and just): a
+// make or just override is an environment assignment as well (GNU make exports a command-line
+// variable to every recipe line; just does under `set export`, measured), so it is judged folded
+// (src/policy-exporters.js, MAKE's comment). This replaces K1's control, which pinned these
+// overrides exact. Against the base source (2092793) every row of L1_OVERRIDE_FOLDED rendered.
+const L1_OVERRIDE_FOLDED = [
+  // K1's control rows, which rendered by its decision.
+  ['make', 'cc=x', 'all'], ['make', 'ar=./x', 'lib'], ['make', 'Ranlib=./x', 'lib'], ['make', 'compile.c=./x', 'all'],
+  ['just', 'ar=x', 'build'], ['just', 'rustc=./x', 'build'],
+  // Each set the fold reaches, in a lower or mixed case: code loading, program naming, the
+  // loader prefixes, F6's make sets, cargo's programs and K3's directories.
+  ['make', 'Cc=x', 'all'], ['make', 'node_options=--require=./y.js', 'test'], ['make', 'ld_preload=./x.so', 'all'],
+  ['make', 'Path=.', 'all'], ['make', 'git_pager=x', 'all'], ['make', 'shell=./x.sh', 'test'],
+  ['make', 'makeflags=--eval=x', 'all'], ['make', 'rustc=./x', 'all'], ['make', 'cargo_home=./h', 'all'],
+  ['make', 'test', 'cc=x'], ['make', 'cc :=x', 'all'], ['make', 'Link.o=./x', 'all'],
+  ['just', 'node_options=--require=./y.js', 'build'], ['just', 'Git_Pager=x', 'build'], ['just', 'ld_preload=./x.so', 'build'],
+  ['just', '--set', 'node_options', 'x', 'build'], ['just', '--set', 'ld', './x', 'build'],
+];
+// Data overrides still render, in any case.
+const L1_OVERRIDE_DATA = [
+  ['make', 'prefix=/usr/local', 'install'], ['make', 'PREFIX=/usr/local', 'install'], ['make', 'Prefix=/usr/local', 'install'],
+  ['make', 'DESTDIR=/tmp/stage', 'install'], ['make', 'destdir=/tmp/stage', 'install'], ['make', 'CFLAGS=-O2', 'all'],
+  ['make', 'cflags=-O2', 'all'], ['make', 'VERBOSE=1', 'all'], ['make', 'verbose=1', 'all'], ['make', 'V=1', 'test'],
+  ['make', 'v=1', 'test'], ['make', 'ldflags=-s', 'all'], ['make', 'rustflags=-g', 'all'], ['make', 'bindir=/opt/bin', 'install'],
+  ['just', 'PYTHON=python3', 'test'], ['just', 'python=python3', 'test'], ['just', 'a=b', 'build'],
+  ['just', '--set', 'verbose', '1', 'build'],
+];
+
+test('L1: a make or just override is judged case-insensitively, as the environment assignment it also is', () => {
+  for (const prefix of L1_OVERRIDE_FOLDED) {
+    // MUTATION: judge MAKE's unsafeVariable by codexEnvNameIsUnsafe again (L1 reverted there).
+    // The make rows render.
+    // MUTATION: the same for JUST. The just rows render, `--set` included.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} reaches a recipe's environment, where a Windows child folds it`);
   }
+  for (const prefix of L1_OVERRIDE_DATA) {
+    // MUTATION: make MAKE's or JUST's unsafeVariable refuse every name. That tool's rows fail.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is a data override and still renders`);
+  }
+  // Upper case, refused before L1 and after it.
   assert.equal(codexRuleCount(['make', 'CC=x', 'all']), 0);
   assert.equal(codexRuleCount(['just', 'AR=x', 'build']), 0);
 });
@@ -1694,6 +1722,50 @@ test('K3: CARGO_HOME, RUSTUP_TOOLCHAIN and RUSTUP_HOME make a Codex prefix broad
     ['Bash(CARGO_HOME=x cargo build *)']);
 });
 
+// L4 (2026-10-14, the lead's decision on what K3 left): the servers rustup downloads the toolchain
+// and itself from (src/policy-exporters.js RUSTUP_SOURCE_ENV, which quotes rustup's page and source
+// for each). Auto-install is on by default, so `cargo build` with the active toolchain absent
+// fetches one from the dist server and runs it. Against the base source (the L3 commit) every row
+// of L4_BROAD rendered.
+const L4_NAMES = ['RUSTUP_DIST_SERVER', 'RUSTUP_DIST_ROOT', 'RUSTUP_UPDATE_ROOT'];
+const L4_BROAD = [
+  ...L4_NAMES.flatMap((name) => [
+    ['env', `${name}=https://mirror.invalid`, 'cargo', 'build'], [`${name}=https://mirror.invalid`, 'cargo', 'build'],
+    ['env', `${name}=https://mirror.invalid`, 'rustup', 'update'], ['docker', 'exec', '-e', name, 'ctr', 'cargo', 'build'],
+    ['podman', 'run', `--env=${name}=https://mirror.invalid`, 'img', 'cargo', 'test'], ['make', `${name}=./m`, 'all'],
+    ['just', `${name}=./m`, 'build'], ['strace', '-E', `${name}=./m`, 'cargo', 'build'],
+    ['env', `${name.toLowerCase()}=./m`, 'cargo', 'build'], ['make', `${name.toLowerCase()}=./m`, 'all'],   // folded, K1 and L1
+  ]),
+  ['env', 'RUSTUP_UPDATE_ROOT=./m', 'rustup', 'self', 'update'], ['timeout', '5', 'env', 'RUSTUP_DIST_SERVER=./m', 'cargo', 'test'],
+];
+// rustup's data variables still render.
+const L4_DATA_NARROW = [
+  ['env', 'RUSTUP_AUTO_INSTALL=0', 'cargo', 'build'], ['env', 'RUSTUP_AUTO_INSTALL=1', 'cargo', 'build'],
+  ['env', 'RUSTUP_LOG=debug', 'cargo', 'build'], ['env', 'RUSTUP_TOOLCHAIN_SOURCE=env', 'cargo', 'build'],
+  ['env', 'RUSTUP_VERSION=1.28.2', 'rustup', 'self', 'update'], ['env', 'RUSTUP_CONCURRENT_DOWNLOADS=4', 'cargo', 'build'],
+  ['env', 'RUSTUP_DOWNLOAD_TIMEOUT=300', 'rustup', 'update'], ['env', 'RUSTUP_DIST_SERVER_BACKUP=x', 'cargo', 'build'],
+  ['RUSTUP_UPDATE_ROOTS=x', 'cargo', 'build'], ['make', 'RUSTUP_LOG=debug', 'all'],
+];
+
+test('L4: RUSTUP_DIST_SERVER, RUSTUP_DIST_ROOT and RUSTUP_UPDATE_ROOT make a Codex prefix broad wherever the export reads an assignment', () => {
+  for (const prefix of [['cargo', 'build'], ['cargo', 'test'], ['rustup', 'update'], ['rustup', 'self', 'update']]) {
+    assert.equal(codexRuleCount(prefix), 1, `precondition: ${JSON.stringify(prefix)} renders`);
+  }
+  for (const prefix of L4_BROAD) {
+    // MUTATION: drop `RUSTUP_SOURCE_ENV.has(name)` from codexEnvNameIsUnsafe. Every row renders.
+    // MUTATION: drop one name from RUSTUP_SOURCE_ENV. That name's rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses where the toolchain or rustup comes from`);
+  }
+  for (const prefix of L4_DATA_NARROW) {
+    // MUTATION: match RUSTUP_SOURCE_ENV as a prefix (`/^RUSTUP_/`). Every row here fails.
+    // MUTATION: add 'RUSTUP_AUTO_INSTALL' to RUSTUP_SOURCE_ENV. The two auto-install rows fail.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
+  }
+  // Codex export only: the Claude half keeps G4(b), as for K3's names.
+  assert.deepEqual(renderClaudePermissions(['Bash(RUSTUP_DIST_SERVER=x cargo build *)'], { includeReviewed: true }),
+    ['Bash(RUSTUP_DIST_SERVER=x cargo build *)']);
+});
+
 test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led build-program rule still renders', () => {
   // A control, passing before and after J1: G4(b) accepts these because the rule keeps the
   // literal value the user ran. MUTATION: judge claudePermissionIsSafe's leading assignments by
@@ -1706,6 +1778,57 @@ test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led b
   // PROGRAM_NAMING_ENV itself is unchanged: CC, CXX and MAKE are still refused there.
   for (const permission of ['Bash(CC=x cargo build *)', 'Bash(CXX=x cargo build *)', 'Bash(MAKE=x cargo build *)']) {
     assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+});
+
+// L2 (2026-10-14, the lead's decision): the Claude half folds case in a leading assignment, as K1
+// folded the Codex export's, for the sets it already refused and no others
+// (src/policy-exporters.js assignmentIsUnsafe). Against the base source (the L1 commit) every rule
+// in L2_FOLDED_REFUSED rendered.
+const L2_FOLDED_REFUSED = [
+  // CODE_LOADING_ENV
+  'Bash(node_options=x cat *)', 'Bash(Node_Options=x cat *)', 'Bash(path=. cat *)', 'Bash(Path=. cat *)',
+  'Bash(bash_env=x cat *)', 'Bash(env=x cat *)', 'Bash(pythonpath=. cat *)', 'Bash(perl5opt=x cat *)',
+  'Bash(java_tool_options=x cat *)',
+  // PROGRAM_NAMING_ENV
+  'Bash(git_pager=x git log *)', 'Bash(Git_Pager=x git log *)', 'Bash(git_ssh_command=x git log *)',
+  'Bash(editor=x git log *)', 'Bash(pager=x git log *)', 'Bash(lessopen=x cat *)', 'Bash(sudo_askpass=x cat *)',
+  'Bash(cc=x cargo build *)', 'Bash(Cxx=x cargo build *)', 'Bash(make=x cargo build *)',
+  // the loader prefixes
+  'Bash(ld_preload=./x.so cat *)', 'Bash(Ld_Preload=./x.so cat *)', 'Bash(ld_library_path=. cat *)',
+  'Bash(dyld_insert_libraries=x ls *)',
+  // after a data assignment
+  'Bash(FOO=1 ld_preload=x cat *)',
+];
+// Refused before L2 and after it.
+const L2_UPPER_REFUSED = ['Bash(LD_PRELOAD=./x.so cat *)', 'Bash(GIT_PAGER=x git log *)', 'Bash(NODE_OPTIONS=x cat *)',
+  'Bash(PATH=. cat *)', 'Bash(CC=x cargo build *)'];
+// G4(b)'s acceptance, in any case: the names the Claude half never refused stay rendering.
+const L2_G4B_RENDER = ['Bash(AR=x cargo build *)', 'Bash(ar=x cargo build *)', 'Bash(LD=./ld cargo build *)',
+  'Bash(ld=./ld cargo build *)', 'Bash(RUSTC=x cargo build *)', 'Bash(rustc=x cargo build *)', 'Bash(Ranlib=x cargo build *)',
+  'Bash(makeflags=-j4 cargo build *)', 'Bash(cargo_home=x cargo build *)', 'Bash(CARGO_HOME=x cargo build *)'];
+// Data, in any case.
+const L2_DATA_RENDER = ['Bash(lang=C git log *)', 'Bash(LANG=C git log *)', 'Bash(foo=1 cat *)', 'Bash(ci=1 cat *)',
+  'Bash(rust_log=debug cargo test *)', 'Bash(cflags=-O2 cargo build *)', 'Bash(ldflags=-s cargo build *)',
+  'Bash(Pathname=x cat *)', 'Bash(editors=x git log *)'];
+
+test('L2: the Claude half judges a leading assignment case-insensitively, for the sets it already refused', () => {
+  for (const permission of ['Bash(cat *)', 'Bash(git log *)', 'Bash(cargo build *)', 'Bash(cargo test *)', 'Bash(ls *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], `precondition: ${permission}`);
+  }
+  for (const permission of L2_FOLDED_REFUSED) {
+    // MUTATION: drop the upper-case lookup from assignmentIsUnsafe (L2 reverted). Every rule here
+    // renders.
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], `${permission} names the variable on Windows`);
+  }
+  for (const permission of L2_UPPER_REFUSED) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  for (const permission of [...L2_G4B_RENDER, ...L2_DATA_RENDER]) {
+    // MUTATION: judge assignmentIsUnsafe by codexFoldedEnvNameIsUnsafe (the Codex export's wider
+    // set). The G4(b) rules are refused and this fails.
+    // MUTATION: make assignmentIsUnsafe refuse every name. Every rule here fails.
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [permission], permission);
   }
 });
 
@@ -1811,6 +1934,57 @@ test('an environment option that names or loads a program, and any environment f
   }
   // A data-valued assignment does not narrow a broad command either.
   assert.equal(codexRuleCount(['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'sh']), 0);
+});
+
+// L3 (2026-10-14, the lead's decision): strace's `-E VAR=VAL`/`--env` sets the traced command's
+// environment, so it is judged as a container's `-e` is; a bare `-E VAR` removes VAR and is
+// harmless (strace(1); src/policy-exporters.js, strace's entry in EXEC_WRAPPER_GRAMMAR). Against
+// the base source (the L2 commit) every row of STRACE_ENV_BROAD rendered.
+const STRACE_ENV_BROAD = [
+  ['strace', '-E', 'LD_PRELOAD=./x.so', 'cat'], ['strace', '-ELD_PRELOAD=./x.so', 'cat'],
+  ['strace', '--env=LD_PRELOAD=./x.so', 'cat'], ['strace', '--env', 'LD_PRELOAD=./x.so', 'cat'],
+  ['strace', '--en=LD_PRELOAD=./x.so', 'cat'], ['strace', '--e=LD_PRELOAD=./x.so', 'cat'],   // getopt_long prefixes
+  ['strace', '-E', 'GIT_PAGER=x', 'git', 'log'], ['strace', '-f', '-E', 'PATH=.', 'ls'],
+  ['strace', '-E', 'ld_preload=./x.so', 'cat'], ['strace', '-ENode_Options=--require=./y.js', 'cat'],   // folded, by K1
+  ['strace', '-E', 'AR=./x', 'make', 'all'], ['strace', '-E', 'CARGO_HOME=./h', 'cargo', 'build'],   // J1's and K3's names
+  ['strace', '-E', 'FOO=1', '-E', 'LD_PRELOAD=x', 'cat'], ['strace', '-o', 'out.txt', '-E', 'BASH_ENV=x', 'cat'],
+  ['timeout', '5', 'strace', '-E', 'LD_PRELOAD=x', 'cat'], ['xargs', 'strace', '--env=LD_PRELOAD=x', 'cat'],
+];
+const STRACE_ENV_NARROW = [
+  // A bare name removes the variable: "Removes var from the inherited environment variables".
+  ['strace', '-E', 'LD_PRELOAD', 'cat'], ['strace', '--env', 'LD_PRELOAD', 'cat'], ['strace', '-ELD_PRELOAD', 'cat'],
+  ['strace', '--env=PATH', 'cat'],
+  // Data, and strace's other options as before.
+  ['strace', '-E', 'FOO=1', 'cat'], ['strace', '-ELANG=C', 'cat'], ['strace', '--env=TZ=UTC', 'ls'],
+  ['strace', 'cat'], ['strace', '-f', 'ls'], ['strace', '-f', '-e', 'trace=open', 'ls'], ['strace', '-etrace=open', 'ls'],
+  // Not environment options: ltrace's `-e` is a filter, flock's `-E` an exit code.
+  ['ltrace', '-e', 'malloc', 'ls'], ['ltrace', '-e', 'LD_PRELOAD=x', 'ls'], ['flock', '-E', '3', 'lock', 'cat'],
+];
+
+test('L3: strace -E/--env VAR=VAL is judged as an environment assignment, and a bare -E VAR, which unsets, is not', () => {
+  for (const prefix of STRACE_ENV_BROAD) {
+    // MUTATION: drop `env` from strace's grammar entry. The separated `-E`/`--env` rows render.
+    // MUTATION: drop `envFused` from it. The fused `-E...` and `--env=` rows render.
+    // MUTATION: narrow envFused to `--env=` alone. The `--en=` and `--e=` rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} hands the traced command a program`);
+  }
+  for (const prefix of STRACE_ENV_NARROW) {
+    // MUTATION: drop `envUnsetsBare: true` from strace's entry. The bare-name rows are refused
+    // as a container's bare `-e NAME` is, and this fails.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is as narrow as its command`);
+  }
+  // A data assignment does not narrow a broad command.
+  assert.equal(codexRuleCount(['strace', '-E', 'FOO=1', 'sh']), 0);
+  // The wrappers whose environment options set a variable but that are broad at any depth already
+  // (ALWAYS_BROAD_WRAPPERS), and nsenter's `-e`/`--env`, which copies the target process's
+  // environment and is absent from its table, so unknown: pins, refused before and after.
+  for (const prefix of [['systemd-run', '-E', 'LD_PRELOAD=x', 'cat'], ['systemd-run', '--setenv=FOO=1', 'cat'],
+    ['firejail', '--env=LD_PRELOAD=x', 'cat'], ['sudo', 'LD_PRELOAD=x', 'cat'], ['gdb', '--args', 'cat'],
+    ['nsenter', '-t', '1', '-e', 'cat'], ['nsenter', '-t', '1', '--env', 'cat']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  // Claude half: strace is a wrapper root there, refused at any depth already.
+  assert.deepEqual(renderClaudePermissions(['Bash(strace -E LD_PRELOAD=x cat *)'], { includeReviewed: true }), []);
 });
 
 // node options that name a file deciding what loads (src/policy-exporters.js, node's `broad`).

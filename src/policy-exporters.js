@@ -432,7 +432,8 @@ function innerCommandPrefix(base, prefix) {
 // Per wrapper: `flags` take no value, `values` take the next token, `fused` matches an
 // option carrying its value in the same token, `operands` counts the fixed positional
 // arguments that come before the command (timeout's DURATION, flock's lock file,
-// chroot's NEWROOT, taskset's mask, chrt's priority). The option lists are each tool's
+// chroot's NEWROOT, taskset's mask, chrt's priority), and `env`/`envFused` name an option that
+// sets the command's environment (strace's `-E`, since L3). The option lists are each tool's
 // own (GNU coreutils for timeout, nice, nohup, stdbuf and chroot; util-linux for setsid,
 // ionice, flock, nsenter, unshare, taskset and chrt; GNU time; strace(1), ltrace(1),
 // valgrind(1); bash/zsh for builtin, noglob, nocorrect), cross-checked against the
@@ -478,10 +479,21 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
   chrt: { flagPattern: /^(?:-[abdefimoprRv]+|--(?:all-tasks|batch|deadline|ext|fifo|idle|max|other|pid|reset-on-fork|rr|verbose))$/,
     values: ['-T', '-P', '-D', '--sched-runtime', '--sched-period', '--sched-deadline'],
     fused: /^(?:-[TPD].|--sched-(?:runtime|period|deadline)=)/, operands: 1 },
+  // strace's `-E VAR=VAL`/`--env=VAR=VAL` "Runs the command with the environment variable var=val
+  // set for execution", and a bare `-E VAR` "Removes var from the inherited environment variables
+  // before executing the command" (strace(1), man7.org, read 2026-10-14; src/strace.c update_env
+  // adds a value holding `=` and removes any other). So an assignment is judged as a container's
+  // `-e` is, and a bare name, which only removes, is harmless (`envUnsetsBare`; L3, 2026-10-14).
+  // `--e=` and `--en=` are `--env=` too: strace parses with getopt_long, which takes an
+  // unambiguous prefix, and `env` is its only long option that starts with `e` (src/strace.c
+  // longopts, read the same day). Until then `-E` was a plain value option, so `["strace", "-E",
+  // "LD_PRELOAD=./x.so", "cat"]` rendered (measured against 0f29d7f). `-e` is strace's filter
+  // expression, not the environment, and stays a value option.
   strace: { flagPattern: /^-[cCdDfFhiknqrtTvVwxyzZ]+$/,
     values: ['-e', '-o', '-p', '-s', '-E', '-P', '-S', '-a', '-b', '-I', '-u', '-X', '-O', '-U', '--output', '--trace',
       '--expr', '--attach', '--string-limit', '--env', '--trace-path', '--columns', '--user'],
-    fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/ },
+    fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/,
+    env: ['-E', '--env'], envFused: /^(?:-E|--e(?:nv?)?=)(.+)$/, envUnsetsBare: true },
   ltrace: { flagPattern: /^-[bcCfhiLrSStTV]+$/,
     values: ['-a', '-A', '-e', '-l', '-n', '-o', '-p', '-s', '-u', '-x', '-D', '-F', '-w', '--align', '--config',
       '--indent', '--library', '--output', '--where'],
@@ -600,14 +612,14 @@ function execWrapperInner(grammar, prefix) {
     if (grammar.lookup?.test(token)) return LOOKUP;
     if (grammar.module?.includes(token)) return ['python', '-m', ...prefix.slice(k + 1)];
     if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
-    // A container's environment option (`env`/`envFused`, docker and compose, 2026-10-14):
-    // judged before the value is skipped, by envAssignmentIsUnsafe.
+    // A container's environment option (`env`/`envFused`, docker and compose, 2026-10-14), and
+    // strace's `-E`/`--env` since L3: judged before the value is skipped, by envOptionIsUnsafe.
     if (grammar.env?.includes(token)) {
-      if (envAssignmentIsUnsafe(prefix[k + 1])) return null;
+      if (envOptionIsUnsafe(grammar, prefix[k + 1])) return null;
       k += 1; continue;
     }
     const fusedEnv = grammar.envFused?.exec(token);
-    if (fusedEnv && envAssignmentIsUnsafe(fusedEnv[1])) return null;
+    if (fusedEnv && envOptionIsUnsafe(grammar, fusedEnv[1])) return null;
     if (values.has(token)) { k += 1; continue; }
     if (grammar.fused?.test(token)) continue;
     return null;
@@ -1039,9 +1051,9 @@ const NPX_EXEC = {
 //   * MAKE_COMMAND_VARIABLE, the whole command lines the built-in rules run (the same table:
 //     COMPILE.c, LINK.o, PREPROCESS.S, LEX.l, YACC.y, LINT.c, ... and CHECKOUT,v). Overriding one
 //     replaces the command a rule runs outright.
-// Matched exactly, as make's variable names are case-sensitive. Not refused, on purpose: the
-// flags variables (CFLAGS, LDFLAGS, ARFLAGS, ...) and the install locations (PREFIX, DESTDIR,
-// prefix, bindir, ...), which the same table and standard define as data, and any variable a
+// Matched exactly until L1 (below), as make's variable names are case-sensitive. Not refused, on
+// purpose: the flags variables (CFLAGS, LDFLAGS, ARFLAGS, ...) and the install locations (PREFIX,
+// DESTDIR, prefix, bindir, ...), which the same table and standard define as data, and any variable a
 // makefile defines for itself, which is the makefile's own code, as a target's recipe is. just
 // gains nothing here: it has no built-in variables and no implicit rules, and an override of a
 // variable the justfile does not declare is an error (MEASURED, just 1.58.0, 2026-10-14: `just
@@ -1052,6 +1064,24 @@ const NPX_EXEC = {
 // environment judgment now holds the build programs, so `["just", "AR=x", "build"]`, which F6
 // left rendering, is broad: under `set export` it is `env AR=x` for every recipe, and a recipe
 // that runs make then runs x. `["just", "PYTHON=python3", "test"]` still renders.
+//
+// FOLDED SINCE L1 (2026-10-14, the lead's decision, reversing F6's and K1's exact match here). A
+// make or just override is judged by codexFoldedEnvNameIsUnsafe, the environment readers' check,
+// because it is an environment assignment as well as a variable. GNU make "exports a variable
+// only if it is either defined in the environment initially or if set on the command line and its
+// name consists only of letters, numbers, and underscores", and "adds the variable and its value
+// to the environment for running each line of the recipe" (the GNU make manual, "Communicating
+// Variables to a Sub-make", read 2026-10-14). just does the same under `set export`: MEASURED with
+// just 1.58.0 in a private temp directory, a justfile with `set export` and `node_options := ""`
+// whose recipe runs node ran y.js under `just node_options=--require=./y.js r`, and node saw
+// NODE_OPTIONS set. A native Windows child reads its environment case-insensitively (K1, at
+// codexFoldedEnvNameIsUnsafe), so `make cc=x all` hands every recipe line a variable a child
+// reading CC sees, though make's own `$(CC)` is untouched. Refusing it is the safe failure, so
+// F6's pinned `["make", "cc=x", "all"]` is broad now. Data overrides still render in any case
+// (`prefix=`, `PREFIX=`, `DESTDIR=`, `CFLAGS=`, `cflags=`, `VERBOSE=`, `V=`): the fold reaches
+// only the program, code-loading and configuration sets. It also refuses a dotted spelling such
+// as `compile.c=` or `.shellflags=`, which make neither reads as the built-in variable nor
+// exports; that over-refusal is the cost of one predicate, and the safe direction.
 const MAKE_SHELL_VARIABLES = new Set(['SHELL', '.SHELLFLAGS', 'MAKESHELL', 'MAKEFLAGS', 'MFLAGS', 'MAKEFILES']);
 const MAKE_PROGRAM_VARIABLES = new Set([
   'AR', 'AS', 'CC', 'OBJC', 'CXX', 'CO', 'CPP', 'FC', 'F77', 'GET', 'LD', 'LEX', 'LINT', 'M2C', 'PC', 'YACC',
@@ -1066,8 +1096,8 @@ const MAKE = {
     assignments: /^\s*([^\s:#=]*?)\s*([:+?!]*)=/,
     // codexEnvNameIsUnsafe is MAKE_SHELL_VARIABLES, MAKE_PROGRAM_VARIABLES, MAKE_COMMAND_VARIABLE
     // and envNameIsUnsafe, which this line named one by one until J1, plus cargo's program names
-    // (a command-line variable reaches every recipe's environment, see above).
-    unsafeVariable: (name, operator) => operator.includes('!') || codexEnvNameIsUnsafe(name),
+    // (a command-line variable reaches every recipe's environment, see above); folded since L1.
+    unsafeVariable: (name, operator) => operator.includes('!') || codexFoldedEnvNameIsUnsafe(name),
     scanAll: true,
     flags: ['--always-make', '--environment-overrides', '--ignore-errors', '--keep-going', '--no-keep-going',
       '--stop', '--just-print', '--dry-run', '--recon', '--print-data-base', '--question', '--no-builtin-rules',
@@ -1096,7 +1126,7 @@ const MAKE = {
 // s.ps1"` (1.58's option to load a command's output as the environment) ran s.ps1, which wrote
 // its marker. A variable override, `NAME=VALUE` or `--set NAME VALUE`, is judged by
 // envNameIsUnsafe since the same day (codexEnvNameIsUnsafe since J1, which adds the build
-// programs): under `set export` it reaches every recipe's environment,
+// programs, and folded since L1, MAKE above): under `set export` it reaches every recipe's environment,
 // and `just NODE_OPTIONS=--require=./y.js build` (NODE_OPTIONS declared in the justfile) ran y.js,
 // measured. just overrides only variables the justfile declares, and no variable chooses the
 // shell, so a data override stays narrow.
@@ -1104,7 +1134,7 @@ const JUST = {
   info: DEFAULT_INFO,
   target: {
     assignments: /^([A-Za-z_][A-Za-z0-9_-]*)()=/,
-    unsafeVariable: (name) => codexEnvNameIsUnsafe(name),
+    unsafeVariable: (name) => codexFoldedEnvNameIsUnsafe(name),
     flags: ['-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '-u', '--unsorted', '--no-deps', '--no-dotenv',
       '--yes', '--highlight', '--no-highlight', '--unstable', '--timestamp', '--explain', '-g', '--global-justfile'],
     flagPattern: /^-v+$/,
@@ -1996,8 +2026,24 @@ const PROGRAM_NAMING_ENV = new Set([
 function envNameIsUnsafe(name) {
   return CODE_LOADING_ENV.has(name) || PROGRAM_NAMING_ENV.has(name) || /^(?:LD|DYLD)_/.test(name);
 }
+// The Claude half's judgment of a leading assignment (claudePermissionIsSafe). FOLDED SINCE L2
+// (2026-10-14, the lead's decision, as K1 folded the Codex export's): a native Windows program
+// reads its environment case-insensitively, so `ld_preload=./x.so cat` or `node_options=... cat`
+// is the variable itself there (K1 MEASURED the bash spelling `node_options=--require=./y.js node
+// -e ...` running y.js). Only envNameIsUnsafe's own sets are folded, the ones this half already
+// refused: CODE_LOADING_ENV, PROGRAM_NAMING_ENV and the loader prefixes `LD_` and `DYLD_`. None is
+// added: J1's build programs, F6's make sets, cargo's names and K3's directories stay Codex export
+// only, so G4(b)'s acceptance of `Bash(AR=x cargo build *)` stands, in any case (`Bash(ar=x cargo
+// build *)` renders too). Claude Code's own strip is case-exact and unaffected: its allow path
+// strips a leading `NAME=VALUE` only when its Set of 39 upper-case names `.has` the captured NAME
+// as written (CLAUDE_SAFE_ENV_VARS, src/permission-match.js; re-read 2026-10-14 in the 2.1.296
+// binary at the offset scripts/check-claude-strip-model.js reports: `let V=G[1] ... if(IG.has(V))`,
+// no case conversion), so `lang=C git log` keeps its assignment and needs a rule that carries it.
+// And no one of those 39 names is in a folded set, so the fold cannot refuse a rule for an
+// assignment Claude Code strips.
 function assignmentIsUnsafe(token) {
-  return envNameIsUnsafe(ASSIGNMENT_WORD.exec(token)[1]);
+  const name = ASSIGNMENT_WORD.exec(token)[1];
+  return envNameIsUnsafe(name) || envNameIsUnsafe(name.toUpperCase());
 }
 // The value of a container's `-e`/`--env` (execWrapperInner, 2026-10-14): `NAME=VALUE`, or a
 // bare `NAME`, which docker and podman fill from the caller's own environment, so a value the
@@ -2006,6 +2052,12 @@ function assignmentIsUnsafe(token) {
 // K1 (codexFoldedEnvNameIsUnsafe below).
 function envAssignmentIsUnsafe(value) {
   return value !== undefined && codexFoldedEnvNameIsUnsafe(String(value).split('=', 1)[0]);
+}
+// An exec wrapper's environment option (execWrapperInner). Where a bare NAME removes the variable
+// instead of copying it in (strace's `-E VAR`, `envUnsetsBare`; L3), only an assignment is judged.
+function envOptionIsUnsafe(grammar, value) {
+  if (grammar.envUnsetsBare && !String(value ?? '').includes('=')) return false;
+  return envAssignmentIsUnsafe(value);
 }
 
 // THE BUILD PROGRAMS, CODEX EXPORT ONLY (J1, 2026-10-14: the lead's answer to the maintainer
@@ -2018,10 +2070,11 @@ function envAssignmentIsUnsafe(value) {
 // override (MAKE's and JUST's unsafeVariable), and a prefix that opens with assignments
 // (candidateEligibleForCodex). Matched exactly, as F6's names are: make's variable names are
 // case-sensitive, and so is a POSIX environment. Since K1 (below) the ENVIRONMENT readers fold
-// case through codexFoldedEnvNameIsUnsafe; the make and just overrides still call this one.
+// case through codexFoldedEnvNameIsUnsafe, and since L1 the make and just overrides do too.
 //
 // THE CLAUDE HALF IS NOT CHANGED. claudePermissionIsSafe judges a leading assignment by
-// envNameIsUnsafe, as before, so `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
+// envNameIsUnsafe, as before (folded since L2, assignmentIsUnsafe above, its own sets only), so
+// `Bash(AR=x cargo build *)` and `Bash(LD=./ld cargo build *)`
 // still render at review: G4(b)'s acceptance stands there, because that rule keeps the literal
 // value the user ran and matches no other (ruleMatches), and Claude Code strips neither name.
 // Adding these names to PROGRAM_NAMING_ENV itself would have refused that rule too, which is
@@ -2074,16 +2127,34 @@ function envAssignmentIsUnsafe(value) {
 //     used for storing installed toolchains and configuration options" (the same page), so the
 //     toolchain a rustup proxy such as cargo or rustc runs, and the settings that choose it, come
 //     from the directory it names: a path again.
+//   * the servers rustup downloads the toolchain and itself from (RUSTUP_SOURCE_ENV; L4,
+//     2026-10-14, the lead's decision on what K3 left). Each read that day from rustup's
+//     environment-variables page (doc/user-guide/src/environment-variables.md in rust-lang/rustup)
+//     and its source. RUSTUP_DIST_SERVER "Sets the root URL for downloading static resources
+//     related to Rust", the toolchains. RUSTUP_DIST_ROOT is its deprecated spelling ("Use
+//     RUSTUP_DIST_SERVER instead"), still read "For backwards compatibility" when
+//     RUSTUP_DIST_SERVER is unset (src/config.rs, dist_root_server). RUSTUP_UPDATE_ROOT "Sets the
+//     root URL for downloading self-update", the rustup binary that every later rustup, cargo or
+//     rustc proxy then is; under `auto-self-update = enable`, "`rustup update` and similar
+//     commands will also check for, and install, any update to Rustup" (basics.md). And
+//     RUSTUP_AUTO_INSTALL is on by default ("(default: 1) When set to `1`, installs the active
+//     toolchain when it is absent"; restored by default in 1.28.1, after 1.28.0 turned it off, per
+//     the CHANGELOG), so a plain `cargo build` with the active toolchain absent downloads one from
+//     the dist server and runs it. Each names where the code that runs comes from, so it is
+//     refused, as a program path is. RUSTUP_AUTO_INSTALL itself stays data: a switch on that
+//     default, which chooses no source.
 // Left out, on purpose:
 //   * the flags variables of both tools (CFLAGS, LDFLAGS, ARFLAGS, ..., RUSTFLAGS,
 //     CARGO_ENCODED_RUSTFLAGS, RUSTDOCFLAGS, CARGO_BUILD_RUSTFLAGS,
 //     CARGO_TARGET_<triple>_RUSTFLAGS) and the locations (PREFIX, DESTDIR, CARGO_TARGET_DIR, ...).
 //     They are data by the standing decision G4(a) records for `CFLAGS=-fplugin=./x.so`, even
 //     though `RUSTFLAGS=-Clinker=./x` names a program the same way.
-//   * rustup's download sources, RUSTUP_DIST_SERVER and RUSTUP_UPDATE_ROOT ("Sets the root URL
-//     for downloading ..."), which with RUSTUP_AUTO_INSTALL ("installs the active toolchain when
-//     it is absent") could fetch the toolchain that then runs: not part of K3's decision, and
-//     recorded for the lead (docs/engineering-record.md, K3).
+//   * rustup's data variables: RUSTUP_LOG (log verbosity), RUSTUP_TOOLCHAIN_SOURCE ("Set by
+//     rustup to tell proxied tools how RUSTUP_TOOLCHAIN was determined"), RUSTUP_AUTO_INSTALL
+//     (above), the terminal, I/O and download tuning (RUSTUP_TERM_*, RUSTUP_IO_THREADS,
+//     RUSTUP_UNPACK_RAM, RUSTUP_CONCURRENT_DOWNLOADS, RUSTUP_DOWNLOAD_TIMEOUT), and RUSTUP_VERSION,
+//     which "Overrides the rustup version (e.g. `1.27.1`) to be downloaded" from the server above:
+//     a version, not a source (docs/engineering-record.md, L4).
 //   * CARGO_ALIAS_<name>: its value is cargo's own arguments, not a program, the `npm test`
 //     class the header records. CARGO_HOST_LINKER: not on either page. target.<triple>.ar:
 //     "deprecated and unused".
@@ -2098,10 +2169,11 @@ const CARGO_PROGRAM_ENV = new Set([
 const CARGO_PROGRAM_ENV_PATTERN =
   /^CARGO_(?:TARGET_[A-Z0-9_]+_(?:LINKER|RUNNER)|REGISTRIES_[A-Z0-9_]+_CREDENTIAL_PROVIDER|CREDENTIAL_ALIAS_[A-Z0-9_]+)$/;
 const CARGO_CONFIG_ENV = new Set(['CARGO_HOME', 'RUSTUP_TOOLCHAIN', 'RUSTUP_HOME']);
+const RUSTUP_SOURCE_ENV = new Set(['RUSTUP_DIST_SERVER', 'RUSTUP_DIST_ROOT', 'RUSTUP_UPDATE_ROOT']);
 function codexEnvNameIsUnsafe(name) {
   return envNameIsUnsafe(name) || MAKE_SHELL_VARIABLES.has(name) || MAKE_PROGRAM_VARIABLES.has(name) ||
     MAKE_COMMAND_VARIABLE.test(name) || CARGO_PROGRAM_ENV.has(name) || CARGO_PROGRAM_ENV_PATTERN.test(name) ||
-    CARGO_CONFIG_ENV.has(name);
+    CARGO_CONFIG_ENV.has(name) || RUSTUP_SOURCE_ENV.has(name);
 }
 // AN ENVIRONMENT NAME FOLDS CASE ON WINDOWS (K1, 2026-10-14, the lead's decision). A native
 // Windows program looks its environment up case-insensitively, so an assignment to `rustc`,
@@ -2112,19 +2184,19 @@ function codexEnvNameIsUnsafe(name) {
 // RUSTC_PROBE). So every ENVIRONMENT reader in the Codex export judges a name by this, on every
 // platform, because a rules file is not tied to the OS it was generated on and refusing more is
 // the safe failure: an `env` wrapper's assignments (wrapperIsBroad), a container's `-e`/`--env`
-// (envAssignmentIsUnsafe above) and a prefix that opens with assignments
-// (candidateEligibleForCodex), the last two through codexAssignmentIsUnsafe below. It is a
+// (envAssignmentIsUnsafe above; strace's `-E` too since L3) and a prefix that opens with assignments
+// (candidateEligibleForCodex), the first and last through codexAssignmentIsUnsafe below. It is a
 // superset of codexEnvNameIsUnsafe by construction: the exact name, its upper-case spelling
 // (every set member is upper case), and the built-in command lines with their lower-case
 // suffix (`COMPILE.c`, `CHECKOUT,v`) matched case-insensitively. That covers envNameIsUnsafe's
 // sets too (CODE_LOADING_ENV, PROGRAM_NAMING_ENV, `LD_*` and `DYLD_*`), which were exact.
 //
-// NOT USED for make's and just's own overrides, which stay exact (MAKE's and JUST's
-// unsafeVariable, codexEnvNameIsUnsafe), by the same decision: make's variable names are
-// case-sensitive, so `["make", "cc=x", "all"]` sets no compiler variable and still renders, as
-// F6 pinned. That half of the decision is recorded for the lead as unverified: make exports a
-// command-line variable to every recipe line's environment, and just does so under `set
-// export`, where a Windows child reads it folded (docs/engineering-record.md, K1).
+// USED for make's and just's own overrides too since L1 (MAKE's and JUST's unsafeVariable; the
+// lead's decision, reversing K1's exact half). K1 kept them exact, because make's variable names
+// are case-sensitive and `["make", "cc=x", "all"]` sets no compiler variable for make itself, and
+// recorded that premise as unverified: make exports a command-line variable to every recipe
+// line's environment, and just does so under `set export` (measured), where a Windows child reads
+// it folded. MAKE's comment above has the sources (docs/engineering-record.md, K1 and L1).
 const MAKE_COMMAND_VARIABLE_FOLDED = new RegExp(MAKE_COMMAND_VARIABLE.source, 'i');
 function codexFoldedEnvNameIsUnsafe(name) {
   const text = String(name);
@@ -2146,6 +2218,7 @@ function claudePermissionIsSafe(parsed, options) {
     if (command < 0 || !reviewed || parsed.tool !== 'Bash') return false;
     // envNameIsUnsafe, NOT the Codex export's codexEnvNameIsUnsafe: J1's build programs are
     // Codex export only, and G4(b)'s acceptance of `Bash(AR=x cargo build *)` stands here.
+    // Folded since L2, so `Bash(ld_preload=./x.so cat *)` is refused (assignmentIsUnsafe).
     if (parsed.tokens.slice(0, command).some(assignmentIsUnsafe)) return false;
     return claudePermissionIsSafe({ ...parsed, root: parsed.tokens[command], tokens: parsed.tokens.slice(command) }, options);
   }

@@ -11,14 +11,23 @@
 // outcomes (evidence acolyte-codex-mcp-runtime-ddsfLK), so reviewed-MCP Auto Learn
 // learned nothing from 0.161.0 history.
 //
-// The fixture is a sanitized copy of the five case rollouts the harness produced, one
+// The fixture is a sanitized copy of the six case rollouts the harness produced, one
 // session after another in case order:
 //
-//   dd01  default-prompt-decline        declined at the prompt      -> failed
+//   dd01  default-prompt-decline        declined at the prompt      -> unknown
 //   dd02  exact-approved-success        approved by config, ran     -> success
 //   dd03  exact-approved-failure        approved, tool isError true -> failed
-//   dd04  neighbor-remains-prompt       declined at the prompt      -> failed
+//   dd04  neighbor-remains-prompt       declined at the prompt      -> unknown
 //   dd05  single-call-reviewed-success  accepted once, ran          -> success
+//   dd06  exact-approved-server-error   approved, the server failed -> failed
+//                                       the call (JSON-RPC error)
+//
+// A DECLINED CALL IS NO EVIDENCE (2026-10-13). The two declines read `failed` until
+// then; the tool never ran (the server log shows no tools/call), so they are withheld,
+// as a declined shell call already is. dd06 was added beside them the same day: Codex
+// writes a call the server failed in the SAME structure as a decline -- status failed,
+// an `error`, no `result` -- and only the message tells them apart, so it stays
+// `failed`. dd01-dd05 are byte-identical to the fixture's first version.
 //
 // Regenerate with (two consecutive runs wrote byte-identical files):
 //   node scripts/check-codex-mcp-runtime.js --write-fixture test/fixtures/codex-mcp-item-completed-sanitized.jsonl
@@ -37,12 +46,16 @@ const FIXTURE = path.join(__dirname, 'fixtures', 'codex-mcp-item-completed-sanit
 const TEXT = fs.readFileSync(FIXTURE, 'utf8');
 const RECORDS = TEXT.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line));
 const CASES = [
-  ['0192dddd-4444-7000-8000-00000000dd01', 'succeed', 'failed'],
+  ['0192dddd-4444-7000-8000-00000000dd01', 'succeed', 'unknown'],
   ['0192dddd-4444-7000-8000-00000000dd02', 'succeed', 'success'],
   ['0192dddd-4444-7000-8000-00000000dd03', 'fail', 'failed'],
-  ['0192dddd-4444-7000-8000-00000000dd04', 'neighbor', 'failed'],
+  ['0192dddd-4444-7000-8000-00000000dd04', 'neighbor', 'unknown'],
   ['0192dddd-4444-7000-8000-00000000dd05', 'succeed', 'success'],
+  ['0192dddd-4444-7000-8000-00000000dd06', 'crash', 'failed'],
 ];
+// The two measured error messages, as Codex 0.161.0 wrote them.
+const DECLINED = 'user rejected MCP tool call';
+const SERVER_ERROR = 'tool call error: tool call failed for `fixture/crash`\n\nCaused by:\n    Mcp error: -32603: acolyte-mcp-crash-witness';
 
 const jsonl = (records) => records.map((record) => JSON.stringify(record)).join('\n') + '\n';
 const parse = (records) => parseCodexJsonl(jsonl(records), { file: FIXTURE, platform: 'win32' });
@@ -66,9 +79,9 @@ function withItem(records, change) {
     : { ...record, payload: { ...record.payload, item: change({ ...record.payload.item }) } }));
 }
 
-test('the fixture really is five 0.161.0 rollouts in the new shape and none in the old', () => {
+test('the fixture really is six 0.161.0 rollouts in the new shape and none in the old', () => {
   const all = sessions();
-  assert.equal(all.length, 5);
+  assert.equal(all.length, 6);
   for (const [index, records] of all.entries()) {
     const meta = records[0].payload;
     assert.equal(meta.cli_version, '0.161.0', 'the fixture names the build it came from');
@@ -86,7 +99,13 @@ test('the fixture really is five 0.161.0 rollouts in the new shape and none in t
     return [status, result ? result.isError : null, error ? 'error' : null]; };
   assert.deepEqual(all.map(shape), [
     ['failed', null, 'error'], ['completed', false, null], ['failed', true, null],
-    ['failed', null, 'error'], ['completed', false, null]]);
+    ['failed', null, 'error'], ['completed', false, null], ['failed', null, 'error']]);
+  // A decline and a server error are the same structure; only the words differ.
+  for (const [index, message] of [[0, DECLINED], [3, DECLINED], [5, SERVER_ERROR]]) {
+    const { item } = completion(all[index]).payload;
+    assert.equal(Object.hasOwn(item, 'result'), false, `WITNESS session ${index + 1} writes no result key at all`);
+    assert.deepEqual(item.error, { message }, `WITNESS session ${index + 1}'s exact error`);
+  }
 });
 
 test('every real 0.161.0 MCP outcome becomes one observation with its true status', () => {
@@ -111,13 +130,13 @@ test('every real 0.161.0 MCP outcome becomes one observation with its true statu
   }
   const whole = mcp(RECORDS);
   assert.deepEqual(whole.map((observation) => observation.status), CASES.map(([, , status]) => status));
-  assert.equal(new Set(whole.map((observation) => observation.id)).size, 5, 'one call id, five sessions, five identities');
+  assert.equal(new Set(whole.map((observation) => observation.id)).size, 6, 'one call id, six sessions, six identities');
 });
 
 test('raw MCP arguments and result content never leave the parser', () => {
   const observations = mcp(RECORDS);
   const text = JSON.stringify(observations);
-  for (const witness of ['acolyte-mcp-succeed-witness', 'acolyte-mcp-fail-witness', 'user rejected MCP tool call']) {
+  for (const witness of ['acolyte-mcp-succeed-witness', 'acolyte-mcp-fail-witness', 'user rejected MCP tool call', 'acolyte-mcp-crash-witness']) {
     assert.ok(TEXT.includes(witness), `precondition: the fixture carries ${witness}`);
     assert.equal(text.includes(witness), false, `${witness} left the parser`);
   }
@@ -147,6 +166,32 @@ test('an McpToolCall outcome counts only when Codex states it, failure first', (
     ['status still in progress', (item) => ({ ...item, status: 'inProgress' })],
     ['status missing', (item) => { const copy = { ...item }; delete copy.status; return copy; }],
   ]) assert.deepEqual(status(change), ['unknown'], `${label}: no authoritative outcome, no success`);
+});
+
+// A DECLINE IS NO EVIDENCE, AND ONLY THE MEASURED DECLINE IS ONE (2026-10-13). The
+// server-error session is the control that matters: Codex wrote it in the decline's
+// own structure, so a reader keyed on structure alone would withhold a real failure.
+test('a declined call is withheld, and only the exact measured decline is one', () => {
+  const all = sessions();
+  const [declined] = all;
+  const serverError = all[5];
+  const status = (records, change) => mcp(withItem(records, change)).map((observation) => observation.status);
+  assert.deepEqual(status(declined, (item) => item), ['unknown'], 'the real decline: the tool never ran');
+  assert.deepEqual(status(all[3], (item) => item), ['unknown'], 'the neighbouring tool\'s real decline');
+  assert.deepEqual(status(serverError, (item) => item), ['failed'], 'control: a call the server failed, same structure, is a failure');
+  assert.deepEqual(status(serverError, (item) => ({ ...item, error: { message: DECLINED } })), ['unknown'],
+    'the same record with the decline\'s words is a decline: the words alone decide');
+  for (const [label, change] of [
+    ['the message capitalised', (item) => ({ ...item, error: { message: 'User rejected MCP tool call' } })],
+    ['the message with trailing text', (item) => ({ ...item, error: { message: `${DECLINED}.` } })],
+    ['the server error\'s message', (item) => ({ ...item, error: { message: SERVER_ERROR } })],
+    ['a second key in the error', (item) => ({ ...item, error: { message: DECLINED, code: -32603 } })],
+    ['the error as a bare string', (item) => ({ ...item, error: DECLINED })],
+    ['a null result beside it', (item) => ({ ...item, result: null })],
+    ['a result beside it', (item) => ({ ...item, result: { content: [], isError: false } })],
+    ['a status other than failed', (item) => ({ ...item, status: 'completed' })],
+    ['no status at all', (item) => { const copy = { ...item }; delete copy.status; return copy; }],
+  ]) assert.deepEqual(status(declined, change), ['failed'], `${label}: not the measured decline, so the recorded error is a failure`);
 });
 
 test('only a direct, well-formed McpToolCall completion confers MCP identity', () => {
@@ -187,16 +232,27 @@ test('both shapes of one call are one observation, and the old shape parses as i
   assert.equal(old.length, 1);
   assert.equal(old[0].id, PINNED_OLD_SHAPE_ID, 'the 0.145.0 identity has not moved');
   assert.equal(old[0].status, 'success');
-  assert.equal(mcp([declined[0], oldEnd({ Err: 'user rejected MCP tool call' })])[0].status, 'failed');
+  // The 0.145.0 decline is no evidence either (2026-10-13; it read `failed`), and
+  // keeps its identity; any other Err is still a failure.
+  const oldDecline = mcp([declined[0], oldEnd({ Err: DECLINED })]);
+  assert.deepEqual([oldDecline[0].id, oldDecline[0].status], [PINNED_OLD_SHAPE_ID, 'unknown']);
+  assert.equal(mcp([declined[0], oldEnd({ Err: 'transport closed' })])[0].status, 'failed');
   // The 0.161.0 record of the same call in the same session lands on the same id.
   const fresh = mcp(declined);
   assert.equal(fresh[0].id, PINNED_OLD_SHAPE_ID, 'WITNESS one call, one identity, whichever shape named it');
-  // A rollout carrying both shapes counts the call once; failure wins either way round.
+  // A rollout carrying both shapes counts the call once. A decline beside a
+  // success is a contradiction and is withheld, either way round; a failure
+  // beside a decline still wins.
   const both = mcp([...declined, oldEnd(OK)]);
   assert.equal(both.length, 1, 'both shapes of one call are not two calls');
-  assert.equal(both[0].status, 'failed', 'a later success cannot erase the recorded decline');
+  assert.equal(both[0].status, 'unknown', 'a later success cannot outweigh the recorded decline');
   const ran = success.map((record) => (record.type === 'session_meta'
     ? { ...record, payload: { ...record.payload, id: OLD_SESSION, session_id: OLD_SESSION } } : record));
+  assert.equal(mcp([...ran, oldEnd({ Err: DECLINED })])[0].status, 'unknown', 'nor can an earlier success');
+  assert.equal(mcp([...declined, oldEnd({ Ok: { content: [], isError: true } })])[0].status, 'failed',
+    'a decline beside a recorded failure: failure wins, as it always does');
+  assert.equal(mcp([...declined, ...declined.filter((record) => record === completion(declined))])[0].status, 'unknown',
+    'a decline recorded twice is still one decline');
   const agree = mcp([...ran, oldEnd(OK)]);
   assert.equal(agree.length, 1);
   assert.equal(agree[0].status, 'success');
@@ -249,5 +305,5 @@ test('the MCP fixture leaks nothing about the machine that produced it', () => {
     assert.match(match[0], /^C:\\\\src\\\\example$/, `unexpected absolute path ${match[0]}`);
     paths += 1;
   }
-  assert.equal(paths, 10, 'WITNESS the path scan found the two synthetic cwds per session');
+  assert.equal(paths, 12, 'WITNESS the path scan found the two synthetic cwds per session');
 });

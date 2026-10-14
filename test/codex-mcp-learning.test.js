@@ -84,7 +84,9 @@ test('measured Codex MCP completion shapes ingest into isolated candidates with 
   }))];
   const observations = parseCodexJsonl(records.map(item => JSON.stringify(item)).join('\n'));
   const candidate = aggregate(observations, 2)[0];
-  assert.deepEqual(candidate.counts, { success: 1, failed: 2, unknown: 1, total: 4 },
+  // The decline is counted unknown, not failed, since 2026-10-13: the tool never
+  // ran. Review-only either way -- the disposition and autoSafe below are the same.
+  assert.deepEqual(candidate.counts, { success: 1, failed: 1, unknown: 2, total: 4 },
     'WITNESS authoritative rollout events survive parser-to-candidate ingestion without outcome inflation');
   assert.equal(candidate.disposition, 'observe');
   assert.equal(candidate.autoSafe, false);

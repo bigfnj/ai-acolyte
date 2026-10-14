@@ -1194,6 +1194,45 @@ function codexMcpStatus(result) {
   return result.Ok.isError === false ? 'success' : 'unknown';
 }
 
+// A DECLINED MCP CALL IS NO EVIDENCE (2026-10-13). The user refused the call, so
+// the tool never ran: it neither succeeded nor failed. Auto Learn's rule is that
+// a confirmed failure is negative evidence and a requested call that never ran
+// is none, which the shell readers already keep (a declined direct exec_command,
+// and since 3521c46 a code-mode cell whose nested command was refused, read
+// `unknown`). This reader counted every decline `failed`. MEASURED on
+// codex-cli 0.161.0, Windows, by scripts/check-codex-mcp-runtime.js (cases
+// `default-prompt-decline` and `neighbor-remains-prompt`, where the local server
+// log proves no tools/call arrived): the McpToolCall item of a declined call is
+// exactly
+//   {..., status: "failed", error: {message: "user rejected MCP tool call"}}
+// with no `result` key. The 0.145.0 record of one is
+//   {..., result: {Err: "user rejected MCP tool call"}}
+// (measured on real 0.145 app-server rollouts on 2026-09-28 and transcribed
+// into test/codex-mcp-history.test.js; no 0.145 binary is on this box to
+// measure again, and it is the very message 0.161.0 writes). Only these exact
+// shapes are a decline: one key in `error` or in the result, that message, and
+// for the item a failed status and no result. Everything else that fails stays
+// `failed`: a tool that RAN and returned isError true, and an error from the
+// call itself -- measured too (`exact-approved-server-error`: the server
+// answered tools/call with a JSON-RPC error, and Codex wrote the same
+// structure with the message "tool call error: tool call failed for
+// `fixture/crash`\n\nCaused by:\n    Mcp error: -32603: ..."). A decline still
+// vetoes a success recorded for the same call (parseCodexJsonl): one call that
+// says both is contradictory and is withheld, as conflicting identities are.
+// MCP candidates are review-only at every threshold (src/tool-learn.js,
+// src/auto-learn.js: autoSafe false), so this moves counts shown in review and
+// never decides a grant.
+const CODEX_MCP_DECLINED = 'user rejected MCP tool call';
+
+function codexMcpDeclinedEnd(result) {
+  return isObject(result) && Object.keys(result).length === 1 && result.Err === CODEX_MCP_DECLINED;
+}
+
+function codexMcpDeclinedItem(item) {
+  return item.status === 'failed' && !Object.prototype.hasOwnProperty.call(item, 'result') &&
+    isObject(item.error) && Object.keys(item.error).length === 1 && item.error.message === CODEX_MCP_DECLINED;
+}
+
 // THE 0.161.0 SHAPE OF THE SAME OUTCOME. MEASURED 2026-10-13 on codex-cli
 // 0.161.0 (Windows) by scripts/check-codex-mcp-runtime.js, five fresh isolated
 // sessions: the rollout carries NO `mcp_tool_call_end` at all. Each outcome is an
@@ -1208,7 +1247,8 @@ function codexMcpStatus(result) {
 // Outcomes map onto the old shape's meaning, record by record:
 //   completed + isError false -> success   (old: Ok, isError false)
 //   failed    + isError true  -> failed    (old: Ok, isError true)
-//   failed    + error         -> failed    (old: Err; a declined call was Err)
+//   failed    + error         -> failed    (old: Err)
+//   the measured decline      -> unknown   (old: the measured Err; see above)
 // Anything else is withheld as unknown, for the reason codexMcpStatus gives: no
 // textual fallback. An `error` beside a `result` is failed, as Ok beside Err is.
 // `failed` is the conservative direction: it blocks auto-safe, never grants.
@@ -1239,12 +1279,15 @@ function codexMcpCompletion(record) {
   if (payload.type === 'mcp_tool_call_end') {
     const invocation = payload.invocation;
     if (!isObject(invocation)) return null;
+    const declined = codexMcpDeclinedEnd(payload.result);
     return { callId: payload.call_id, server: invocation.server, tool: invocation.tool,
-      status: codexMcpStatus(payload.result) };
+      status: declined ? 'unknown' : codexMcpStatus(payload.result), declined };
   }
   if (payload.type === 'item_completed' && isObject(payload.item) && payload.item.type === 'McpToolCall') {
     const item = payload.item;
-    return { callId: item.id, server: item.server, tool: item.tool, status: codexMcpItemStatus(item) };
+    const declined = codexMcpDeclinedItem(item);
+    return { callId: item.id, server: item.server, tool: item.tool,
+      status: declined ? 'unknown' : codexMcpItemStatus(item), declined };
   }
   return null;
 }
@@ -1265,6 +1308,8 @@ function codexMcpObservation(record, location, state, file) {
   defineParserOffsets(observation, location.offset, location.end);
   observation._resultOffset = location.offset;
   observation._resultEnd = location.end;
+  // Transient, like the offsets: parseCodexJsonl's merge reads it, nothing persists it.
+  Object.defineProperty(observation, '_codexMcpDeclined', { value: completion.declined === true });
   return observation;
 }
 
@@ -1289,6 +1334,9 @@ function parseCodexJsonl(text, options = {}) {
   const results = new Map();
   const mcpCalls = new Map();
   const conflictingMcpCalls = new Set();
+  // MCP calls with a recorded decline (codexMcpDeclinedItem / -End): the decline
+  // is no evidence itself, and it vetoes any success recorded for the same call.
+  const declinedMcpCalls = new Set();
   const directProcessCalls = [];
   const processWaitCalls = [];
   const processOutputs = [];
@@ -1303,6 +1351,7 @@ function parseCodexJsonl(text, options = {}) {
 
     const mcp = codexMcpObservation(record, location, state, file);
     if (mcp) {
+      if (mcp._codexMcpDeclined) declinedMcpCalls.add(mcp.id);
       const previous = mcpCalls.get(mcp.id);
       if (!previous) {
         mcpCalls.set(mcp.id, mcp);
@@ -1313,6 +1362,10 @@ function parseCodexJsonl(text, options = {}) {
         }
         applyResult(previous, { status: mcp.status, offset: location.offset, end: location.end });
         if (conflictingMcpCalls.has(mcp.id)) previous.status = 'unknown';
+        // One call recorded both declined and succeeded (two shapes, or a
+        // repeated record, that disagree) is contradictory: withheld. A failure
+        // beside a decline still wins, as any failure does.
+        if (declinedMcpCalls.has(mcp.id) && previous.status === 'success') previous.status = 'unknown';
       }
     }
 

@@ -35,8 +35,10 @@ test('Codex MCP end events preserve explicit success failure and rejection witho
     call('failure'), end('failure', ok(true)), output('failure'),
     call('decline'), end('decline', { Err: 'user rejected MCP tool call' }), output('decline')]);
   assert.equal(result.length, 3);
-  assert.deepEqual(result.map(entry => entry.status), ['success', 'failed', 'failed'],
-    'WITNESS authoritative MCP success isError and Err determine outcomes');
+  // The decline is still observed, with its identity, and is no evidence: the tool
+  // never ran (2026-10-13; it read `failed` until then, see codexMcpDeclinedEnd).
+  assert.deepEqual(result.map(entry => entry.status), ['success', 'failed', 'unknown'],
+    'WITNESS authoritative MCP success and isError determine outcomes, and a decline is withheld');
   for (const item of result) {
     assert.equal(item.source, 'codex');
     assert.equal(item.kind, 'codex-mcp');
@@ -69,6 +71,21 @@ test('Codex MCP missing or malformed outcome stays unknown despite success-shape
   assert.deepEqual(parse([meta(), call('incomplete'), output('incomplete')]), [],
     'an unfinished function call cannot invent authoritative MCP server and tool identity');
   assert.equal(parse([end('both', { ...ok(false), Err: 'transport failure' })])[0].status, 'failed');
+});
+
+// Only the measured 0.145.0 decline, `{Err: "user rejected MCP tool call"}` and
+// nothing else, is withheld; every other Err is a failure of the call itself.
+test('Codex MCP Err is a failure unless it is exactly the measured decline', () => {
+  const status = (result) => parse([meta(), end('call', result)])[0].status;
+  assert.equal(status({ Err: 'user rejected MCP tool call' }), 'unknown', 'the decline: the tool never ran');
+  for (const [label, result] of [
+    ['another error', { Err: 'transport failure' }],
+    ['the message capitalised', { Err: 'User rejected MCP tool call' }],
+    ['the message with trailing text', { Err: 'user rejected MCP tool call.' }],
+    ['the decline beside an Ok', { Err: 'user rejected MCP tool call', ...ok(false) }],
+    ['the decline beside another key', { Err: 'user rejected MCP tool call', detail: 'x' }],
+    ['the decline as an object', { Err: { message: 'user rejected MCP tool call' } }],
+  ]) assert.equal(status(result), 'failed', `${label}: not the measured decline`);
 });
 
 test('Codex MCP parser refuses nested spoofed end events and malformed authority fields', () => {

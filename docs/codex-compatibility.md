@@ -1101,6 +1101,88 @@ auto-review denial, an approval aborted rather than declined, and a nested
 `tools.shell_command`), whose messages this parser does not know and so still reads, in a
 cell, as the script's failure.
 
+## Codex 0.161.0 follow-up, October 13, 2026: a declined MCP call is no evidence either
+
+Added after the section above, and it closes that section's "Not changed" paragraph. It
+also amends the MCP section's mapping ("a declined call ... is failed") and the MCP
+harness's recorded verdicts; nothing else is replaced. Same machine, `codex-cli` 0.161.0,
+Windows, isolated temp homes, scripted loopback responder, no credentials.
+
+**A declined MCP call reads `unknown`, as a declined shell call does.** The rule is the
+shell readers' rule: a confirmed failure is negative evidence, and a requested call that
+never ran is none. The MCP harness's two declined cases (`default-prompt-decline`,
+`neighbor-remains-prompt`, where the local server's log shows no `tools/call`) were
+re-measured. The rollout's `McpToolCall` item is exactly `status: "failed"`, `error:
+{message: "user rejected MCP tool call"}`, and no `result` key. The 0.145.0 record of a
+decline is `result: {Err: "user rejected MCP tool call"}`. That is the shape measured on
+real 0.145 rollouts on September 28 and transcribed into `test/codex-mcp-history.test.js`;
+no 0.145 binary is on this machine to measure again, and it is the same message 0.161.0
+writes. A sixth case, `exact-approved-server-error`, was added: the fixture server answers
+`tools/call` for a `crash` tool with a JSON-RPC error. Codex records that call in the
+decline's own structure (`status: "failed"`, an `error`, no `result`) and differs only in
+the words. Its message is "tool call error: tool call failed for" plus the backquoted
+`fixture/crash`, a blank line, then `Caused by:` and an indented `Mcp error: -32603:
+acolyte-mcp-crash-witness`. So a reader keyed on structure alone would have withheld a
+real failure.
+
+`codexMcpDeclinedItem` and `codexMcpDeclinedEnd` in `src/history-adapters.js` recognise
+only those exact decline shapes. The 0.161.0 item must have exactly that one-key error
+with a failed status and no result; the 0.145.0 record must be exactly that single `Err`.
+Such a decline is read `unknown`, and its identity is unchanged: the pinned
+`codex:716a610061674ce24a251479` does not move. Everything else that fails stays `failed`:
+a tool that ran and returned `isError: true`, a call the server failed, and any other
+`Err`. A decline still vetoes a success recorded for the same call. One call written
+both declined and succeeded (two shapes, or a repeated record) is contradictory and is
+withheld, as conflicting identities are, while a failure beside a decline still wins.
+Codex MCP candidates are review-only at every threshold (`autoSafe: false` in
+`src/auto-learn.js`; review eligibility counts successes only, `src/codex-mcp-review.js`),
+so this moves a decline from the failed to the unknown count shown in review and never
+decides a grant. Stored evidence from rollouts already scanned keeps its old verdict
+until `CODEX_EVIDENCE_REVISION` (`src/auto-learn-manager.js`) is next raised. None of the
+2026-10-13 parser changes raised it.
+
+`assertMcpRolloutOutcome` in the MCP harness asserts rollout facts, not the parser's
+verdict, so none of its existing expectations changed. It gained an optional
+`errorMessage`, the exact recorded error, which the harness passes for both declines and
+the server error. The VS Code MCP acceptance suite passes none, so it asserts exactly what
+it did. Its learned counts (three successes, one `isError` failure) come from calls that
+ran and are scanned before any decline, so they do not change either. The harness's own
+parser expectation had encoded "declined = failed" and now names each case's verdict.
+`test/fixtures/codex-mcp-item-completed-sanitized.jsonl` gained the sixth session, and its
+first five are a byte-identical prefix of the fixture before this change. The tests:
+
+- `test/codex-mcp-item-completed.test.js` pins the six real verdicts and both exact
+  messages.
+- Its decline test shows the server-error record with the decline's words swapped in
+  reads `unknown`: the words alone decide. It also pins the variants that stay `failed`:
+  capitalised, trailing text, another key, a bare string, a null or real `result`, and
+  another status or none.
+- The two-shape test pins the veto either way round, and failure-wins beside a decline.
+- `test/codex-mcp-history.test.js` pins the 0.145.0 decline and its exactness.
+- `test/codex-mcp-learning.test.js` pins the review counts: success 1, failed 1, unknown 2
+  (was 1, 2, 1), still `observe` and never auto-safe.
+- `test/vscode-acceptance-mcp.test.js` pins the shared assertion's exact-error checks.
+
+Against the parser before this change, six of those files' 27 tests fail. MCP harness on
+0.161.0: 6/6 cases pass, with verdicts unknown, success, failed, unknown, success, failed
+(`acolyte-codex-mcp-runtime-Yrc9iw`, `-CFSRmA`; the two runs wrote byte-identical
+fixtures). Against the parser before this change,
+exactly the two declines fail, each read `failed` (`acolyte-codex-mcp-runtime-xU6iEs`).
+Mutation: thirteen parser mutants were each killed:
+
+- a decline read `failed` again;
+- either shape's decline unrecognised;
+- the 0.161.0 decline keyed on structure rather than its words;
+- extra error keys, a result key, or any status allowed;
+- extra keys beside `Err`, or `Err` matched by `/rejected/i`;
+- the veto removed, or never recorded;
+- a decline erasing a recorded failure;
+- a decline given its own identity.
+
+Not measured: an approval answered `cancel` rather than `decline`, a Guardian or
+auto-review denial of an MCP call, and a server that dies mid-call. Their messages are not
+the measured decline, so they still read `failed`.
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,
@@ -1186,7 +1268,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1735#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1788#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

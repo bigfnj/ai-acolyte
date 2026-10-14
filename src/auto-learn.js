@@ -1119,13 +1119,13 @@ function aggregateObservations(observations, options = {}) {
       // not smuggle one back in through this list.
       //
       // FLAGGED ONCE AS A GUARD WITH NO SIGNAL, and it is not one. Forcing the
-      // condition TRUE does leave the suite identical, because
-      // normalizePermissionSpelling(null) returns '' (:703) and nothing can put ''
-      // into the spelling set (:882 refuses an empty permission), so the filter
-      // below drops everything either way. That is an EQUIVALENT MUTANT — a
-      // property of that particular edit, not of this line. The edit a reader
-      // would actually make here, returning the unfiltered spellings on the false
-      // branch, is caught: it fails test/auto-learn-spellings.test.js:84 with
+      // condition TRUE does leave the suite identical, because normalizePermissionSpelling(null)
+      // returns '' (src/auto-learn.js:888#normalizePermissionSpelling) and nothing can put ''
+      // into the spelling set (src/auto-learn.js:1093#invocation.claudePermission refuses an
+      // empty permission), so the filter below drops everything either way. That is an
+      // EQUIVALENT MUTANT — a property of that particular edit, not of this line. The edit a
+      // reader would actually make here, returning the unfiltered spellings on the false
+      // branch, is caught: it fails test/auto-learn-spellings.test.js:84#withdrawn with
       // `['Bash(git status *)']` where `[]` is required. Measured 2026-09-25.
       permissions: candidate.claudePermission
         ? [...candidate.permissions].filter((item) =>

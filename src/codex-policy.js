@@ -414,8 +414,8 @@ function codexRuleFileSet(options = {}) {
     }
   }
   // ONE IDENTITY PER FILE, and on Windows that identity ignores case. The target
-  // is a hard-coded lowercase name (`let codexRulesPath` at extension.js:1161;
-  // `const codexRulesPath` at bin/wildcard-perms:329-330) while readdirSync
+  // is a hard-coded lowercase name (`let` at vscode-extension/extension.js:1161#codexRulesPath;
+  // `const` at bin/wildcard-perms:329-330#codexRulesPath) while readdirSync
   // returns whatever spelling is on disk, and the three comparisons below used
   // raw strings. Measured 2026-10-13 with an on-disk
   // `Permission-Wildcarding.rules` and the lowercase target plus a substitute:
@@ -424,8 +424,8 @@ function codexRuleFileSet(options = {}) {
   // candidate, the exact state the note above this function rules out. A target
   // whose DIRECTORY was cased differently (`.CODEX`) did the same, and the
   // rule-store inventory, which walks `files`, listed the file and each of its
-  // rules twice. Keyed the way src/codex-reviewed-plans.js:13 and
-  // src/codex-rule-store.js:17 already key paths: resolved, lowercased on win32
+  // rules twice. Keyed the way src/codex-reviewed-plans.js:13#win32 and
+  // src/codex-rule-store.js:17#win32 already key paths: resolved, lowercased on win32
   // only, so a case-sensitive POSIX filesystem keeps two spellings as the two
   // files they are. The first spelling seen, the on-disk one, is what is
   // reported. `platform` is injectable so that POSIX rule is testable here.

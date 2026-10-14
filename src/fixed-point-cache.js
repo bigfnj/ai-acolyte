@@ -22,7 +22,7 @@
 // Two rules govern everything below.
 //
 // 1. Three requires, forever: fs, path, os. That is the lazy-require discipline
-//    documented at bin/wildcard-perms:11-26, and `crypto` is the module this must
+//    documented at bin/wildcard-perms:7-30#NOTE, and `crypto` is the module this must
 //    never reach. Measured cold in a fresh process, loading it plus the first
 //    createHash plus a digest costs 4.15 ms (min 3.758 over 21 runs), because the
 //    lazy OpenSSL init happens after the module snapshot and is therefore paid once
@@ -61,10 +61,10 @@ const CACHE_VERSION = 1;
 // blob); the read-side === is what decides whether a real key is the right one.
 const KEY_SHAPE = /^\d+:[0-9a-f]{8}:\d+:[0-9a-f]{8}$/;
 
-// Resolved at call time, never captured at require time — the discipline
-// src/agent-gates.js:64-66 and src/agent-guidance.js:37 document, because the tests
-// substitute the home directory and a module-level constant would freeze whatever
-// os.homedir() said at require time and then write to the real ~/.claude.
+// Resolved at call time, never captured at require time — the discipline that
+// src/agent-gates.js:64-66#singleton and src/agent-guidance.js:37#guidancePath document,
+// because the tests substitute the home directory and a module-level constant would
+// freeze whatever os.homedir() said at require time and then write to the real ~/.claude.
 //
 // Alongside the policy lock, the Auto Learn state and the recall models. The
 // durable `.claude/wildcarding` directory is joined independently here on
@@ -81,10 +81,10 @@ function cachePath({ home = os.homedir(), cacheFile } = {}) {
 // There is no third input on that path — no data file, no policy read, no env.
 //
 // Their mtimeMs:size IS the cache's version. A hand-bumped constant is the trap this
-// project already fell into at src/auto-learn-manager.js:29-31, where `VERSION = 1`
-// is write-only with no migration hook. A stat also self-invalidates on an in-place
-// `git checkout`, which is exactly what someone bisecting the generalizer does and
-// exactly what a constant cannot see. Measured ~0.03 ms per statSync.
+// project already fell into: Auto Learn's state `VERSION` was write-only, with no migration
+// hook until 2026-09-14 (src/auto-learn-manager.js:57#VERSION). A stat also self-invalidates
+// on an in-place `git checkout`, which is exactly what someone bisecting the generalizer
+// does and exactly what a constant cannot see. Measured ~0.03 ms per statSync.
 // WARNING for anyone extending this beyond the CLI.
 //
 // The stamp is a `statSync` of code ON DISK, and it is only sound for a
@@ -186,15 +186,15 @@ function readFixedPoint(options = {}) {
 }
 
 // Did the key land? Best-effort like readBypassState/writeBypassState in
-// src/permissions.js:512-523, and for the same reason: total loss of this file costs
-// exactly one cache miss.
+// src/permissions.js:799-810#readBypassState, and for the same reason: total loss of
+// this file costs exactly one cache miss.
 //
 // Plain writeFileSync, NOT writeFileAtomicSync. That helper's rename retry loop
-// (src/permissions.js:43-54) is sleepSync(20 * (attempt + 1)) over 10 attempts, where
-// sleepSync is Atomics.wait — an unyieldable thread block totalling ~1100 ms worst
-// case, on EPERM/EACCES/EBUSY/ETXTBSY, which is exactly what a brand-new temp file in
-// ~/.claude attracts from Defender. Importing a second of stall onto the hook path to
-// protect a file worth one cache miss would be a bad trade; a torn write here is
+// (src/permissions.js:52-67#MAX_ATTEMPTS) is sleepSync(20 * (attempt + 1)) between 10
+// attempts, where sleepSync is Atomics.wait — an unyieldable thread block totalling
+// ~900 ms worst case, on EPERM/EACCES/EBUSY/ETXTBSY, which is exactly what a brand-new
+// temp file in ~/.claude attracts from Defender. Importing a second of stall onto the
+// hook path to protect a file worth one cache miss would be a bad trade; a torn write here is
 // already handled, because a prefix of a key is not === the key.
 function writeFixedPoint(key, options = {}) {
   // Refuses null, which is what fixedPointKey returns when the code stat failed: no

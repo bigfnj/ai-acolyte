@@ -392,7 +392,7 @@ function settingsWriter() {
 // at its worst by replacing the file with only blanket grants and a hook. The
 // remaining bypass writer and the one-way legacy cleanup both refuse instead.
 //
-// This is the "exists but could not be parsed" refusal src/settings-write.js:150-162
+// This is the "exists but could not be parsed" refusal src/settings-write.js:157-169#falling
 // documents, reached from verbs that do not go through writeAllow.
 function readSettingsForWrite(label) {
   const { readSettingsState, SETTINGS_UNREADABLE } = require('../src/settings-write');
@@ -494,7 +494,7 @@ function run(input) {
 // The two jobs used to lock separately — the wildcarding write took no lock at
 // all and the drain took its own — leaving a window between them for Auto Learn
 // to land its settings write and its claims write. That is verbatim the
-// "interleaved write" src/policy-lock.js:3-7 exists to prevent, so they now share
+// "interleaved write" src/policy-lock.js:3-7#advisory exists to prevent, so they now share
 // one acquisition. A busy lock stays silent: the next tool call fires the hook
 // again and the pass is idempotent, so losing a turn costs at most one extra
 // prompt and never a permission.
@@ -576,7 +576,7 @@ function wildcardUnderLock() {
     // here are what this pass intended against a read taken earlier. They agree
     // in the common case and diverge exactly when a concurrent Claude Code write
     // lands in between — the case a diagnostic exists to describe. The anti-
-    // pattern is spelled out at src/settings-write.js:212-214, where it produced
+    // pattern is spelled out at src/settings-write.js:219-221#measured, where it produced
     // "+299 restored" over a file that already had them.
     const written = writer.writeAllow(fresh, after);
     process.stderr.write(

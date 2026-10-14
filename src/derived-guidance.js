@@ -37,9 +37,9 @@ const RULE_LIMIT = 200;
 // user's own instruction file. The remote-settings cache it arrives in is local and
 // client-refreshed, so any local process that can write it picks that string. Both
 // suppliers of costliestRules now apply clean: the managed-hits side runs
-// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2547`, and the
-// inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1729`. But that only
-// collapses control characters; it knows nothing about a code span. Sanitising HERE,
+// `clean(observation.managedRule, 200)` at `auto-learn-manager.js:2575#observation.managedRule`,
+// and the inert-family side gets `clean(rule, 200)` at `auto-learn-manager.js:1757#clean`. But
+// that only collapses control characters; it knows nothing about a code span. Sanitising HERE,
 // at the interpolation, is what escapes the backtick and the comment opener.
 //
 // Same transform the hit table already applies — control characters and whitespace runs

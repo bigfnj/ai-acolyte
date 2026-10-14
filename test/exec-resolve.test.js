@@ -401,6 +401,71 @@ test('a deadline from endTreeAfter ends the program under a launcher, which kill
   assert.match(String(error?.message), /^Command failed:/, 'the callback reads the kill as execFile reports any failed command');
 });
 
+// A SPAWN THAT FAILS LEAVES NO DEADLINE ARMED (2026-10-14, S3 of the final pre-tag audit).
+// endTreeAfter cleared its timer on 'exit' alone, and a program that cannot be started
+// emits 'error' and then 'close', never 'exit', so the unref'd timer held the ChildProcess
+// for the full deadline. Which handles are cleared is recorded by wrapping clearTimeout;
+// setTimeout is wrapped only for the endTreeAfter call, to learn the handle it armed.
+test('a spawn that fails clears its endTreeAfter deadline, and a running child keeps its own until it exits', async (t) => {
+  const { endTreeAfter } = require('../src/exec-resolve');
+  const { execFile, spawn } = require('node:child_process');
+  const { EventEmitter } = require('node:events');
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const cleared = new Set();
+  global.clearTimeout = (handle) => { cleared.add(handle); return realClearTimeout(handle); };
+  t.after(() => { global.clearTimeout = realClearTimeout; });
+  const arm = (child) => {
+    let handle = null;
+    global.setTimeout = (fn, ms, ...rest) => (handle = realSetTimeout(fn, ms, ...rest));
+    try { endTreeAfter(child, 30000); } finally { global.setTimeout = realSetTimeout; }
+    assert.ok(handle, 'precondition: a deadline was armed');
+    return handle;
+  };
+
+  const missing = path.join(scratch('deadline-missing'), windows ? 'no-such-program.exe' : 'no-such-program');
+  const failed = execFile(missing, ['x'], () => {});
+  const seen = [];
+  for (const event of ['exit', 'error', 'close']) failed.on(event, () => seen.push(event));
+  const deadline = arm(failed);
+  await new Promise((resolve) => failed.once('close', resolve));
+  assert.deepEqual(seen, ['error', 'close'], 'precondition: a spawn that fails emits error and close, and never exit');
+  // MUTATION: listen for 'exit' alone again, as before. The deadline is never cleared, and
+  // stays armed for its 30 s. Confirmed 2026-10-14.
+  assert.ok(cleared.has(deadline), 'the deadline of a spawn that failed is still armed');
+
+  // An 'error' alone clears it only for a child that never started: a test double with no pid.
+  const never = new EventEmitter();
+  never.on('error', () => {}); // execFile's own listener, so an emit never throws here
+  const doubleDeadline = arm(never);
+  never.emit('error', new Error('spawn x ENOENT'));
+  // MUTATION: drop the 'error' listener. This fails. Confirmed 2026-10-14.
+  assert.ok(cleared.has(doubleDeadline), 'an error from a child that never started left its deadline armed');
+  // 'close' is the one clear left for a child armed after its 'exit' had already fired.
+  const late = Object.assign(new EventEmitter(), { pid: 4242, exitCode: 0 });
+  const lateDeadline = arm(late);
+  late.emit('close', 0, null);
+  // MUTATION: drop the 'close' listener. This fails (the failed spawn above is still cleared,
+  // by its 'error'). Confirmed 2026-10-14.
+  assert.ok(cleared.has(lateDeadline), 'the close of a child armed after its exit left its deadline armed');
+
+  // The control: a running child keeps its deadline through an 'error' (Node also emits one
+  // when a kill fails), and its exit clears it.
+  const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  t.after(() => { try { live.kill('SIGKILL'); } catch {} });
+  live.on('error', () => {});
+  await new Promise((resolve) => live.once('spawn', resolve));
+  const running = arm(live);
+  live.emit('error', new Error('kill EPERM'));
+  // MUTATION: clear on any 'error'. A running child loses its deadline and this fails.
+  // Confirmed 2026-10-14.
+  assert.equal(cleared.has(running), false, 'an error on a running child dropped its deadline');
+  const exited = new Promise((resolve) => live.once('exit', resolve));
+  live.kill();
+  await exited;
+  assert.ok(cleared.has(running), 'the exit of a running child did not clear its deadline');
+});
+
 // npm's own cmd-shim, as bundled with the node running this suite. Generating the
 // shim with it, rather than copying its template here, is what makes the test
 // mean "the shim npm writes", and not "the shim this file thinks npm writes".
@@ -557,4 +622,94 @@ test('a batch shim runs System32\'s cmd.exe when ComSpec is missing or not a ful
   const named = path.join(dir, 'named', 'cmd.exe');
   process.env.ComSpec = named;
   assert.equal(withPath(dir, () => commandLaunch('wccomspec', [])).file, named, 'a full ComSpec is still the one used');
+});
+
+// WHAT cmd.exe EXPANDS INSIDE QUOTES NEVER REACHES IT (2026-10-14, the final pre-tag
+// audit's S1, the BatBadBut class). `%CMDCMDLINE:~-1%` is the last character of cmd.exe's
+// own command line, the `"` that closes the `/s /c "..."` line, so expanding it ends the
+// argument's quoting and what follows `&` runs. The audit's token, through the arguments
+// "Why did this prompt?" builds (codexExecpolicyArgs), and a two-line `.cmd` stand-in,
+// which is not npm's shape, so only the command processor can run it. Each run's cwd is
+// its own folder, so the injected `>F` lands where this test looks.
+const INJECTION = 'x%CMDCMDLINE:~-1%&echo injected>F&rem ';
+function batchStandIn(dir) {
+  const script = path.join(dir, 'fake-codex.js');
+  fs.writeFileSync(script, 'process.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
+  const shim = path.join(dir, 'codex.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  return shim;
+}
+
+test('a batch launch refuses an argument cmd.exe would expand, so the audit\'s %CMDCMDLINE:~-1% injection never runs', { skip: !windows }, () => {
+  const { resolvedLaunch, BATCH_ARGUMENT_REFUSED_CODE } = require('../src/exec-resolve');
+  const { codexExecpolicyArgs } = require('../vscode-extension/autoLearnUi');
+  const dir = scratch('batbadbut');
+  const shim = batchStandIn(dir);
+  const F = path.join(dir, 'F');
+  const args = codexExecpolicyArgs([path.join(dir, 'user.rules')], ['fd', `--${INJECTION}`]);
+
+  // PRECONDITION: the hazard is real. The command line commandLaunch built before this fix,
+  // spawned by hand, runs the injected command.
+  const line = [shim, ...args].map(quoteForCommandProcessor).join(' ');
+  const system = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  spawnSync(system, ['/d', '/s', '/c', `"${line}"`], { cwd: dir, windowsHide: true, windowsVerbatimArguments: true });
+  assert.equal(fs.existsSync(F), true, 'precondition: the quoted command line runs what follows the expanded quote');
+  fs.rmSync(F);
+
+  // MUTATION: drop the batchArgumentRefusal check from commandLaunch. The launch is
+  // returned, the spawn below runs it, F is created and both assertions fail. Confirmed 2026-10-14.
+  let launch = null;
+  let refused = null;
+  try { launch = resolvedLaunch(shim, args); } catch (error) { refused = error; }
+  if (launch) spawnSync(launch.file, launch.args, { cwd: dir, windowsHide: true, ...launch.options });
+  assert.equal(fs.existsSync(F), false, 'the injected command ran');
+  assert.equal(refused?.code, BATCH_ARGUMENT_REFUSED_CODE, `not refused: ${refused && refused.message}`);
+  assert.equal(refused.message, `Refused to run codex.cmd: argument ${args.length} contains "%". ` +
+    'codex.cmd is a batch file, so it runs through cmd.exe, which expands % and ! even inside quotes ' +
+    'and ends a command at a line break, so the argument could not arrive as written. Nothing was run.');
+});
+
+test('a batch launch still passes ordinary arguments verbatim, and refuses ! and line breaks as well', { skip: !windows }, () => {
+  const { BATCH_ARGUMENT_REFUSED_CODE } = require('../src/exec-resolve');
+  const dir = scratch('batch-controls');
+  const shim = batchStandIn(dir);
+  // The control: the fixed probe arguments, and the metacharacters quoting does cover.
+  for (const args of [['--version'], ['app-server', '--stdio'], ['a&b|c', 'two words', 'say "hi"', '^(x)<y>']]) {
+    const launch = commandLaunch(shim, args);
+    assert.equal(launch.options.windowsVerbatimArguments, true, 'precondition: this is the cmd.exe route');
+    const run = spawnSync(launch.file, launch.args, { cwd: dir, encoding: 'utf8', windowsHide: true, ...launch.options });
+    assert.deepEqual(JSON.parse(run.stdout), args, `${JSON.stringify(args)} did not arrive as written`);
+  }
+  // MUTATION: drop `!` from BATCH_UNSAFE_ARGUMENT. The first launch is returned. Confirmed 2026-10-14.
+  for (const [value, named] of [['echo!x!', '"!"'], ['a\rb', 'a carriage return'], ['a\nb', 'a line feed'], ['a\0b', 'a NUL character']]) {
+    assert.throws(() => commandLaunch(shim, ['--', value]),
+      (error) => error.code === BATCH_ARGUMENT_REFUSED_CODE && error.message.includes(`argument 2 contains ${named}.`),
+      JSON.stringify(value));
+  }
+  // A native executable takes them all: only the cmd.exe route refuses.
+  assert.deepEqual(commandLaunch(process.execPath, ['-e', '%x%!y!']).args, ['-e', '%x%!y!']);
+});
+
+// The other half of the fix: a caller with text to pass tries npmShimLaunch first, and the
+// shim npm writes (generated here by npm's own cmd-shim) then runs with no cmd.exe at all,
+// so the same token reaches the script exactly as written.
+test('through the shim npm writes, the audit\'s %CMDCMDLINE:~-1% argument reaches the script verbatim and runs nothing', { skip: !windows }, async (t) => {
+  const { npmShimLaunch } = require('../src/exec-resolve');
+  const { codexExecpolicyArgs } = require('../vscode-extension/autoLearnUi');
+  const cmdShim = bundledCmdShim();
+  if (!cmdShim) { t.skip('npm\'s bundled cmd-shim is not next to this node'); return; }
+  const dir = scratch('npmshim-verbatim');
+  const bin = path.join(dir, 'node_modules', '@openai', 'codex', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  // The shebang is what makes cmd-shim write its node form, as npm's own codex.js has one.
+  fs.writeFileSync(path.join(bin, 'codex.js'), '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
+  await cmdShim(path.join(bin, 'codex.js'), path.join(dir, 'codex'));
+  const shim = path.join(dir, 'codex.cmd');
+  const args = codexExecpolicyArgs([path.join(dir, 'user.rules')], ['fd', `--${INJECTION}`]);
+  // The callers' own expression. MUTATION: make npmShimLaunch return null outright. The
+  // .cmd route refuses the token and this throws. Confirmed 2026-10-14.
+  const launch = npmShimLaunch(shim, args) || commandLaunch(shim, args);
+  const run = spawnSync(launch.file, launch.args, { cwd: dir, encoding: 'utf8', windowsHide: true, ...launch.options });
+  assert.equal(fs.existsSync(path.join(dir, 'F')), false, 'the injected command ran');
+  assert.deepEqual(JSON.parse(run.stdout), args, 'the argument did not reach the script as written');
 });

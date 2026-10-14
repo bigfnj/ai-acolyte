@@ -91,19 +91,54 @@ function resolveExecutable(name) {
 }
 
 // Inside double quotes the command processor stops treating & | < > ^ ( ) as
-// syntax, so quoting every token is enough to keep an argument whole. Doubling
-// an embedded quote is the escape cmd.exe understands. %NAME% expansion stays
-// live inside quotes and has no escape on a command line, so a token spelled
-// like an environment variable would still expand; learned prefixes are
-// tokenized command words, which is why that is a legibility edge and not a
-// hole here.
+// syntax, so quoting every token keeps those inside one argument. Doubling an
+// embedded quote is the escape cmd.exe understands. Quoting is NOT enough on its
+// own, and commandLaunch below refuses what it cannot cover: see
+// BATCH_UNSAFE_ARGUMENT.
 function quoteForCommandProcessor(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
 
+// WHAT cmd.exe EXPANDS INSIDE QUOTES IS REFUSED, NOT ESCAPED (2026-10-14, the BatBadBut
+// class). This comment used to call `%NAME%` expansion "a legibility edge and not a hole",
+// on the premise that every argument was a learned command word. It is a hole: "Why did
+// this prompt?" passes text the user pasted, and a PowerShell variant passes the whole
+// paste as one `-Command` token. `%` expansion runs before quotes are parsed and has no
+// escape on a command line, so `%CMDCMDLINE:~-1%`, the last character of cmd.exe's own
+// command line, expands to the `"` that closes it, and what follows a `&` then runs as a
+// command (reproduced by the final pre-tag audit through an npm-shaped `codex.cmd`).
+// `!` is the same with delayed expansion, which `/d` does not turn off: `/d` skips only
+// the AutoRun commands, and the registry can turn delayed expansion on. A CR or LF ends
+// the command line early, and NUL cannot cross CreateProcess at all.
+//
+// Escaping these is possible and intricate (Rust's std took that route for the same
+// advisory). Every launch here is a probe or a diagnostic, so commandLaunch refuses the
+// argument instead, before anything is spawned. Only ARGUMENTS are checked. The program
+// path is the file PATH, a machine-scoped setting or the user's own install named, never
+// text from a project or a paste, and refusing it would refuse a profile directory with
+// a `!` in its name.
+const BATCH_UNSAFE_ARGUMENT = /[%!\r\n\0]/;
+const BATCH_ARGUMENT_REFUSED_CODE = 'ERR_BATCH_ARGUMENT_REFUSED';
+function batchArgumentRefusal(resolved, list) {
+  const index = list.findIndex((value) => BATCH_UNSAFE_ARGUMENT.test(value));
+  if (index < 0) return null;
+  const found = list[index].match(BATCH_UNSAFE_ARGUMENT)[0];
+  const named = { '\r': 'a carriage return', '\n': 'a line feed', '\0': 'a NUL character' }[found] || `"${found}"`;
+  return Object.assign(new Error(
+    `Refused to run ${path.basename(resolved)}: argument ${index + 1} contains ${named}. ` +
+    `${path.basename(resolved)} is a batch file, so it runs through cmd.exe, which expands % and ! ` +
+    'even inside quotes and ends a command at a line break, so the argument could not arrive as ' +
+    'written. Nothing was run.',
+  ), { code: BATCH_ARGUMENT_REFUSED_CODE, path: resolved, argumentIndex: index });
+}
+
 // Describes how to launch `name` with `args`: the file to spawn, the arguments
 // to pass, and any spawn options the form requires. Callers spread `options`
-// into their own so execFile and spawnSync can share one decision.
+// into their own so execFile and spawnSync can share one decision. THROWS,
+// before any spawn, when the launch would go through cmd.exe and an argument
+// carries a character it expands (BATCH_UNSAFE_ARGUMENT, above), with code
+// BATCH_ARGUMENT_REFUSED_CODE. A caller with text of its own to pass tries
+// npmShimLaunch first, which runs an npm shim with no cmd.exe at all.
 function commandLaunch(name, args = []) {
   const list = (Array.isArray(args) ? args : []).map(String);
   const resolved = resolveExecutable(name);
@@ -116,6 +151,8 @@ function commandLaunch(name, args = []) {
   if (process.platform !== 'win32' || !BATCH_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
     return { file: resolved, args: list, options: {}, resolved };
   }
+  const refused = batchArgumentRefusal(resolved, list);
+  if (refused) throw refused;
   const line = [resolved, ...list].map(quoteForCommandProcessor).join(' ');
   // ComSpec when it names a file outright, else System32's: a bare `cmd.exe` is the same
   // current-directory lookup as any other bare name (resolvedLaunch, below).
@@ -300,9 +337,20 @@ function endProcessTree(child) {
 // afterwards, because endProcessTree finds a tree by its root and the root is gone.
 // This is the version probe's pattern (src/codex-version.js, "ITS OWN TIMER"): a
 // timer that tree-kills the root while it is still alive. Returns the child, so a
-// call site reads `endTreeAfter(trackChild(execFile(...)), ms)`. Cleared on 'exit';
-// endProcessTree's own guard refuses an exited child as well. Unref'd, because the
-// child is what keeps a process alive while it runs, exactly as before.
+// call site reads `endTreeAfter(trackChild(execFile(...)), ms)`. Cleared on 'exit',
+// 'close' and a spawn's 'error'; endProcessTree's own guard refuses an exited child as
+// well. Unref'd, because the child is what keeps a process alive while it runs,
+// exactly as before.
+//
+// NOT ON 'exit' ALONE (2026-10-14, S3 of the final pre-tag audit). A program that
+// cannot be started emits 'error' and then 'close', and never 'exit' (measured with
+// Node 24.19.0: a missing absolute path, a missing bare name and spawn() alike). The
+// timer was then held, with the ChildProcess it closes over, for the full deadline
+// (30-180 s at the extension's sites). 'close' always follows that 'error', so it is
+// the clear that matters. 'error' alone clears only a child that never started or has
+// ended: Node also emits 'error' when a kill fails, and a child still running then
+// must keep its deadline. Every caller hands an execFile child, which listens for
+// 'error' itself, so the listener here gives no error a handling it lacked.
 //
 // The callback sees the kill as the child's exit: on Windows taskkill /F leaves exit
 // code 1, on POSIX the SIGTERM. Either way execFile's error reads "Command failed:
@@ -320,7 +368,14 @@ function endTreeAfter(child, ms) {
   const timer = setTimeout(() => { endProcessTree(child); }, deadline);
   if (typeof timer.unref === 'function') timer.unref();
   const listen = typeof child.once === 'function' ? 'once' : typeof child.on === 'function' ? 'on' : null;
-  if (listen) child[listen]('exit', () => clearTimeout(timer));
+  if (listen) {
+    const clear = () => clearTimeout(timer);
+    child[listen]('exit', clear);
+    child[listen]('close', clear);
+    child[listen]('error', () => {
+      if (!Number.isInteger(child.pid) || child.exitCode != null || child.signalCode != null) clear();
+    });
+  }
   return child;
 }
 
@@ -331,5 +386,5 @@ function endTreeAfter(child, ms) {
 // less than the tests that already exist.
 module.exports = {
   resolveExecutable, commandLaunch, resolvedLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
-  END_TREE, npmShimLaunch,
+  END_TREE, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE,
 };

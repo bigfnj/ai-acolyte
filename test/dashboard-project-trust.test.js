@@ -20,7 +20,7 @@
 // and the version probe a push started pushes once when it lands.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:311#sharing).
+// (test/extension-activation.test.js:313#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -682,4 +682,85 @@ test('"Why did this prompt?" refuses a codex name PATH does not hold, and never 
   const failed = app.shown.filter((entry) => entry.level === 'error').map((entry) => entry.message);
   assert.deepEqual(failed, [`Codex execpolicy check failed without changing rules: spawn ${name} ENOENT`],
     'the failure reads as spawn\'s own ENOENT, as it did before');
+});
+
+// "WHY DID THIS PROMPT?" NEVER HANDS PASTED TEXT TO cmd.exe (2026-10-14, S1 of the final
+// pre-tag audit, the BatBadBut class). The audit's input, end to end: Codex, Bash, and a
+// quoted token carrying %CMDCMDLINE:~-1%, which cmd.exe expands to the quote that closes
+// its own command line, so the `&echo injected>F` after it ran while the user saw an
+// ordinary analysis. F is relative, so it lands in the host's cwd, which is a folder of
+// the test's own for the call.
+const INJECTED_TOKEN = '--x%CMDCMDLINE:~-1%&echo injected>F&rem ';
+async function explainInHostCwd(app, layers, cwd) {
+  fs.mkdirSync(cwd, { recursive: true });
+  const saved = process.cwd();
+  process.chdir(cwd);
+  try {
+    const explained = app.commands.get('permission-wildcarding.autoLearnWhy')();
+    await until(() => layers.calls.length === 1, 3000, 'the trust refresh to be asked');
+    layers.pending[0].answer();
+    await explained;
+  } finally {
+    process.chdir(saved);
+  }
+}
+
+test('"Why did this prompt?" refuses a pasted %CMDCMDLINE:~-1% token for a batch-file codex, and the injected command never runs', { skip: process.platform !== 'win32' }, async (t) => {
+  const box = fixture(t);
+  const marks = path.join(box.base, 'ran.log');
+  // fakeCodex's two-line .cmd is not npm's shape, so only cmd.exe can run it.
+  const codex = fakeCodex(path.join(box.base, 'bin'), 'answer', null, marks);
+  const layers = deferredLayers();
+  const app = harness(box, { layers, codexExecutable: codex, picks: ['codex', 'Bash'], input: `fd '${INJECTED_TOKEN}'` });
+  const cwd = path.join(box.base, 'host-cwd');
+  try {
+    await explainInHostCwd(app, layers, cwd);
+  } finally {
+    await app.dispose();
+  }
+  // MUTATION: drop the batchArgumentRefusal check from commandLaunch (src/exec-resolve.js).
+  // The check runs through cmd.exe, F is created, and the stand-in answers. Confirmed 2026-10-14.
+  assert.equal(fs.existsSync(path.join(cwd, 'F')), false, 'the injected command ran');
+  assert.equal(fs.existsSync(marks) && /execpolicy/.test(fs.readFileSync(marks, 'utf8')), false, 'the check was run at all');
+  assert.equal(app.shown.filter((entry) => entry.message === 'Codex execpolicy analysis').length, 0);
+  const failed = app.shown.filter((entry) => entry.level === 'error').map((entry) => entry.message);
+  assert.equal(failed.length, 1, JSON.stringify(failed));
+  assert.match(failed[0], /^Codex execpolicy check failed without changing rules: Refused to run codex\.cmd: argument \d+ contains "%"\. .* Nothing was run\. A codex\.exe, or the codex\.cmd npm installs, receives any argument: point permissionWildcarding\.autoLearn\.codexExecutable at one\.$/);
+});
+
+test('"Why did this prompt?" runs the codex.cmd npm writes as its node script, so the same token arrives verbatim and runs nothing', { skip: process.platform !== 'win32' }, async (t) => {
+  let cmdShim;
+  try { cmdShim = require(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'node_modules', 'cmd-shim')); }
+  catch { t.skip('npm\'s bundled cmd-shim is not next to this node'); return; }
+  const box = fixture(t);
+  const marks = path.join(box.base, 'ran.jsonl');
+  const npm = path.join(box.base, 'npm');
+  const bin = path.join(npm, 'node_modules', '@openai', 'codex', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  // The shebang is what makes cmd-shim write its node form, as npm's own codex.js has one.
+  fs.writeFileSync(path.join(bin, 'codex.js'), [
+    '#!/usr/bin/env node',
+    `require('fs').appendFileSync(${JSON.stringify(marks)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+    'process.stdout.write(JSON.stringify({ decision: \'allow\', matchedRules: [] }) + \'\\n\');',
+    '',
+  ].join('\n'));
+  await cmdShim(path.join(bin, 'codex.js'), path.join(npm, 'codex'));
+  const layers = deferredLayers();
+  const app = harness(box, { layers, codexExecutable: path.join(npm, 'codex.cmd'), picks: ['codex', 'Bash'],
+    input: `fd '${INJECTED_TOKEN}'` });
+  const cwd = path.join(box.base, 'host-cwd');
+  try {
+    await explainInHostCwd(app, layers, cwd);
+  } finally {
+    await app.dispose();
+  }
+  assert.equal(fs.existsSync(path.join(cwd, 'F')), false, 'the injected command ran');
+  // MUTATION: launch execFileCaptured's check from resolvedLaunch alone again. The .cmd route
+  // refuses the token, so no analysis is shown and nothing is recorded. Confirmed 2026-10-14.
+  assert.ok(app.shown.some((entry) => entry.message === 'Codex execpolicy analysis'),
+    `the analysis was not shown: ${JSON.stringify(app.shown.map((entry) => entry.message))}`);
+  const runs = fs.readFileSync(marks, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(runs.length, 1, 'one variant, one check');
+  assert.equal(runs[0].at(-2), 'fd');
+  assert.match(runs[0].at(-1), /^--x%CMDCMDLINE:~-1%&echo injected>F&rem ?$/, 'the token did not arrive as written');
 });

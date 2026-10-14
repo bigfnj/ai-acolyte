@@ -164,3 +164,42 @@ test('the validator finds a codex in the npm prefix that PATH cannot see', { ski
   assert.ok(applied.changedTargets.includes('codex'));
   assert.match(fs.readFileSync(rules, 'utf8'), /prefix_rule\(/);
 });
+
+// THE VALIDATOR'S ARGUMENTS ARE TEXT, NOT FIXED WORDS (2026-10-14, S1 of the final pre-tag
+// audit). Its `--rules` paths sit under the user's home and its prefix is learned, so either
+// can carry a `%`, which cmd.exe expands even inside quotes. The batch route now refuses such
+// an argument (src/exec-resolve.js, BATCH_UNSAFE_ARGUMENT), and the validator tries
+// npmShimLaunch first, so the codex.cmd npm writes is run as its node script and takes it.
+// The witness is a home whose own name holds a `%`.
+test('the validator runs the codex.cmd npm writes without cmd.exe, so a % in the rules path still validates; any other batch file refuses it closed', { skip: !windows }, async (t) => {
+  let cmdShim;
+  try { cmdShim = require(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'node_modules', 'cmd-shim')); }
+  catch { t.skip('npm\'s bundled cmd-shim is not next to this node'); return; }
+  const { home, rules } = fixture(t, 'validator-50%');
+  assert.match(rules, /%/, 'precondition: the rules path carries a %');
+  const npmDir = path.join(home, 'npmbin');
+  const bin = path.join(npmDir, 'node_modules', '@openai', 'codex', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  // The shebang is what makes cmd-shim write its node form, as npm's own codex.js has one.
+  fs.writeFileSync(path.join(bin, 'codex.js'), '#!/usr/bin/env node\nprocess.stdout.write(\'{"decision":"allow"}\\n\');\n');
+  await cmdShim(path.join(bin, 'codex.js'), path.join(npmDir, 'wcnpmcodex'));
+
+  const manager = createAutoLearnManager({ home, threshold: 3, codexRulesPath: rules, codexExecutable: 'wcnpmcodex' });
+  manager.scan({ platform: 'win32' });
+  // MUTATION: launch the validator from commandLaunch alone again. The .cmd route refuses
+  // the rules path and the apply throws. Confirmed 2026-10-14.
+  const applied = withPath(npmDir, () => manager.apply());
+  assert.equal(applied.appliedCount, 1);
+  assert.match(fs.readFileSync(rules, 'utf8'), /prefix_rule\(/);
+
+  // The control, and the residual it records: a batch file that is not npm's shape can only
+  // run through cmd.exe, so the same path is refused, the apply fails closed, nothing is written.
+  const other = fixture(t, 'validator-50%-batch');
+  const otherBin = path.join(other.home, 'fakebin');
+  installFakeCodex(otherBin, 'wcplaincodex');
+  const refusing = createAutoLearnManager({ home: other.home, threshold: 3, codexRulesPath: other.rules, codexExecutable: 'wcplaincodex' });
+  refusing.scan({ platform: 'win32' });
+  // PATHEXT supplies the extension, so its casing is whatever the box uses.
+  assert.throws(() => withPath(otherBin, () => refusing.apply()), /Refused to run wcplaincodex\.cmd: argument \d+ contains "%"/i);
+  assert.equal(fs.existsSync(other.rules), false);
+});

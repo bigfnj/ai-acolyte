@@ -18,7 +18,7 @@ const {
 const { isCoveredBy } = require('./permissions');
 const { scanHistoryFiles, codexHistoryStoreState } = require('./history-adapters');
 const { createPolicyLock } = require('./policy-lock');
-const { commandLaunch } = require('./exec-resolve');
+const { commandLaunch, npmShimLaunch } = require('./exec-resolve');
 const { codexRuleFileSet, codexRulesArguments, enterprisePolicyAssessment, enterprisePrefixRuleHealth } = require('./codex-policy');
 const { resolveCodexHome } = require('./codex-paths');
 const { readCodexClaims, updateCodexClaims, renderCodexClaims } = require('./codex-claims');
@@ -1313,8 +1313,13 @@ function defaultCodexValidator(text, context) {
     // Fails closed on purpose: no reachable codex means no validation, and an
     // unvalidated rules file must never be written.
     const executable = context.codexExecutable || 'codex';
-    const launch = commandLaunch(executable,
-      ['execpolicy', 'check', ...rulesArgs, '--', ...command]);
+    // The learned tokens and the rule paths are text, not fixed words, so an npm codex.cmd
+    // runs as the node script it names and never meets cmd.exe; any other batch file refuses
+    // an argument cmd.exe would expand, which fails this check closed (src/exec-resolve.js,
+    // BATCH_UNSAFE_ARGUMENT). Through cmd.exe a `%NAME%` token was also checked as its
+    // expansion, so the prefix proved was not the prefix written.
+    const checkArgs = ['execpolicy', 'check', ...rulesArgs, '--', ...command];
+    const launch = npmShimLaunch(executable, checkArgs) || commandLaunch(executable, checkArgs);
     // Name the way out. This surfaces in the dashboard's Auto Learn card, where
     // an error with no remedy reads as the feature being broken; the setting has
     // existed all along and nothing said so. An explicit path is honoured
@@ -3096,7 +3101,7 @@ function createAutoLearnManager(options = {}) {
     // off THIS object, so `listCandidates` is absent exactly when `getCandidates`
     // is too, and the fallback could not run. Same for `getStatus` beside `status`.
     // Removed 2026-09-25 with the two dead legs in the extension
-    // (vscode-extension/extension.js:1358-1369#managerStatus, which this note once cited
+    // (vscode-extension/extension.js:1366-1377#managerStatus, which this note once cited
     // as :1032 — a line number that had rotted by 113 lines, which is its own argument
     // against leaving a claim like that unchecked). The rule is pinned by
     // test/auto-learn-manager.test.js: no two keys on this object may be the same

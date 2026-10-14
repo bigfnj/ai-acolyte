@@ -82,8 +82,10 @@ test('off settings remove shadowed Codex guidance and gates on activation and co
     workspace: {
       isTrusted: true, workspaceFolders: [{ uri: { fsPath: path.join(root, 'workspace') } }],
       createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
+      // `off` is the USER's setting, so inspect() reports it there too: the two instruction-file
+      // switches are machine-scoped and read from globalValue alone (S2 of the final pre-tag audit).
       getConfiguration: () => ({ get: (key, fallback) => off.has(key) ? false : fallback,
-        inspect: () => ({}), update: async () => {} }),
+        inspect: (key) => (off.has(key) ? { globalValue: false } : {}), update: async () => {} }),
       onDidChangeConfiguration(handler) { configurationHandlers.push(handler); return disposable(); },
       onDidChangeWorkspaceFolders: disposable,
     },

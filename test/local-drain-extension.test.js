@@ -82,7 +82,9 @@ function harness(tempHome, { guidance = true, localDrain = true } = {}) {
             if (key === 'localDrain.enabled') return localDrain;
             return fallback;
           },
-          inspect: () => ({}),
+          // guidance.enabled is machine-scoped and read from the user tier alone (S2 of the
+          // final pre-tag audit), so the harness's value is reported there.
+          inspect: (key) => (key === 'guidance.enabled' ? { globalValue: guidance } : {}),
           update: async () => {},
         };
       },

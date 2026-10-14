@@ -65,7 +65,7 @@ function settle(ms = 140) {
 }
 
 // Copied from test/policy-backup.test.js rather than shared. That is a standing
-// decision in this suite (test/extension-activation.test.js:311#sharing: "Kept as its
+// decision in this suite (test/extension-activation.test.js:313#sharing: "Kept as its
 // own mock rather than sharing the one above… duplicating a mock is far cheaper
 // than breaking the activation test that already works"), and this file needs two
 // things that one does not: the provider instance, and a count of how many times
@@ -776,7 +776,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3089#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3104#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2041,7 +2041,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:2875-2877#errors records — a file that failed every
+// defect src/auto-learn-manager.js:2880-2882#errors records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which

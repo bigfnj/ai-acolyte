@@ -373,6 +373,9 @@ test('a configured Codex root that is missing keeps the rebuild open, so auto-sa
   assert.equal(f.granted(), false, 'no grant, and so no revocation either');
 });
 
+// The reason a held rebuild leads its Codex reasons with (rebuildHeldOpenReason in the manager).
+const HELD_OPEN = /^The Codex evidence rebuild is held open: the configured history folder/;
+
 // The 9abc330 behaviour, through the REAL walk: a pending transcript archived
 // mid-rebuild is enumerated under its new path, and its old id is dropped. And the
 // one default root whose absence is benign: `archived_sessions/` on a box that
@@ -405,6 +408,9 @@ test('control: a clean real walk still drops a moved or deleted transcript\'s pe
     const clean = createAutoLearnManager(f.options).scan({ platform: 'win32' });
     assert.equal(clean.codexEvidence.pending, false, `${label}: a clean walk no longer holds a gone path pending`);
     assert.equal(clean.codexEvidence.remainingFiles, 0, label);
+    // The benign absence holds nothing, so it names nothing.
+    assert.ok(!(clean.codexHistoryReasons || []).some((reason) => HELD_OPEN.test(reason)),
+      `${label}: a rebuild nothing holds was reported as held: ${JSON.stringify(clean.codexHistoryReasons)}`);
   }
 });
 
@@ -435,6 +441,9 @@ test('an archive folder that is a link to a missing target still holds a pending
   assert.equal(blocked.codexEvidence.pending, true,
     'witness:missing-root-link -- an archive behind an unplugged junction was read as never having existed');
   assert.equal(blocked.errors, 0);
+  // Named as a link, so the user looks for the drive rather than for a folder.
+  assert.match(blocked.codexHistoryReasons[0] || '',
+    /folder archived_sessions\/ \(a link to a missing target\) is missing, and 1 transcript\(s\)/);
 
   fs.renameSync(unplugged, path.dirname(external));
   const back = createAutoLearnManager(f.options).scan({ platform: 'win32' });
@@ -741,4 +750,65 @@ test('a preserved grant that a newer failure had already outgrown is not re-pres
   assert.deepEqual(f.read().applied, f.before.applied, 'the migration itself revokes nothing');
   learn.scan({ platform: 'win32' });
   assert.equal(f.read().applied.claude.includes(key), false, 'the next apply holds the grant to the normal rules, as it already would have');
+});
+
+// WHY IT IS HELD OPEN (2026-10-14, F3 of the v1.6.3 confirmation audit). The tests above pin that
+// a missing root holds the rebuild; nothing told the user so. The scan now leads its Codex reasons
+// with one that names the folder -- by NAME, never its path: reasons are persisted in
+// lastScanStats, and the state file holds no history path and no `.jsonl` (as
+// test/auto-learn-integration.test.js holds it). A reason, because the held rebuild keeps every
+// family with Codex evidence off the auto-safe path and out of Review.
+test('a missing root that holds the rebuild open is named, by folder name only, until it returns', (t) => {
+  const f = twoRoots(t);
+  const offline = `${f.rootB}-offline`;
+  fs.renameSync(f.rootB, offline);
+
+  const held = f.learn().scan({ platform: 'win32' });
+  // MUTATION: drop the `rebuildHeldOpen ? [...] :` from lastScanStats.codexHistoryReasons in the
+  // manager's scan. The scan says nothing about why its rebuild is open and this fails.
+  // Confirmed 2026-10-14.
+  assert.equal(held.codexHistoryReasons.length, 1, JSON.stringify(held.codexHistoryReasons));
+  const [reason] = held.codexHistoryReasons;
+  assert.match(reason, HELD_OPEN);
+  assert.match(reason, /folder history-b\/ is missing, and 1 transcript\(s\) still owed a complete read/);
+  assert.match(reason, /not applied, automatically or from Review/);
+  assert.ok(!reason.includes(f.home) && !reason.includes(`${path.sep}history-b`), `a full path reached the reason: ${reason}`);
+  assert.equal(held.codexHistoryStale, false, 'nothing diverged: the store is not stale, the rebuild is held');
+  assert.equal(held.codexEvidence.pending, true, 'precondition: the rebuild is held');
+  const stateText = fs.readFileSync(f.learn().paths.state, 'utf8');
+  assert.deepEqual(JSON.parse(stateText).lastScanStats.codexHistoryReasons, [reason], 'persisted, for the dashboard');
+  assert.doesNotMatch(stateText, /\.jsonl/i);
+  for (const root of [f.rootA, f.rootB]) {
+    assert.ok(!stateText.includes(JSON.stringify(root).slice(1, -1)), 'the state file gained a history root path');
+  }
+
+  // A second missing root is named beside the first, once each.
+  const offlineA = `${f.rootA}-offline`;
+  fs.renameSync(f.rootA, offlineA);
+  const both = f.learn().scan({ platform: 'win32' });
+  assert.match(both.codexHistoryReasons[0], /folders history-a\/, history-b\/ are missing/);
+  fs.renameSync(offlineA, f.rootA);
+
+  // Back: the rebuild completes and the reason goes with it.
+  fs.renameSync(offline, f.rootB);
+  const back = f.learn().scan({ platform: 'win32' });
+  assert.equal(back.codexEvidence.pending, false);
+  assert.deepEqual(back.codexHistoryReasons, [], 'a cleared condition left its reason behind');
+});
+
+// The other half of "only when the root is what holds it": a pending transcript the walk DID
+// find is catching up on its own (a capped read), so a missing root beside it is not why the
+// rebuild waits, and saying so would send the user looking for a folder that changes nothing.
+test('a missing root beside a rebuild that waits only on a capped read is not named', (t) => {
+  const f = fixture(t);
+  const capped = () => ({ ...f.current, files: f.current.files.map((entry) => ({ ...entry, mode: 'partial' })),
+    missingRoots: [{ path: path.join(f.home, 'gone-history'), source: 'codex', link: false }] });
+  createAutoLearnManager({ ...f.options, historyScanner: capped }).scan();
+  const again = createAutoLearnManager({ ...f.options, historyScanner: capped }).scan();
+  assert.equal(again.codexEvidence.pending, true, 'precondition: the capped read keeps the rebuild open');
+  assert.equal(again.codexEvidence.remainingFiles, 1, 'precondition: its one pending transcript was enumerated');
+  // MUTATION: drop `owed <= 0` from rebuildHeldOpenReason's guard. The scan names gone-history/
+  // as holding a rebuild it does not hold ("0 transcript(s) still owed") and this fails.
+  // Confirmed 2026-10-14.
+  assert.ok(!again.codexHistoryReasons.some((reason) => HELD_OPEN.test(reason)), JSON.stringify(again.codexHistoryReasons));
 });

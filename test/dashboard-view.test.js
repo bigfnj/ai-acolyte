@@ -2041,7 +2041,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:2772-2774#errors records — a file that failed every
+// defect src/auto-learn-manager.js:2774-2776#errors records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which
@@ -2373,6 +2373,53 @@ test('a stale Codex verdict names what diverged instead of claiming the store mo
     const cleared = renderDashboard(app.provider, clean);
     assert.match(cleared.alScanHealth, /read 9 files cleanly/);
     assert.equal(cleared.node('alScanHealth').title, '');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// WHY A CODEX REBUILD IS HELD OPEN reaches the scan-health hover (2026-10-14, F3 of the v1.6.3
+// confirmation audit). A configured Codex root that is missing holds the evidence rebuild open,
+// which keeps every family with Codex evidence from being applied, and until now nothing named
+// the folder. The REAL manager writes the reason here (a scripted walk reports `sessions/`
+// missing and a pending transcript it did not find), and the real extension reads it back from
+// the state file, as it does every persisted Codex reason. By folder name, never the path.
+test('a rebuild held open by a missing Codex root names the folder on the scan-health hover', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const pending = `path-sha256:${'a'.repeat(24)}`;
+  seedAutoLearnState(env.tempHome, { ...SCAN_SEED }, {
+    version: 3, codexEvidenceRevision: 4, codexEvidenceRebuildPending: true, codexEvidencePendingFiles: [pending],
+  });
+  // eslint-disable-next-line global-require
+  const { createAutoLearnManager } = require('../src/auto-learn-manager');
+  const codex = path.join(env.tempHome, '.codex');
+  const result = createAutoLearnManager({
+    home: env.tempHome, workspaceRoot: path.join(env.tempHome, 'workspace'),
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }),
+    historyScanner: () => ({
+      observations: [], cursors: {},
+      files: [{ source: 'codex', mode: 'full', path: path.join(codex, 'archived_sessions', 'other.jsonl') }],
+      missingRoots: [{ path: path.join(codex, 'sessions'), source: 'codex', link: false }],
+    }),
+  }).scan();
+  assert.equal(result.codexEvidence.pending, true, 'precondition: the missing root holds the rebuild');
+
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    const rendered = renderDashboard(app.provider, data);
+    const title = rendered.node('alScanHealth').title;
+    // MUTATION: drop the `rebuildHeldOpen ? [...] :` from the manager's lastScanStats. The hover is
+    // empty and this fails. Confirmed 2026-10-14.
+    assert.match(title, /^The Codex evidence rebuild is held open: the configured history folder sessions\/ is missing/,
+      `the hover said "${title}"`);
+    assert.ok(!title.includes(env.tempHome) && !title.includes(codex), `a path reached the hover: ${title}`);
+    assert.match(rendered.node('alsub').textContent, /rebuilding older Codex evidence: 1 transcripts still need a complete read/,
+      'precondition: the card already said the rebuild is open, only not why');
   } finally {
     await app.dispose();
   }

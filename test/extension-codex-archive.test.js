@@ -183,10 +183,28 @@ test('scan trouble is logged when its kinds change, not when a count moves, and 
   t.after(() => { try { fs.rmSync(home, { recursive: true, force: true }); } catch {} });
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: [] } }));
+  // The fourth scan is a REAL manager's (2026-10-14, F3 of the v1.6.3 confirmation audit): a
+  // configured Codex root that is missing holds the evidence rebuild open, and the reason it now
+  // gives must reach this channel as trouble, like every Codex reason, by folder name only.
+  const heldHome = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-ext-held-'));
+  t.after(() => { try { fs.rmSync(heldHome, { recursive: true, force: true }); } catch {} });
+  const heldState = path.join(heldHome, '.claude', 'wildcarding', 'auto-learn-state.json');
+  fs.mkdirSync(path.dirname(heldState), { recursive: true });
+  fs.writeFileSync(heldState, JSON.stringify({ version: 3, codexEvidenceRevision: 4, codexEvidenceRebuildPending: true,
+    codexEvidencePendingFiles: [`path-sha256:${'b'.repeat(24)}`], candidates: {}, cursors: {} }));
+  const held = require('../src/auto-learn-manager').createAutoLearnManager({
+    home: heldHome, statePath: heldState,
+    codexHistoryStore: () => ({ stale: false, inspected: 'unavailable', reasons: [], notes: [] }),
+    historyScanner: () => ({ observations: [], cursors: {},
+      files: [{ source: 'codex', mode: 'full', path: path.join(heldHome, '.codex', 'archived_sessions', 'other.jsonl') }],
+      missingRoots: [{ path: path.join(heldHome, '.codex', 'sessions'), source: 'codex', link: false }] }),
+  }).scan();
+  assert.equal(held.codexEvidence.pending, true, 'precondition: the missing root holds the rebuild');
   const results = [
     { errors: 3, codexHistoryNotes: ['2 entries in rollout-migrations/: Codex has recorded a rollout migration.'] },
     { errors: 4, codexHistoryNotes: ['3 entries in rollout-migrations/: Codex has recorded a rollout migration.'] },
     { errors: 4, unreadable: 1, codexHistoryNotes: ['3 entries in rollout-migrations/: Codex has recorded a rollout migration.'] },
+    held,
   ];
   const disposable = () => ({ dispose() {} });
   const commands = new Map();
@@ -251,7 +269,7 @@ test('scan trouble is logged when its kinds change, not when a count moves, and 
     }
     extension = require(extensionPath);
     extension.activate({ subscriptions: [] });
-    for (let scan = 0; scan < 3; scan += 1) {
+    for (let scan = 0; scan < 4; scan += 1) {
       await commands.get('permission-wildcarding.autoLearnScan')();
       after.push(logged().slice());
     }
@@ -282,4 +300,11 @@ test('scan trouble is logged when its kinds change, not when a count moves, and 
     'Auto Learn scan: 1 file had an unreadable stretch that was skipped',
     'Auto Learn scan note: Codex history: 3 entries in rollout-migrations/: Codex has recorded a rollout migration.',
   ], 'a new KIND of trouble logs the whole current set, with the current counts');
+  // MUTATION: drop the `rebuildHeldOpen ? [...] :` from the manager's lastScanStats. The real scan
+  // logs nothing and this fails. Confirmed 2026-10-14.
+  const heldLines = after[3].slice(after[2].length);
+  assert.equal(heldLines.length, 1, JSON.stringify(heldLines));
+  assert.match(heldLines[0],
+    /^Auto Learn scan: Codex history: The Codex evidence rebuild is held open: the configured history folder sessions\/ is missing/);
+  assert.ok(!heldLines[0].includes(heldHome), `a path reached the channel: ${heldLines[0]}`);
 });

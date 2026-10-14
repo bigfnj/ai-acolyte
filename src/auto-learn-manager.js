@@ -2656,6 +2656,7 @@ function createAutoLearnManager(options = {}) {
           if (safe) state.cursors[id] = safe;
         }
       }
+      let rebuildHeldOpen = null; // rebuildHeldOpenReason, below createAutoLearnManager
       if (rebuildingCodex) {
         const codexFiles = scannedFiles.filter((entry) => entry.source === 'codex');
         const incomplete = codexFiles.filter((entry) =>
@@ -2718,13 +2719,14 @@ function createAutoLearnManager(options = {}) {
         // returns or leaves the configuration: gone and unplugged look alike, and
         // guessing "gone" is how the audit's grant-then-revoke happened.
         const benignAbsence = normalizedPath(path.join(codexHome, 'archived_sessions'));
-        const missingCodexRoot = (Array.isArray(result.missingRoots) ? result.missingRoots : []).some((entry) =>
+        const missingCodexRoots = (Array.isArray(result.missingRoots) ? result.missingRoots : []).filter((entry) =>
           entry?.source === 'codex' && (entry.link === true || normalizedPath(entry.path) !== benignAbsence));
-        if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoot) {
+        if (!codexFiles.some((entry) => entry.scope === 'root') && !missingCodexRoots.length) {
           for (const id of [...pendingFiles]) if (!enumerated.has(id)) pendingFiles.delete(id);
         }
         state.codexEvidencePendingFiles = [...pendingFiles].sort();
         state.codexEvidenceRebuildPending = codexFiles.length === 0 || incomplete.length > 0 || pendingFiles.size > 0;
+        rebuildHeldOpen = rebuildHeldOpenReason(missingCodexRoots, [...pendingFiles].filter((id) => !enumerated.has(id)).length);
       }
       refreshEvidenceStatus(state);
       // Enforce the cap on the way out, so one scan cannot leave the file
@@ -2793,7 +2795,7 @@ function createAutoLearnManager(options = {}) {
         // No `codexEvidence` copy: `status()` and the return below compute it live (see `scanStats`).
         codexHistoryStale: codexHistory.stale === true,
         codexHistoryInspected: codexHistory.inspected,
-        codexHistoryReasons: codexHistory.reasons,
+        codexHistoryReasons: rebuildHeldOpen ? [rebuildHeldOpen, ...codexHistory.reasons] : codexHistory.reasons,
         codexHistoryNotes: codexHistory.notes,
         codexHistoryFindings: codexHistory.findings ?? null,
       };
@@ -3037,6 +3039,33 @@ function takeExporterRule(item) {
   if (typeof rule !== 'string') return;
   item.claudePermission = rule;
   item.permissions = permissionSpellings(item.permissions, rule);
+}
+
+// Why the Codex evidence rebuild is still open, when the answer is a configured history root that
+// is not there (2026-10-14, F3 of the v1.6.3 confirmation audit). 7ce6217 made a missing root hold
+// the rebuild open (scan, `missingCodexRoots`) and said so nowhere: the card read "rebuilding older
+// Codex evidence: N transcripts still need a complete read" for as long as the folder stayed
+// away, and nothing named it. Only when the root is what holds the rebuild: a pending transcript
+// this walk did not enumerate, whose id the drop would otherwise have released. A pending file the
+// walk did find is catching up on its own, and the folder's absence is not why it waits.
+//
+// A REASON, not a note, because it blocks something: while the rebuild is open every family with
+// Codex evidence is `evidencePending`, which keeps it off the auto-safe path (refresh) and out of
+// a reviewed apply (applyUnlocked refuses it, and the listing offers it no target). Reasons reach
+// the scan-health hover and the output channel as trouble; notes reach only the channel. It does
+// not set `codexHistoryStale`, which means the history store diverged, and nothing did. Folder
+// NAMES only, the probe's own convention (dirNames in src/history-adapters.js): reasons are
+// persisted in lastScanStats, and the state file holds no transcript or history-root path
+// (test/auto-learn-integration.test.js).
+function rebuildHeldOpenReason(roots, owed) {
+  if (!roots.length || owed <= 0) return null;
+  const names = [...new Set(roots.map((entry) => `${path.basename(path.resolve(String(entry.path)))}/${
+    entry.link === true ? ' (a link to a missing target)' : ''}`))];
+  const one = names.length === 1;
+  return `The Codex evidence rebuild is held open: the configured history folder${one ? '' : 's'} ` +
+    `${names.join(', ')} ${one ? 'is' : 'are'} missing, and ${owed} transcript(s) still owed a complete read ` +
+    'may be there. Families with Codex evidence are not applied, automatically or from Review, until ' +
+    `${one ? 'it returns or is' : 'they return or are'} no longer a configured history root.`;
 }
 
 // Exported for independent coverage of the version floor and missing steps.

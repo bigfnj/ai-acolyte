@@ -17,7 +17,7 @@
 // being the normal case.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:313#sharing). Its shape is test/machine-scoped-settings.test.js's.
+// (test/extension-activation.test.js:407#sharing). Its shape is test/machine-scoped-settings.test.js's.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

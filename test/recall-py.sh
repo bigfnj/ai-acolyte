@@ -90,13 +90,13 @@ echo "$ERR" | grep -q 'recall_index.json' || fail "the warning does not name the
 echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 
 # ---------------------------------------------------------------- B2: the write is ATOMIC
-# Mutation: replace save_index's body (memory/recall.py:408-419#save_index) with a plain in-place
+# Mutation: replace save_index's body (memory/recall.py:416-427#save_index) with a plain in-place
 # `json.dump(idx, open(INDEX_PATH, "w"))`. The file-identity assertion below fails; nothing
 # else in this suite does.
 #
 # The residue check underneath used to be the only guard here, and it was vacuous twice over.
 # It globbed for `recall_index.json.tmp`, but save_index names its temp file with the writing
-# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:416#os.getpid) -- so the literal path
+# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:424#os.getpid) -- so the literal path
 # it tested has never existed on any run, broken or not. And even spelled correctly it only fires for
 # "wrote a tmp, forgot os.replace": revert to an in-place json.dump and there is no temp file
 # to leave behind, so it passes on the state it exists to forbid. Between it and the
@@ -377,12 +377,12 @@ echo "ok: the clean verdict tests every finding it prints, not five of eight"
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# memory/recall.py:1052. The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1142#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1044#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1134#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.
@@ -559,6 +559,225 @@ RC=$?
 mv "$GATES.away" "$GATES"
 [ "$RC" = "0" ] || fail "a fresh machine with no compiled gates must stay a no-op, exited $RC"
 echo "ok: a fresh machine with nothing installed is still a quiet no-op"
+
+# ---------------------------------------------------------------- the gates write is ATOMIC
+# Ported from rampage 7139659 (2026-10-14). compile_gates wrote gates.generated.md in place, and
+# a reader racing that write could read it empty or partial, which src/agent-gates.js turned into
+# an empty or truncated gates block. It now writes a pid-named temp and os.replace()s it over the
+# target, as save_index does, and the observable is the one the index test above uses: os.replace
+# swaps a NEW file in, so the file id changes, while an in-place write truncates the old file and
+# keeps its id.
+#
+# Mutation: put `with open(GATES_OUT, "w", ...)` back in place of the temp file and os.replace.
+# The file-id assertion fails, naming this file; nothing else here does.
+ATOM="$TMP/atomic"; mkdir -p "$ATOM"
+printf -- '# Memory Index\n' > "$ATOM/MEMORY.md"
+printf -- '---\nname: a\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Atomic one.** Pass: first wording.\n<!-- /gate -->\n' > "$ATOM/a.md"
+RECALL_MEMORY_DIR="$ATOM" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "precondition: the atomic corpus should compile"
+ID_BEFORE="$(file_id "$GATES")"
+[ -n "$ID_BEFORE" ] || fail "precondition: could not read the compiled file's id, so atomicity is untestable"
+printf -- '---\nname: a\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Atomic one.** Pass: second wording.\n<!-- /gate -->\n' > "$ATOM/a.md"
+RECALL_MEMORY_DIR="$ATOM" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1 || fail "the second atomic compile exited non-zero"
+grep -q 'second wording' "$GATES" || fail "the recompile did not reach gates.generated.md"
+ID_AFTER="$(file_id "$GATES")"
+[ "$ID_BEFORE" != "$ID_AFTER" ] \
+  || fail "gates.generated.md was rewritten IN PLACE (file id $ID_AFTER unchanged): a reader racing the compile can read it empty"
+for residue in "$TMP/.claude"/gates.generated.md.*.tmp; do
+  [ -e "$residue" ] && fail "a successful gates compile left $residue behind"
+done
+echo "ok: the gates write replaces the file rather than truncating it, and leaves no .tmp residue"
+
+# ------------------------------------------- an unreadable store stops the gates compile cold
+# Ported from rampage 7139659. With RECALL_MEMORY_DIR unset, _discover_memory_dir picks the store
+# holding the most .md files, and one it cannot read is skipped with a warning. The pick then
+# falls to the next-largest store, and --gates-compile used to compile THAT store's gates and exit
+# 0, while `wildcard-perms --gates refresh` swallowed the warning: the standing orders silently
+# came from the wrong store. A gate is a standing order, so the compile now refuses, writes
+# nothing, and names the store. (The extension passes RECALL_MEMORY_DIR whenever it has a store,
+# so this is the CLI's and a bare run's path.)
+#
+# The unreadable store is simulated by making os.listdir raise for it inside the harness, so this
+# runs the same on every platform and as any user (a chmod 000 does not stop root). The first
+# compile, with nothing denied, is the control: it proves the big store IS the pick, so the
+# refusal after it is caused by the read failure and nothing else.
+#
+# Mutations, one assertion each, all naming this file:
+#   delete the `if _DISCOVERY_ERRORS:` refusal in compile_gates -> "compiled gates from the fallback"
+#   drop the append in _discover_memory_dir's per-store except  -> "compiled gates from the fallback"
+DHOME="$TMP/disc-home"
+for store in big-store small-store; do mkdir -p "$DHOME/.claude/projects/$store/memory"; done
+DBIG="$DHOME/.claude/projects/big-store/memory"
+DSMALL="$DHOME/.claude/projects/small-store/memory"
+printf -- '# Memory Index\n' > "$DBIG/MEMORY.md"
+printf -- '# Memory Index\n' > "$DSMALL/MEMORY.md"
+printf -- '---\nname: b1\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Big-store gate one.**\n<!-- /gate -->\n' > "$DBIG/b1.md"
+printf -- '---\nname: b2\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Big-store gate two.**\n<!-- /gate -->\n' > "$DBIG/b2.md"
+printf -- '---\nname: b3\n---\nplain note\n' > "$DBIG/b3.md"
+printf -- '---\nname: s1\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **Small-store gate.**\n<!-- /gate -->\n' > "$DSMALL/s1.md"
+DISC_OUT="$(RECALL_MEMORY_DIR= "$PY" - "$RECALL" "$DHOME" 2>&1 <<'PY'
+import importlib.util, os, sys
+recall, home = sys.argv[1:3]
+os.environ.pop("RECALL_MEMORY_DIR", None)
+os.environ["HOME"] = os.environ["USERPROFILE"] = home
+big = os.path.join(home, ".claude", "projects", "big-store", "memory")
+key = lambda p: os.path.normcase(os.path.abspath(p))
+real_listdir = os.listdir
+def run(deny):
+    def listdir(p="."):
+        if deny and key(p) == key(deny):
+            raise PermissionError(13, "Permission denied", p)
+        return real_listdir(p)
+    os.listdir = listdir
+    try:
+        s = importlib.util.spec_from_file_location("recall", recall)
+        m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+        try:
+            m.compile_gates()
+            return m, "RETURNED"
+        except SystemExit as e:
+            return m, f"EXIT {e.code}"
+    finally:
+        os.listdir = real_listdir
+m, result = run(None)
+print("CONTROL-PICK-OK" if key(m.MEMORY_DIR) == key(big) else f"CONTROL-PICK-WRONG {m.MEMORY_DIR}")
+print("CONTROL", result)
+m, result = run(big)
+print("DENY", result)
+PY
+)"
+printf '%s\n' "$DISC_OUT" | grep -q '^CONTROL-PICK-OK' \
+  || fail "precondition: discovery did not pick the larger store, so the refusal below proves nothing: $DISC_OUT"
+printf '%s\n' "$DISC_OUT" | grep -q '^CONTROL RETURNED' \
+  || fail "precondition: the control compile, with nothing unreadable, did not succeed: $DISC_OUT"
+grep -q 'Small-store gate' "$DHOME/.claude/gates.generated.md" \
+  && fail "an unreadable store let --gates-compile compile gates from the fallback store"
+grep -q 'Big-store gate one' "$DHOME/.claude/gates.generated.md" \
+  || fail "the refused compile changed the gates compiled from the big store: $DISC_OUT"
+printf '%s\n' "$DISC_OUT" | grep -q '^DENY EXIT .*refusing to compile gates.*big-store' \
+  || fail "the refusal does not exit non-zero naming the store it could not read: $DISC_OUT"
+echo "ok: a store discovery cannot read stops --gates-compile, which names it and writes nothing"
+
+# ...but a home with no ~/.claude/projects at all is a fresh machine, not an unreadable store. The
+# root listdir raises FileNotFoundError there, and recording that refused every compile on a
+# machine that had never run a session, where the fresh-machine test above expects a quiet no-op.
+# That test cannot see it: it sets RECALL_MEMORY_DIR, and discovery only runs without one.
+# Mutation: record the root's error whatever it is (drop the isinstance(e, FileNotFoundError)
+# test in _discover_memory_dir) -> "a home with no projects dir refused the gates compile".
+FRESH="$TMP/fresh-home"; mkdir -p "$FRESH"
+FRESH_OUT="$(RECALL_MEMORY_DIR= "$PY" - "$RECALL" "$FRESH" 2>&1 <<'PY'
+import importlib.util, os, sys
+recall, home = sys.argv[1:3]
+os.environ.pop("RECALL_MEMORY_DIR", None)
+os.environ["HOME"] = os.environ["USERPROFILE"] = home
+assert not os.path.exists(os.path.join(home, ".claude")), "degenerate fixture: the fresh home has a .claude"
+s = importlib.util.spec_from_file_location("recall", recall)
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+try:
+    m.compile_gates()
+    print("FRESH RETURNED")
+except SystemExit as e:
+    print(f"FRESH EXIT {e.code}")
+PY
+)"
+printf '%s\n' "$FRESH_OUT" | grep -q '^FRESH RETURNED' \
+  || fail "a home with no projects dir refused the gates compile, where a fresh machine is a quiet no-op: $FRESH_OUT"
+[ -e "$FRESH/.claude/gates.generated.md" ] && fail "a fresh machine's no-op gates compile wrote a gates file"
+echo "ok: a home with no ~/.claude/projects is a fresh machine, and its gates compile stays a no-op"
+
+# ------------------------------------------- gates in OTHER stores are reported, never compiled
+# The maintainer's decision (2026-10-14): the compiler reads one store (RECALL_MEMORY_DIR, else
+# the largest) and a scope:global gate anywhere else was ignored in silence. It is still never
+# compiled; --lint now names each other store, by folder name only, with how many gate memories
+# it holds that are not installed. A gate whose text the compile store already has is installed,
+# so a store copied rather than moved is not reported for it.
+#
+# Mutations, one assertion each:
+#   delete the other-store section in lint()                  -> "--lint did not report the other store"
+#   drop `body not in primary_bodies` in _other_store_gates   -> the count reads 2: "did not report"
+#   drop `or other_gates or other_unreadable` from `clean:`   -> "called a corpus ... clean"
+#   drop the unreadable append in _other_store_gates          -> "skipped in silence"
+# (The `== primary` skip is not separately falsifiable: every gate the compile store holds is in
+# primary_bodies by construction, so the dedup already zeroes it. The skip saves the re-read.)
+OHOME="$TMP/other-home"
+OP="$OHOME/.claude/projects"
+mkdir -p "$OP/main-store/memory" "$OP/side-store/memory" "$OP/quiet-store/memory" "$OHOME/.claude"
+gate() { printf -- '---\nname: %s\nmetadata:\n  scope: global\n---\n<!-- gate -->\n- **%s**\n<!-- /gate -->\n' "$1" "$2"; }
+printf -- '# Memory Index\n' > "$OP/main-store/memory/MEMORY.md"
+gate m1 'Main-store gate.' > "$OP/main-store/memory/m1.md"
+printf -- '---\nname: m2\n---\nplain\n' > "$OP/main-store/memory/m2.md"
+printf -- '---\nname: m3\n---\nplain\n' > "$OP/main-store/memory/m3.md"
+printf -- '# Memory Index\n' > "$OP/side-store/memory/MEMORY.md"
+gate s1 'Side-store gate.' > "$OP/side-store/memory/s1.md"
+gate s2 'Main-store gate.' > "$OP/side-store/memory/s2-copied.md"   # installed via main-store
+printf -- '# Memory Index\n' > "$OP/quiet-store/memory/MEMORY.md"
+printf -- '---\nname: q1\n---\nno gate here\n' > "$OP/quiet-store/memory/q1.md"
+olint()    { HOME="$OHOME" USERPROFILE="$OHOME" RECALL_MEMORY_DIR="${1:-}" "$PY" "$RECALL" --lint 2>&1; }
+ocompile() { HOME="$OHOME" USERPROFILE="$OHOME" RECALL_MEMORY_DIR="${1:-}" "$PY" "$RECALL" --gates-compile >/dev/null 2>&1; }
+OGATES="$OHOME/.claude/gates.generated.md"
+
+OUT="$(olint)"
+printf '%s\n' "$OUT" | grep -q '1 scope:global gate memory in other memory stores -- not installed' \
+  || fail "--lint did not report the other store's gate: $OUT"
+printf '%s\n' "$OUT" | grep -qx '    side-store: 1' \
+  || fail "--lint counted a gate the compile store installs, or did not name side-store by folder: $OUT"
+printf '%s\n' "$OUT" | grep -q 'main-store:' && fail "--lint reported the compile store as another store: $OUT"
+printf '%s\n' "$OUT" | grep -q 'quiet-store' && fail "--lint reported a store that holds no gate: $OUT"
+printf '%s\n' "$OUT" | grep -q 'projects[\\/]' && fail "--lint printed a store's path, not its folder name: $OUT"
+printf '%s\n' "$OUT" | grep -q 'not compiled' && fail "the section says 'not compiled', which verify-release.ps1 fails on: $OUT"
+printf '%s\n' "$OUT" | grep -q 'clean:' && fail "--lint called a corpus with an uninstalled gate clean: $OUT"
+ocompile || fail "precondition: the compile over main-store failed"
+grep -q 'Main-store gate' "$OGATES" || fail "precondition: main-store, the largest, is the store that compiles"
+grep -q 'Side-store gate' "$OGATES" && fail "a gate in another store was compiled into the standing orders"
+echo "ok: a gate in another store is reported by folder name and count, and is not compiled"
+
+# Control: the compile is byte-identical with the other store and without it.
+WITH="$("$PY" -c "import sys;print(open(sys.argv[1],'rb').read().hex())" "$OGATES")"
+mv "$OP/side-store" "$OHOME/side-store.away"
+ocompile || fail "the compile without side-store failed"
+WITHOUT="$("$PY" -c "import sys;print(open(sys.argv[1],'rb').read().hex())" "$OGATES")"
+{ [ -n "$WITH" ] && [ "$WITH" = "$WITHOUT" ]; } || fail "the other store changed the compiled bytes"
+# Control: with no gate in any other store, there is no section at all.
+OUT="$(olint)"
+printf '%s\n' "$OUT" | grep -q 'other memory stores' && fail "--lint reported other-store gates where there are none: $OUT"
+mv "$OHOME/side-store.away" "$OP/side-store"
+echo "ok: the compile is byte-identical with and without the other store, which reports nothing once it holds no gate"
+
+# A pinned store is respected: point RECALL_MEMORY_DIR at side-store and IT compiles, while
+# main-store, now the other store, is the one reported, for its one gate side-store lacks.
+gate m4 'Main-only gate.' > "$OP/main-store/memory/m4.md"
+SIDE_W="$(cygpath -m "$OP/side-store/memory" 2>/dev/null || echo "$OP/side-store/memory")"
+OUT="$(olint "$SIDE_W")"
+printf '%s\n' "$OUT" | grep -qx '    main-store: 1' \
+  || fail "under RECALL_MEMORY_DIR the unpinned store was not the one reported: $OUT"
+printf '%s\n' "$OUT" | grep -q 'side-store:' && fail "the pinned store was reported as another store: $OUT"
+ocompile "$SIDE_W" || fail "the compile over the pinned side-store failed"
+grep -q 'Side-store gate' "$OGATES" || fail "RECALL_MEMORY_DIR did not decide which store compiles"
+grep -q 'Main-only gate' "$OGATES" && fail "under the pin, a gate in the unpinned store was compiled"
+echo "ok: RECALL_MEMORY_DIR decides the compile store, and the census reports the rest"
+
+# A store the census cannot read is named, not skipped in silence. In-process, as above, so no
+# chmod is needed.
+UNREAD="$(RECALL_MEMORY_DIR= "$PY" - "$RECALL" "$OHOME" 2>&1 <<'PY'
+import importlib.util, os, sys
+recall, home = sys.argv[1:3]
+os.environ.pop("RECALL_MEMORY_DIR", None)
+os.environ["HOME"] = os.environ["USERPROFILE"] = home
+s = importlib.util.spec_from_file_location("recall", recall)
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+quiet = os.path.join(home, ".claude", "projects", "quiet-store", "memory")
+key = lambda p: os.path.normcase(os.path.abspath(p))
+real = os.listdir
+def listdir(p="."):
+    if key(p) == key(quiet):
+        raise PermissionError(13, "Permission denied", p)
+    return real(p)
+os.listdir = listdir
+m.lint()
+PY
+)"
+printf '%s\n' "$UNREAD" | grep -qx '    quiet-store: could not be read' \
+  || fail "an unreadable other store was skipped in silence: $UNREAD"
+echo "ok: an other store the census cannot read is named as such"
 
 # ------------------------------------------------ rank() must refuse a partial parts tuple
 # Passing idx+names with lex=None silently returned pure-vector ordering at exactly half score

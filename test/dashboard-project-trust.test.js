@@ -20,7 +20,7 @@
 // and the version probe a push started pushes once when it lands.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:313#sharing).
+// (test/extension-activation.test.js:407#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

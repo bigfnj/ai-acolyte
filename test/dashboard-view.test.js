@@ -65,7 +65,7 @@ function settle(ms = 140) {
 }
 
 // Copied from test/policy-backup.test.js rather than shared. That is a standing
-// decision in this suite (test/extension-activation.test.js:313#sharing: "Kept as its
+// decision in this suite (test/extension-activation.test.js:407#sharing: "Kept as its
 // own mock rather than sharing the one above… duplicating a mock is far cheaper
 // than breaking the activation test that already works"), and this file needs two
 // things that one does not: the provider instance, and a count of how many times
@@ -275,6 +275,9 @@ function harness(tempHome, opts = {}) {
         },
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
+        // Only when a test supplies it: without it gatesCardData's census throws inside its
+        // own try and the card carries `otherStores: null`, as on a census failure.
+        ...(opts.otherStoreGates ? { otherStoreGates: opts.otherStoreGates } : {}),
       };
     }
     return originalLoad.call(this, request, parent, isMain);
@@ -2784,6 +2787,58 @@ test('unreadable Codex override discovery is visible in both instruction cards',
   } finally {
     await app.dispose();
   }
+});
+
+// The maintainer's decision of 2026-10-14: gates in memory stores other than the compile
+// store are reported, never compiled. The census runs against the store compileGates pins
+// (memoryReport().dir) with that store's gate texts, and the card names folders only.
+test('the gates card says how many gates in other memory stores are not installed', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  fs.writeFileSync(path.join(env.tempHome, '.claude', 'gates.generated.md'),
+    '## Standing gates (1 memories, managed)\n- Fixture resident instruction.\n');
+  const compileStore = path.join(env.tempHome, '.claude', 'projects', 'main-store', 'memory');
+  const census = { calls: [], answer: null };
+  const app = harness(env.tempHome, {
+    memoryReport: () => ({
+      conf: { enabled: true, totalBudget: 12000, maxLines: 200 }, dir: compileStore,
+      report: { tokens: 10, bytes: 40, fileCount: 2, lineCount: 1, linesOver: false, over: [], broken: [],
+        unresolved: [], gateSources: 1, gateBodies: ['- Fixture resident instruction.'] },
+    }),
+    otherStoreGates: (...args) => { census.calls.push(args); return census.answer; },
+  });
+  try {
+    census.answer = { count: 3, stores: [{ name: 'side-store', count: 2 }, { name: 'bare-store', count: 1 }],
+      unreadable: ['locked-store'] };
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual(census.calls.at(-1), [compileStore, ['- Fixture resident instruction.']],
+      'the census is asked about the store that compiles, with the gate texts it installs');
+    assert.deepEqual(data.gates.otherStores, census.answer);
+    const line = renderDashboard(app.provider, data).node('mgother');
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent, '3 gates in other memory stores are not installed: side-store (2), bare-store (1)'
+      + ' · 1 other memory store could not be read: locked-store');
+    assert.doesNotMatch(line.textContent, /projects|[\\/]/, 'folder names only, never a path');
+
+    // One gate reads in the singular; none at all hides the line.
+    census.answer = { count: 1, stores: [{ name: 'side-store', count: 1 }], unreadable: [] };
+    const one = renderDashboard(app.provider, { ...data, gates: { ...data.gates, otherStores: census.answer } }).node('mgother');
+    assert.equal(one.textContent, '1 gate in another memory store is not installed: side-store (1)');
+    const none = renderDashboard(app.provider,
+      { ...data, gates: { ...data.gates, otherStores: { count: 0, stores: [], unreadable: [] } } }).node('mgother');
+    assert.deepEqual([none.hidden, none.textContent], [true, '']);
+    const unknown = renderDashboard(app.provider, { ...data, gates: { ...data.gates, otherStores: null } }).node('mgother');
+    assert.deepEqual([unknown.hidden, unknown.textContent], [true, '']);
+  } finally {
+    await app.dispose();
+  }
+
+  // MUTATION: drop the `otherStores` field from gatesCardData in vscode-extension/extension.js
+  // and data.gates.otherStores is undefined; drop the `mgother` block from renderGates and
+  // the line stays empty.
 });
 
 test('partial Codex instruction installation is reported consistently in cards and collapsed badges', async (t) => {

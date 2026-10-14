@@ -342,6 +342,33 @@ test('a second writer of the same instruction file is refused, and changes nothi
     'the lock file does not outlive the write');
 });
 
+// The instruction-file lock is the one caller of policy-lock's `reclaimLiveWhenStale`. A
+// holder killed mid-write leaves a lock whose pid can belong to an unrelated live process by
+// the time anyone looks (rampage 7139659 measured it refusing every gates write for an hour).
+// The work under this lock takes milliseconds, so past its 30 s window the lock goes.
+test('an instruction lock older than its window is reclaimed even when its pid answers', () => {
+  const box = scratch();
+  fs.writeFileSync(box.file, USER_TEXT, 'utf8');
+  const lockPath = instructionLockPath(box.file);
+  const plant = (ageMs) => {
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, owner: 'reused-pid' }) + '\n');
+    const when = new Date(Date.now() - ageMs);
+    fs.utimesSync(lockPath, when, when);
+  };
+  plant(5_000);
+  assert.match(setGuidance(true, { file: box.file, backupDir: box.backupDir }).error, /being written by another/,
+    'inside the window the holder may be real');
+  assert.equal(fs.readFileSync(box.file, 'utf8'), USER_TEXT);
+  plant(60_000);
+  const row = setGuidance(true, { file: box.file, backupDir: box.backupDir });
+  assert.equal(row.error, null, 'a minute-old lock with a live pid is a dead holder\'s');
+  assert.equal(row.changed, true);
+  assert.equal(fs.existsSync(lockPath), false, 'and the reclaimed lock is released after the write');
+
+  // MUTATION: drop `reclaimLiveWhenStale: true` from withInstructionLock in
+  // src/agent-guidance.js and the second setGuidance reports "being written by another".
+});
+
 test('a missing CLAUDE.md is created rather than treated as an error', () => {
   const box = scratch();
   const result = setGuidance(true, { file: box.file, backupDir: box.backupDir });
@@ -482,4 +509,412 @@ test('a body that quotes the markers cannot truncate its own block', () => {
 
   // And it is removable, which the truncated range made impossible.
   assert.equal(block.apply(on.text, false).text, USER_TEXT);
+});
+
+// ── Ported from rampage 7139659 (test/managed-block.test.js) ─────────────────────
+// Rampage hardened its copy of this module after it split off. The cases below are its
+// tests, driven through this module's API: setGuidance and guidanceStatus for the file
+// plumbing, the shell block's apply for the arithmetic. Not ported: the legacy-marker and
+// `escape` cases (AI Acolyte has no legacy block to migrate), requireBlock (this API
+// defaults the block), and "a real symbolic link survives the write", which needs the
+// symlink privilege Windows reserves for an elevated or Developer Mode session; the two
+// stand-in symlink tests below cover the same code path without it.
+
+// A busy lock on Windows is not always EEXIST: a lock its holder has just unlinked is
+// delete-pending until the last handle closes, and creating it then fails with EPERM.
+// That used to escape the writer as an uncaught throw (rampage: 7 crashes in 480 racing
+// CLI writes).
+test('a lock that cannot be created for a sharing reason is a busy row, not a crash', (t) => {
+  const box = scratch();
+  fs.writeFileSync(box.file, USER_TEXT, 'utf8');
+  const lockPath = instructionLockPath(box.file);
+  const realOpen = fs.openSync;
+  t.mock.method(fs, 'openSync', (target, ...rest) => {
+    if (path.resolve(String(target)) === lockPath) {
+      throw Object.assign(new Error(`EPERM: operation not permitted, open '${lockPath}'`), { code: 'EPERM' });
+    }
+    return realOpen(target, ...rest);
+  });
+  const row = setGuidance(true, { file: box.file, backupDir: box.backupDir });
+  assert.equal(row.changed, false);
+  assert.match(row.error, /being written by another permission-wildcarding process \(EPERM creating the lock\)/);
+  assert.equal(fs.readFileSync(box.file, 'utf8'), USER_TEXT);
+  assert.equal(fs.existsSync(box.backupDir), false);
+
+  // MUTATION: make isContended in src/policy-lock.js answer EEXIST alone (the pre-port rule)
+  // and setGuidance throws the EPERM instead of returning this row.
+});
+
+test('a file that is not UTF-8 text is refused byte for byte, and nothing is backed up', () => {
+  // Measured by rampage before the fix: the decode swapped each invalid byte for U+FFFD and
+  // the write-back carried it into the user's text and into the backup, so the original
+  // bytes could not be recovered from either.
+  const cases = {
+    // Windows PowerShell 5.1 Set-Content's ANSI: "Café".
+    cp1252: Buffer.concat([Buffer.from('# notes\r\n\r\nCaf'), Buffer.from([0xe9]), Buffer.from(' au lait\r\n')]),
+    // Its Out-File default, and Notepad's "Unicode".
+    utf16le: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('# notes\r\n\r\nMy rules\r\n', 'utf16le')]),
+    // UTF-16 with no byte-order mark is valid UTF-8 byte by byte, NULs and all.
+    utf16leNoMark: Buffer.from('# notes\r\n\r\nMy rules\r\n', 'utf16le'),
+  };
+  for (const [name, bytes] of Object.entries(cases)) {
+    const box = scratch();
+    fs.writeFileSync(box.file, bytes);
+    const status = guidanceStatus(box.file);
+    assert.equal(status.readable, false, `${name}: status says it cannot be read as text`);
+    assert.match(status.error, /is not UTF-8 text/, name);
+    for (const on of [true, false]) {
+      const row = setGuidance(on, { file: box.file, backupDir: box.backupDir });
+      assert.equal(row.changed, false, name);
+      assert.match(row.error, /is not UTF-8 text.*save it as UTF-8/, name);
+    }
+    assert.deepEqual(fs.readFileSync(box.file), bytes, `${name}: every byte is where it was`);
+    assert.equal(fs.existsSync(box.backupDir), false, `${name}: and no backup was taken`);
+  }
+
+  // A UTF-8 file with a byte-order mark and CRLF lines is UTF-8: written, and both backups
+  // hold its exact bytes.
+  const box = scratch();
+  const bytes = Buffer.from(`${String.fromCharCode(0xfeff)}# notes\r\n\r\nCafé\r\n`, 'utf8');
+  fs.writeFileSync(box.file, bytes);
+  assert.equal(setGuidance(true, { file: box.file, backupDir: box.backupDir }).error, null);
+  assert.deepEqual(fs.readFileSync(path.join(box.backupDir, 'CLAUDE.md.pre-guidance')), bytes);
+  assert.deepEqual(fs.readFileSync(path.join(box.backupDir, 'CLAUDE.md.pre-guidance-prev')), bytes);
+
+  // MUTATION: drop the `Buffer.from(text, 'utf8').equals(raw)` test from readInstructionFile
+  // and the cp1252 and utf16le cases are written. Drop `raw.includes(0)` instead and only
+  // utf16leNoMark is.
+});
+
+// AI Acolyte's adaptation: Codex reads AGENTS.override.md OR AGENTS.md, and setGuidanceAll
+// sweeps the inactive one for a stale copy of the block. Refusing every non-UTF-8 file
+// outright would have let an inactive UTF-16 AGENTS.md, which holds no block, stop guidance
+// being installed in the active override at all.
+test('an inactive Codex file that is not UTF-8 and holds no block blocks nothing', () => {
+  const box = scratch();
+  const profile = path.join(box.root, '.codex');
+  fs.mkdirSync(profile);
+  const regular = path.join(profile, 'AGENTS.md');
+  const override = path.join(profile, 'AGENTS.override.md');
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('# base notes\r\n', 'utf16le')]);
+  fs.writeFileSync(regular, utf16);
+  fs.writeFileSync(override, '# Active override\n');
+  const status = guidanceStatusAll(box.root).find((row) => row.agent === 'codex');
+  assert.equal(status.error, undefined, 'status reads the active override and is not stopped by the base');
+  const row = setGuidanceAll(true, { home: box.root }).find((r) => r.agent === 'codex');
+  assert.equal(row.error, null);
+  assert.equal(row.path, override);
+  assert.ok(hasGuidance(fs.readFileSync(override, 'utf8')));
+  assert.deepEqual(fs.readFileSync(regular), utf16, 'the inactive file keeps every byte');
+  assert.equal(setGuidanceAll(false, { home: box.root }).find((r) => r.agent === 'codex').error, null,
+    'and off, which sweeps both files, is not stopped by it either');
+  assert.deepEqual(fs.readFileSync(regular), utf16);
+
+  // MUTATION: make blocksCleanup in src/agent-guidance.js return `!state.readable` and the
+  // install reports "is not UTF-8 text" for the file it was never going to write.
+});
+
+// The two mocks below stand a regular file in for the link, so this runs without the
+// privilege Windows wants for creating a symbolic link.
+function pretendSymlink(t, link, target) {
+  const realLstat = fs.lstatSync;
+  const realRealpath = fs.realpathSync;
+  const isLink = (file) => path.resolve(String(file)) === path.resolve(link);
+  t.mock.method(fs, 'lstatSync', (file, ...rest) => (isLink(file)
+    ? { isSymbolicLink: () => true } : realLstat(file, ...rest)));
+  t.mock.method(fs, 'realpathSync', (file, ...rest) => {
+    if (!isLink(file)) return realRealpath(file, ...rest);
+    if (target === null) throw Object.assign(new Error(`ENOENT: no such file, realpath '${link}'`), { code: 'ENOENT' });
+    return target;
+  });
+}
+
+test('a symlinked instruction file is written through to its target, and locked there', (t) => {
+  const box = scratch();
+  const target = path.join(box.root, 'dotfiles', 'CLAUDE.md');
+  fs.mkdirSync(path.dirname(target));
+  fs.writeFileSync(target, USER_TEXT, 'utf8');
+  fs.writeFileSync(box.file, 'the link itself\n', 'utf8');
+  pretendSymlink(t, box.file, target);
+
+  assert.equal(instructionLockPath(box.file), `${target}.wildcarding.lock`,
+    'the lock sits beside the file the write lands in, whichever name a writer used');
+  createPolicyLock({ lockPath: `${target}.wildcarding.lock` }).locked(() => {
+    assert.match(setGuidance(true, { file: box.file, backupDir: box.backupDir }).error,
+      /being written by another/);
+  });
+
+  const row = setGuidance(true, { file: box.file, backupDir: box.backupDir });
+  assert.deepEqual([row.changed, row.error, row.path], [true, null, box.file], 'reported under the name it was given');
+  assert.ok(hasGuidance(fs.readFileSync(target, 'utf8')), 'the target holds the block');
+  assert.equal(fs.readFileSync(box.file, 'utf8'), 'the link itself\n', 'and the link was not replaced');
+  assert.equal(fs.readFileSync(path.join(box.backupDir, 'CLAUDE.md.pre-guidance'), 'utf8'), USER_TEXT,
+    'the backup is the target\'s content, under the link\'s name');
+  assert.deepEqual(fs.readdirSync(path.dirname(target)), ['CLAUDE.md'], 'no temp file left beside the target');
+
+  // MUTATION: make writablePath return `resolved` without following the link, and the
+  // stand-in file is overwritten while the target keeps no block.
+});
+
+test('a symbolic link to a missing file is refused, not replaced by a regular file', (t) => {
+  const box = scratch();
+  pretendSymlink(t, box.file, null);
+  const row = setGuidance(true, { file: box.file, backupDir: box.backupDir });
+  assert.equal(row.changed, false);
+  assert.match(row.error, /symbolic link to a file that does not exist/);
+  assert.equal(fs.existsSync(box.file), false, 'nothing was created where the link is');
+
+  // MUTATION: delete the `raw === null && isSymbolicLink(file)` refusal in setGuidance and a
+  // regular file is created in the link's place.
+});
+
+test('the first-ever backup is kept for good, and a rolling one holds the file before the last change', () => {
+  // One slot rewritten on every change made damage permanent at the next automatic write:
+  // the extension's recompile and `--gates refresh` both write unasked, and each copied the
+  // damaged file over the only good copy.
+  const box = scratch();
+  fs.writeFileSync(box.file, USER_TEXT, 'utf8');
+  const first = path.join(box.backupDir, 'CLAUDE.md.pre-test');
+  const prev = path.join(box.backupDir, 'CLAUDE.md.pre-test-prev');
+  const read = (file) => fs.readFileSync(file, 'utf8');
+  const options = { file: box.file, backupDir: box.backupDir, backupName: 'CLAUDE.md.pre-test' };
+
+  setGuidance(true, options);
+  assert.equal(read(first), USER_TEXT);
+  assert.equal(read(prev), USER_TEXT);
+  const installed = read(box.file);
+
+  // A recompile: same markers, a new body, written without the user asking.
+  const recompiled = createManagedBlock({ begin: BEGIN, end: END, body: 'recompiled' });
+  setGuidance(true, { ...options, block: recompiled });
+  assert.equal(read(first), USER_TEXT, 'the original survives every later write');
+  assert.equal(read(prev), installed, 'and the rolling slot is one change behind');
+  const refreshed = read(box.file);
+
+  setGuidance(false, { ...options, block: recompiled });
+  assert.equal(read(first), USER_TEXT);
+  assert.equal(read(prev), refreshed);
+  assert.deepEqual(fs.readdirSync(box.backupDir).sort(), ['CLAUDE.md.pre-test', 'CLAUDE.md.pre-test-prev']);
+
+  // MUTATION: drop the `fs.existsSync(first)` test in setGuidance and the first assertion
+  // after the recompile fails: the original is overwritten with the installed file.
+});
+
+// AI Acolyte's decision on the in-place fallback (rampage writes its own way): the
+// unattended writers pass `inPlaceFallback: false` through setGuidanceAll, so a file held
+// through every rename attempt is left byte-identical and reported, never truncated and
+// refilled while a session may be reading it. The default keeps the fallback.
+test('inPlaceFallback: false leaves a held instruction file untouched and says so', (t) => {
+  const box = scratch();
+  fs.mkdirSync(path.join(box.root, '.claude'));
+  const file = path.join(box.root, '.claude', 'CLAUDE.md');
+  fs.writeFileSync(file, USER_TEXT, 'utf8');
+  const realRename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (path.resolve(String(to)) === path.resolve(file)) {
+      throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: 'EPERM' });
+    }
+    return realRename(from, to);
+  });
+  t.mock.method(process, 'emitWarning', () => {});
+  const [strict] = setGuidanceAll(true, { home: box.root, inPlaceFallback: false });
+  assert.match(strict.error, /stayed held through \d+ rename attempts/);
+  assert.equal(strict.changed, false);
+  assert.equal(fs.readFileSync(file, 'utf8'), USER_TEXT, 'the held file keeps every byte');
+  assert.deepEqual(fs.readdirSync(path.dirname(file)).filter((name) => name.endsWith('.tmp')), [],
+    'and its temp file is gone');
+
+  // The default, for the interactive toggles and the CLI's on/off: written in place.
+  const [lenient] = setGuidanceAll(true, { home: box.root });
+  assert.equal(lenient.error, null);
+  assert.ok(hasGuidance(fs.readFileSync(file, 'utf8')));
+
+  // MUTATION: drop `{ inPlaceFallback }` from setGuidance's write of the instruction file
+  // and the strict call writes in place too: its error is null.
+});
+
+// ── Removal arithmetic, CRLF and the byte-order mark ──────────────────────────────
+
+test('removal between CRLF lines gives every CRLF back whole', () => {
+  // Written for an instruction file whose user text is CRLF while the block is LF. The
+  // sweeps count a CRLF as one terminator and keep the user's own bytes, so the bare-LF
+  // blank line an install put above the block goes and every CRLF stays.
+  const crlf = `top\r\n\r\n\n${BEGIN}\nMANAGED\n${END}\n\r\nbottom\r\n`;
+  const removed = applyGuidance(crlf, false).text;
+  assert.equal(removed, 'top\r\n\r\n\r\nbottom\r\n');
+  assert.equal(removed.replace(/\r\n/g, '').includes('\r'), false, 'no CR was orphaned');
+  assert.equal(count(removed, '\r\n'), count(crlf, '\r\n'), 'every CRLF the user had is still there');
+});
+
+test('a file an editor saves as CRLF does not grow over on/off cycles', () => {
+  // The editor turns every line ending in the file into CRLF, the block's own included.
+  // Sweeping bare `\n` stopped at each `\r`, so `off` kept the block's CRLF terminator and
+  // the CRLF blank line above it as user bytes: "top\r\n" grew to three CRLFs after one
+  // cycle, five after two, seven after three.
+  const editorSave = (text) => text.replace(/\r?\n/g, '\r\n');
+  let text = 'top\r\n';
+  for (let cycle = 1; cycle <= 3; cycle += 1) {
+    text = applyGuidance(editorSave(applyGuidance(text, true).text), false).text;
+    assert.equal(text, 'top\r\n', `after cycle ${cycle}`);
+  }
+  // Mid-file, the user's own blank line below the block is theirs and stays.
+  assert.equal(applyGuidance(editorSave(`top\n\n${guidanceBlock()}\nbottom\n`), false).text, 'top\r\n\r\nbottom\r\n');
+
+  // MUTATION: make terminatorsBefore and terminatorsAfter in src/agent-guidance.js step over
+  // a bare `\n` only, and this fails at cycle 1 with 'top\r\n\r\n\r\n'.
+});
+
+test('only the install\'s own blank line goes, wherever the block sits', () => {
+  // At the end of the file the user's blank lines below the block are theirs, and stay.
+  assert.equal(applyGuidance(`notes\n\n${BEGIN}\nM\n${END}\n\n\n`, false).text, 'notes\n\n\n');
+  // The install writes its blank line with `\n`, like the block. A CRLF blank line right
+  // above an LF block is the user's, so it stays too.
+  assert.equal(applyGuidance(`top\r\n\r\n${BEGIN}\nM\n${END}\n`, false).text, 'top\r\n\r\n');
+
+  // MUTATION: set `inserted` in apply to `up.run.length > 1`, ignoring how the line is
+  // spelled, and the second assertion fails with 'top\r\n'.
+});
+
+test('a byte-order mark is not user text above the block', () => {
+  const BOM = String.fromCharCode(0xfeff);
+  const top = `${BOM}${BEGIN}\nstale\n${END}\n\nmy notes\n`;
+  assert.equal(hasGuidance(top), true, 'a block on the first line after the mark is found');
+  assert.equal(applyGuidance(top, false).text, `${BOM}my notes\n`, 'and removed as at the start of a file');
+  // A file holding only the mark takes the block straight after it and gets back exactly
+  // the mark: it used to come back as the mark plus a newline.
+  const on = applyGuidance(BOM, true).text;
+  assert.equal(on, `${BOM}${guidanceBlock()}`);
+  assert.equal(applyGuidance(on, false).text, BOM);
+
+  // MUTATION: drop the byte-order-mark case from markerLineAt and `hasGuidance(top)` fails.
+  // MUTATION: drop `head === BYTE_ORDER_MARK` from apply's removal separator and the
+  // removal yields the mark, a newline, then the notes.
+  // MUTATION: drop `current === BYTE_ORDER_MARK` from apply's install separator and the
+  // block lands two blank lines below the mark.
+});
+
+// The live ~/.codex/AGENTS.md on the development box opens with a byte-order mark and has
+// CRLF lines, so this is that file's round trip through the real writer: on, status, off.
+test('an AGENTS.md that opens with a byte-order mark and CRLF lines round-trips byte for byte', () => {
+  const box = scratch();
+  const profile = path.join(box.root, '.codex');
+  fs.mkdirSync(profile);
+  const agents = path.join(profile, 'AGENTS.md');
+  const original = Buffer.from(`${String.fromCharCode(0xfeff)}# Codex notes\r\n\r\n- Prefer the toolbox python.\r\n`, 'utf8');
+  fs.writeFileSync(agents, original);
+
+  const on = setGuidanceAll(true, { home: box.root }).find((row) => row.agent === 'codex');
+  assert.equal(on.error, null);
+  const installed = fs.readFileSync(agents);
+  assert.deepEqual(installed.subarray(0, original.length), original, 'the user text, mark included, is untouched');
+  const state = guidanceStatusAll(box.root).find((row) => row.agent === 'codex');
+  assert.deepEqual([state.on, state.current], [true, true]);
+  assert.equal(setGuidanceAll(true, { home: box.root }).find((row) => row.agent === 'codex').changed, false,
+    'and a second install is a no-op');
+
+  const off = setGuidanceAll(false, { home: box.root }).find((row) => row.agent === 'codex');
+  assert.equal(off.error, null);
+  assert.deepEqual(fs.readFileSync(agents), original, 'off gives back the exact bytes, mark and CRLFs');
+
+  // The same file after an editor saved it whole as CRLF, block included.
+  fs.writeFileSync(agents, Buffer.from(installed.toString('utf8').replace(/\r?\n/g, '\r\n'), 'utf8'));
+  setGuidanceAll(false, { home: box.root });
+  assert.deepEqual(fs.readFileSync(agents), original, 'and so does an editor-saved CRLF copy');
+
+  // A block at the very top, right after the mark, with the user's text below it.
+  const topBlock = Buffer.from(`${String.fromCharCode(0xfeff)}${guidanceBlock()}\r\n# Codex notes\r\n`, 'utf8');
+  fs.writeFileSync(agents, topBlock);
+  setGuidanceAll(false, { home: box.root });
+  assert.deepEqual(fs.readFileSync(agents), Buffer.from(`${String.fromCharCode(0xfeff)}# Codex notes\r\n`, 'utf8'));
+
+  // MUTATION: revert apply's removal to the bare-`\n` sweeps (the pre-port code) and the
+  // editor-saved copy keeps two CRLFs of the block's own; drop the mark from markerLineAt
+  // and the top block is never found.
+});
+
+// ── Where a marker counts ─────────────────────────────────────────────────────
+
+// The user's own text, ending in one newline so that every round trip below is exact.
+const QUOTING = '# notes\n\nThis tool opens its block with `' + BEGIN + '`.\n\n## My important section\n\n'
+  + '- rule one\n- rule two\n';
+
+test('a marker quoted in the user\'s prose is not a fence', () => {
+  // Measured by rampage before the fix: a quoted begin marker above an installed block made
+  // `on` replace everything from the quote to the block's end, the section and its rules
+  // with it, and `off` deleted the same span.
+  const stale = `${QUOTING}\n${BEGIN}\nstale\n${END}\n`;
+  assert.equal(isCurrent(stale), false);
+  assert.equal(applyGuidance(stale, true).text, `${QUOTING}\n${guidanceBlock()}`, 'refreshed where it stands, quote and section kept');
+  assert.equal(applyGuidance(stale, false).text, QUOTING, 'and off removes the block alone');
+
+  // Both markers quoted in one sentence, and no block: nothing here is a block.
+  const sentence = 'The fence is `' + BEGIN + '` and `' + END + '`; keep this note.\nNext line.\n';
+  assert.equal(hasGuidance(sentence), false);
+  const on = applyGuidance(sentence, true).text;
+  assert.equal(on, `${sentence}\n${guidanceBlock()}`, 'the block is appended and the sentence is untouched');
+  assert.equal(applyGuidance(on, false).text, sentence);
+
+  // A marker with anything else on its line is not a whole line either.
+  for (const line of [`  ${BEGIN}`, `${BEGIN} trailing`, `> ${BEGIN}`]) {
+    assert.equal(hasGuidance(`${line}\nbody\n${END}\n`), false, JSON.stringify(line));
+  }
+  // A line ending in CRLF still counts, or an editor's save would hide the block.
+  assert.equal(hasGuidance(`notes\r\n\r\n${BEGIN}\r\nbody\r\n${END}\r\n`), true);
+
+  // MUTATION: make markerLineAt in src/agent-guidance.js return `text.indexOf(marker, from)`
+  // and the first assertion fails: the refresh replaces the quote and the section.
+});
+
+test('a begin line left on its own above the block does not pull the user\'s text into it', () => {
+  const orphan = `notes\n${BEGIN}\nmy section\n\n${BEGIN}\nstale\n${END}\n`;
+  assert.equal(applyGuidance(orphan, true).text, `notes\n${BEGIN}\nmy section\n\n${guidanceBlock()}`);
+  assert.equal(applyGuidance(orphan, false).text, `notes\n${BEGIN}\nmy section\n`);
+
+  // MUTATION: delete the loop in blockRange that moves `start` to the last begin line before
+  // the end line, and the first assertion fails: "my section" is replaced along with the block.
+});
+
+test('a marker pair inside a closed code fence is a documented example, not a block', () => {
+  const doc = '# notes\n\nExample:\n\n```markdown\n' + BEGIN + '\n(example body)\n' + END + '\n```\n\nmore notes\n';
+  assert.equal(hasGuidance(doc), false);
+  const on = applyGuidance(doc, true).text;
+  assert.equal(on, `${doc}\n${guidanceBlock()}`, 'the example keeps its own body and the real block is appended');
+  assert.equal(applyGuidance(on, true).changed, false, 'and the real block below it settles');
+  assert.equal(applyGuidance(on, false).text, doc);
+
+  // A tilde fence, an indented one, and a longer fence whose example holds a shorter one.
+  assert.equal(hasGuidance(`~~~\n${BEGIN}\nx\n${END}\n~~~\n`), false, 'tilde');
+  assert.equal(hasGuidance('  ```\n' + BEGIN + '\nx\n' + END + '\n  ```\n'), false, 'indented up to three spaces');
+  assert.equal(hasGuidance('````md\n```\n' + BEGIN + '\nx\n' + END + '\n```\n````\n'), false, 'only as long a run closes');
+  // A tilde line does not close a backtick fence.
+  assert.equal(hasGuidance('```\n~~~\n' + BEGIN + '\nx\n' + END + '\n```\n'), false, 'only the same character closes');
+  // A backtick run with a backtick after it is inline code, not a fence, so the trailing
+  // fence line below the pair is an unclosed opener and hides nothing.
+  assert.equal(hasGuidance('```inline```\n' + BEGIN + '\nx\n' + END + '\n```\n'), true, 'inline code is no fence');
+
+  // MUTATION: make blockRange ignore the fences (`const example = null`) and the first
+  // assertion fails: the example reads as the block, and `on` replaces its body. In
+  // fencedSpans, drop ` {0,3}` from FENCE_OPENER, the length test, the same-character test
+  // or the backtick-info test, and the matching labelled assertion fails.
+});
+
+test('a fence can hide only a pair it encloses, and an unclosed fence hides nothing', () => {
+  // A fence the user never closed: CommonMark would run it to end of file, but a stray
+  // fence line must not make the real block invisible, or every `on` appends another copy.
+  const unclosed = `notes\n\n\`\`\`\nleft open\n\n${BEGIN}\nstale\n${END}\n`;
+  assert.equal(hasGuidance(unclosed), true);
+  assert.equal(count(applyGuidance(unclosed, true).text, BEGIN), 1);
+
+  // A gate's own code fence closing one the user left open above: the fence ends between
+  // the markers, so it encloses neither the block nor its end, and the block is real.
+  const fencedBody = createManagedBlock({ begin: BEGIN, end: END, body: 'gate\n```bash\nls\n```' });
+  const installed = fencedBody.apply('notes\n```\nleft open\n', true).text;
+  assert.equal(fencedBody.has(installed), true);
+  assert.equal(fencedBody.apply(installed, true).changed, false, 'it settles rather than appending a copy');
+  assert.equal(fencedBody.apply(installed, false).text, 'notes\n```\nleft open\n');
+
+  // MUTATION: treat an opener with no closer as running to end of file (in fencedSpans,
+  // push [opener, text.length] instead of skipping it) and the first assertion fails.
+  // MUTATION: in blockRange, test only `open < start && start < close` (drop the end
+  // marker's half of the condition) and the fenced-body block reads as absent.
 });

@@ -898,6 +898,7 @@ function gates(args) {
   // `python` before PATH, so a repository could supply the program every session start
   // ran (src/exec-resolve.js, resolvedLaunch). Nothing on PATH reads as the ENOENT it
   // always did: "spawnSync python ENOENT".
+  let compileFailure = null;
   if (cmd === 'refresh') {
     const recall = path.join(__dirname, '..', 'memory', 'recall.py');
     let compile;
@@ -910,10 +911,18 @@ function gates(args) {
     }
     if (compile.error || compile.status !== 0) {
       // Non-fatal by design: a hook that fails loudly on every session start is worse than
-      // a slightly stale block, and --gates status still reports the staleness.
-      process.stderr.write('wildcard-perms --gates refresh: compile failed, '
-        + `installing whatever was last compiled (${compile.error?.message
-          || (compile.stderr || '').trim() || `exit ${compile.status}`})\n`);
+      // a slightly stale block, and `recall.py --lint` still reports the staleness (--gates
+      // status cannot: the block and gates.generated.md go stale together). Reported after
+      // the install below, which decides which of two things is true to say.
+      compileFailure = compile.error?.message || (compile.stderr || '').trim() || `exit ${compile.status}`;
+    } else if (compile.stderr) {
+      // A compile over a readable store writes nothing to stderr, so anything here is a
+      // warning about the run (no ~/.claude/projects at all, for one), and it is passed
+      // through rather than swallowed (ported from rampage 7139659). Swallowing it is how
+      // a "cannot read <store>" warning once went unseen while gates were installed from a
+      // fallback store; recall.py now refuses that compile, and this keeps the next
+      // warning visible. The SessionStart contract is a quiet STDOUT, and this is stderr.
+      process.stderr.write(compile.stderr);
     }
   }
 
@@ -922,7 +931,34 @@ function gates(args) {
     process.exit(1);
   }
 
-  const results = setGatesAll(cmd !== 'off');
+  // `refresh` is the unattended one (a SessionStart hook), so it writes with no in-place
+  // fallback: a held instruction file is left whole and the next session retries, where an
+  // in-place write would truncate it while that very session may be loading it.
+  const results = setGatesAll(cmd !== 'off', { inPlaceFallback: cmd !== 'refresh' });
+  // A refused install is one row carrying `refusal` (src/agent-gates.js setGatesAll). Its
+  // own message advises `recall.py --gates-compile` or `wildcard-perms --gates refresh`,
+  // which is the step that just ran, so a SessionStart hook printed advice pointing back at
+  // itself on every session (rampage 7139659). Refresh says what actually happened instead.
+  const refused = results.length === 1 && results[0].refusal ? results[0] : null;
+  if (cmd === 'refresh' && refused) {
+    let why;
+    if (compileFailure !== null) {
+      why = `compile failed, and nothing was installed (${compileFailure})`
+        + (refused.refusal === 'empty' ? '' : `; ${refused.reason}`);
+    } else if (refused.refusal === 'empty') {
+      why = 'the compile found no scope:global gate blocks, so there is nothing to install; '
+        + 'add a <!-- gate --> block to a scope: global memory first';
+    } else {
+      why = `${refused.reason}; the next refresh tries again`;
+    }
+    process.stderr.write(`wildcard-perms --gates refresh: ${why}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (compileFailure !== null) {
+    process.stderr.write('wildcard-perms --gates refresh: compile failed, '
+      + `installing whatever was last compiled (${compileFailure})\n`);
+  }
   if (!results.length) {
     process.stderr.write('wildcard-perms --gates: no agent instruction file to write\n');
     process.exit(1);
@@ -1006,14 +1042,15 @@ function seed() {
 // Every Claude policy writer shares one lock, so one cannot land between Auto
 // Learn's settings write and its claims write. Reads and writes both go inside.
 function withPolicyLock(flag, run) {
-  const {
-    createPolicyLock, POLICY_LOCK_PATH, POLICY_LOCK_CODE, POLICY_LOCK_BUSY_MESSAGE,
-  } = require('../src/policy-lock');
+  const { createPolicyLock, POLICY_LOCK_PATH, POLICY_LOCK_CODE } = require('../src/policy-lock');
   try {
     createPolicyLock({ lockPath: POLICY_LOCK_PATH }).locked(run);
   } catch (err) {
+    // The busy error's own message: POLICY_LOCK_BUSY_MESSAGE, plus the code when the lock
+    // could not be CREATED for a sharing reason (EPERM, EACCES, EBUSY), which a read-only
+    // directory also produces and the constant alone would misreport as a scan.
     process.stderr.write(err?.code === POLICY_LOCK_CODE
-      ? `wildcard-perms ${flag}: ${POLICY_LOCK_BUSY_MESSAGE}\n`
+      ? `wildcard-perms ${flag}: ${err.message}\n`
       : `wildcard-perms ${flag}: write error: ${err.message}\n`);
     process.exit(1);
   }

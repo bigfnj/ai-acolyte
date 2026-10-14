@@ -17,33 +17,17 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-14 as 1.6.3** (tag `v1.6.3` at `1fb294a`, CI green on all 7 jobs, the published
+asset verified entry by entry against the local build). Every finding from the 1.6.3 confirmation
+audits, their follow-up waves and the final pre-tag audit is fixed or recorded in
+`docs/engineering-record.md`. What follows is only what is still open.
+
 The pattern worth naming, still true: **an entry rots in a way its own prose cannot show.**
 Re-verify before acting on anything here, including this paragraph.
 
 ---
 
 ## Open
-
-### In flight: tagging 1.6.3 (2026-10-14)
-
-1.6.3 is not tagged yet. The original release commit was `7cbba2b`. Every finding of its two
-confirmation audits, and of every follow-up wave (F1–F7, G1–G4, J1–J2, K1–K3, L1–L4, M1–M6,
-and wave-f10's spawn census), is fixed or recorded in `docs/engineering-record.md`, in these
-sections:
-
-- "The v1.6.3 release commit's CI failures";
-- "The v1.6.3 confirmation audit";
-- "Process spawns: the v1.6.3 lifecycle and performance confirmation";
-- "Bare-name spawns: the census";
-- "Follow-ups to the v1.6.3 confirmation audit".
-
-The exporter's header now records a third standing limit: a runner that no table names is
-judged as an ordinary program.
-
-The final audit of `7cbba2b..2074deb` found no regression. Its documentation findings are fixed
-in `4d39174`. It also found two MEDIUM security defects, both older than the delta: the cmd.exe
-injection in "Why did this prompt?", and the workspace-chosen `memory.dir`. Both are fixed in
-wave-f15 (`e3c5fd1`, `84c14c7`) and recorded under "The final pre-tag audit (2026-10-14)".
 
 ### Memory gates: three gaps found on the second workstation (2026-10-14)
 

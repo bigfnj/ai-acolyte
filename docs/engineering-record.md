@@ -35,8 +35,21 @@ is unmeasurable at the process level.
 
 ## The final pre-tag audit (2026-10-14)
 
+**Released as v1.6.3 on 2026-10-14.** The tag is at `1fb294a`.
+- CI run 38588139138 passed all 7 jobs, and release.yml run 38588481782 succeeded.
+- The published `ai-acolyte-v163.vsix` matches the local build in all 57 entries, apart from line
+  endings: CI packages from an LF checkout, the development tree is CRLF.
+- The installed build passed `drive-installed.js` 14 of 14.
+- The release list keeps 3 releases.
+- The real-editor drive, `drive-vscode.js`, is still unrun, because VS Code's pending update holds
+  its mutex (BACKLOG).
+
 The last audit before the v1.6.3 tag found two MEDIUM security defects and two NOTEs. Each was
 re-verified before it was changed, and every test named here was run against a revert of its fix.
+Releasing then surfaced one harness gap, and it is fixed:
+- `drive-installed.js`'s settings stub had no `inspect()`, so the newly machine-scoped toggles read
+  their defaults and the round trip failed 1 of 14.
+- Fixed in `1fb294a`.
 
 | Finding | Disposition | Evidence |
 |---|---|---|

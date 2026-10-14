@@ -432,7 +432,8 @@ function innerCommandPrefix(base, prefix) {
 // Per wrapper: `flags` take no value, `values` take the next token, `fused` matches an
 // option carrying its value in the same token, `operands` counts the fixed positional
 // arguments that come before the command (timeout's DURATION, flock's lock file,
-// chroot's NEWROOT, taskset's mask, chrt's priority). The option lists are each tool's
+// chroot's NEWROOT, taskset's mask, chrt's priority), and `env`/`envFused` name an option that
+// sets the command's environment (strace's `-E`, since L3). The option lists are each tool's
 // own (GNU coreutils for timeout, nice, nohup, stdbuf and chroot; util-linux for setsid,
 // ionice, flock, nsenter, unshare, taskset and chrt; GNU time; strace(1), ltrace(1),
 // valgrind(1); bash/zsh for builtin, noglob, nocorrect), cross-checked against the
@@ -478,10 +479,21 @@ const EXEC_WRAPPER_GRAMMAR = new Map(Object.entries({
   chrt: { flagPattern: /^(?:-[abdefimoprRv]+|--(?:all-tasks|batch|deadline|ext|fifo|idle|max|other|pid|reset-on-fork|rr|verbose))$/,
     values: ['-T', '-P', '-D', '--sched-runtime', '--sched-period', '--sched-deadline'],
     fused: /^(?:-[TPD].|--sched-(?:runtime|period|deadline)=)/, operands: 1 },
+  // strace's `-E VAR=VAL`/`--env=VAR=VAL` "Runs the command with the environment variable var=val
+  // set for execution", and a bare `-E VAR` "Removes var from the inherited environment variables
+  // before executing the command" (strace(1), man7.org, read 2026-10-14; src/strace.c update_env
+  // adds a value holding `=` and removes any other). So an assignment is judged as a container's
+  // `-e` is, and a bare name, which only removes, is harmless (`envUnsetsBare`; L3, 2026-10-14).
+  // `--e=` and `--en=` are `--env=` too: strace parses with getopt_long, which takes an
+  // unambiguous prefix, and `env` is its only long option that starts with `e` (src/strace.c
+  // longopts, read the same day). Until then `-E` was a plain value option, so `["strace", "-E",
+  // "LD_PRELOAD=./x.so", "cat"]` rendered (measured against 0f29d7f). `-e` is strace's filter
+  // expression, not the environment, and stays a value option.
   strace: { flagPattern: /^-[cCdDfFhiknqrtTvVwxyzZ]+$/,
     values: ['-e', '-o', '-p', '-s', '-E', '-P', '-S', '-a', '-b', '-I', '-u', '-X', '-O', '-U', '--output', '--trace',
       '--expr', '--attach', '--string-limit', '--env', '--trace-path', '--columns', '--user'],
-    fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/ },
+    fused: /^(?:-[eopsEPSabIuXOU].|--[a-z-]+=)/,
+    env: ['-E', '--env'], envFused: /^(?:-E|--e(?:nv?)?=)(.+)$/, envUnsetsBare: true },
   ltrace: { flagPattern: /^-[bcCfhiLrSStTV]+$/,
     values: ['-a', '-A', '-e', '-l', '-n', '-o', '-p', '-s', '-u', '-x', '-D', '-F', '-w', '--align', '--config',
       '--indent', '--library', '--output', '--where'],
@@ -600,14 +612,14 @@ function execWrapperInner(grammar, prefix) {
     if (grammar.lookup?.test(token)) return LOOKUP;
     if (grammar.module?.includes(token)) return ['python', '-m', ...prefix.slice(k + 1)];
     if (flags.has(token) || grammar.flagPattern?.test(token)) continue;
-    // A container's environment option (`env`/`envFused`, docker and compose, 2026-10-14):
-    // judged before the value is skipped, by envAssignmentIsUnsafe.
+    // A container's environment option (`env`/`envFused`, docker and compose, 2026-10-14), and
+    // strace's `-E`/`--env` since L3: judged before the value is skipped, by envOptionIsUnsafe.
     if (grammar.env?.includes(token)) {
-      if (envAssignmentIsUnsafe(prefix[k + 1])) return null;
+      if (envOptionIsUnsafe(grammar, prefix[k + 1])) return null;
       k += 1; continue;
     }
     const fusedEnv = grammar.envFused?.exec(token);
-    if (fusedEnv && envAssignmentIsUnsafe(fusedEnv[1])) return null;
+    if (fusedEnv && envOptionIsUnsafe(grammar, fusedEnv[1])) return null;
     if (values.has(token)) { k += 1; continue; }
     if (grammar.fused?.test(token)) continue;
     return null;
@@ -2041,6 +2053,12 @@ function assignmentIsUnsafe(token) {
 function envAssignmentIsUnsafe(value) {
   return value !== undefined && codexFoldedEnvNameIsUnsafe(String(value).split('=', 1)[0]);
 }
+// An exec wrapper's environment option (execWrapperInner). Where a bare NAME removes the variable
+// instead of copying it in (strace's `-E VAR`, `envUnsetsBare`; L3), only an assignment is judged.
+function envOptionIsUnsafe(grammar, value) {
+  if (grammar.envUnsetsBare && !String(value ?? '').includes('=')) return false;
+  return envAssignmentIsUnsafe(value);
+}
 
 // THE BUILD PROGRAMS, CODEX EXPORT ONLY (J1, 2026-10-14: the lead's answer to the maintainer
 // question G4(b) carried in docs/engineering-record.md). PROGRAM_NAMING_ENV refuses CC, CXX and
@@ -2147,8 +2165,8 @@ function codexEnvNameIsUnsafe(name) {
 // RUSTC_PROBE). So every ENVIRONMENT reader in the Codex export judges a name by this, on every
 // platform, because a rules file is not tied to the OS it was generated on and refusing more is
 // the safe failure: an `env` wrapper's assignments (wrapperIsBroad), a container's `-e`/`--env`
-// (envAssignmentIsUnsafe above) and a prefix that opens with assignments
-// (candidateEligibleForCodex), the last two through codexAssignmentIsUnsafe below. It is a
+// (envAssignmentIsUnsafe above; strace's `-E` too since L3) and a prefix that opens with assignments
+// (candidateEligibleForCodex), the first and last through codexAssignmentIsUnsafe below. It is a
 // superset of codexEnvNameIsUnsafe by construction: the exact name, its upper-case spelling
 // (every set member is upper case), and the built-in command lines with their lower-case
 // suffix (`COMPILE.c`, `CHECKOUT,v`) matched case-insensitively. That covers envNameIsUnsafe's

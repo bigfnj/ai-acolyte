@@ -1892,6 +1892,57 @@ test('an environment option that names or loads a program, and any environment f
   assert.equal(codexRuleCount(['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'sh']), 0);
 });
 
+// L3 (2026-10-14, the lead's decision): strace's `-E VAR=VAL`/`--env` sets the traced command's
+// environment, so it is judged as a container's `-e` is; a bare `-E VAR` removes VAR and is
+// harmless (strace(1); src/policy-exporters.js, strace's entry in EXEC_WRAPPER_GRAMMAR). Against
+// the base source (the L2 commit) every row of STRACE_ENV_BROAD rendered.
+const STRACE_ENV_BROAD = [
+  ['strace', '-E', 'LD_PRELOAD=./x.so', 'cat'], ['strace', '-ELD_PRELOAD=./x.so', 'cat'],
+  ['strace', '--env=LD_PRELOAD=./x.so', 'cat'], ['strace', '--env', 'LD_PRELOAD=./x.so', 'cat'],
+  ['strace', '--en=LD_PRELOAD=./x.so', 'cat'], ['strace', '--e=LD_PRELOAD=./x.so', 'cat'],   // getopt_long prefixes
+  ['strace', '-E', 'GIT_PAGER=x', 'git', 'log'], ['strace', '-f', '-E', 'PATH=.', 'ls'],
+  ['strace', '-E', 'ld_preload=./x.so', 'cat'], ['strace', '-ENode_Options=--require=./y.js', 'cat'],   // folded, by K1
+  ['strace', '-E', 'AR=./x', 'make', 'all'], ['strace', '-E', 'CARGO_HOME=./h', 'cargo', 'build'],   // J1's and K3's names
+  ['strace', '-E', 'FOO=1', '-E', 'LD_PRELOAD=x', 'cat'], ['strace', '-o', 'out.txt', '-E', 'BASH_ENV=x', 'cat'],
+  ['timeout', '5', 'strace', '-E', 'LD_PRELOAD=x', 'cat'], ['xargs', 'strace', '--env=LD_PRELOAD=x', 'cat'],
+];
+const STRACE_ENV_NARROW = [
+  // A bare name removes the variable: "Removes var from the inherited environment variables".
+  ['strace', '-E', 'LD_PRELOAD', 'cat'], ['strace', '--env', 'LD_PRELOAD', 'cat'], ['strace', '-ELD_PRELOAD', 'cat'],
+  ['strace', '--env=PATH', 'cat'],
+  // Data, and strace's other options as before.
+  ['strace', '-E', 'FOO=1', 'cat'], ['strace', '-ELANG=C', 'cat'], ['strace', '--env=TZ=UTC', 'ls'],
+  ['strace', 'cat'], ['strace', '-f', 'ls'], ['strace', '-f', '-e', 'trace=open', 'ls'], ['strace', '-etrace=open', 'ls'],
+  // Not environment options: ltrace's `-e` is a filter, flock's `-E` an exit code.
+  ['ltrace', '-e', 'malloc', 'ls'], ['ltrace', '-e', 'LD_PRELOAD=x', 'ls'], ['flock', '-E', '3', 'lock', 'cat'],
+];
+
+test('L3: strace -E/--env VAR=VAL is judged as an environment assignment, and a bare -E VAR, which unsets, is not', () => {
+  for (const prefix of STRACE_ENV_BROAD) {
+    // MUTATION: drop `env` from strace's grammar entry. The separated `-E`/`--env` rows render.
+    // MUTATION: drop `envFused` from it. The fused `-E...` and `--env=` rows render.
+    // MUTATION: narrow envFused to `--env=` alone. The `--en=` and `--e=` rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} hands the traced command a program`);
+  }
+  for (const prefix of STRACE_ENV_NARROW) {
+    // MUTATION: drop `envUnsetsBare: true` from strace's entry. The bare-name rows are refused
+    // as a container's bare `-e NAME` is, and this fails.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is as narrow as its command`);
+  }
+  // A data assignment does not narrow a broad command.
+  assert.equal(codexRuleCount(['strace', '-E', 'FOO=1', 'sh']), 0);
+  // The wrappers whose environment options set a variable but that are broad at any depth already
+  // (ALWAYS_BROAD_WRAPPERS), and nsenter's `-e`/`--env`, which copies the target process's
+  // environment and is absent from its table, so unknown: pins, refused before and after.
+  for (const prefix of [['systemd-run', '-E', 'LD_PRELOAD=x', 'cat'], ['systemd-run', '--setenv=FOO=1', 'cat'],
+    ['firejail', '--env=LD_PRELOAD=x', 'cat'], ['sudo', 'LD_PRELOAD=x', 'cat'], ['gdb', '--args', 'cat'],
+    ['nsenter', '-t', '1', '-e', 'cat'], ['nsenter', '-t', '1', '--env', 'cat']]) {
+    assert.equal(codexRuleCount(prefix), 0, JSON.stringify(prefix));
+  }
+  // Claude half: strace is a wrapper root there, refused at any depth already.
+  assert.deepEqual(renderClaudePermissions(['Bash(strace -E LD_PRELOAD=x cat *)'], { includeReviewed: true }), []);
+});
+
 // node options that name a file deciding what loads (src/policy-exporters.js, node's `broad`).
 // Each row's verdict at 1d66310 is in the commit that added this test.
 const NODE_FILE_BROAD = [

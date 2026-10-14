@@ -55,6 +55,23 @@ it found a second real defect. The confirmation audit added two LOW findings in 
   - The node images have no git and run as root, so 13 tests fail there on any commit. Compare against a control run on the base commit.
 - Windows: a `.cmd` stand-in's hidden console host keeps its cwd for about 1 s after the last client dies, and Node 24's `rmSync` does not retry that EPERM.
 
+## The v1.6.3 confirmation audit (2026-10-14)
+
+Two read-only audits re-checked `7cbba2b` against v1.6.2 before tagging. The first covered
+regressions and dead code: suites green, and 281 common commands showed no new refusals; the
+census catches planted defects. The second covered lifecycle and performance: no new leak, and
+every figure at or better than v1.6.2. Their findings, beyond the two in the CI table above:
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| A stored null-rule family that had not run since the upgrade could be written despite a user deny or managed ask (MEDIUM) | **FIXED**, `819e4ab` | Reproduced with no scan: a deny on `Bash(cargo --version *)` and a managed ask on `Bash(df -h:*)` listed as policy `unknown`, and a reviewed apply wrote both. `takeExporterRule` now runs first in `refresh` and sets the stored rule to what the write itself renders (`candidateClaudePermission`, now exported). Every reader judges the rule that lands. `revivesNullRule` (b4643ed) was a second, untested source of the same rule and is removed. Pinned by `test/auto-learn-null-revival.test.js`, which uses a scanner that throws if called. |
+| A missing configured history root pinned the Codex evidence rebuild in silence | **FIXED**, `3ce06e0` | It blocks auto-safe and makes a reviewed apply throw, so it is a reason, not a note. `rebuildHeldOpenReason` names folders only and never a path, and fires only when a pending transcript was not found by the walk. The scan-health line's ✓ is a follow-up (BACKLOG). |
+| A pending project-trust verdict rendered "No saved permissions yet" | **FIXED**, `8f2af8f` | The empty message also requires `codexCounted`. While the verdict is pending, the list ends with a "not listed yet" line. Controls cover the settled verdict and the truly empty case. |
+| make's other program variables still rendered in Codex export | **FIXED**, `b9854f6` | Reproduced: 44 broad rows, for example `make AR=./x lib`. Refused now: every program in GNU make's built-in table outside VMS (`src/default.c`), the GNU Coding Standards program variables, and the built-in rules' full command lines (`COMPILE.*`, `LINK.*` and so on). Matching is case-exact. 18 data rows still render (VERBOSE, PREFIX, DESTDIR, CFLAGS, …). just is unchanged: measured with just 1.58.0, it has no built-in variables, and overriding an undeclared one is an error. |
+| `memory.recallScript` and `backupMirrorPath` were window-scoped | **FIXED**, `177c901` | Both are `"scope": "machine"`, read through `inspect().globalValue` like `autoLearn.codexExecutable`. A workspace value is never used. |
+| The push figures left out CreateProcess time on the host thread | wave-f7 | MEASURED: `execFile` blocks its caller inside CreateProcess, at p50 428 ms for the real winget `codex.exe` and 203 ms for node. The recorded "106 ms cold" held only with a `.cmd` stand-in. |
+| The hook's in-place fallback could empty settings.json under a teardown kill | **FIXED**, `3c2724d` | See "A held settings.json was rewritten in place by a hook that can be killed" in the v1.6.2 post-release audit section. |
+
 ## The v1.6.2 post-release audit (2026-10-14)
 
 Four read-only audits ran over the released v1.6.2: regressions, dead code and dead ends,

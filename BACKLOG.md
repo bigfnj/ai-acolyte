@@ -28,18 +28,18 @@ Re-verify before acting on anything here, including this paragraph.
 
 The 1.6.3 release commit (7cbba2b) is not tagged. Its CI failures, the freed-PID tree kill and
 the cached trust timeout are fixed and recorded under "The v1.6.3 release commit's CI failures
-(2026-10-14)". Still open from the confirmation audit of that commit:
+(2026-10-14)". The first confirmation audit's other five findings are fixed and recorded under
+"The v1.6.3 confirmation audit (2026-10-14)". Its follow-ups, in flight on wave-f9:
 
-- **MEDIUM.** A stored null-rule family that has not run since the upgrade can be written
-  despite a user deny or managed ask. The boundary checks judge the stored null field; the write
-  renders the derived rule. Deny still wins at runtime, so this is a dead entry reported as
-  applied, not an escalation.
-- **LOW.** A missing configured history root pins the Codex evidence rebuild without saying so.
-- **LOW.** A pending project-trust verdict can render "No saved permissions yet".
-- **LOW.** make's other implicit program variables (`RM=`, `AR=`, …) still render in Codex
-  export.
-- **LOW.** `memory.recallScript` and `backupMirrorPath` are window-scoped, so a workspace can
-  choose them.
+- `recallScriptPath`'s dead fallbacks search workspace folders and the project's old name.
+  They are reachable only without a bundled copy, but when they are reached a workspace would
+  choose the script the extension runs.
+- `applyUnlocked` judges a family's main rule, not the alternate spelling it also writes.
+  The same dead-entry class as the null-rule fix, and it predates it.
+- A rebuild held open by a missing folder shows ✓ on the scan-health line, although it blocks
+  auto-safe. Nobody has checked yet whether a folder deleted for good pins it forever.
+- Two acceptances need recording: compiler-plugin flags in make's data variables, and AR/LD in
+  Claude-side env-prefixed rules.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
 and no performance regression; every 1.6.3 figure is at or better than 1.6.2. It found:

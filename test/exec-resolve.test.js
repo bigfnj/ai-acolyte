@@ -44,7 +44,7 @@ test('a batch shim is launched through the command processor and reports its out
   fs.writeFileSync(path.join(dir, 'wcprobe.cmd'), '@echo probe-ok %~1\r\n', 'utf8');
 
   const launch = withPath(dir, () => commandLaunch('wcprobe', ['first arg']));
-  assert.equal(launch.file, process.env.ComSpec || 'cmd.exe');
+  assert.equal(launch.file, path.isAbsolute(process.env.ComSpec || '') ? process.env.ComSpec : path.join(process.env.SystemRoot, 'System32', 'cmd.exe'));
   assert.equal(launch.options.windowsVerbatimArguments, true);
 
   const result = spawnSync(launch.file, launch.args, {
@@ -457,4 +457,104 @@ test('the shim npm writes is run as the node script it names; every other shape 
   fs.writeFileSync(path.join(dir, 'batch.bat'), text);
   assert.equal(npmShimLaunch(path.join(dir, 'batch.bat'), []), null, 'a .bat, which npm never writes');
   assert.equal(npmShimLaunch(process.execPath, []), null, 'a real executable');
+});
+
+// A NAME NOTHING ON PATH HOLDS NEVER REACHES spawn (2026-10-14). commandLaunch hands an
+// unresolved name back bare, and libuv looks for a bare name in the current directory
+// before PATH unless the SPAWNING process's own environment carries
+// NoDefaultCurrentDirectoryInExePath (the child's `env` does not count). The
+// precondition runs that hazard for real: a copy of node named like the program, in this
+// process's cwd, with the variable removed from this process, answers a bare spawn.
+// resolvedLaunch refuses the same name with the error spawn raises when there is nothing
+// to find at all, word for word.
+// The cwd is put back in a `finally`, not a hook: scratch()'s removal is a hook registered
+// first, and Windows will not remove a directory a process is standing in.
+test('a name nothing on PATH holds is refused before spawn, so a copy planted in the current directory never runs', { skip: !windows }, () => {
+  const { resolvedLaunch } = require('../src/exec-resolve');
+  const dir = scratch('bare');
+  const name = 'wc-planted-probe';
+  fs.copyFileSync(process.execPath, path.join(dir, `${name}.exe`));
+  const saved = { cwd: process.cwd(), noCwd: process.env.NoDefaultCurrentDirectoryInExePath };
+  delete process.env.NoDefaultCurrentDirectoryInExePath;
+  process.chdir(dir);
+  try {
+    const bare = commandLaunch(name, ['--version']);
+    assert.equal(bare.resolved, null, 'precondition: nothing on PATH is called this');
+    // Endpoint scanning can hold the first run of a freshly copied executable for seconds.
+    const ran = spawnSync(bare.file, bare.args, { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    assert.equal(String(ran.stdout).trim(), process.version, 'precondition: a bare spawn ran the copy in the current directory');
+
+    // MUTATION: make resolvedLaunch return commandLaunch(name, args) whether or not it
+    // resolved. Both throws fail, and a caller spawns the bare name above. Confirmed 2026-10-14.
+    assert.throws(() => resolvedLaunch(name, ['--version']),
+      (error) => error.code === 'ENOENT' && error.message === `spawn ${name} ENOENT` && error.path === name);
+    const absent = 'wc-absent-probe-xyz';
+    const nowhere = spawnSync(absent, ['x']).error;
+    assert.equal(nowhere?.code, 'ENOENT', 'precondition: the name is nowhere at all');
+    assert.throws(() => resolvedLaunch(absent, ['x'], 'spawnSync'),
+      (error) => error.message === nowhere.message && error.code === nowhere.code && error.syscall === nowhere.syscall,
+      'the words of spawn\'s own ENOENT');
+    // A name PATH does hold is launched exactly as commandLaunch would.
+    assert.deepEqual(resolvedLaunch(process.execPath, ['--version']), commandLaunch(process.execPath, ['--version']));
+  } finally {
+    process.chdir(saved.cwd);
+    if (saved.noCwd === undefined) delete process.env.NoDefaultCurrentDirectoryInExePath;
+    else process.env.NoDefaultCurrentDirectoryInExePath = saved.noCwd;
+  }
+});
+
+test('POSIX hands resolvedLaunch\'s name to spawn unchanged, because execvp walks PATH alone', { skip: windows }, () => {
+  const { resolvedLaunch } = require('../src/exec-resolve');
+  assert.deepEqual(resolvedLaunch('wc-absent-probe-xyz', ['x']), commandLaunch('wc-absent-probe-xyz', ['x']));
+});
+
+// A RELATIVE PATH ENTRY IS THE CURRENT DIRECTORY BY ANOTHER NAME (2026-10-14). "." is
+// one, and so is an entry whose variable was never expanded, which a REG_SZ PATH value
+// leaves literal: a repository can ship a folder called `%TOOLS%`. Each holds a shim
+// here, and only the absolute entry may answer.
+test('a relative PATH entry is never searched, so "." and an unexpanded %VAR% entry cannot supply a program', { skip: !windows }, () => {
+  const dir = scratch('relative');
+  const elsewhere = path.join(dir, 'elsewhere');
+  const unexpanded = path.join('%ACOLYTE_NEVER_EXPANDED%', 'bin');
+  for (const folder of [dir, path.join(dir, unexpanded), elsewhere]) {
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'wcrelprobe.cmd'), '@echo probe-ok\r\n');
+  }
+  const saved = { cwd: process.cwd(), PATH: process.env.PATH };
+  process.chdir(dir);
+  try {
+    // MUTATION: drop the isAbsolute filter from resolveExecutable's PATH walk. The first
+    // relative entry answers, with a path relative to this cwd. Confirmed 2026-10-14.
+    process.env.PATH = [unexpanded, '.', elsewhere].join(path.delimiter);
+    // PATHEXT supplies the extension, so its casing is whatever the box uses.
+    assert.equal(String(resolveExecutable('wcrelprobe')).toLowerCase(), path.join(elsewhere, 'wcrelprobe.cmd').toLowerCase());
+    process.env.PATH = [unexpanded, '.'].join(path.delimiter);
+    assert.equal(resolveExecutable('wcrelprobe'), null, 'relative entries alone find nothing');
+  } finally {
+    process.chdir(saved.cwd);
+    process.env.PATH = saved.PATH;
+  }
+});
+
+// cmd.exe BY ABSOLUTE PATH TOO (2026-10-14). A batch shim was launched through
+// `process.env.ComSpec || 'cmd.exe'`, and that bare fallback is the same current-directory
+// lookup. ComSpec is used when it names a file outright, System32's cmd.exe otherwise.
+test('a batch shim runs System32\'s cmd.exe when ComSpec is missing or not a full path', { skip: !windows }, (t) => {
+  const dir = scratch('comspec');
+  fs.writeFileSync(path.join(dir, 'wccomspec.cmd'), '@echo probe-ok\r\n');
+  const saved = process.env.ComSpec;
+  t.after(() => { if (saved === undefined) delete process.env.ComSpec; else process.env.ComSpec = saved; });
+  const system = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  for (const value of [undefined, 'cmd.exe']) {
+    if (value === undefined) delete process.env.ComSpec; else process.env.ComSpec = value;
+    // MUTATION: put `process.env.ComSpec || 'cmd.exe'` back. Unset, the file is the bare
+    // 'cmd.exe'; relative, it is the relative value as given. Confirmed 2026-10-14.
+    const launch = withPath(dir, () => commandLaunch('wccomspec', []));
+    assert.equal(launch.file, system, `ComSpec ${value === undefined ? 'unset' : JSON.stringify(value)}`);
+    const result = spawnSync(launch.file, launch.args, { encoding: 'utf8', windowsHide: true, ...launch.options });
+    assert.match(result.stdout, /probe-ok/);
+  }
+  const named = path.join(dir, 'named', 'cmd.exe');
+  process.env.ComSpec = named;
+  assert.equal(withPath(dir, () => commandLaunch('wccomspec', [])).file, named, 'a full ComSpec is still the one used');
 });

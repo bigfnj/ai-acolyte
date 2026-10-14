@@ -247,7 +247,11 @@ function codexVersionStatus(options = {}) {
     if (!id.resolved) return missing(executable, now);
     const hit = cached(executable, id, now);
     if (hit) return hit;
-    const launch = commandLaunch(executable, ['--version']);
+    // THE FILE THE IDENTITY NAMED, not a second walk for the name (2026-10-14). A second
+    // walk could find a different file than the one the cache is keyed on, and one that
+    // found nothing handed spawn the bare name, which libuv looks for in the current
+    // directory first (src/exec-resolve.js, resolvedLaunch). An absolute path never is.
+    const launch = commandLaunch(id.resolved, ['--version']);
     const run = typeof options.run === 'function' ? options.run : spawnSync;
     const result = run(launch.file, launch.args, { ...launch.options, encoding: 'utf8', windowsHide: true,
       timeout: options.timeoutMs || DEFAULT_TIMEOUT_MS });
@@ -303,7 +307,8 @@ function probeCodexVersionStatus(options = {}) {
   const epoch = probeEpoch;
   const promise = new Promise((resolve) => {
     try {
-      const launch = commandLaunch(executable, ['--version']);
+      // The identity's file, as in codexVersionStatus above.
+      const launch = commandLaunch(id.resolved, ['--version']);
       const run = typeof options.execFile === 'function' ? options.execFile
         : options.offThread === true ? require('./spawn-thread').execFileOffThread : execFile;
       const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;

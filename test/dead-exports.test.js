@@ -146,8 +146,8 @@ const TEST_ONLY = {
   // exercised; this census is what noticed, on the merge.
   'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRules', 'enterpriseRequirements'],
   'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'reconcileDerived'],
-  // resolveExecutable left this list 2026-10-13: src/codex-version.js keys its cache on it.
-  'src/exec-resolve.js': ['quoteForCommandProcessor'],
+  // resolveExecutable left this list 2026-10-13 (src/codex-version.js keys its cache on it); taskkillPath joined 2026-10-14 (the config worker's grace kill is endProcessTree's now).
+  'src/exec-resolve.js': ['quoteForCommandProcessor', 'taskkillPath'],
   'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
   'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl'],
   'src/legacy-backup-cleanup.js': ['parseBackupText'],
@@ -170,9 +170,9 @@ const TEST_ONLY = {
   // was what made the census count it as a production consumer.
   'src/settings-write.js': ['SETTINGS_ABSENT'],
   'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
-  // The VS Code host is the real consumer of these two (package.json `main`); the
-  // lifecycle tests load the module by path and call both. Off HELD 2026-10-14.
-  'vscode-extension/extension.js': ['activate', 'deactivate'],
+  // extension.js's activate and deactivate left this list 2026-10-14: the VS Code host is their real consumer (package.json
+  // `main`), and scripts/measure-push-host-thread.js now loads a tree's extension.js by path and calls both, which the
+  // census counts. Before that only the lifecycle tests did, which is why they were here.
   // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
   'vscode-extension/memoryLint.js': ['pickPrimaryDir'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test

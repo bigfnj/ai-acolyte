@@ -637,3 +637,49 @@ test('a workspace-level Codex executable is never run, and a user-level one is',
     await control.dispose();
   }
 });
+
+// "WHY DID THIS PROMPT?" NEVER RUNS A CODEX FROM THE HOST'S CWD (2026-10-14). Its
+// execpolicy check handed execFile whatever commandLaunch returned, and for a name that
+// PATH does not hold that is the bare name, which libuv looks for in the current
+// directory first unless the extension host's own environment carries
+// NoDefaultCurrentDirectoryInExePath. The host's cwd is wherever VS Code was started. Here
+// it holds a copy of node named like the configured executable, a --require preload
+// writes a flag only when it runs as that copy, and the variable is removed from this
+// process for the call: an agent shell often sets it, and with it set the unfixed code
+// passes too.
+test('"Why did this prompt?" refuses a codex name PATH does not hold, and never runs the copy in the host\'s cwd', { skip: process.platform !== 'win32' }, async (t) => {
+  const box = fixture(t);
+  const name = 'acolyte-planted-codex';
+  const cwd = path.join(box.base, 'host-cwd');
+  fs.mkdirSync(cwd);
+  fs.copyFileSync(process.execPath, path.join(cwd, `${name}.exe`));
+  const flag = path.join(box.base, 'planted-codex-ran');
+  const marker = path.join(box.base, 'planted-marker.js');
+  fs.writeFileSync(marker, `if (/acolyte-planted-codex\\.exe$/i.test(process.execPath)) require('fs').writeFileSync(${JSON.stringify(flag)}, process.argv.slice(1).join(' '));\n`);
+  const layers = deferredLayers();
+  const app = harness(box, { layers, codexExecutable: name, picks: ['codex', 'Bash'], input: 'fd --version' });
+  const saved = { cwd: process.cwd(), noCwd: process.env.NoDefaultCurrentDirectoryInExePath, nodeOptions: process.env.NODE_OPTIONS };
+  try {
+    delete process.env.NoDefaultCurrentDirectoryInExePath;
+    // NODE_OPTIONS reads a backslash inside quotes as an escape: forward slashes.
+    process.env.NODE_OPTIONS = `--require "${marker.split(path.sep).join('/')}"`;
+    process.chdir(cwd);
+    const explained = app.commands.get('permission-wildcarding.autoLearnWhy')();
+    await until(() => layers.calls.length === 1, 3000, 'the trust refresh to be asked');
+    layers.pending[0].answer();
+    await explained;
+  } finally {
+    process.chdir(saved.cwd);
+    for (const [key, value] of [['NoDefaultCurrentDirectoryInExePath', saved.noCwd], ['NODE_OPTIONS', saved.nodeOptions]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await app.dispose();
+  }
+  // MUTATION: launch execFileCaptured's check from commandLaunch again. execFile gets the
+  // bare name, the copy in the cwd runs (writing the flag once it is past the scan), and
+  // the check fails as that copy's error instead. Confirmed 2026-10-14.
+  assert.equal(fs.existsSync(flag), false, `the codex in the host's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}`);
+  const failed = app.shown.filter((entry) => entry.level === 'error').map((entry) => entry.message);
+  assert.deepEqual(failed, [`Codex execpolicy check failed without changing rules: spawn ${name} ENOENT`],
+    'the failure reads as spawn\'s own ENOENT, as it did before');
+});

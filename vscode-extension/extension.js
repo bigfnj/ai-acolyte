@@ -34,7 +34,7 @@ const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
-const { commandLaunch, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
+const { resolvedLaunch, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
 const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
@@ -1822,10 +1822,10 @@ async function cycleAutoLearnMode() {
 }
 
 function execFileCaptured(executable, args) {
-  // Same PATHEXT asymmetry the Auto Learn validator hits: a bare name that a
-  // PATH check finds can still be unlaunchable when it resolves to a shim.
-  const launch = commandLaunch(executable, args);
+  // Resolved on PATH here (a shim needs cmd.exe), and never run bare: a name nothing matches
+  // rejects as spawn's own ENOENT, not as the copy libuv finds in the host's cwd first.
   return new Promise((resolve, reject) => {
+    const launch = resolvedLaunch(executable, args);
     endTreeAfter(trackChild(execFile(launch.file, launch.args, {
       windowsHide: true, maxBuffer: 1024 * 1024, ...launch.options,
     }, (error, stdout, stderr) => {

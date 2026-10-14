@@ -880,11 +880,24 @@ function gates(args) {
 
   // `refresh` = compile then install, which is what a SessionStart hook wants: edit a gate
   // in a memory file and the next session is correct with no remembered step. recall.py
-  // re-execs itself into the toolbox venv, so a bare `python` is enough here.
+  // re-execs itself into the toolbox venv, so any `python` on PATH is enough here.
+  //
+  // FOUND ON PATH, NEVER SPAWNED BARE (2026-10-14). A SessionStart hook (nothing here
+  // registers one; a user can) runs in the session's project directory, and by hand this
+  // runs wherever the shell stands. On Windows libuv looks in that directory for a bare
+  // `python` before PATH, so a repository could supply the program every session start
+  // ran (src/exec-resolve.js, resolvedLaunch). Nothing on PATH reads as the ENOENT it
+  // always did: "spawnSync python ENOENT".
   if (cmd === 'refresh') {
     const recall = path.join(__dirname, '..', 'memory', 'recall.py');
-    const compile = spawnSync(process.env.TOOLBOX_PYTHON || 'python', [recall, '--gates-compile'],
-      { encoding: 'utf8' });
+    let compile;
+    try {
+      const launch = require('../src/exec-resolve').resolvedLaunch(process.env.TOOLBOX_PYTHON || 'python',
+        [recall, '--gates-compile'], 'spawnSync');
+      compile = spawnSync(launch.file, launch.args, { ...launch.options, encoding: 'utf8' });
+    } catch (error) {
+      compile = { error };
+    }
     if (compile.error || compile.status !== 0) {
       // Non-fatal by design: a hook that fails loudly on every session start is worse than
       // a slightly stale block, and --gates status still reports the staleness.

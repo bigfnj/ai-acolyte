@@ -33,6 +33,162 @@ is unmeasurable at the process level.
 
 ---
 
+## Process-spawn follow-ups (2026-10-14)
+
+Three follow-ups to "Process spawns: the v1.6.3 lifecycle and performance confirmation", below,
+each re-verified in the code before it was changed.
+
+### Bare-name spawns: the census — FIXED
+
+1e11efa fixed this for taskkill. The premise, re-measured with libuv 1.52.1 and Node 24.19.0:
+handed a bare name, libuv looks in the CURRENT DIRECTORY before PATH, and the directory is the
+child's `cwd` option when one is given, the spawner's otherwise. A copy of node named
+`python.exe` in that directory answered a bare `spawnSync('python')` in place of Python 3.14.
+Only the SPAWNING process's own environment can turn it off, with
+`NoDefaultCurrentDirectoryInExePath` (libuv asks `NeedCurrentDirectoryForExePathW`, which reads
+the caller's environment). Setting it in the child's `env` did nothing, and with it set in the
+spawner the copy did not run. The agent shell this was measured from sets it, so every test
+below deletes it from the process that spawns.
+
+The census covers every `spawn`, `spawnSync`, `execFile` and `fork` in `src/`, `bin/` and
+`vscode-extension/` (the packed `vscode-extension/src/` copy excluded). The registered
+PostToolUse hook spawns nothing; `bin/wildcard-perms` has one spawn, behind `--gates`.
+
+| Site | Program | Runs in | Bare name before | Planted copy could run | Disposition |
+|---|---|---|---|---|---|
+| `--gates refresh` (`bin/wildcard-perms:895#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
+| `execFileCaptured` in vscode-extension/extension.js, "Why did this prompt?" | `autoLearn.codexExecutable`, default `codex` | the extension host's: wherever VS Code was started, per 1e11efa (not re-measured; listing a live host's directory handle needs elevation) | yes: commandLaunch handed an unresolved name back bare | **yes**, reproduced | **FIXED**: rejects with "spawn codex ENOENT", the words execFile used |
+| The version probe, both doors (`src/codex-version.js:254#commandLaunch`, `src/codex-version.js:311#commandLaunch`) | the located codex | `--learn status`: the shell's; the dashboard probe: the host's | only when the second PATH walk, made after the location was cached, found nothing | in that window only | **FIXED**: launches the identity's own file, so the launch and the cache key are one file |
+| Every `.cmd`/`.bat` launch (`src/exec-resolve.js:124#systemProgram`) | `ComSpec`, else `cmd.exe` | every caller's | yes, with ComSpec unset or relative | then | **FIXED**: ComSpec only when absolute, else System32's |
+| The PATH walk itself (`src/exec-resolve.js:87#isAbsolute`) | any | — | — | yes, through a relative entry: `.`, or an unexpanded `%VAR%\bin` that a REG_SZ PATH leaves literal | **FIXED**: absolute entries only |
+| `defaultCodexValidator` in src/auto-learn-manager.js (the Auto Learn `execpolicy check`) | `codexExecutable`, default `codex` | the Auto Learn worker thread's (the host's); `--learn`: the shell's | no: unresolved on Windows throws its "codex executable not found" | no | none |
+| `nativeRpc` and `nativeRpcAsync` in src/codex-mcp-config.js | `nodeExecutable`, default `node` | the caller's | no: unresolved throws | no | none |
+| The config worker's app-server | `npmShimLaunch`'s node, else commandLaunch | `request.home` | no: unresolved is "Codex executable is not reachable" | no | none |
+| `endProcessTree`, the worker's grace kill | `taskkillPath()` | — | no, since 1e11efa | no | none; the grace kill is the next entry |
+| `npmShimLaunch`'s node | the shim's own `node.exe`, else PATH's | — | no: none found returns null and the `.cmd` route is used | no | none |
+| `run` in src/codex-recall.js | an absolute `pythonExecutable`, an absolute existing `TOOLBOX_PYTHON`, or the toolbox manifest's absolute path | the worker's | no: anything else is the lexical fallback | no | none |
+| The recall rebuild, sync and gate compile (three `execFile(st.py, …)` in extension.js) | `toolboxPython()`: `CODEX_TOOLBOX` or `%LOCALAPPDATA%\DevToolbox`, then `python\.venv\Scripts\python.exe` | the host's | no: a path, checked to exist first | no; a relative `CODEX_TOOLBOX` would be the user's own environment | none |
+| src/spawn-thread.js's `execFile` | the caller's file: only the version probe | the host's | as the probe | — | covered by the probe row |
+| `new Worker()` (spawn-thread, autoLearnWorkerRunner) | a module path, not a program | — | — | — | not a spawn |
+
+**ACCEPTED-RECORDED, POSIX.** execvp walks PATH alone, so no site above searches the cwd
+there. An empty or relative PATH entry is a cwd lookup that the user's own PATH asked for,
+and execvp honours it; nothing here changes POSIX. **Not in the census:** the `scripts/`
+harnesses spawn bare `taskkill`, `git` and `powershell.exe`, and some spawn
+`commandLaunch('codex')` without checking it resolved. They are maintainer tools run from the
+checkout and are not shipped.
+
+**What changed.** `resolvedLaunch(name, args, syscall)` (`src/exec-resolve.js:143#resolvedLaunch`)
+is commandLaunch that never returns a bare name. On Windows an unresolved name throws the error
+spawn raises when there is nothing to find, in its words: `<syscall> <name> ENOENT`, code ENOENT,
+with spawn's `syscall`. The hook's compile and `execFileCaptured` use it, the second inside the
+promise, so it is a rejection there as before. extension.js is line-neutral. The version probe
+launches `id.resolved`. On POSIX that is the file `walkFor` found, which is the one execvp would
+run. A python found through PATHEXT can now be a `.cmd` or `.bat`, such as a pyenv-win shim, and
+it runs through cmd.exe. A bare spawn skipped those, because libuv tries `.com` and `.exe` only.
+
+**Pinned by**, each confirmed to fail with its own fix reverted:
+- "CLI --gates refresh never runs a python planted in the project directory it runs in"
+  (test/cli-gates.test.js). Reverted, the planted copy ran `recall.py --gates-compile`.
+- "\"Why did this prompt?\" refuses a codex name PATH does not hold, and never runs the copy in
+  the host's cwd" (test/dashboard-project-trust.test.js). Reverted, the planted copy ran the
+  `execpolicy check` arguments.
+- "the version probe launches the file its identity resolved, not whatever a second PATH walk
+  finds" (test/codex-version.test.js). It covers both doors, each reverted separately.
+- In test/exec-resolve.test.js:
+  - "a name nothing on PATH holds is refused before spawn, so a copy planted in the current
+    directory never runs". Its precondition runs the hazard for real.
+  - "a relative PATH entry is never searched, so \".\" and an unexpanded %VAR% entry cannot
+    supply a program".
+  - "a batch shim runs System32's cmd.exe when ComSpec is missing or not a full path".
+- Neutering `resolvedLaunch` alone fails both call-site tests as well.
+
+### The config worker's grace kill read `exitCode` alone — UNREACHABLE as shipped; FIXED anyway
+
+**Verified in form.** The kill in the worker's `finally` (src/codex-mcp-config.js) skipped a
+child only when `exitCode` was set. A child that exited by a signal has `exitCode` null and
+`signalCode` set, so this is the shape 6dfe60b fixed in `endProcessTree`. **Refuted as a live
+defect**, measured on this box with Node 24.19.0:
+- On Windows, `signalCode` is set only when THIS process ends the child with `child.kill()`
+  (`SIGTERM`, exit code null). An outside `taskkill /F` gives exit code 1 with no signal, and
+  an exit by itself gives its own code. libuv sets the exit signal only in `uv_process_kill`,
+  and the worker never calls `child.kill()` on Windows.
+- On POSIX the old branch was `child.kill('SIGTERM')`. After 'exit', Node's `kill` finds
+  `_handle` null and returns false without signalling (read from Node 24's own source; the
+  probe returned false on all three exit kinds).
+
+**What changed.** The grace kill is now `endProcessTree(child)`. Its guard reads both codes,
+and on Windows it runs System32's taskkill /T. On POSIX it tries the group signal, which fails
+with ESRCH because the app-server leads no group, and then calls `child.kill()`, exactly what
+the old branch did. One guard for every tree kill means a later `child.kill()` in the worker
+cannot make the old shape reachable. Its Windows taskkill is now asynchronous; the worker was
+only awaiting 'close' anyway. Pinned by "the config worker's grace kill skips an app-server
+that exited by a signal, and still ends a live one" (test/codex-mcp-config.test.js,
+Windows-only, because on POSIX the two versions behave the same). It drives the state in the
+real worker. The stand-in's node refuses `initialize`, so the worker reaches its `finally` only
+once that node is running, and as the `finally` begins a preload kills the `.cmd` stand-in's
+cmd.exe, so the exit is by a real signal. The node under it holds stdout, so 'close' comes 3 s
+after the 1 s grace. The preload records every taskkill and runs none, and each run is bounded
+at 30 s. Under the old kill it recorded
+`taskkill /PID <the signalled PID> /T /F`, 1.0 s after that PID's exit. Its control, a live
+app-server, records the tree kill with the fix in place. 1e11efa's planted-taskkill worker test
+still fails with taskkill named bare, now in `endProcessTree`.
+
+### The push bench is in the repo — DONE
+
+`scripts/measure-push-host-thread.js` is the measurement behind the push figures in "Process
+spawns", below. Until now it lived outside the repo as four files (the bench, a PowerShell
+loop and two summarisers); it is now one script. Usage is in its header. What it guarantees:
+- Every sample is a fresh process, the trees alternate sample by sample, and it reports n and
+  p50 [min-max].
+- A tree is this checkout, or any revision extracted with `git -c core.autocrlf=false archive`
+  into its own temp dir.
+- It writes only under one temp dir it creates, and checks every write against that dir. A
+  sample's HOME, USERPROFILE, CODEX_HOME, TMP, TEMP, APPDATA and LOCALAPPDATA all point there,
+  and the sample asserts this itself before it runs anything.
+- The provider credentials are removed using the one shared list,
+  `PROVIDER_CREDENTIAL_ENV`, plus the rest of the `OPENAI_` and `AZURE_OPENAI_` families.
+- The codex it is given is executed only, never written. A Codex install location (winget
+  Links and Packages, npm's global folder, the folder and link target of the given codex and of
+  PATH's) is never written, and `--tmp` inside one is refused before anything is created. A
+  temp dir inside the checkout is refused as well. Tested against fake roots: all three
+  refusals fire, and nothing is created.
+- `--stand-in` writes a node stand-in into the temp dir, for a box with no codex.
+
+**Re-run 2026-10-14** with the real winget codex.exe 0.161.0, n=11, `--before 2d8d223^ --after
+2d8d223`, on a box shared with another worktree's suite runs:
+
+| p50 [min-max], ms | a140dc5 | 2d8d223 | recorded |
+|---|---|---|---|
+| Cold push, push → next setImmediate | 704.7 [662.4-724.6] | 21.2 [19.3-55.0] | 673 → 20 |
+| After a config.toml edit | 225.9 [218.6-232.4] | 8.8 [8.0-9.9] | 218 → 8.1 |
+| Warm push | 7.6 [6.8-8.2] | 7.4 [7.0-10.5] | 7.2 → 7.0 |
+| Loop-delay max: cold, after an edit | 707.8, 226.1 | 21.6, 16.1 | 674 → 20.6, 218 → 16.1 |
+| Both answers on screen after a cold push | 1,762 | 1,318 | 1,586 → 1,229 (n=7) |
+
+The order of magnitude reproduces, and the "before" column is about 5 % above the recorded
+figures, inside this box's process-level swing (see the MEASUREMENT HAZARD in the v1.6.2
+section). This branch against its base fb5f44f (n=7, same codex) measured: cold 22.7 against
+22.3, after an edit 9.0 against 9.1, warm 7.5 against 8.0. The bare-name and grace-kill changes
+cost the push nothing measurable.
+
+### Process-spawn residuals — ACCEPTED-RECORDED
+
+Recorded as facts in "Process spawns", below. Each is given its disposition and reason here, and
+the rows there point back to this table. The spawn costs are how long `execFile()` holds its
+caller inside CreateProcess, p50, n=15, measured 2026-10-14: the DevToolbox venv `python.exe`
+138 ms, taskkill 60 ms; the same row below has node 207 ms, cmd.exe 74 ms and the real winget
+codex.exe 465 ms.
+
+| Residual | Reason |
+|---|---|
+| The extension's four `execFile` sites still spawn on the extension host thread | None of them is on the dashboard push. Two run only when the user acts: the recall rebuild button (venv python) and "Why did this prompt?", whose `execFileCaptured` costs one CreateProcess per variant (74 ms through an npm `.cmd`, 465 ms for the winget exe) while the user waits for its modal anyway. Two run in the background, and rarely: the recall sync, at most once per 15-minute cooldown and only when the index is behind its corpus, and the gate compile, which runs after a 2 s debounce on a memory-file change while gates are on (or when the user picks "Compile now"). Each costs one 138 ms venv-python spawn. Moving them is mechanical if that is ever wanted: src/spawn-thread.js's `execFileOffThread` already carries the version probe's execFile. |
+| Deactivate's own taskkill runs on the host thread | It is one taskkill (60 ms) per child still tracked on the host, and only the four sites above put children there, because a ThreadChild is ended by its own thread. Deactivate runs once per window lifetime, and the host is being torn down. A thread would have to start during that teardown, and the kill would then depend on it starting at all, when the kill matters most. |
+| A parent killed during CreateProcess can leave an orphan | First observed when a whole running suite was killed from outside (see the npm-shim row below). **Reproduced 2026-10-14**, by accident, in the first version of this branch's grace-kill test, under two suites at once. Its preload killed the stand-in's cmd.exe 1.25 s after the spawn, while cmd.exe was still inside CreateProcess for node. Ten minutes later that node had one thread and 0.00 s of CPU: created and never resumed. It held the stdout pipe it inherited, so the worker's 'close' never came. Ending the node released the worker at once. So the orphan is a SUSPENDED process that never runs. Its only harm is the handles it inherited: here, a pipe whose reader then waits for ever. The mechanism is inferred, not measured inside Windows: CreateProcess resumes a child's first thread at its very end, so a parent killed before then leaves the thread suspended, and the child is outside libuv's job as well. Nothing in JS can close that window. It needs the host or a worker to die outright inside a CreateProcess, and it costs one suspended orphan per such death. Deactivate's taskkill /T is unaffected, because it runs while the host is alive. The test now kills only a stand-in that is already running. |
+| The planted-taskkill worker test failed once under four concurrent test files (5.4 s) | It passed alone, in every later batch (ffa334f), and in every full run of both suites on wave-f10. Its budget is the worker's 1 s deadline plus a 1 s grace inside a 4 s backstop, and endpoint scanning held a freshly copied executable's first run for about 3 s here (the planted copies above took 3.0–3.4 s). That is the harness hazard 1e11efa recorded, and the reason the test has two witnesses. Since ffa334f every message carries the host's answer and the elapsed time, so a recurrence says which path won. The behaviour it pins has a second, single-process witness in test/exec-resolve.test.js. |
+
+---
+
 ## The v1.6.3 release commit's CI failures (2026-10-14)
 
 CI run 38525363435 on `7cbba2b` failed 5 of 7 jobs; Windows Node 24 and the PowerShell 5.1
@@ -84,7 +240,7 @@ or recorded the same day.
 
 | Finding | Disposition | Evidence |
 |---|---|---|
-| The dashboard push blocked the extension host on a synchronous Codex `config/read` | **FIXED**, `c85c10d` | Introduced by the trusted-project discovery. The push now reads the trust verdict from cache, a miss refreshes in the background (tracked, 10 s bound, tree-killed on deactivate), and only `.codex` folders with `rules/` are asked about. Cold push 1,106 → 106 ms, push after a `config.toml` edit 980 → 9 ms, a Codex that never answers 31,331 ms → under 120 ms. **CORRECTED 2026-10-14:** the "after" figures hold only for the `.cmd` stand-in they were taken with. With the real winget codex.exe the same push held the host 673 ms cold and 218 ms after an edit (p50, n=11), because the spawns it started block the calling thread; both now run on worker threads, see "Process spawns: the v1.6.3 lifecycle and performance confirmation". |
+| The dashboard push blocked the extension host on a synchronous Codex `config/read` | **FIXED**, `c85c10d` | Introduced by the trusted-project discovery. The push now reads the trust verdict from cache, a miss refreshes in the background (tracked, 10 s bound, tree-killed on deactivate), and only `.codex` folders with `rules/` are asked about. Cold push 1,106 → 106 ms, push after a `config.toml` edit 980 → 9 ms, a Codex that never answers 31,331 ms → under 120 ms. **CORRECTED 2026-10-14:** the "after" figures hold only for the `.cmd` stand-in they were taken with. With the real winget codex.exe the same push held the host 673 ms cold and 218 ms after an edit (p50, n=11; scripts/measure-push-host-thread.js), because the spawns it started block the calling thread; both now run on worker threads, see "Process spawns: the v1.6.3 lifecycle and performance confirmation". |
 | `autoLearn.codexExecutable` was window-scoped | **FIXED**, `b7c9a8d` | A workspace setting chose the executable the push now runs. Machine scope, read from the user tier only. (VS Code already disables the extension in Restricted Mode, because it declares no `untrustedWorkspaces`.) |
 | A rebuild could finish while a Codex root was missing | **FIXED**, `7ce6217` | A vanished root read as a clean walk, so pending ids were dropped and auto-safe could grant against a failure in that root (reproduced: granted on scan 2, revoked on scan 3). A missing configured root now holds the rebuild open; an `archived_sessions/` that never existed is benign, a dangling link there is not. |
 | Reviewed Claude rules for informational forms disappeared, and an upgrade revoked them | **FIXED**, `3417398`, `bee0f82` | The exporter honoured an explicit null rule on the false premise that every withholding reason was also a complexity reason. The learner now writes the informational word, and only an env-kept assignment withholds a rule. Families stored with a null rule were revived on their next run (`b4643ed`); until that run the managed-inert and user-deny checks still judged the null while the write rendered the derived rule (F1 of the v1.6.3 confirmation audit, reproduced: a reviewed apply of stored state wrote a user-denied and a managed-ask rule). The rule is now derived on load by the exporter function the write calls (`takeExporterRule`), which replaces the next-run revival. |
@@ -205,11 +361,11 @@ record, on the development box, with the method named in each row.
 
 | Finding | Disposition | Evidence |
 |---|---|---|
-| The dashboard push held the extension host for every spawn it started | **FIXED**, `2d8d223` | Verified: on Windows `spawn()` and `execFile()` return only once CreateProcess has. Measured here, how long spawn() held the calling thread (n=15, p50): node 207 ms, cmd.exe 74 ms, taskkill 61 ms, the real winget codex.exe 465 ms; the audit had 203 and 428 ms. The push ran the version probe's execFile inline and the trust worker's spawn in the microtask after it. **Design: one worker thread per spawn** (src/spawn-thread.js), running the existing code unchanged (the probe's execFile, and `nativeRpcAsync`) and holding the ChildProcess there. The host holds a ThreadChild, which `track` hands to trackChild, and `endProcessTree` ends it by asking the thread to run `endProcessTree` on the real child. So the tree kill, the POSIX group signal, the freed-PID guard, the 10 s backstop, the worker deadline (counted from the host's call), the 16 MiB bound, the wordings, the one-refresh latch and the 60 s timeout TTL are the same code, not copies of it. The process tree is unchanged, so host death is too: measured, a host SIGKILLed with the thread in between still took its worker on Windows, because libuv's kill-on-close job belongs to the process. `new Worker()` costs the host 0.44 ms (p50, n=15), and a 700 ms spin on the main thread saw a longest gap of 4.1 ms while a thread spawned the real codex (5.1 ms with no spawn at all). **Declined, design (b): the trust ask itself on a thread**, which would also drop the node spawn. It makes the app-server a direct child of the host, which loses c108d04's host watch on POSIX (nothing would end a hung codex after a host death), it leaves the npm-shim residual on Windows as it is, and the node spawn is off the host thread anyway. **Measured** with the real codex.exe 0.161.0 (HOME, USERPROFILE and CODEX_HOME in a fresh temp dir, OpenAI variables removed) through the real `_push()` under the stub-vscode harness of test/dashboard-project-trust.test.js, a fresh process per sample, the tree before this change and after it interleaved, n=11, host-thread time from the push to the next setImmediate, p50: cold push with a project `.codex/rules` 673 → 20 ms, push after a config.toml edit 218 → 8.1 ms, warm push 7.2 → 7.0 ms. The event-loop-delay histogram's maximum agrees: 674 → 20.6 and 218 → 16.1 ms, where about 16 ms is this box's timer floor. Both answers were on screen 1,586 → 1,229 ms after a cold push (p50, n=7), because the two spawns no longer queue on one thread. Pinned by "a cold push starts no process on the host thread, and both Codex answers still arrive" (test/dashboard-project-trust.test.js; fails with `offThread` dropped from either call) and by test/spawn-thread.test.js, whose tree-kill test fails with the thread ignoring the end request or with `endProcessTree`'s END_TREE branch removed. Still on the host thread: the extension's four execFile sites (user-initiated or background, not the push) and deactivate's own taskkill. |
+| The dashboard push held the extension host for every spawn it started | **FIXED**, `2d8d223` | Verified: on Windows `spawn()` and `execFile()` return only once CreateProcess has. Measured here, how long spawn() held the calling thread (n=15, p50): node 207 ms, cmd.exe 74 ms, taskkill 61 ms, the real winget codex.exe 465 ms; the audit had 203 and 428 ms. The push ran the version probe's execFile inline and the trust worker's spawn in the microtask after it. **Design: one worker thread per spawn** (src/spawn-thread.js), running the existing code unchanged (the probe's execFile, and `nativeRpcAsync`) and holding the ChildProcess there. The host holds a ThreadChild, which `track` hands to trackChild, and `endProcessTree` ends it by asking the thread to run `endProcessTree` on the real child. So the tree kill, the POSIX group signal, the freed-PID guard, the 10 s backstop, the worker deadline (counted from the host's call), the 16 MiB bound, the wordings, the one-refresh latch and the 60 s timeout TTL are the same code, not copies of it. The process tree is unchanged, so host death is too: measured, a host SIGKILLed with the thread in between still took its worker on Windows, because libuv's kill-on-close job belongs to the process. `new Worker()` costs the host 0.44 ms (p50, n=15), and a 700 ms spin on the main thread saw a longest gap of 4.1 ms while a thread spawned the real codex (5.1 ms with no spawn at all). **Declined, design (b): the trust ask itself on a thread**, which would also drop the node spawn. It makes the app-server a direct child of the host, which loses c108d04's host watch on POSIX (nothing would end a hung codex after a host death), it leaves the npm-shim residual on Windows as it is, and the node spawn is off the host thread anyway. **Measured** with the real codex.exe 0.161.0 (HOME, USERPROFILE and CODEX_HOME in a fresh temp dir, OpenAI variables removed) through the real `_push()` under the stub-vscode harness of test/dashboard-project-trust.test.js, a fresh process per sample, the tree before this change and after it interleaved, n=11, host-thread time from the push to the next setImmediate, p50: cold push with a project `.codex/rules` 673 → 20 ms, push after a config.toml edit 218 → 8.1 ms, warm push 7.2 → 7.0 ms. Reproduce with `node scripts/measure-push-host-thread.js --codex <codex> --before 2d8d223^ --after 2d8d223` (re-run under "The push bench is in the repo", above). The event-loop-delay histogram's maximum agrees: 674 → 20.6 and 218 → 16.1 ms, where about 16 ms is this box's timer floor. Both answers were on screen 1,586 → 1,229 ms after a cold push (p50, n=7), because the two spawns no longer queue on one thread. Pinned by "a cold push starts no process on the host thread, and both Codex answers still arrive" (test/dashboard-project-trust.test.js; fails with `offThread` dropped from either call) and by test/spawn-thread.test.js, whose tree-kill test fails with the thread ignoring the end request or with `endProcessTree`'s END_TREE branch removed. Still on the host thread: the extension's four execFile sites (user-initiated or background, not the push) and deactivate's own taskkill. Both are **ACCEPTED-RECORDED**, with reasons, under "Process-spawn residuals", above. |
 | execFile's own `timeout` orphaned the program under a launcher | **FIXED** on Windows, `f1f2de1`; POSIX **ACCEPTED-RECORDED** | execFile's timeout is `child.kill()` on the one PID it holds, and on Windows each of the extension's four execFile children is a launcher: an npm `codex.cmd` (cmd.exe → node) for the 30 s `codex execpolicy check` in `execFileCaptured`, and the DevToolbox venv `python.exe` for the recall rebuild and sync (180 s) and the gate compile (60 s). That `python.exe` is a redirector whose interpreter is its child (measured: the interpreter's parent PID was the PID spawn returned). Ended that way the program kept running, and because it held the pipes it inherited, execFile's callback never came either; endProcessTree could not reach it afterwards, because it finds a tree by its root. Each site now takes its deadline from `endTreeAfter` (src/exec-resolve.js), the version probe's pattern: a timer of its own that tree-kills the still-live root. The four lengths and the reported wording ("Command failed: …" plus stderr) are unchanged. Pinned by "a deadline from endTreeAfter ends the program under a launcher, which killing the launcher alone leaves running" (test/exec-resolve.test.js; fails with the timer calling `child.kill()`) and "every execFile site takes its deadline from endTreeAfter, never from execFile's own timeout" (test/extension-lifecycle-async.test.js; fails with one site reverted). **POSIX:** endProcessTree reaches a whole tree only through a process group, and execFile cannot start a group leader (it drops `detached`, f8a3b92), so the deadline ends the child alone there, exactly as before. These sites have no grandchild on POSIX: a venv's python is the interpreter, `RECALL_REEXEC=1` suppresses recall.py's own re-run, and a native codex is one process. An npm-installed codex on POSIX is node → native codex; whether that launcher forwards SIGTERM was not re-verified here. |
 | The trust worker's graceful timeout could lose to the host's backstop | **FIXED**, `a140dc5` | CI run 38535034218 failed "the asynchronous layers read does not block…" on Node 20 / windows-latest only ("unavailable: the worker timed out", 6,478 ms). Confirmed in the code, not reproduced on the runner: the worker armed `deadlineMs` (timeoutMs − 3 s) as a length, after its own start, its module load and its codex spawn, then spent a 1 s grace and a synchronous taskkill before it exited, so the graceful path needed startup plus taskkill under 2 s, in the 4 s test and the 10 s product budget alike. The deadline is now a time, `deadlineAt`, fixed when `nativeRpcAsync` is called (src/codex-mcp-config.js, "THE DEADLINE IS A TIME, NOT A LENGTH"), so the worker's start comes out of the codex's 7 s and the whole 3 s margin is left for the grace, the kill and the exit. Budget, grace, backstop and wordings are unchanged; a worker that starts after its deadline fails the call at once. Pinned by "a worker that starts after its deadline still ends its own codex before the host's backstop" (a preload holds the worker 5.5 s, past the 5 s deadline of an 8 s budget; fails with the deadline made a length again). The original test still fails with `deadlineAt` dropped. |
-| On Windows an npm `codex.cmd` outlived an extension host that died outright | **FIXED** for the shim npm writes; any other `.cmd` **ACCEPTED-RECORDED** | Verified in "a worker whose host dies outright" (test/codex-mcp-config.test.js): libuv puts every child in a kill-on-close job that allows silent breakaway, so the worker's job held cmd.exe and not the shim's node, which survived the host. The worker now launches its app-server through `npmShimLaunch` (src/exec-resolve.js). A `.cmd` whose text is exactly cmd-shim's (npm 7 and later; @openai/codex needs one of those), with a relative target that exists, runs as `node <target>`, using the shim's own node.exe or else node from PATH, as the shim itself would choose. That node is then the worker's own child, in the worker's job, and the native codex the npm launcher starts is in that node's job. Anything else returns null and launches through cmd.exe as before. Small and in one place: the worker's launch only; the version probe and the execpolicy check exit by themselves and keep the `.cmd`. Pinned by "the shim npm writes is run as the node script it names; every other shape is left alone" (test/exec-resolve.test.js). Its shim is generated by the cmd-shim (8.0.0 here) bundled with the running node's npm, so it is npm's own output, and six other shapes return null. Also pinned by "on Windows, an npm-shim codex dies with a host that dies outright" (test/codex-mcp-config.test.js), which fails with the worker back on `commandLaunch` alone. A winget or standalone codex.exe was never affected: it is the worker's direct child. **Residual:** a hand-written or other-generator `.cmd` still breaks away. Deactivate's taskkill /T still ends it; only an outright host death does not. S1's design leaves this as it was, because the node worker still exists (design (b) was declined). Observed once and not reproduced: when a whole running suite was killed from outside, an npm stand-in that a worker started at that same instant survived. That fits libuv adding a child to its job only after CreateProcess returns (200–470 ms here), so a worker killed inside that call leaves the child in no job. Unverified. |
-| Bare `taskkill` is resolved from the current directory | **FIXED**, `1e11efa` | libuv resolves a bare name itself and looks in the cwd before PATH unless the environment carries `NoDefaultCurrentDirectoryInExePath`. Measured (libuv 1.52.1, Node 24.19.0): with the variable unset, a copy of node named `taskkill.exe` in the cwd ran in place of System32's; with it set, it did not. The extension host's cwd is wherever VS Code was started, and the Codex config worker inherits it. The variable was set in the agent shell the audit ran from, and in neither the user nor the machine environment, so a test run from such a shell passes against the unfixed code: both new tests remove it. `endProcessTree` and the config worker's grace kill now run `taskkillPath()`, `%SystemRoot%\System32\taskkill.exe`. Pinned by "the tree kill runs System32's taskkill, not one planted in the current directory" (test/exec-resolve.test.js) and "the config worker's own kill runs System32's taskkill, not one planted in its cwd" (test/codex-mcp-config.test.js); each fails with its own site reverted. The planted copy's flag is not the only witness, because endpoint scanning can hold a freshly copied executable's first run past the kill's own timeout: the first test also requires that the node under a cmd.exe dies, which only `/T` does, and the second that the worker's own deadline is the answer. Same class, not changed here: `bin/wildcard-perms` spawns `TOOLBOX_PYTHON \|\| 'python'` by bare name, and `commandLaunch` hands an unresolved name back bare, which `execFileCaptured` then spawns. |
+| On Windows an npm `codex.cmd` outlived an extension host that died outright | **FIXED** for the shim npm writes; any other `.cmd` **ACCEPTED-RECORDED** | Verified in "a worker whose host dies outright" (test/codex-mcp-config.test.js): libuv puts every child in a kill-on-close job that allows silent breakaway, so the worker's job held cmd.exe and not the shim's node, which survived the host. The worker now launches its app-server through `npmShimLaunch` (src/exec-resolve.js). A `.cmd` whose text is exactly cmd-shim's (npm 7 and later; @openai/codex needs one of those), with a relative target that exists, runs as `node <target>`, using the shim's own node.exe or else node from PATH, as the shim itself would choose. That node is then the worker's own child, in the worker's job, and the native codex the npm launcher starts is in that node's job. Anything else returns null and launches through cmd.exe as before. Small and in one place: the worker's launch only; the version probe and the execpolicy check exit by themselves and keep the `.cmd`. Pinned by "the shim npm writes is run as the node script it names; every other shape is left alone" (test/exec-resolve.test.js). Its shim is generated by the cmd-shim (8.0.0 here) bundled with the running node's npm, so it is npm's own output, and six other shapes return null. Also pinned by "on Windows, an npm-shim codex dies with a host that dies outright" (test/codex-mcp-config.test.js), which fails with the worker back on `commandLaunch` alone. A winget or standalone codex.exe was never affected: it is the worker's direct child. **Residual:** a hand-written or other-generator `.cmd` still breaks away. Deactivate's taskkill /T still ends it; only an outright host death does not. S1's design leaves this as it was, because the node worker still exists (design (b) was declined). Observed once and not reproduced: when a whole running suite was killed from outside, an npm stand-in that a worker started at that same instant survived. That fits libuv adding a child to its job only after CreateProcess returns (200–470 ms here), so a worker killed inside that call leaves the child in no job. Unverified. **ACCEPTED-RECORDED** under "Process-spawn residuals", above. |
+| Bare `taskkill` is resolved from the current directory | **FIXED**, `1e11efa` | libuv resolves a bare name itself and looks in the cwd before PATH unless the environment carries `NoDefaultCurrentDirectoryInExePath`. Measured (libuv 1.52.1, Node 24.19.0): with the variable unset, a copy of node named `taskkill.exe` in the cwd ran in place of System32's; with it set, it did not. The extension host's cwd is wherever VS Code was started, and the Codex config worker inherits it. The variable was set in the agent shell the audit ran from, and in neither the user nor the machine environment, so a test run from such a shell passes against the unfixed code: both new tests remove it. `endProcessTree` and the config worker's grace kill now run `taskkillPath()`, `%SystemRoot%\System32\taskkill.exe`. Pinned by "the tree kill runs System32's taskkill, not one planted in the current directory" (test/exec-resolve.test.js) and "the config worker's own kill runs System32's taskkill, not one planted in its cwd" (test/codex-mcp-config.test.js); each fails with its own site reverted. The planted copy's flag is not the only witness, because endpoint scanning can hold a freshly copied executable's first run past the kill's own timeout: the first test also requires that the node under a cmd.exe dies, which only `/T` does, and the second that the worker's own deadline is the answer. Same class, not changed here: `bin/wildcard-perms` spawns `TOOLBOX_PYTHON \|\| 'python'` by bare name, and `commandLaunch` hands an unresolved name back bare, which `execFileCaptured` then spawns. Both are fixed since, with the rest of the census, under "Bare-name spawns: the census". |
 
 ## Follow-ups to the v1.6.3 confirmation audit (2026-10-14)
 

@@ -35,7 +35,7 @@ const {
 } = require('./derived-guidance');
 const {
   renderCodexRules, validateCodexRulesText, renderClaudePermissions, mergeClaudeAllow,
-  mergeGeneratedCodexRules,
+  mergeGeneratedCodexRules, CLAUDE_WITHHOLDING_REASONS,
 } = require('./policy-exporters');
 
 const VERSION = 3;
@@ -902,7 +902,7 @@ function mergeCandidate(existing, fresh, threshold) {
       existing.reasons.includes('environment-not-stripped') && !fresh.reasons.includes('environment-not-stripped')) {
     existing.claudePermission = fresh.claudePermission;
     existing.reasons = existing.reasons.filter((reason) => reason !== 'environment-not-stripped');
-  }
+  } else if (revivesNullRule(existing, fresh)) existing.claudePermission = fresh.claudePermission;
   if (existing.claudePermission !== fresh.claudePermission) {
     // `git` and `git.exe` are two spellings of one grant, not a conflict. Any
     // other disagreement still nulls the permission, as it always has.
@@ -2999,6 +2999,29 @@ function createAutoLearnManager(options = {}) {
     listCandidates,
     setMode, apply: applyPolicy, applyClaude, applyCodex, undo,
   };
+}
+
+// mergeCandidate's second way to restore a stored null rule (2026-10-14), defined down here so
+// that no line other files cite into this module moves. A family stored with no Claude rule takes
+// the one its next run brings when nothing withheld it: neither side is complex and neither
+// carries a withholding reason (CLAUDE_WITHHOLDING_REASONS, src/policy-exporters.js, which reads
+// an explicit null the same way). Through v1.6.2 the learner wrote no rule for an informational
+// family (`cargo --version`, `df -h`; src/auto-learn.js INFO_PREFIX_FLAGS), so the state file
+// holds those families with a null, and preferredPermissionSpelling(null, x) is null, so no later
+// run could ever replace it. The exporter derives their rule since 3417398, but the managed-inert
+// and user-deny checks in applyUnlocked and the listing's clone read `item.claudePermission`, so
+// they could not see that rule. MEASURED against 08978d9 with two stored null families and one
+// fresh run each: the listing offered the managed-inert `Bash(df -h *)` to Claude, and a reviewed
+// apply wrote it and the user-denied `Bash(cargo --version *)` into `allow`, withholding neither.
+//
+// Not revived, on purpose: a complex family (its null came from a run the rule would not match,
+// such as a path executable), and a family that carries the withholding reason (an env-led run
+// whose kept assignment the rule cannot carry). The legacy-key block in mergeCandidate stays the
+// only path for the second kind: it needs a fresh run without the marker and consumes it.
+function revivesNullRule(existing, fresh) {
+  return existing.claudePermission === null && typeof fresh.claudePermission === 'string' &&
+    !existing.complex && !fresh.complex &&
+    ![...existing.reasons, ...(fresh.reasons || [])].some((reason) => CLAUDE_WITHHOLDING_REASONS.has(String(reason)));
 }
 
 // Exported for independent coverage of the version floor and missing steps.

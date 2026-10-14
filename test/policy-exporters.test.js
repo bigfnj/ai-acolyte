@@ -1343,3 +1343,125 @@ test('on the Codex half an env assignment that names or loads a program is refus
     assert.equal(codexRuleCount(prefix), 1, JSON.stringify(prefix));
   }
 });
+
+// Invoke-Expression's argument is a whole script (measured; src/policy-exporters.js
+// ALWAYS_BROAD_WRAPPERS). Each row's verdict at 0ecf75b is in the commit that added this test.
+const IEX_PREFIXES = [['iex', 'Get-Date'], ['IEX', 'Get-Date'], ['iex', '$x'], ['iex', '-Command'],
+  ['invoke-expression', 'x'], ['Invoke-Expression', 'Get-ChildItem'], ['Invoke-Expression', '-Command', 'x'],
+  ['Microsoft.PowerShell.Utility\\Invoke-Expression', 'x'], ['iex.exe', 'x'], ['iex'], ['Invoke-Expression'],
+  ['timeout', '5', 'iex', 'x'], ['xargs', 'invoke-expression']];
+
+test('Invoke-Expression and iex are broad at any depth, in every spelling', () => {
+  for (const prefix of IEX_PREFIXES) {
+    // MUTATION: drop 'iex' from ALWAYS_BROAD_WRAPPERS. `["iex", "Get-Date"]` falls to the
+    // generic rule and renders. Confirmed 2026-10-14. Dropping 'invoke-expression' fails its
+    // rows the same way. Confirmed 2026-10-14.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} evaluates code`);
+  }
+  // The Claude half refused them at any depth already, by membership: pins.
+  for (const permission of ['PowerShell(iex *)', 'PowerShell(Invoke-Expression Get-Date *)', 'PowerShell(IEX x *)',
+    'Bash(iex x *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  // The learner's verdict agrees: a shell-wrapper risk whatever the case, keyed on the bare root.
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const command of ["iex 'Get-Date'", "Invoke-Expression 'Get-Date'", "IEX 'x'"]) {
+    const learned = classifyInvocation({ tool: 'PowerShell', command, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${command}: ${JSON.stringify(learned.reasons)}`);
+    assert.equal(learned.prefix.length, 1, command);
+  }
+  // Control: a cmdlet whose name merely contains the word is judged as before.
+  assert.equal(codexRuleCount(['Invoke-ExpressionLint', 'x']), 1);
+});
+
+// bunx is `bun x` and pnpx is `pnpm dlx` (src/policy-exporters.js RUNNER_ALIASES). Each
+// row's verdict at e6d227c is in the commit that added this test.
+const ALIAS_BROAD = [['bunx'], ['bunx', 'sh'], ['bunx', 'node'], ['bunx', '--bun', 'vite'], ['bunx.exe', 'sh'],
+  ['bun', 'x', 'sh'], ['bun', 'x', 'node', '-e', 'x'], ['bun', 'x', 'python', '-c', 'x'], ['pnpx'], ['pnpx', 'sh'],
+  ['pnpx', 'node'], ['pnpx.cmd', 'sh'], ['xargs', 'bunx'], ['timeout', '5', 'pnpx', 'sh']];
+const ALIAS_NARROW = [['bunx', 'tsc'], ['bunx', 'cowsay', 'hi'], ['bun', 'x', 'tsc'], ['pnpx', 'create-vite'],
+  ['pnpx', 'tsc', '--noEmit'], ['timeout', '5', 'bunx', 'tsc']];
+
+test('bunx and pnpx are judged as bun x and pnpm dlx: broad until they name a narrow command', () => {
+  for (const prefix of ALIAS_BROAD) {
+    // MUTATION: delete the RUNNER_ALIASES lookup in wrapperIsBroad. `["bunx"]` is then a
+    // wrapper with no grammar of its own and only `["bunx"]` itself is refused; `["bunx",
+    // "sh"]` renders and this fails. Confirmed 2026-10-14.
+    // MUTATION: drop `exec: ['x']` from bun's subcommands. Any named target pins `bun x` again,
+    // so `["bunx", "sh"]` and `["bun", "x", "sh"]` render. Confirmed 2026-10-14.
+    // MUTATION: drop 'bunx' and 'pnpx' from OWN_SHELL_WRAPPERS and from the learner's
+    // SHELL_WRAPPERS. candidateEligibleForCodex never asks wrapperIsBroad and `["bunx"]`
+    // renders. Confirmed 2026-10-14. Dropping them from OWN_SHELL_WRAPPERS alone survives, by
+    // design (the learner union still lists them; measured); from the learner alone, the
+    // learner assertion below fails.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} runs any package bin or a broad command`);
+  }
+  for (const prefix of ALIAS_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} names a narrow command and still renders`);
+  }
+  // The Claude half refuses them at any depth by membership, as it refuses bun and pnpm.
+  for (const permission of ['Bash(bunx tsc *)', 'Bash(pnpx create-vite *)', 'PowerShell(bunx *)']) {
+    assert.deepEqual(renderClaudePermissions([permission], { includeReviewed: true }), [], permission);
+  }
+  // The learner calls them runners, as it calls `bun x` and `npx` (src/auto-learn.js SHELL_WRAPPERS).
+  const { classifyInvocation } = require('../src/auto-learn');
+  for (const command of ['bunx tsc', 'pnpx create-vite']) {
+    const learned = classifyInvocation({ tool: 'Bash', command, source: 'claude' });
+    assert.ok(learned.reasons.includes('shell-wrapper'), `${command}: ${JSON.stringify(learned.reasons)}`);
+    assert.equal((renderCodexRules([learned], { includeReviewed: true }).match(/prefix_rule\(/g) || []).length, 0,
+      `${command}: the learner's bare-root prefix is refused`);
+  }
+});
+
+// The environment a runner hands its command (the lead's decision, 2026-10-14): an assignment
+// that loads or names a program is refused inside docker/podman/compose `-e` as it is after
+// `env`, and every environment FILE is refused, its contents being unknowable at review time.
+// node's and uv's `--env-file` were measured to load code (src/policy-exporters.js). Each row's
+// verdict at f23e978 is in the commit that added this test.
+const ENV_REFUSED = [
+  ['docker', 'exec', '-e', 'LD_PRELOAD=/x.so', 'ctr', 'cat'], ['docker', 'exec', '-eLD_PRELOAD=/x.so', 'ctr', 'cat'],
+  ['docker', 'exec', '--env=GIT_PAGER=x', 'ctr', 'git', 'log'], ['docker', 'exec', '--env', 'PATH=/tmp', 'ctr', 'ls'],
+  ['docker', 'exec', '-e', 'LD_PRELOAD', 'ctr', 'cat'], ['podman', 'run', '-e', 'BASH_ENV=x', 'img', 'make', 'test'],
+  ['nerdctl', 'exec', '-e', 'DYLD_INSERT_LIBRARIES=x', 'ctr', 'ls'],
+  ['docker', 'compose', 'exec', '-e', 'NODE_OPTIONS=--require=x', 'web', 'npm', 'test'],
+  ['docker', 'compose', 'run', '-e', 'LD_PRELOAD=x', 'web', 'ls'], ['docker-compose', 'exec', '-e', 'EDITOR=x', 'web', 'git', 'commit'],
+  ['docker', 'exec', '--env-file', 'x.env', 'ctr', 'cat'], ['docker', 'run', '--env-file=x.env', 'img', 'ls'],
+  ['podman', 'run', '--env-file', 'x.env', 'img', 'pytest'], ['uv', 'run', '--env-file', 'x.env', 'pytest'],
+  ['uv', 'run', '--env-file=x.env', 'pytest'], ['uvx', '--env-file', 'x.env', 'ruff'], ['uv', 'tool', 'run', '--env-file', 'x', 'ruff'],
+  ['node', '--env-file', 'x.env', 'x.js'], ['node', '--env-file=x.env', 'x.js'], ['node', '--env-file-if-exists=x.env', 'x.js'],
+  ['deno', 'run', '--env-file', 'x.ts'], ['deno', '--env-file', 'run', 'x.ts'], ['bun', '--env-file', 'x.env', 'x.ts'],
+  ['bun', 'run', '--env-file', 'x.env', 'x.ts'], ['just', '--dotenv-path', 'x.env', 'build'], ['just', '-E', 'x.env', 'build'],
+  ['just', '--dotenv-filename=x.env', 'build'], ['timeout', '5', 'node', '--env-file', 'x', 'x.js'],
+];
+const ENV_NARROW = [
+  ['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'ls'], ['docker', 'exec', '-eFOO=bar', 'ctr', 'ls'], ['docker', 'exec', '-e', 'FOO', 'ctr', 'ls'],
+  ['docker', 'run', '-e', 'CI=1', 'img', 'pytest'], ['docker', 'compose', 'exec', '-e', 'FOO=1', 'web', 'pytest'],
+  ['podman', 'exec', '--env=TZ=UTC', 'ctr', 'date'], ['uv', 'run', '--no-env-file', 'pytest'], ['node', 'x.js'],
+  ['just', '--no-dotenv', 'build'], ['just', '-f', 'x', 'build'],
+];
+
+test('an environment option that names or loads a program, and any environment file, make a runner prefix broad', () => {
+  for (const prefix of ENV_REFUSED) {
+    // MUTATION: delete the `grammar.env` check in execWrapperInner. `["docker", "exec", "-e",
+    // "LD_PRELOAD=/x.so", "ctr", "cat"]` renders. Confirmed 2026-10-14.
+    // MUTATION: drop the envFused check. `["docker", "exec", "-eLD_PRELOAD=/x.so", "ctr",
+    // "cat"]` renders. Confirmed 2026-10-14.
+    // MUTATION: put '--env-file' back into DOCKER_EXEC's values. `["docker", "exec",
+    // "--env-file", "x.env", "ctr", "cat"]` renders. Confirmed 2026-10-14.
+    // MUTATION: put '--env-file' back into UVX_EXEC's values. The uv rows render. Confirmed
+    // 2026-10-14.
+    // MUTATION: drop the env-file alternative from node's `broad`. `["node", "--env-file=x.env",
+    // "x.js"]` renders (the generic fused form). Confirmed 2026-10-14.
+    // MUTATION: put '--dotenv-path' back into JUST's values. `["just", "--dotenv-path", "x.env",
+    // "build"]` renders. Confirmed 2026-10-14.
+    // The four deno and bun rows were refused already (their top-level and post-subcommand
+    // options are not modelled, so `--env-file` was an unknown option): pins.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} lets the environment load or name a program`);
+  }
+  // Controls: a data-valued assignment, a copied safe name, the opt-out flags, and nothing at all.
+  for (const prefix of ENV_NARROW) {
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} is as narrow as its command`);
+  }
+  // A data-valued assignment does not narrow a broad command either.
+  assert.equal(codexRuleCount(['docker', 'exec', '-e', 'FOO=bar', 'ctr', 'sh']), 0);
+});

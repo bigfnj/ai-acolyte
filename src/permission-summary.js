@@ -162,10 +162,40 @@ function deadShellApprovals(allow) {
 // Only wildcard entries are examined, the mirror image of deadShellApprovals above.
 // `Bash(*)` is an explicit tool-wide grant with no head, and is skipped. On the
 // development box (2026-10-13) this counted 2 of 425 wildcard shell grants: one
-// `Bash(export *)` and one `PowerShell(& *)`.
+// `Bash(export *)` and one `PowerShell(& *)`. Since 2026-10-14 it counts 1 there, the
+// `Bash(export *)`: `PowerShell(& *)` is one of the grants below.
 const OVER_BROAD_REASONS = Object.freeze(['dynamic-executable', 'missing-command-root', 'reserved-keyword']);
 const OVER_BROAD_EXEMPT_BASH_HEADS = new Set(['source', '[']);
 const WILDCARD_TAIL = /[\s:]*\*\s*$/;
+
+// The starter pack's 13 blanket interpreter and shell grants, kept on the maintainer's call
+// (docs/engineering-record.md, "The 13 blanket wrapper grants": left in place 2026-09-03 and
+// still standing). Each is an arbitrary-execution grant, and the diagnostic is not the place to
+// relitigate a standing decision: `PowerShell(& *)`, the one of the 13 this diagnostic flags
+// (`missing-command-root`, the call operator runs whatever follows it), was half of its count
+// on the development box, so the dashboard asked the user, on every push, to remove a grant the
+// project seeds on purpose. They are still examined (`total`) and reported apart as `kept`, so
+// the count is the grants nobody decided on. Matched by tool and head, so the colon spelling
+// `PowerShell(&:*)`, the same rule, is kept too.
+//
+// The one list: patterns/starter-pack.json must hold every entry (test/starter-pack.test.js
+// asserts it, and that the record's heading expands to exactly these 13), and that test reads
+// the pack's control set from `kept` rather than from a copy of its own. The pack no longer
+// seeds `Bash(export *)` (2026-10-14), so this diagnostic flags nothing the pack seeds.
+const MAINTAINER_KEPT_GRANTS = Object.freeze([
+  'Bash(bash *)', 'Bash(sh *)', 'Bash(python *)', 'Bash(python3 *)', 'Bash(node *)', 'Bash(npx *)',
+  'Bash(pwsh *)', 'Bash(powershell *)', 'PowerShell(& *)', 'PowerShell(python *)', 'PowerShell(python3 *)',
+  'PowerShell(powershell *)', 'PowerShell(node *)',
+]);
+const wildcardHead = (entry) => {
+  const match = SHELL_APPROVAL.exec(entry);
+  if (!match || !WILDCARD_TAIL.test(match[2])) return null;
+  return { tool: match[1], head: match[2].replace(WILDCARD_TAIL, '').trim() };
+};
+const KEPT_HEADS = new Set(MAINTAINER_KEPT_GRANTS.map((entry) => {
+  const { tool, head } = wildcardHead(entry);
+  return `${tool}\u0000${head}`;
+}));
 
 // Its own memo cell, for the reason the one above has one: the dashboard asks for both
 // diagnostics on every push, and one shared cell would evict the other each time.
@@ -177,14 +207,15 @@ function overBroadShellGrants(allow) {
   if (overBroadMemo.key === key) return overBroadMemo.value;
   const byReason = {};
   const entries = [];
+  const kept = [];
   let total = 0;
   for (const entry of list) {
-    const match = SHELL_APPROVAL.exec(entry);
-    if (!match || !WILDCARD_TAIL.test(match[2])) continue;
-    const [, tool, arg] = match;
-    const head = arg.replace(WILDCARD_TAIL, '').trim();
+    const parsed = wildcardHead(entry);
+    if (!parsed) continue;
+    const { tool, head } = parsed;
     if (!head) continue;
     total += 1;
+    if (KEPT_HEADS.has(`${tool}\u0000${head}`)) { kept.push(entry); continue; }
     if (tool === 'Bash' && OVER_BROAD_EXEMPT_BASH_HEADS.has(head.split(/\s+/)[0])) continue;
     const invocations = extractInvocations(tool, head);
     const reasons = new Set(invocations.length
@@ -199,6 +230,7 @@ function overBroadShellGrants(allow) {
   // Frozen for the same reason as deadShellApprovals: the memo hands one object to all.
   const value = Object.freeze({
     count: entries.length, total, byReason: Object.freeze(byReason), entries: Object.freeze(entries),
+    kept: Object.freeze(kept),
   });
   overBroadMemo = { key, value };
   return value;

@@ -223,9 +223,11 @@ for (const [reason, entry, alsoCounted] of [
   // An expansion opener has no literal root, so it is always both of these.
   ['dynamic-executable', 'Bash($EDITOR *)', ['missing-command-root']],
   ['dynamic-executable', 'Bash([[ *)', ['missing-command-root']],
-  // A range literal and the call operator have no command root at all.
+  // A range literal and the call operator have no command root at all. `PowerShell(& *)` was
+  // the call-operator row until 2026-10-14; it is one of the maintainer-kept grants now (the
+  // test after the controls), so the same head under Bash, where `&` backgrounds, takes it.
   ['missing-command-root', 'PowerShell(1..6 *)', []],
-  ['missing-command-root', 'PowerShell(& *)', []],
+  ['missing-command-root', 'Bash(& *)', []],
   // A bare assignment yields no invocation from extractInvocations; classifyInvocation
   // is asked directly and reports the missing root.
   ['missing-command-root', 'Bash(FOO=bar *)', []],
@@ -234,8 +236,9 @@ for (const [reason, entry, alsoCounted] of [
     // MUTATION: drop '${reason}' from OVER_BROAD_REASONS in src/permission-summary.js.
     // Its per-reason count disappears and, where it is the only reason, the entry stops
     // counting. Confirmed 2026-10-13, one reason at a time. MUTATION: drop the
-    // classifyInvocation fallback; `Bash(FOO=bar *)` and `PowerShell(& *)`, the two heads
-    // with no invocation, are no longer counted. Confirmed 2026-10-13.
+    // classifyInvocation fallback; `Bash(FOO=bar *)` and `Bash(& *)` (`PowerShell(& *)`
+    // until 2026-10-14), the heads with no invocation, are no longer counted. Confirmed
+    // 2026-10-13, and for `Bash(& *)` 2026-10-14.
     const result = broad([entry, 'Bash(git status *)']);
     assert.equal(result.byReason[reason], 1, `${entry}: ${JSON.stringify(result.byReason)}`);
     assert.deepEqual(Object.keys(result.byReason).sort(), [reason, ...alsoCounted].sort());
@@ -261,7 +264,7 @@ test('ordinary wildcard grants, runner roots and the two exempt words are not ov
     'Bash(command *)', 'Bash(timeout 5 *)', 'Bash(rm *)', 'PowerShell(Get-ChildItem *)',
     'PowerShell(select *)', 'PowerShell(7z *)',
   ]);
-  assert.deepEqual(result, { count: 0, total: 11, byReason: {}, entries: [] });
+  assert.deepEqual(result, { count: 0, total: 11, byReason: {}, entries: [], kept: ['Bash(bash *)'] });
   // `source` is exempt in Bash only; PowerShell has no such word to exempt, and a
   // PowerShell keyword is still flagged next to it.
   assert.deepEqual(broad(['PowerShell(foreach *)', 'Bash(source *)']).entries, ['PowerShell(foreach *)']);
@@ -274,8 +277,27 @@ test('exact entries, the tool-wide grant and non-shell entries are not judged', 
   // `Bash(for f in a b)` is then counted. Confirmed 2026-10-13.
   const result = broad(['Bash(for f in a b)', 'PowerShell($x = 1)', 'Bash(*)', 'Read(**)',
     'WebSearch', 'mcp__fixture__tool', 42, null]);
-  assert.deepEqual(result, { count: 0, total: 0, byReason: {}, entries: [] });
-  assert.deepEqual(broad('not a list'), { count: 0, total: 0, byReason: {}, entries: [] });
+  assert.deepEqual(result, { count: 0, total: 0, byReason: {}, entries: [], kept: [] });
+  assert.deepEqual(broad('not a list'), { count: 0, total: 0, byReason: {}, entries: [], kept: [] });
+});
+
+test('the 13 blanket grants the maintainer kept are examined and reported apart, never counted', () => {
+  // `PowerShell(& *)` is one of the starter pack's 13 blanket interpreter grants, left in
+  // place on the maintainer's call (docs/engineering-record.md, "The 13 blanket wrapper
+  // grants"), and it is the one of them this diagnostic flags. It was half of the count on the
+  // development box (2026-10-13: `Bash(export *)` and `PowerShell(& *)`), so the dashboard
+  // asked, on every push, for the removal of a grant the project seeds on purpose.
+  // MUTATION: drop the KEPT_HEADS check in overBroadShellGrants. `PowerShell(& *)` and its
+  // colon spelling are counted and this fails. Confirmed 2026-10-14.
+  const result = broad(['PowerShell(& *)', 'PowerShell(&:*)', 'Bash(bash *)', 'Bash(export *)', 'Bash(& *)']);
+  assert.deepEqual(result.entries, ['Bash(export *)', 'Bash(& *)'], 'only the grants nobody decided on are counted');
+  assert.equal(result.count, 2);
+  assert.equal(result.total, 5, 'the kept grants are still examined');
+  assert.deepEqual(result.kept, ['PowerShell(& *)', 'PowerShell(&:*)', 'Bash(bash *)']);
+  // Matched by tool and head, not by text alone: the same head under the other tool, and a
+  // longer head, are judged as before (`PowerShell(& tool *)` names its program).
+  assert.deepEqual(broad(['Bash(& *)', 'PowerShell(& tool *)']).kept, []);
+  assert.ok(Object.isFrozen(result.kept));
 });
 
 test('the over-broad result is memoized on the list contents, separately from the one-off memo', () => {

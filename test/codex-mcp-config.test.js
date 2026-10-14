@@ -332,9 +332,10 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   assert.equal(tracked.length, 1, 'the worker is handed to the caller, so a deactivate can end it');
   // The WORKER's deadline, not this side's backstop: the worker is the one that
   // can end its own codex gracefully, so it has to be the one that fires first.
-  // MUTATION: drop `deadlineMs` from the worker request. The worker waits its 25 s
+  // MUTATION: drop `deadlineAt` from the worker request. The worker waits its 25 s
   // default, the 4 s backstop tree-kills it instead, and the reason reads
-  // "unavailable: the worker timed out". Confirmed 2026-10-14.
+  // "unavailable: the worker timed out". Confirmed 2026-10-14 (as `deadlineMs`
+  // before the deadline became a time, and again after).
   await assert.rejects(reading, /refused: Codex config operation timed out/,
     'a codex that never answers ends as the worker timing it out, not as a hang');
   const elapsed = Date.now() - started;
@@ -347,6 +348,52 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   assert.equal(alive, false, 'the worker tree-killed the codex it started');
   await assert.rejects(api.readCodexConfigLayersAsync({ home, codexHome, codexExecutable: codex.executable,
     rpc: () => Promise.resolve([{ config: {} }]) }), /did not return layers/, 'an injected route is checked like the real one');
+});
+
+// A WORKER THAT STARTS LATE STILL ENDS ITS OWN CODEX FIRST (2026-10-14). CI run
+// 38535034218 failed the test above on Node 20 / windows-latest only: the worker's
+// deadline was a length counted from its own start, so a slow start was taken out
+// of the 3 s margin its grace and its kill need, and the host's backstop got there
+// first ("unavailable: the worker timed out"). Here the start is slow on purpose: a
+// --require preload, active only in the process that runs --rpc-worker, holds it
+// for 5.5 s, past the 5 s deadline an 8 s budget sets. The deadline is a time now,
+// so the worker fails the call as soon as it arms it, and its 1 s grace and its
+// kill fit inside the 3 s that are left.
+test('a worker that starts after its deadline still ends its own codex before the host\'s backstop', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-late-'));
+  t.after(async () => {
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const codex = hangingCodex(t);
+  const preload = path.join(root, 'slow-worker.js');
+  fs.writeFileSync(preload, "if (process.argv.includes('--rpc-worker')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5500);\n");
+  const saved = process.env.NODE_OPTIONS;
+  // NODE_OPTIONS reads a backslash inside quotes as an escape: forward slashes.
+  process.env.NODE_OPTIONS = `--require "${preload.split(path.sep).join('/')}"`;
+  const started = Date.now();
+  let reading;
+  try {
+    reading = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
+      timeoutMs: 8000 }).then(() => 'answered', error => error.message);
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = saved;
+  }
+  const outcome = await reading;
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 5500, `precondition: the worker really started late (answered after ${elapsed} ms)`);
+  // MUTATION: make the deadline a length again (send `timeoutMs - 3000` as
+  // `deadlineAt` and arm it as is in the worker). It is armed 5 s after the late
+  // start, the 8 s backstop fires first, and this reads "unavailable: the worker
+  // timed out". Confirmed 2026-10-14.
+  assert.match(outcome, /refused: Codex config operation timed out/, 'the worker\'s deadline, not the host\'s backstop');
+  // The stand-in may not have got as far as writing its pid before the kill.
+  if (fs.existsSync(codex.pidFile)) {
+    const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+    t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+    assert.equal(await waitFor(() => gone(pid), 3000), true, 'the worker tree-killed the codex it started');
+  }
 });
 
 const gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };

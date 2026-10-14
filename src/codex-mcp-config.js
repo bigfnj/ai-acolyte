@@ -149,9 +149,10 @@ function nativeRpc(requests, options, context) {
 // THREAD" has the measurements that made spawnSync there a defect). Read-only
 // requests only, and bounded by `options.timeoutMs` end to end:
 //
-//   - the worker gets `deadlineMs` = timeoutMs - 3 s for its own Codex calls and,
-//     being read-only, a 1 s grace before it tree-kills its app-server, so a codex
-//     that never answers is ended by the worker that started it;
+//   - the worker's own Codex calls end at `deadlineAt`, timeoutMs - 3 s after
+//     this call began, and, being read-only, it then gives its app-server a 1 s
+//     grace before it tree-kills it, so a codex that never answers is ended by
+//     the worker that started it;
 //   - this side arms a backstop at timeoutMs that tree-kills the WORKER, for a
 //     worker that is itself wedged. taskkill /T on Windows, because the worker's
 //     codex is a grandchild of this process and child.kill() ends only the child;
@@ -173,8 +174,24 @@ function nativeRpc(requests, options, context) {
 // output is gathered here instead, with execFile's 16 MiB bound and the same
 // failure shapes. The worker does not detach its app-server (see the worker
 // below), so the group the host signals is the whole tree.
+//
+// THE DEADLINE IS A TIME, NOT A LENGTH (2026-10-14). It was `deadlineMs`, counted
+// from when the worker armed it, which is after the worker has started, loaded
+// this module and spawned its codex. None of that was budgeted, and after the
+// deadline the worker still spends its grace plus a taskkill before it exits, so
+// the graceful path had to fit startup + taskkill into 2 s of the 3 s margin. CI
+// run 38535034218 (Node 20, windows-latest only) did not: the backstop tree-killed
+// the worker first and the answer read "unavailable: the worker timed out". Both
+// paths end the codex, and both read as a timeout to the 60 s retry in
+// src/codex-policy.js, but the worker is the one that can end its codex
+// gracefully, so it has to be the one that fires first. `deadlineAt` is now
+// fixed when this call starts (or at `options.startedAt`, for a caller that
+// started the clock earlier), so however long the worker takes to start, the
+// whole 3 s margin is left for the grace, the kill and the exit.
 const WORKER_OUTPUT_LIMIT = 16 * 1024 * 1024;
+const WORKER_MARGIN_MS = 3000;
 function nativeRpcAsync(requests, options, context) {
+  const startedAt = Number.isFinite(options.startedAt) ? options.startedAt : Date.now();
   return new Promise((resolve, reject) => {
     if (!requests.every((item) => item?.method === 'config/read')) {
       throw new Error('The asynchronous Codex config RPC is read-only');
@@ -231,7 +248,7 @@ function nativeRpcAsync(requests, options, context) {
     backstop = setTimeout(() => { timedOut = true; endProcessTree(child); }, timeoutMs);
     child.stdin?.on('error', () => {});
     child.stdin?.end(JSON.stringify({ requests, home: context.home, codexHome: context.codexHome,
-      codexExecutable: options.codexExecutable || 'codex', deadlineMs: timeoutMs - 3000 }));
+      codexExecutable: options.codexExecutable || 'codex', deadlineAt: startedAt + timeoutMs - WORKER_MARGIN_MS }));
     if (typeof options.track === 'function') options.track(child);
   });
 }
@@ -502,14 +519,14 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
     // A read-only request with its own deadline also gets a short grace before
     // its app-server is tree-killed: there is no write to let finish, and the
     // caller's budget is counted in seconds. Every other request keeps 5 s.
-    let deadlineMs = 25000, graceMs = 5000;
+    let deadlineAt = null, graceMs = 5000;
     const pending = new Map();
     try {
       const request = JSON.parse(input);
       if (!Array.isArray(request.requests) || request.requests.length > 4 || request.requests.some(item =>
         !['config/read', 'config/value/write'].includes(item?.method))) throw new Error('Unsupported config worker operation');
-      if (Number.isFinite(request.deadlineMs)) {
-        deadlineMs = Math.min(25000, Math.max(1000, request.deadlineMs));
+      if (Number.isFinite(request.deadlineAt)) {
+        deadlineAt = request.deadlineAt;
         if (request.requests.every(item => item.method === 'config/read')) graceMs = 1000;
       }
       const launch = commandLaunch(request.codexExecutable, ['app-server', '--stdio']);
@@ -555,9 +572,14 @@ if (require.main === module && process.argv[2] === '--rpc-worker') {
           else waiting.resolve(message.result);
         } catch (error) { fail(error); }
       });
-      // 25 s unless the caller set a shorter deadline: the extension's read-only
-      // trust ask does (nativeRpcAsync), so its whole budget, kill included, fits
-      // inside its own backstop. Clamped, so no request can lengthen the write path.
+      // 25 s unless the caller set a deadline: the extension's read-only trust ask
+      // does (nativeRpcAsync), so its whole budget, kill included, fits inside its
+      // own backstop. It is a TIME, read here, after this worker's own start and
+      // its codex spawn, so neither is taken from the margin the grace and the
+      // kill need (see "THE DEADLINE IS A TIME" above). A worker that starts after
+      // it has passed fails at once, which is still inside the backstop. Clamped,
+      // so no request can lengthen the write path.
+      const deadlineMs = deadlineAt === null ? 25000 : Math.min(25000, Math.max(0, deadlineAt - Date.now()));
       timeout = setTimeout(() => fail(new Error('Codex config operation timed out')), deadlineMs);
       // NOR WAIT OUT THAT DEADLINE FOR A HOST THAT IS GONE (2026-10-14). On POSIX
       // nothing ends a child when its parent dies, and nativeRpcAsync's worker

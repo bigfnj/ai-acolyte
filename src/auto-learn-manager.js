@@ -1651,16 +1651,16 @@ function createAutoLearnManager(options = {}) {
   const approveCodexMcp = (request) => locked(() => mcpReview.apply(request));
   const undoCodexMcp = (request) => locked(() => mcpReview.restore(request));
   const recoverCodexMcp = (request) => locked(() => mcpReview.recover(request));
-  // Why one permission cannot pay off, or null: a managed rule makes it inert, or the user's
-  // own deny covers it. Built once per listing (candidatesFrom) and once per application
-  // (applyUnlocked), from one read of each policy, and read by the listing's `clone`, by
-  // applyUnlocked's gate on a family's rule and by its write for each spelling, so none of the
-  // three can judge by a different rule.
-  function refusalFor(policy, userDeny) {
+  // Why one permission cannot pay off, or null: a managed rule makes it inert, or the user's own deny or
+  // ask covers it (ask since K2: deny, then ask, then allow, docs/claude-code-permissions.md "Precedence").
+  // One verdict per listing and per application, read by `clone`, the write's gate and its per-spelling check.
+  function refusalFor(policy, user) {
     return (permission) => {
       if (assessPermission(policy, permission) === 'inert') return overridingRule(policy, permission) || {};
-      const denied = userDeny.find((rule) => coversPermission(rule, permission));
-      return denied ? { decision: 'deny', rule: denied, source: 'user-deny' } : null;
+      const denied = user.deny.find((rule) => coversPermission(rule, permission));
+      if (denied) return { decision: 'deny', rule: denied, source: 'user-deny' };
+      const asked = user.ask.find((rule) => coversPermission(rule, permission));
+      return asked ? { decision: 'ask', rule: asked, source: 'user-ask' } : null;
     };
   }
   // `policy` is a PARAMETER rather than a `managedPolicy()` call, because this
@@ -1689,7 +1689,7 @@ function createAutoLearnManager(options = {}) {
     // apply") with its warning state, Review offered it, and applying it wrote nothing and
     // reported it withheld (reproduced on 7d08ced). The Codex target is untouched: a Claude
     // deny says nothing about a Codex rule. `policy` stays the managed verdict alone, which is
-    // what managedSummary and the blocked-family report mean by it.
+    // what managedSummary and the blocked-family report mean by it. A user ask likewise (K2).
     const policyVerdict = assessPermission(policy, item.claudePermission);
     const claudeRefused = Boolean(claudeSettingsPath && item.claudePermission && refusal(item.claudePermission));
     const eligibleTargets = [
@@ -1712,7 +1712,7 @@ function createAutoLearnManager(options = {}) {
   }
   function candidatesFrom(state, query = {}) {    const known = { claude: new Set(state.applied.claude), codex: new Set(state.applied.codex) };
     const policy = managedPolicy();
-    const refusal = refusalFor(policy, readUserDeny());
+    const refusal = refusalFor(policy, readUserRules());
     const removals = codexRuleStore.read();
     let result = Object.values(state.candidates).map((item) => clone(item, known, policy, removals, refusal));
     if (query.autoSafe === true) result = result.filter((item) => item.autoSafe);
@@ -2103,21 +2103,21 @@ function createAutoLearnManager(options = {}) {
     return conflicts;
   }
 
-  // The user's own deny entries, read from the same file the grant is written
-  // to. An unreadable or malformed settings.json yields none rather than
-  // throwing: the apply below parses it again and reports the parse failure
-  // properly, and withholding every grant because a reader could not run would
-  // be a worse answer than the one this is protecting against.
-  function readUserDeny() {
-    if (!claudeSettingsPath) return [];
+  // The user's own deny and ask entries (ask since K2), read from the same file the grant is
+  // written to. An unreadable or malformed settings.json yields none rather than throwing: the
+  // apply below parses it again and reports the parse failure properly, and withholding every
+  // grant because a reader could not run would be a worse answer than the one this protects against.
+  function readUserRules() {
+    const none = { deny: [], ask: [] };
+    if (!claudeSettingsPath) return none;
     const now = snapshot(claudeSettingsPath);
-    if (!now.exists) return [];
+    if (!now.exists) return none;
     let settings;
     try { settings = JSON.parse(now.content.toString('utf8').replace(/^\uFEFF/, '')); }
-    catch { return []; }
-    if (!object(settings)) return [];
-    const deny = settings.permissions?.deny;
-    return Array.isArray(deny) ? deny.filter((rule) => typeof rule === 'string' && rule.trim()) : [];
+    catch { return none; }
+    if (!object(settings)) return none;
+    const tier = (rules) => Array.isArray(rules) ? rules.filter((rule) => typeof rule === 'string' && rule.trim()) : [];
+    return { deny: tier(settings.permissions?.deny), ask: tier(settings.permissions?.ask) };
   }
 
   function applyUnlocked(state, request = {}) {
@@ -2231,11 +2231,11 @@ function createAutoLearnManager(options = {}) {
     // `local-settings.js` has checked `userDeny` and withheld all along; this is
     // the same check on the other writer, and the same class of bug the `inert`
     // gate above was added to fix. Read once per application, for the reason
-    // given above.
-    const userDeny = useClaude ? readUserDeny() : [];
+    // given above. The user's ask list with it since K2, because ask beats allow too.
+    const userRules = useClaude ? readUserRules() : { deny: [], ask: [] };
     // One verdict for the family's rule here and for each of its spellings at the write below,
     // and the listing's (refusalFor), so none of them can judge by a different rule.
-    const refusal = refusalFor(policy, userDeny);
+    const refusal = refusalFor(policy, userRules);
     if (useClaude) for (const item of selected) {
       if (!claudeEligible(item, includeReviewed)) continue;
       const refused = refusal(item.claudePermission);

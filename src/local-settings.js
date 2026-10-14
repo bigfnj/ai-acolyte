@@ -94,18 +94,26 @@ function grantedByIndex(allow) {
 
 // Phase 1 — what to add to user scope. Deliberately does not decide what to
 // remove locally: that depends on what the user-scope write actually achieved.
-function planPromotions({ localAllow = [], userAllow = [], userDeny = [] } = {}) {
+//
+// A user ask is withheld the same way since K2 (2026-10-14), and reported in `asked`, apart from
+// `denied`, whose readers word it as a deny. Claude Code evaluates deny, then ask, then allow
+// across merged layers (docs/claude-code-permissions.md, "Precedence"), so a promoted entry an
+// ask covers would prompt anyway, while the drain called it promoted and pruned its local copy.
+function planPromotions({ localAllow = [], userAllow = [], userDeny = [], userAsk = [] } = {}) {
   const promote = [];
   const denied = [];
+  const asked = [];
   for (const entry of localAllow) {
     const candidate = promotionFor(entry);
     if (!candidate) continue;
     const rule = userDeny.find((deny) => permissionMatches(candidate, deny));
     if (rule) { denied.push({ entry, candidate, rule }); continue; }
+    const ask = userAsk.find((rule) => permissionMatches(candidate, rule));
+    if (ask) { asked.push({ entry, candidate, rule: ask }); continue; }
     if (grantedBy(candidate, userAllow)) continue;
     if (!promote.includes(candidate)) promote.push(candidate);
   }
-  return { promote, denied };
+  return { promote, denied, asked };
 }
 
 // An entry can be redundant in a way the glob test cannot see. An approval with
@@ -179,7 +187,7 @@ function backupLocalAllow(workspaceRoot, backupDir, allow, writeOptions) {
 function emptyReport(file, extra) {
   return {
     path: file, exists: false, blocked: null, promote: [], promoted: [],
-    denied: [], prune: [], pruned: [], kept: 0, changed: false, verified: true,
+    denied: [], asked: [], prune: [], pruned: [], kept: 0, changed: false, verified: true,
     backup: null, error: null, ...extra,
   };
 }
@@ -251,12 +259,13 @@ function drainLocalSettings({
 
   const userAllow = Array.isArray(user?.permissions?.allow) ? user.permissions.allow : [];
   const userDeny = Array.isArray(user?.permissions?.deny) ? user.permissions.deny : [];
-  const { promote, denied } = planPromotions({ localAllow, userAllow, userDeny });
+  const userAsk = Array.isArray(user?.permissions?.ask) ? user.permissions.ask : [];
+  const { promote, denied, asked } = planPromotions({ localAllow, userAllow, userDeny, userAsk });
 
   if (dryRun) {
     const { prune, keep } = partitionLocal(localAllow, [...userAllow, ...promote]);
     return emptyReport(file, {
-      exists: true, promote, denied, prune, kept: keep.length,
+      exists: true, promote, denied, asked, prune, kept: keep.length,
       changed: !!(promote.length || prune.length),
     });
   }
@@ -285,6 +294,7 @@ function drainLocalSettings({
     promote,
     promoted: landed,
     denied,
+    asked,
     prune,
     pruned: prune,
     kept: keep.length,

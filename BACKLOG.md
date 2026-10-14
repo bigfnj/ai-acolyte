@@ -29,17 +29,19 @@ Re-verify before acting on anything here, including this paragraph.
 The 1.6.3 release commit (7cbba2b) is not tagged. Its CI failures, the freed-PID tree kill and
 the cached trust timeout are fixed and recorded under "The v1.6.3 release commit's CI failures
 (2026-10-14)". The first confirmation audit's other five findings are fixed and recorded under
-"The v1.6.3 confirmation audit (2026-10-14)". Its follow-ups, in flight on wave-f9:
+"The v1.6.3 confirmation audit (2026-10-14)". Its follow-ups (G1–G4) are fixed or recorded
+under "Follow-ups to the v1.6.3 confirmation audit (2026-10-14)". Still in flight:
 
-- `recallScriptPath`'s dead fallbacks search workspace folders and the project's old name.
-  They are reachable only without a bundled copy, but when they are reached a workspace would
-  choose the script the extension runs.
-- `applyUnlocked` judges a family's main rule, not the alternate spelling it also writes.
-  The same dead-entry class as the null-rule fix, and it predates it.
-- A rebuild held open by a missing folder shows ✓ on the scan-health line, although it blocks
-  auto-safe. Nobody has checked yet whether a folder deleted for good pins it forever.
-- Two acceptances need recording: compiler-plugin flags in make's data variables, and AR/LD in
-  Claude-side env-prefixed rules.
+- **wave-f10.**
+  - A census of bare-name spawns, which Windows resolves from the cwd first. Known cases are
+    `--gates refresh`'s `python` and an unresolved `commandLaunch` name.
+  - The config worker's grace kill, which checks `exitCode` only.
+  - Moving the push benchmark into `scripts/`.
+  - Recording the remaining spawn residuals.
+- **wave-f11.**
+  - Codex export's env-led refusal (`PROGRAM_NAMING_ENV`) extended from CC/CXX/MAKE to the
+    other build-program names. This is the lead's decision on G4(b)'s maintainer question.
+  - Whether the listing ignores a user deny on a family's own rule.
 
 A second confirmation audit (lifecycle and performance, MEASURED 2026-10-14) found no new leak
 and no performance regression; every 1.6.3 figure is at or better than 1.6.2. Its process-spawn

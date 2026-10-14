@@ -51,6 +51,24 @@ flight on wave-f15 before the tag:
   installed into the user's global `CLAUDE.md` and `AGENTS.md`. The audit traced this in code;
   it has not been run.
 
+### Memory gates: three gaps found on the second workstation (2026-10-14)
+
+A read-only census of this box found 0 compiled gates and 1 qualifying memory. The 16 gates in
+the repo's comments, from a 119–123-memory corpus, lived on the development machine. Three
+defects surfaced along the way:
+
+- **The compiler reads one store and ignores the rest without saying so.** `recall.py`'s
+  discovery and `memoryLint.js`'s `pickPrimary` choose the single `~/.claude/projects/*/memory`
+  folder with the most `.md` files. A `scope: global` gate in any other store never compiles,
+  and neither the lint nor the dashboard reports it. Here, the only real gate sits in the
+  41-file store, and the 48-file store wins.
+- **`agents:` targeting is ignored.** A gate marked `agents: [codex]` is installed into
+  Claude's `CLAUDE.md` too. Per-agent output (`gates.generated.{claude,codex}.md`) exists only
+  in the older `permission-wildcarding-agent-targeted-gates` checkout, which was never merged
+  here. A 2026-09-24 compile on this box came from that branch.
+- **`src/agent-gates.js`'s header still says gates need `type: feedback`.** Selection has keyed
+  on `scope: global` alone since the README's change.
+
 ### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
 
 The audit's findings are fixed and recorded in `docs/engineering-record.md` under "The v1.6.2

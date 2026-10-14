@@ -558,3 +558,93 @@ test('a batch shim runs System32\'s cmd.exe when ComSpec is missing or not a ful
   process.env.ComSpec = named;
   assert.equal(withPath(dir, () => commandLaunch('wccomspec', [])).file, named, 'a full ComSpec is still the one used');
 });
+
+// WHAT cmd.exe EXPANDS INSIDE QUOTES NEVER REACHES IT (2026-10-14, the final pre-tag
+// audit's S1, the BatBadBut class). `%CMDCMDLINE:~-1%` is the last character of cmd.exe's
+// own command line, the `"` that closes the `/s /c "..."` line, so expanding it ends the
+// argument's quoting and what follows `&` runs. The audit's token, through the arguments
+// "Why did this prompt?" builds (codexExecpolicyArgs), and a two-line `.cmd` stand-in,
+// which is not npm's shape, so only the command processor can run it. Each run's cwd is
+// its own folder, so the injected `>F` lands where this test looks.
+const INJECTION = 'x%CMDCMDLINE:~-1%&echo injected>F&rem ';
+function batchStandIn(dir) {
+  const script = path.join(dir, 'fake-codex.js');
+  fs.writeFileSync(script, 'process.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
+  const shim = path.join(dir, 'codex.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  return shim;
+}
+
+test('a batch launch refuses an argument cmd.exe would expand, so the audit\'s %CMDCMDLINE:~-1% injection never runs', { skip: !windows }, () => {
+  const { resolvedLaunch, BATCH_ARGUMENT_REFUSED_CODE } = require('../src/exec-resolve');
+  const { codexExecpolicyArgs } = require('../vscode-extension/autoLearnUi');
+  const dir = scratch('batbadbut');
+  const shim = batchStandIn(dir);
+  const F = path.join(dir, 'F');
+  const args = codexExecpolicyArgs([path.join(dir, 'user.rules')], ['fd', `--${INJECTION}`]);
+
+  // PRECONDITION: the hazard is real. The command line commandLaunch built before this fix,
+  // spawned by hand, runs the injected command.
+  const line = [shim, ...args].map(quoteForCommandProcessor).join(' ');
+  const system = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  spawnSync(system, ['/d', '/s', '/c', `"${line}"`], { cwd: dir, windowsHide: true, windowsVerbatimArguments: true });
+  assert.equal(fs.existsSync(F), true, 'precondition: the quoted command line runs what follows the expanded quote');
+  fs.rmSync(F);
+
+  // MUTATION: drop the batchArgumentRefusal check from commandLaunch. The launch is
+  // returned, the spawn below runs it, F is created and both assertions fail. Confirmed 2026-10-14.
+  let launch = null;
+  let refused = null;
+  try { launch = resolvedLaunch(shim, args); } catch (error) { refused = error; }
+  if (launch) spawnSync(launch.file, launch.args, { cwd: dir, windowsHide: true, ...launch.options });
+  assert.equal(fs.existsSync(F), false, 'the injected command ran');
+  assert.equal(refused?.code, BATCH_ARGUMENT_REFUSED_CODE, `not refused: ${refused && refused.message}`);
+  assert.equal(refused.message, `Refused to run codex.cmd: argument ${args.length} contains "%". ` +
+    'codex.cmd is a batch file, so it runs through cmd.exe, which expands % and ! even inside quotes ' +
+    'and ends a command at a line break, so the argument could not arrive as written. Nothing was run.');
+});
+
+test('a batch launch still passes ordinary arguments verbatim, and refuses ! and line breaks as well', { skip: !windows }, () => {
+  const { BATCH_ARGUMENT_REFUSED_CODE } = require('../src/exec-resolve');
+  const dir = scratch('batch-controls');
+  const shim = batchStandIn(dir);
+  // The control: the fixed probe arguments, and the metacharacters quoting does cover.
+  for (const args of [['--version'], ['app-server', '--stdio'], ['a&b|c', 'two words', 'say "hi"', '^(x)<y>']]) {
+    const launch = commandLaunch(shim, args);
+    assert.equal(launch.options.windowsVerbatimArguments, true, 'precondition: this is the cmd.exe route');
+    const run = spawnSync(launch.file, launch.args, { cwd: dir, encoding: 'utf8', windowsHide: true, ...launch.options });
+    assert.deepEqual(JSON.parse(run.stdout), args, `${JSON.stringify(args)} did not arrive as written`);
+  }
+  // MUTATION: drop `!` from BATCH_UNSAFE_ARGUMENT. The first launch is returned. Confirmed 2026-10-14.
+  for (const [value, named] of [['echo!x!', '"!"'], ['a\rb', 'a carriage return'], ['a\nb', 'a line feed'], ['a\0b', 'a NUL character']]) {
+    assert.throws(() => commandLaunch(shim, ['--', value]),
+      (error) => error.code === BATCH_ARGUMENT_REFUSED_CODE && error.message.includes(`argument 2 contains ${named}.`),
+      JSON.stringify(value));
+  }
+  // A native executable takes them all: only the cmd.exe route refuses.
+  assert.deepEqual(commandLaunch(process.execPath, ['-e', '%x%!y!']).args, ['-e', '%x%!y!']);
+});
+
+// The other half of the fix: a caller with text to pass tries npmShimLaunch first, and the
+// shim npm writes (generated here by npm's own cmd-shim) then runs with no cmd.exe at all,
+// so the same token reaches the script exactly as written.
+test('through the shim npm writes, the audit\'s %CMDCMDLINE:~-1% argument reaches the script verbatim and runs nothing', { skip: !windows }, async (t) => {
+  const { npmShimLaunch } = require('../src/exec-resolve');
+  const { codexExecpolicyArgs } = require('../vscode-extension/autoLearnUi');
+  const cmdShim = bundledCmdShim();
+  if (!cmdShim) { t.skip('npm\'s bundled cmd-shim is not next to this node'); return; }
+  const dir = scratch('npmshim-verbatim');
+  const bin = path.join(dir, 'node_modules', '@openai', 'codex', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  // The shebang is what makes cmd-shim write its node form, as npm's own codex.js has one.
+  fs.writeFileSync(path.join(bin, 'codex.js'), '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
+  await cmdShim(path.join(bin, 'codex.js'), path.join(dir, 'codex'));
+  const shim = path.join(dir, 'codex.cmd');
+  const args = codexExecpolicyArgs([path.join(dir, 'user.rules')], ['fd', `--${INJECTION}`]);
+  // The callers' own expression. MUTATION: make npmShimLaunch return null outright. The
+  // .cmd route refuses the token and this throws. Confirmed 2026-10-14.
+  const launch = npmShimLaunch(shim, args) || commandLaunch(shim, args);
+  const run = spawnSync(launch.file, launch.args, { cwd: dir, encoding: 'utf8', windowsHide: true, ...launch.options });
+  assert.equal(fs.existsSync(path.join(dir, 'F')), false, 'the injected command ran');
+  assert.deepEqual(JSON.parse(run.stdout), args, 'the argument did not reach the script as written');
+});

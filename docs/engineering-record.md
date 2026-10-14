@@ -33,6 +33,15 @@ is unmeasurable at the process level.
 
 ---
 
+## The final pre-tag audit (2026-10-14)
+
+The last audit before the v1.6.3 tag found two MEDIUM security defects and two NOTEs. Each was
+re-verified before it was changed, and every test named here was run against a revert of its fix.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| S1 (MEDIUM): "Why did this prompt?" passed pasted text through cmd.exe, so `%CMDCMDLINE:~-1%` broke out of the quoting (the BatBadBut class) | **FIXED** | **Reproduced** first: `x%CMDCMDLINE:~-1%&echo injected>F&rem`, through `resolvedLaunch` and `codexExecpolicyArgs` with a two-line stand-in `codex.cmd`, created F, and the controls `x&echo injected>F&rem` and `x%CMDCMDLINE%&…` did not. `%CMDCMDLINE:~-1%` is the last character of cmd.exe's own command line, the `"` that closes it. The comment that called `%NAME%` expansion "a legibility edge and not a hole" assumed learned command words; this path passes a paste, and the PowerShell variant passes the whole paste as one `-Command` token. **What changed:** (a) `execFileCaptured` tries `npmShimLaunch` first, as the trust worker does, so an npm `codex.cmd` runs as `node <script>` with no cmd.exe at all. The Auto Learn validator does the same, because its `--rules` paths and learned tokens are text too, and through cmd.exe a `%NAME%` token was validated as its expansion. (b) `commandLaunch`, and so `resolvedLaunch`, refuses before any spawn an argument holding `%`, `!`, CR, LF or NUL on the cmd.exe route (`src/exec-resolve.js:120#BATCH_UNSAFE_ARGUMENT`), with code `ERR_BATCH_ARGUMENT_REFUSED` and a message that names the argument and the character and says nothing was run. `!` is refused because `/d` skips only AutoRun, and the registry can turn delayed expansion on. Refusing rather than escaping, because every launch here is a probe or a diagnostic. The program path is not checked: PATH, a machine-scoped setting or the user's install names it, and a profile folder may hold a `!`. "Why did this prompt?" adds the remedy, a `codex.exe` or the shim npm writes. **Callers checked:** the version probe (`--version`) and the trust worker (`app-server --stdio`) pass fixed words and are unaffected, and so is the config RPC worker (node plus this module's own path). `--gates refresh` reports a refusal as the compile failure it already prints. **Residual:** a batch-file codex that is not npm's shape now refuses a `%` or `!` anywhere in its arguments, and that includes a home folder whose name holds one. The validator then fails closed. **Cost:** "Why did this prompt?" through an npm shim now creates node (207 ms on the host thread, the residuals table's figure) where it created cmd.exe (74 ms), once per variant, while the user waits for a modal. **Pinned by**, each failing with its fix reverted (checked by mutation, files restored by hash): in test/exec-resolve.test.js, "a batch launch refuses an argument cmd.exe would expand, so the audit's %CMDCMDLINE:~-1% injection never runs" (its precondition runs the injection for real), "a batch launch still passes ordinary arguments verbatim, and refuses ! and line breaks as well", and "through the shim npm writes, the audit's %CMDCMDLINE:~-1% argument reaches the script verbatim and runs nothing"; in test/dashboard-project-trust.test.js, end to end through `autoLearnWhy`, "…refuses a pasted %CMDCMDLINE:~-1% token for a batch-file codex…" and "…runs the codex.cmd npm writes as its node script…"; in test/codex-validator-launch.test.js, "the validator runs the codex.cmd npm writes without cmd.exe…". With both (a) and (b) reverted, both end-to-end tests fail on F being created. |
+
 ## Process-spawn follow-ups (2026-10-14)
 
 Three follow-ups to "Process spawns: the v1.6.3 lifecycle and performance confirmation", below,
@@ -59,7 +68,7 @@ PostToolUse hook spawns nothing; `bin/wildcard-perms` has one spawn, behind `--g
 | `--gates refresh` (`bin/wildcard-perms:905#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
 | `execFileCaptured` in vscode-extension/extension.js, "Why did this prompt?" | `autoLearn.codexExecutable`, default `codex` | the extension host's: wherever VS Code was started, per 1e11efa (not re-measured; listing a live host's directory handle needs elevation) | yes: commandLaunch handed an unresolved name back bare | **yes**, reproduced | **FIXED**: rejects with "spawn codex ENOENT", the words execFile used |
 | The version probe, both doors (`src/codex-version.js:254#commandLaunch`, `src/codex-version.js:311#commandLaunch`) | the located codex | `--learn status`: the shell's; the dashboard probe: the host's | only when the second PATH walk, made after the location was cached, found nothing | in that window only | **FIXED**: launches the identity's own file, so the launch and the cache key are one file |
-| Every `.cmd`/`.bat` launch (`src/exec-resolve.js:124#systemProgram`) | `ComSpec`, else `cmd.exe` | every caller's | yes, with ComSpec unset or relative | then | **FIXED**: ComSpec only when absolute, else System32's |
+| Every `.cmd`/`.bat` launch (`src/exec-resolve.js:161#systemProgram`) | `ComSpec`, else `cmd.exe` | every caller's | yes, with ComSpec unset or relative | then | **FIXED**: ComSpec only when absolute, else System32's |
 | The PATH walk itself (`src/exec-resolve.js:87#isAbsolute`) | any | — | — | yes, through a relative entry: `.`, or an unexpanded `%VAR%\bin` that a REG_SZ PATH leaves literal | **FIXED**: absolute entries only |
 | `defaultCodexValidator` in src/auto-learn-manager.js (the Auto Learn `execpolicy check`) | `codexExecutable`, default `codex` | the Auto Learn worker thread's (the host's); `--learn`: the shell's | no: unresolved on Windows throws its "codex executable not found" | no | none |
 | `nativeRpc` and `nativeRpcAsync` in src/codex-mcp-config.js | `nodeExecutable`, default `node` | the caller's | no: unresolved throws | no | none |
@@ -78,7 +87,7 @@ harnesses spawn bare `taskkill`, `git` and `powershell.exe`, and some spawn
 `commandLaunch('codex')` without checking it resolved. They are maintainer tools run from the
 checkout and are not shipped.
 
-**What changed.** `resolvedLaunch(name, args, syscall)` (`src/exec-resolve.js:143#resolvedLaunch`)
+**What changed.** `resolvedLaunch(name, args, syscall)` (`src/exec-resolve.js:180#resolvedLaunch`)
 is commandLaunch that never returns a bare name. On Windows an unresolved name throws the error
 spawn raises when there is nothing to find, in its words: `<syscall> <name> ENOENT`, code ENOENT,
 with spawn's `syscall`. The hook's compile and `execFileCaptured` use it, the second inside the
@@ -1640,10 +1649,10 @@ Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `const updated = {` at `src/auto-learn-manager.js:2363-2366#updated`, written `src/auto-learn-manager.js:2420#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2417-2419#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2953#next`, written `src/auto-learn-manager.js:3034#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:2100#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2096#change.afterHash`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3053#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3049#item.restored.hash` hash guard. |
+| `const updated = {` at `src/auto-learn-manager.js:2368-2371#updated`, written `src/auto-learn-manager.js:2425#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2422-2424#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2958#next`, written `src/auto-learn-manager.js:3039#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:2105#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2101#change.afterHash`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3058#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3054#item.restored.hash` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:287#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:225#readFileSync` read → `src/local-settings.js:287#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -1658,7 +1667,7 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `src/auto-learn-manager.js:2100#change.before.content` blindly restores `change.before.content`. If the writer
+- `rollback()` at `src/auto-learn-manager.js:2105#change.before.content` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a
@@ -1690,7 +1699,7 @@ holds the full text.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3022-3024#rides`);
+  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3029-3031#rides`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -2294,7 +2303,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:4723#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:4730#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

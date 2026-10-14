@@ -34,7 +34,7 @@ const {
   managedSettingsPaths, policySignalPaths, policyLimitsPath, policyRestrictions, assessPolicy,
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
-const { resolvedLaunch, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
+const { resolvedLaunch, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
 const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
@@ -1083,7 +1083,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2666#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2673#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1363,7 +1363,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5359#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5366#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1432,7 +1432,7 @@ function autoLearnEvidence(cfg) {
 // that DID return, reporting that part of the corpus was unreadable, and they
 // were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
 // every one of them. That is the exact shape of the defect that sat unnoticed for
-// eight days (src/auto-learn-manager.js:2875-2877#errors: "`errors` was computed here
+// eight days (src/auto-learn-manager.js:2880-2882#errors: "`errors` was computed here
 // all along and then not returned, so a file that failed every scan for eight
 // days was invisible"). Surfacing it in the CLI and not in the panel most users
 // live in only moves where it hides.
@@ -1596,12 +1596,12 @@ async function runAutoLearnScan(manual = false, suppressApplicationNotice = fals
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5389#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5396#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2454#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2461#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -1822,10 +1822,13 @@ async function cycleAutoLearnMode() {
 }
 
 function execFileCaptured(executable, args) {
-  // Resolved on PATH here (a shim needs cmd.exe), and never run bare: a name nothing matches
-  // rejects as spawn's own ENOENT, not as the copy libuv finds in the host's cwd first.
+  // The arguments carry text the user pasted. An npm codex.cmd runs as the node script it
+  // names, so that text never meets cmd.exe (2026-10-14, the BatBadBut class); any other batch
+  // file refuses an argument cmd.exe would expand (src/exec-resolve.js, BATCH_UNSAFE_ARGUMENT).
+  // Never run bare: a name nothing matches rejects as spawn's own ENOENT, not as the copy libuv
+  // finds in the host's cwd first.
   return new Promise((resolve, reject) => {
-    const launch = resolvedLaunch(executable, args);
+    const launch = npmShimLaunch(executable, args) || resolvedLaunch(executable, args);
     endTreeAfter(trackChild(execFile(launch.file, launch.args, {
       windowsHide: true, maxBuffer: 1024 * 1024, ...launch.options,
     }, (error, stdout, stderr) => {
@@ -2193,7 +2196,11 @@ async function explainAutoLearnPrompt() {
     // surfaces here as a failed check the user never caused.
     if (deactivated) return;
     vscode.window.showErrorMessage(
-      `Codex execpolicy check failed without changing rules: ${error.detail || error.message}`
+      `Codex execpolicy check failed without changing rules: ${error.detail || error.message}` +
+      (error.code === BATCH_ARGUMENT_REFUSED_CODE
+        ? ' A codex.exe, or the codex.cmd npm installs, receives any argument: point ' +
+          'permissionWildcarding.autoLearn.codexExecutable at one.'
+        : '')
     );
   }
 }

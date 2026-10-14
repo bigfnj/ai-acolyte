@@ -139,8 +139,9 @@ test('off settings remove shadowed Codex guidance and gates on activation and co
 // and nobody is there to retry a dropped write except the next activation or recompile.
 // So they pass `inPlaceFallback: false` (src/agent-guidance.js setGuidance): a CLAUDE.md
 // held through every rename attempt is left byte-identical and reported, never truncated
-// and refilled while a session may be loading it.
-test('activation never writes a held CLAUDE.md in place', async (t) => {
+// and refilled while a session may be loading it. ensureGates logs each failed target to
+// the extension's output channel, because on this path nobody is shown the error.
+test('activation never writes a held CLAUDE.md in place, and logs each gates target that failed', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-held-instructions-'));
   const home = path.join(root, 'home');
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
@@ -210,6 +211,13 @@ test('activation never writes a held CLAUDE.md in place', async (t) => {
     // MUTATION: drop `{ inPlaceFallback: false }` from ensureGates' setGatesAll call (or
     // from ensureGuidance's setGuidanceAll call) in vscode-extension/extension.js and the
     // WITNESS fails: CLAUDE.md is rewritten in place with the block.
+
+    const logged = channelLines.filter((line) => /memory gates: claude /.test(line));
+    assert.equal(logged.length, 1, `one line for the one gates target that failed: ${JSON.stringify(channelLines)}`);
+    assert.match(logged[0], /^\[\d{4}-\d\d-\d\dT[^\]]+\] memory gates: claude \(~[\\/]\.claude[\\/]CLAUDE\.md\): .*stayed held through \d+ rename attempts/);
+
+    // MUTATION: delete the `if (failed.length)` logging block in ensureGates and the count
+    // above is 0: the error is dropped exactly as it was before.
   } finally {
     try { await extension?.deactivate?.(); } catch { /* always release deferred work */ }
     Module._load = originalLoad;

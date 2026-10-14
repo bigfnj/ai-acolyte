@@ -1376,7 +1376,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5487#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5501#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1631,7 +1631,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5517#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5531#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -3730,7 +3730,21 @@ function ensureGates(announce = false) {
     // Unattended (activation, the compiled-file watcher, the corpus recompile), so no in-place
     // fallback: a held CLAUDE.md or AGENTS.md is left whole rather than truncated and refilled
     // while a session may be loading it, and the next activation or recompile retries.
-    const changed = setGatesAll(want, { inPlaceFallback: false }).filter((result) => result.changed);
+    const results = setGatesAll(want, { inPlaceFallback: false });
+    // Every target that failed, in the output channel (ported from rampage 7139659, which
+    // logs to the console). This path is unattended, so a refused or held write used to
+    // vanish: the results were filtered to `changed` and the errors dropped, and the card
+    // then read "corpus changed" with nothing anywhere saying why the refresh never landed.
+    const failed = results.filter((result) => result.error);
+    if (failed.length) {
+      const channel = sharedChannel();
+      const stamp = new Date().toISOString();
+      for (const result of failed) {
+        channel?.appendLine(`[${stamp}] memory gates: ${result.agent} `
+          + `(${String(result.path || '').replace(os.homedir(), '~')}): ${result.error}`);
+      }
+    }
+    const changed = results.filter((result) => result.changed);
     if (!changed.length) return;
     if (announce || want) {
       vscode.window.setStatusBarMessage(

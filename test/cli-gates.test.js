@@ -132,6 +132,54 @@ fs.renameSync = (from, to) => {
   // bin/wildcard-perms and the refresh rewrites CLAUDE.md in place: the first assertion fails.
 });
 
+// Ported from rampage 7139659. `refresh` is the command the install refusals advise, so
+// printing them from refresh itself told a SessionStart hook to run itself, every session.
+// Two cases, both with nothing compiled: a compile that could not run at all, and a stand-in
+// compile that ran, compiled nothing and warned on stderr, which refresh used to swallow.
+test('CLI --gates refresh says what happened, never advises refresh, and passes compile warnings through', (t) => {
+  const home = tempHome(t, { compiled: null });
+  const root = path.parse(home).root;
+  const env = {
+    ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
+    HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+  };
+  delete env.TOOLBOX_PYTHON;
+  const run = (extra) => spawnSync(process.execPath, [CLI, '--gates', 'refresh'],
+    { cwd: home, encoding: 'utf8', windowsHide: true, env: { ...env, ...extra } });
+
+  // The compile cannot run: the interpreter named does not exist.
+  const failed = run({ TOOLBOX_PYTHON: path.join(home, 'no-such-python.exe') });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /refresh: compile failed, and nothing was installed \(.*ENOENT/);
+  assert.doesNotMatch(failed.stderr, /--gates refresh`|--gates-compile/, 'no advice to run what just ran');
+  assert.doesNotMatch(failed.stderr, /installing whatever was last compiled/, 'nothing was installed, so it must not say so');
+  assert.equal(claudeMd(home), '# Mine\n');
+
+  // The compile runs, prints a warning, exits 0 and compiles nothing. A stand-in python on
+  // PATH, so this needs no interpreter and no model.
+  const bin = path.join(home, 'bin');
+  fs.mkdirSync(bin);
+  const WARNING = '[recall] stand-in warning: a store could not be listed';
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(bin, 'python.cmd'), `@echo off\r\necho ${WARNING} 1>&2\r\nexit /b 0\r\n`);
+  } else {
+    fs.writeFileSync(path.join(bin, 'python'), `#!/bin/sh\necho '${WARNING}' >&2\nexit 0\n`, { mode: 0o755 });
+  }
+  const system = process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin';
+  const empty = run({ PATH: [bin, system].join(path.delimiter) });
+  assert.equal(empty.status, 1);
+  assert.ok(empty.stderr.includes(WARNING), `the compile's own warning reaches stderr: ${empty.stderr}`);
+  assert.match(empty.stderr, /refresh: the compile found no scope:global gate blocks, so there is nothing to install/);
+  assert.doesNotMatch(empty.stderr, /--gates refresh`|--gates-compile/, 'no advice to run what just ran');
+  assert.equal(empty.stdout, '', 'and stdout, which a SessionStart hook can fold into context, stays empty');
+  assert.equal(claudeMd(home), '# Mine\n');
+
+  // MUTATION: delete the `if (cmd === 'refresh' && refused)` block in gates() in
+  // bin/wildcard-perms and both cases print the refusal's "run `recall.py --gates-compile`
+  // first (`wildcard-perms --gates refresh` ...)" advice. Delete the `else if
+  // (compile.stderr)` pass-through and the WARNING assertion fails.
+});
+
 test('CLI --gates with nothing compiled refuses and says which command to run', (t) => {
   const home = tempHome(t, { compiled: null });
   const on = runCli(home, ['--gates', 'on']);

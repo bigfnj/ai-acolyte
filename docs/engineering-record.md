@@ -119,7 +119,7 @@ PostToolUse hook spawns nothing; `bin/wildcard-perms` has one spawn, behind `--g
 
 | Site | Program | Runs in | Bare name before | Planted copy could run | Disposition |
 |---|---|---|---|---|---|
-| `--gates refresh` (`bin/wildcard-perms:905#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
+| `--gates refresh` (`bin/wildcard-perms:906#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
 | `execFileCaptured` in vscode-extension/extension.js, "Why did this prompt?" | `autoLearn.codexExecutable`, default `codex` | the extension host's: wherever VS Code was started, per 1e11efa (not re-measured; listing a live host's directory handle needs elevation) | yes: commandLaunch handed an unresolved name back bare | **yes**, reproduced | **FIXED**: rejects with "spawn codex ENOENT", the words execFile used |
 | The version probe, both doors (`src/codex-version.js:254#commandLaunch`, `src/codex-version.js:311#commandLaunch`) | the located codex | `--learn status`: the shell's; the dashboard probe: the host's | only when the second PATH walk, made after the location was cached, found nothing | in that window only | **FIXED**: launches the identity's own file, so the launch and the cache key are one file |
 | Every `.cmd`/`.bat` launch (`src/exec-resolve.js:161#systemProgram`) | `ComSpec`, else `cmd.exe` | every caller's | yes, with ComSpec unset or relative | then | **FIXED**: ComSpec only when absolute, else System32's |
@@ -2363,7 +2363,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:4851#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:4865#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

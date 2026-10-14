@@ -110,20 +110,27 @@ function gatesStatusAll(homeOrOptions) {
 }
 
 // Why an install would be refused, or null. Every one of these leaves every instruction
-// file exactly as it was.
+// file exactly as it was. `kind` and the bare `reason` travel on the refused row beside
+// the full `error`, because `wildcard-perms --gates refresh` IS the advice two of these
+// give, and it words the outcome itself rather than telling a hook to run itself.
 function refusalFor(compiled, home) {
   // An empty block: without this, a missing compile would fence off nothing, report
   // success, and leave a card reading "gates ON" forever, the exact silent-failure shape
   // this whole feature exists to avoid.
   if (compiled === '') {
-    return 'no compiled gates: run `recall.py --gates-compile` first (`wildcard-perms --gates refresh` compiles and installs)';
+    return { kind: 'empty', reason: 'no compiled gates',
+      error: 'no compiled gates: run `recall.py --gates-compile` first (`wildcard-perms --gates refresh` compiles and installs)' };
   }
   // A read that failed outright. A writer holding the file open reads as EBUSY on Windows,
   // and the late-reading body's `|| ''` turned it into an empty block past the check above.
-  if (compiled === null) return `cannot read ${compiledPath(home)}: nothing was written, try again`;
+  if (compiled === null) {
+    const reason = `cannot read ${compiledPath(home)}: nothing was written`;
+    return { kind: 'unreadable', reason, error: `${reason}, try again` };
+  }
   if (!compiledIsWhole(compiled)) {
-    return `${compiledPath(home)} does not match the sha in its own header (read while it was being `
-      + 'written, or edited by hand): nothing was written; recompile with `wildcard-perms --gates refresh`';
+    const reason = `${compiledPath(home)} does not match the sha in its own header (read while it was being `
+      + 'written, or edited by hand): nothing was written';
+    return { kind: 'torn', reason, error: `${reason}; recompile with \`wildcard-perms --gates refresh\`` };
   }
   return null;
 }
@@ -140,7 +147,7 @@ function setGatesAll(on, options = {}) {
   if (refusal) {
     return [{
       agent: 'all', changed: false, path: compiledPath(home), on: false, compiled: false,
-      error: refusal,
+      error: refusal.error, refusal: refusal.kind, reason: refusal.reason,
     }];
   }
   // Share discovery, override migration and removal with the shell block. The

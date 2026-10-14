@@ -1722,6 +1722,50 @@ test('K3: CARGO_HOME, RUSTUP_TOOLCHAIN and RUSTUP_HOME make a Codex prefix broad
     ['Bash(CARGO_HOME=x cargo build *)']);
 });
 
+// L4 (2026-10-14, the lead's decision on what K3 left): the servers rustup downloads the toolchain
+// and itself from (src/policy-exporters.js RUSTUP_SOURCE_ENV, which quotes rustup's page and source
+// for each). Auto-install is on by default, so `cargo build` with the active toolchain absent
+// fetches one from the dist server and runs it. Against the base source (the L3 commit) every row
+// of L4_BROAD rendered.
+const L4_NAMES = ['RUSTUP_DIST_SERVER', 'RUSTUP_DIST_ROOT', 'RUSTUP_UPDATE_ROOT'];
+const L4_BROAD = [
+  ...L4_NAMES.flatMap((name) => [
+    ['env', `${name}=https://mirror.invalid`, 'cargo', 'build'], [`${name}=https://mirror.invalid`, 'cargo', 'build'],
+    ['env', `${name}=https://mirror.invalid`, 'rustup', 'update'], ['docker', 'exec', '-e', name, 'ctr', 'cargo', 'build'],
+    ['podman', 'run', `--env=${name}=https://mirror.invalid`, 'img', 'cargo', 'test'], ['make', `${name}=./m`, 'all'],
+    ['just', `${name}=./m`, 'build'], ['strace', '-E', `${name}=./m`, 'cargo', 'build'],
+    ['env', `${name.toLowerCase()}=./m`, 'cargo', 'build'], ['make', `${name.toLowerCase()}=./m`, 'all'],   // folded, K1 and L1
+  ]),
+  ['env', 'RUSTUP_UPDATE_ROOT=./m', 'rustup', 'self', 'update'], ['timeout', '5', 'env', 'RUSTUP_DIST_SERVER=./m', 'cargo', 'test'],
+];
+// rustup's data variables still render.
+const L4_DATA_NARROW = [
+  ['env', 'RUSTUP_AUTO_INSTALL=0', 'cargo', 'build'], ['env', 'RUSTUP_AUTO_INSTALL=1', 'cargo', 'build'],
+  ['env', 'RUSTUP_LOG=debug', 'cargo', 'build'], ['env', 'RUSTUP_TOOLCHAIN_SOURCE=env', 'cargo', 'build'],
+  ['env', 'RUSTUP_VERSION=1.28.2', 'rustup', 'self', 'update'], ['env', 'RUSTUP_CONCURRENT_DOWNLOADS=4', 'cargo', 'build'],
+  ['env', 'RUSTUP_DOWNLOAD_TIMEOUT=300', 'rustup', 'update'], ['env', 'RUSTUP_DIST_SERVER_BACKUP=x', 'cargo', 'build'],
+  ['RUSTUP_UPDATE_ROOTS=x', 'cargo', 'build'], ['make', 'RUSTUP_LOG=debug', 'all'],
+];
+
+test('L4: RUSTUP_DIST_SERVER, RUSTUP_DIST_ROOT and RUSTUP_UPDATE_ROOT make a Codex prefix broad wherever the export reads an assignment', () => {
+  for (const prefix of [['cargo', 'build'], ['cargo', 'test'], ['rustup', 'update'], ['rustup', 'self', 'update']]) {
+    assert.equal(codexRuleCount(prefix), 1, `precondition: ${JSON.stringify(prefix)} renders`);
+  }
+  for (const prefix of L4_BROAD) {
+    // MUTATION: drop `RUSTUP_SOURCE_ENV.has(name)` from codexEnvNameIsUnsafe. Every row renders.
+    // MUTATION: drop one name from RUSTUP_SOURCE_ENV. That name's rows render.
+    assert.equal(codexRuleCount(prefix), 0, `${JSON.stringify(prefix)} chooses where the toolchain or rustup comes from`);
+  }
+  for (const prefix of L4_DATA_NARROW) {
+    // MUTATION: match RUSTUP_SOURCE_ENV as a prefix (`/^RUSTUP_/`). Every row here fails.
+    // MUTATION: add 'RUSTUP_AUTO_INSTALL' to RUSTUP_SOURCE_ENV. The two auto-install rows fail.
+    assert.equal(codexRuleCount(prefix), 1, `${JSON.stringify(prefix)} carries data and still renders`);
+  }
+  // Codex export only: the Claude half keeps G4(b), as for K3's names.
+  assert.deepEqual(renderClaudePermissions(['Bash(RUSTUP_DIST_SERVER=x cargo build *)'], { includeReviewed: true }),
+    ['Bash(RUSTUP_DIST_SERVER=x cargo build *)']);
+});
+
 test('J1 is Codex export only: the Claude half keeps G4(b), a reviewed env-led build-program rule still renders', () => {
   // A control, passing before and after J1: G4(b) accepts these because the rule keeps the
   // literal value the user ran. MUTATION: judge claudePermissionIsSafe's leading assignments by

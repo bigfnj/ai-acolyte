@@ -2127,16 +2127,34 @@ function envOptionIsUnsafe(grammar, value) {
 //     used for storing installed toolchains and configuration options" (the same page), so the
 //     toolchain a rustup proxy such as cargo or rustc runs, and the settings that choose it, come
 //     from the directory it names: a path again.
+//   * the servers rustup downloads the toolchain and itself from (RUSTUP_SOURCE_ENV; L4,
+//     2026-10-14, the lead's decision on what K3 left). Each read that day from rustup's
+//     environment-variables page (doc/user-guide/src/environment-variables.md in rust-lang/rustup)
+//     and its source. RUSTUP_DIST_SERVER "Sets the root URL for downloading static resources
+//     related to Rust", the toolchains. RUSTUP_DIST_ROOT is its deprecated spelling ("Use
+//     RUSTUP_DIST_SERVER instead"), still read "For backwards compatibility" when
+//     RUSTUP_DIST_SERVER is unset (src/config.rs, dist_root_server). RUSTUP_UPDATE_ROOT "Sets the
+//     root URL for downloading self-update", the rustup binary that every later rustup, cargo or
+//     rustc proxy then is; under `auto-self-update = enable`, "`rustup update` and similar
+//     commands will also check for, and install, any update to Rustup" (basics.md). And
+//     RUSTUP_AUTO_INSTALL is on by default ("(default: 1) When set to `1`, installs the active
+//     toolchain when it is absent"; restored by default in 1.28.1, after 1.28.0 turned it off, per
+//     the CHANGELOG), so a plain `cargo build` with the active toolchain absent downloads one from
+//     the dist server and runs it. Each names where the code that runs comes from, so it is
+//     refused, as a program path is. RUSTUP_AUTO_INSTALL itself stays data: a switch on that
+//     default, which chooses no source.
 // Left out, on purpose:
 //   * the flags variables of both tools (CFLAGS, LDFLAGS, ARFLAGS, ..., RUSTFLAGS,
 //     CARGO_ENCODED_RUSTFLAGS, RUSTDOCFLAGS, CARGO_BUILD_RUSTFLAGS,
 //     CARGO_TARGET_<triple>_RUSTFLAGS) and the locations (PREFIX, DESTDIR, CARGO_TARGET_DIR, ...).
 //     They are data by the standing decision G4(a) records for `CFLAGS=-fplugin=./x.so`, even
 //     though `RUSTFLAGS=-Clinker=./x` names a program the same way.
-//   * rustup's download sources, RUSTUP_DIST_SERVER and RUSTUP_UPDATE_ROOT ("Sets the root URL
-//     for downloading ..."), which with RUSTUP_AUTO_INSTALL ("installs the active toolchain when
-//     it is absent") could fetch the toolchain that then runs: not part of K3's decision, and
-//     recorded for the lead (docs/engineering-record.md, K3).
+//   * rustup's data variables: RUSTUP_LOG (log verbosity), RUSTUP_TOOLCHAIN_SOURCE ("Set by
+//     rustup to tell proxied tools how RUSTUP_TOOLCHAIN was determined"), RUSTUP_AUTO_INSTALL
+//     (above), the terminal, I/O and download tuning (RUSTUP_TERM_*, RUSTUP_IO_THREADS,
+//     RUSTUP_UNPACK_RAM, RUSTUP_CONCURRENT_DOWNLOADS, RUSTUP_DOWNLOAD_TIMEOUT), and RUSTUP_VERSION,
+//     which "Overrides the rustup version (e.g. `1.27.1`) to be downloaded" from the server above:
+//     a version, not a source (docs/engineering-record.md, L4).
 //   * CARGO_ALIAS_<name>: its value is cargo's own arguments, not a program, the `npm test`
 //     class the header records. CARGO_HOST_LINKER: not on either page. target.<triple>.ar:
 //     "deprecated and unused".
@@ -2151,10 +2169,11 @@ const CARGO_PROGRAM_ENV = new Set([
 const CARGO_PROGRAM_ENV_PATTERN =
   /^CARGO_(?:TARGET_[A-Z0-9_]+_(?:LINKER|RUNNER)|REGISTRIES_[A-Z0-9_]+_CREDENTIAL_PROVIDER|CREDENTIAL_ALIAS_[A-Z0-9_]+)$/;
 const CARGO_CONFIG_ENV = new Set(['CARGO_HOME', 'RUSTUP_TOOLCHAIN', 'RUSTUP_HOME']);
+const RUSTUP_SOURCE_ENV = new Set(['RUSTUP_DIST_SERVER', 'RUSTUP_DIST_ROOT', 'RUSTUP_UPDATE_ROOT']);
 function codexEnvNameIsUnsafe(name) {
   return envNameIsUnsafe(name) || MAKE_SHELL_VARIABLES.has(name) || MAKE_PROGRAM_VARIABLES.has(name) ||
     MAKE_COMMAND_VARIABLE.test(name) || CARGO_PROGRAM_ENV.has(name) || CARGO_PROGRAM_ENV_PATTERN.test(name) ||
-    CARGO_CONFIG_ENV.has(name);
+    CARGO_CONFIG_ENV.has(name) || RUSTUP_SOURCE_ENV.has(name);
 }
 // AN ENVIRONMENT NAME FOLDS CASE ON WINDOWS (K1, 2026-10-14, the lead's decision). A native
 // Windows program looks its environment up case-insensitively, so an assignment to `rustc`,

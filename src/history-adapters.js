@@ -921,10 +921,42 @@ function applyCodexProcessResults(directCalls, waitCalls, outputs, observations,
 //   - `terminate` -- the argument, or a "Script terminated" result -- closes the
 //     cell and applies nothing: a stopped cell has no outcome, and its command
 //     neither succeeded nor failed by itself;
+//   - the runtime's own "exec cell N not found" (codeModeMissingCell below)
+//     closes every open cell with that key and applies nothing: the wait
+//     reached no cell at all;
 //   - two open cells with one key (a fork's copied history, a resume that
 //     restarts allocation, a hand-edited file) make every wait for that key
 //     ambiguous, and it is withheld; so is a wait whose own definitions disagree,
 //     one for a key with no open cell, and a repeated yield naming another cell.
+//
+// ACROSS TURNS, RESUMES AND FORKS. MEASURED 2026-10-13 on codex-cli 0.161.0,
+// Windows (scripts/check-codex-code-mode-runtime.js, the continuity cases; the
+// sanitized rollouts are test/fixtures/codex-code-mode-continuity-sanitized.jsonl):
+//   - a cell left running at the end of a turn survives into the next turn of
+//     the same process, and its ID sequence continues (1, then 2);
+//   - a resume into a NEW process -- app-server thread/resume, with or without
+//     overrides, and `codex exec resume` -- appends to the SAME rollout file,
+//     writes no new session_meta, and restarts allocation at 1, so (session, N)
+//     names two cells in one file. The old runtime and every cell it ran are
+//     gone: a cell left running is killed at shutdown (its nested command is
+//     recorded failed, exit -1), and a later wait for its ID gets "not found".
+//     A resume inside the SAME process (also after thread/unsubscribe) keeps
+//     the runtime: the cell survives and allocation continues;
+//   - thread/fork starts a new file whose one session_meta is the fork's own
+//     (`forked_from_id` = the parent), with none of the parent's items copied,
+//     and the fork allocates from 1 while the parent continues its own
+//     sequence; a wait in the fork for a parent's cell gets "not found".
+// So the key needs no resume epoch. A closed cell never collides with a later
+// one of the same ID (a resumed session whose cells all finished reads
+// exactly), and a cell left open at a reload is closed by the runtime's own
+// "not found" the first time anything waits on its ID. What remains is a cell
+// left open at a reload whose ID the new runtime hands to a new cell before
+// anything waits on the old one: two open cells, one key, both withheld. That
+// loses the new cell's outcome and never credits either cell. The one record a
+// reload writes, `event_msg/thread_settings_applied`, cannot serve as an epoch:
+// a same-process turn whose turn/start carries setting overrides writes it too,
+// and the cell left running across that turn boundary survived and completed
+// (measured), so an epoch there would abandon a live cell.
 // Only a result's HEADER counts -- the first line of its first text, which Codex
 // writes before any `Output:` block -- because the block below it is the cell's
 // stdout, and a script printing "Script running with cell ID 3" must not open,
@@ -942,11 +974,12 @@ function applyCodexProcessResults(directCalls, waitCalls, outputs, observations,
 // open cell for the same key that lies before the slice's start (the overlap,
 // or the widened start) is invisible to it, so the slice binds where a full read
 // withholds. That needs two code-mode runtimes writing one session under one ID
-// sequence and a yield left open further back than the slice reaches; the
-// slice's verdict is then still the outcome reported for the cell its wait
-// names, never the opposite, and both reads use the same id. A full read is
-// itself capped at the ingest budget, so this is the limit of every bounded
-// read, not one this join adds.
+// sequence -- which a resume into a new process is, one after the other
+// (measured, above) -- and a yield left open further back than the slice
+// reaches; the slice's verdict is then the outcome reported for the cell its
+// wait names (the live runtime's: the old one is gone), never the opposite, and
+// both reads use the same id. A full read is itself capped at the ingest budget,
+// so this is the limit of every bounded read, not one this join adds.
 const CODE_MODE_YIELD_RE = /^Script running with cell ID ([A-Za-z0-9_-]{1,64})$/;
 const CODE_MODE_TERMINATED_RE = /^Script terminated\b/;
 
@@ -958,6 +991,40 @@ function codeModeHeader(output) {
 
 function codeModeYieldId(output) {
   const match = CODE_MODE_YIELD_RE.exec(codeModeHeader(output) || '');
+  return match ? match[1] : null;
+}
+
+// THE RUNTIME'S OWN "NO SUCH CELL". MEASURED 2026-10-13 on codex-cli 0.161.0: a
+// wait for a cell the runtime does not hold -- after a resume into a new
+// process, in a fork waiting on its parent's cell, for a cell that already
+// completed -- returns, as its function_call_output, exactly
+//   [{text: "Script failed\nWall time 0.0 seconds\nOutput:\n"},
+//    {text: "Script error:\nexec cell N not found"}]
+// Bound as an ordinary terminal result, its "Script failed" header credited the
+// open cell N with a FAILURE (measured on a resumed session: that cell's command
+// had been killed at shutdown, not failed). It is the runtime saying the wait
+// reached no cell, so codeModeJoin closes every open cell with that key and
+// applies nothing, as for a terminate, and reports nothing for a widen: there is
+// no call a wider slice could find. Only this exact two-part shape counts, and
+// only for the ID the wait itself named. A command's stdout cannot write it: it
+// lands below "Output:" or in a text part of its own beside others. Only the
+// cell's own script can, by throwing, and that was measured both ways
+// (scripts/check-codex-code-mode-runtime.js, `thrown-not-found` and
+// `thrown-string`): a thrown Error is written "Script error:\nError: exec cell 1
+// not found" plus a stack line (the script module, line 2, column 7), which
+// this shape excludes, so the cell stays failed; a thrown bare string is
+// written exactly as the runtime's own answer, so a script that throws those
+// words, naming the very cell it runs in, is read as stopped -- its verdict
+// withheld, never credited.
+const CODE_MODE_MISSING_HEAD_RE = /^Script failed\n(?:Wall time [^\n]*\n)?Output:\n?$/;
+const CODE_MODE_MISSING_RE = /^Script error:\nexec cell ([A-Za-z0-9_-]{1,64}) not found$/;
+
+function codeModeMissingCell(output) {
+  if (!Array.isArray(output) || output.length !== 2) return null;
+  if (!output.every((part) => isObject(part) && typeof part.text === 'string')) return null;
+  const [head, error] = output.map((part) => part.text.replace(/\r\n/g, '\n'));
+  if (!CODE_MODE_MISSING_HEAD_RE.test(head)) return null;
+  const match = CODE_MODE_MISSING_RE.exec(error);
   return match ? match[1] : null;
 }
 
@@ -1005,6 +1072,9 @@ function codeModeJoin() {
       const [{ cellId, terminate }] = definitions;
       const entries = cells.get(key(scope, cellId)) || [];
       const open = entries.filter((entry) => entry.open);
+      // The runtime holds no cell with this ID: whatever was open under it is
+      // gone, nothing is applied, and there is nothing to widen for.
+      if (record.missing === cellId) { for (const entry of open) entry.open = false; return null; }
       if (!entries.length) { unresolved.push({ callId, resultEnd: location.end }); return null; }
       if (open.length !== 1 || open[0].ambiguous) return null;
       const [cell] = open;
@@ -1308,6 +1378,7 @@ function parseCodexJsonl(text, options = {}) {
           const bound = cellJoin.waitOutput(state.session || '', outerCallId, {
             status: classifyCodexOutput(item), nestedStatuses: nestedShellStatuses(item.output),
             pending: pendingShellResult(item.output), offset: location.offset, end: location.end,
+            missing: codeModeMissingCell(item.output),
           }, codeModeHeader(item.output), location);
           if (bound) {
             // The cell's own output and every result bound to it, as one result:

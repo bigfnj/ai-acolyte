@@ -957,6 +957,77 @@ instead of the in-order session; the wait join looking its cell up outside its s
 a previous result merged across sessions; identity gaining the command or losing the
 session; the append seed applying only the first head `session_meta`).
 
+**Code-mode cells across turns, resumes and forks, measured; a wait across a reload is no
+longer read as the cell's failure.** The code-mode harness drives a case as steps now
+(turns, app-server restarts, `thread/resume`, `thread/unsubscribe`, `thread/fork`, and
+`codex exec` / `codex exec resume` processes), and its sixteen continuity cases assert
+what they measured. Only a yield names a cell's ID, so the probe cells yield. Measured:
+
+- *Across turns*: a cell left running at the end of a turn survives into the next turn of
+  the same process, where a wait returned its completion, and allocation continues (1,
+  then 2). A `thread/resume` inside the same process, also after `thread/unsubscribe`,
+  keeps the runtime the same way.
+- *Resume*: a resume into a new process (app-server `thread/resume` with or without
+  overrides, and `codex exec resume`) appends to the same rollout file, writes no new
+  `session_meta`, and restarts allocation at 1 (cells 1, 2, then 1). A cell left running
+  at the restart is gone: its nested command is recorded failed with exit -1 at shutdown,
+  and a wait for its ID gets the runtime's own answer, `Script failed` / `Script error:
+  exec cell 1 not found`. A wait for a cell that already completed gets the same answer,
+  so a reused ID can never hand an old wait a new cell's result.
+- *Fork*: `thread/fork` writes a new rollout whose one `session_meta` is the fork's own,
+  with `forked_from_id`, and none of the parent's items; the fork allocates from 1, the
+  parent continues its own sequence (1, 2, then 3), and a wait in the fork for the
+  parent's running cell gets "not found".
+
+So (session, cell ID) does name two cells in one file after a resume. A closed cell never
+collides with a later one, and a resumed session whose cells all finished reads exactly.
+The defect was the open one: the parser bound the runtime's "not found" as that cell's
+terminal result, and its "Script failed" header credited a cell whose command had been
+killed with a failure (cases `resumed-open-cell`, `resumed-reallocated`,
+`exec-resumed-open-cell`). `codeModeMissingCell` in `src/history-adapters.js` recognises
+the exact two-part answer, for the ID the wait itself named, and the join closes every
+open cell under that key with nothing applied, as for a terminate, and reports nothing
+for a widen. No resume epoch was added to the key, because none is needed and the one
+candidate marker is wrong: a reload writes `event_msg/thread_settings_applied`, but so
+does a same-process turn whose `turn/start` carries setting overrides, and the cell
+running across that turn survived and completed (`turn-overrides`). What remains is a
+cell left open at a reload whose ID the new runtime hands to a new cell before anything
+waits on the old one: two open cells under one key, both withheld by the existing rule
+(`resumed-reused-id`; the new cell really succeeded, and that is the coverage the rule
+gives up). The append-slice exception the code-mode section records is now reachable by
+a resume and is pinned in its measured shape: a slice that starts past the old cell's
+yield binds the new cell to its own true outcome where a full read withholds, under the
+same id, never the opposite. How a script's own throw is written was measured too: a
+thrown `Error` carries `Error: ` and a stack line, which the shape excludes, so the cell
+stays failed (`thrown-not-found`); a thrown bare string is written exactly as the
+runtime's answer, so that cell reads as stopped, withheld and never credited
+(`thrown-string`). A command's stdout cannot write that part; only the cell's own script
+can, naming the very cell it runs in.
+
+`test/fixtures/codex-code-mode-continuity-sanitized.jsonl` holds the eighteen thread
+rollouts of those cases, sanitized as the sequence fixture is, and two consecutive runs
+wrote byte-identical files. `test/codex-code-mode-continuity.test.js` pins every measured
+fact above from the fixture, every cell's exact verdict alone and in one file with the
+rest, the defect and its control, the exact-shape refusals (another cell's ID, a third
+part, another header, stdout below `Output:`, one string, trailing text, a thrown
+`Error`'s spelling, the cell's own output), the two open cells, the absent widen, the
+append-slice identity across the resume boundary, the bounded exception, and a
+sanitization gate. Against the parser before this change, six of its eight tests fail.
+Harness on 0.161.0: all 23 sessions pass, every verdict exact, and the regenerated
+sequence fixture is byte-identical to the committed one (`acolyte-code-mode-O6Tlx6`); a
+second run of the sixteen continuity sessions passed and wrote a byte-identical
+continuity fixture (`acolyte-code-mode-A9EyII`). Against the parser before this change,
+exactly the four cells the fix is for fail, each read `failed` (the three stopped cells
+and the thrown bare string), and `resumed` passes (`acolyte-code-mode-YurUAM`).
+Mutation: ten parser mutants were each killed (the answer ignored; accepted for any
+cell ID; leaving the cell open; reported for a widen; its head allowed stdout or any
+header; more parts allowed; trailing text allowed; a thrown `Error` accepted; the shape
+read from a cell's own output). Not measured: an interactive `codex resume` in the TUI,
+which this harness may not drive; two runtimes writing one session at once; and forks by
+the older builds whose rollouts open with two `session_meta` records (the archive
+section), where the fork's own cells share the parent's scope and a collision with a
+parent cell left open would be withheld by the same rule.
+
 ## Recorded CLI and local-state evidence
 
 **`--rules` is repeatable, and conflicts resolve toward the MORE RESTRICTIVE decision,
@@ -1042,7 +1113,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1599#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:1670#codexHeadSeed`).
 
 **Workspace scope is withdrawn and gated.** `--codex-scope workspace` parses, refuses,
 names the reason and changes nothing. The extension accepts the setting value, turns Codex

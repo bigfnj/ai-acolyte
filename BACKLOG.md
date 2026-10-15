@@ -59,20 +59,16 @@ Code") has feature work on memory gates and on Project-local draining. Its memor
 gates one at a time" (`e5c0ee7`) in wave-h3 (the record's "Retire and restore memory gates
 (2026-10-14)"). Its Project-local drain work is not mapped yet. Check it before designing that.
 
-### Decided 2026-10-15, in flight: a workspace may lower Auto Learn's mode, never raise it
+### Decided 2026-10-15, CLOSED: a workspace may lower Auto Learn's mode, never raise it
 
-wave-f15's settings census ("The settings census behind S2" in the record) found
-`autoLearn.mode` is still window-scoped. So a repository's `.vscode/settings.json` can set
-`auto-safe`, and Auto Learn then applies grants unattended to `~/.claude/settings.json` and
-`~/.codex/rules`, with no confirmation modal. `autoLearn.successThreshold` can lower the bar at
-the same time. The grants still come only from the user's own observed history, through the
-auto-safe classifier, so a repository cannot inject a rule. But it can opt the user into
-unattended writes to global files.
-
-This is a product decision, not a defect: `cycleAutoLearnMode` deliberately writes the workspace
-tier. One candidate is to let a workspace lower the mode but never raise it above the user tier.
-Same class, lower impact: `autoLearn.codexScope`, which can turn Codex export back on, and
-`localDrain.enabled`.
+**CLOSED, FIXED (`ea1fabe`).** The evidence is in `docs/engineering-record.md` under "Workspace
+settings may only tighten (2026-10-15)". wave-f15's census had found that a repository's
+`.vscode/settings.json` could set `autoLearn.mode` to `auto-safe` and so opt the user into
+unattended grants to the global files. Now `autoLearn.mode`, `autoLearn.successThreshold`,
+`autoLearn.codexScope` and `localDrain.enabled` are tighten-only. A workspace or folder value may
+make each one stricter than the user's own setting, never looser. A looser value is ignored, with
+one output line. The Cycle mode command writes user settings for any step above the user's mode.
+This entry can go once that release ships.
 
 Also from wave-f15, ACCEPTED-RECORDED rather than queued:
 - **Argument splitting on the cmd route.** A token ending in `\` before the closing quote merges

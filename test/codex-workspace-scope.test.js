@@ -373,7 +373,13 @@ test('the extension writes no Codex rules while the setting still says workspace
             if (key === 'autoLearn.mode') return 'auto-safe';
             return fallback;
           },
-          inspect: () => ({}), update: async () => {},
+          // Both are the USER's settings, so inspect() reports them there. A workspace may only
+          // tighten these keys (2026-10-15, vscode-extension/extension.js tightenOnlySetting), so
+          // an auto-safe that no tier reports is held to the default recommend, and the scan
+          // below would stop exercising the unattended apply path this test is about.
+          inspect: (key) => (key === 'autoLearn.codexScope' ? { globalValue: 'workspace' }
+            : key === 'autoLearn.mode' ? { globalValue: 'auto-safe' } : {}),
+          update: async () => {},
         };
       },
       onDidChangeConfiguration() { return disposable(); },

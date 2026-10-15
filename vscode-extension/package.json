@@ -241,14 +241,14 @@
             "Automatically apply only deterministic, suffix-closed read-only candidates after the success threshold and with zero confirmed failures."
           ],
           "default": "recommend",
-          "markdownDescription": "Auto Learn operating mode. `auto-safe` requires a suffix-closed read-only prefix, judged on the *pattern* rather than the observed command: an applied `Bash(<root> *)` also matches `<root> ... > <path>`, and no allow pattern can exclude a redirection. Auto-safe is therefore limited to roots where no argument can reach stdout — `echo`, `printf`, `Write-*`, `basename`, `dirname`, `Get-Date` and `git cat-file` are excluded, along with destructive, administrative, credential-related, network-capable, package-install, wrapper, and ambiguous candidates. All remain review-only. Accepted residual: an auto-safe root can still truncate a path with fixed content (`whoami > f`), so keep catastrophic paths in `permissions.deny`."
+          "markdownDescription": "Auto Learn operating mode. `auto-safe` requires a suffix-closed read-only prefix, judged on the *pattern* rather than the observed command: an applied `Bash(<root> *)` also matches `<root> ... > <path>`, and no allow pattern can exclude a redirection. Auto-safe is therefore limited to roots where no argument can reach stdout — `echo`, `printf`, `Write-*`, `basename`, `dirname`, `Get-Date` and `git cat-file` are excluded, along with destructive, administrative, credential-related, network-capable, package-install, wrapper, and ambiguous candidates. All remain review-only. Accepted residual: an auto-safe root can still truncate a path with fixed content (`whoami > f`), so keep catastrophic paths in `permissions.deny`. A workspace may only make this stricter: a workspace or folder value can lower the mode, and one above your user setting is ignored (the Acolyte output channel says so once). Raising it is always your user setting."
         },
         "permissionWildcarding.autoLearn.successThreshold": {
           "type": "number",
           "default": 3,
           "minimum": 1,
           "maximum": 100,
-          "markdownDescription": "Successful correlated executions required before a normalized command family becomes eligible for automatic safe application."
+          "markdownDescription": "Successful correlated executions required before a normalized command family becomes eligible for automatic safe application. A workspace may only make this stricter: it can raise the threshold, never lower it below your user setting."
         },
         "permissionWildcarding.autoLearn.intervalMinutes": {
           "type": "number",
@@ -275,7 +275,7 @@
             "Learn from Codex history but do not write Codex rules."
           ],
           "default": "user",
-          "markdownDescription": "Where validated generated Codex rules are written. Codex loads rules at startup, so restart Codex after a rule change.\n\n`workspace` is **withdrawn**: its trust model could not be stated, because VS Code workspace trust, this setting and Codex's own project trust are three different decisions and only the last governs whether Codex loads a workspace rule file. A settings file that still says `workspace` is accepted, but Codex rule export stays OFF and the Auto Learn card says so. To remove rules an older release wrote into a repository: `wildcard-perms --codex-workspace-rules remove`."
+          "markdownDescription": "Where validated generated Codex rules are written. Codex loads rules at startup, so restart Codex after a rule change.\n\n`workspace` is **withdrawn**: its trust model could not be stated, because VS Code workspace trust, this setting and Codex's own project trust are three different decisions and only the last governs whether Codex loads a workspace rule file. A settings file that still says `workspace` is accepted, but Codex rule export stays OFF and the Auto Learn card says so. To remove rules an older release wrote into a repository: `wildcard-perms --codex-workspace-rules remove`.\n\nA workspace may only make this stricter: it can turn export `off`, never back to `user` when your user setting says `off`."
         },
         "permissionWildcarding.autoLearn.codexExecutable": {
           "type": "string",
@@ -293,7 +293,7 @@
         "permissionWildcarding.localDrain.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Promote portable approvals from each workspace's `.claude/settings.local.json` — the file Claude Code writes an \"always approve\" into — up to user-scope `settings.json`, then drop the local entries user scope now covers. Only clean command families move (`Bash(<root> *)`, `Tool(<root> <sub> *)`); script blobs, absolute-path executables, MCP tools and file/web families stay local. A local entry is removed only after its promotion is verified in `settings.json`, so a pruned entry is always still granted. Refused while legacy blanket `Bash(*)` and `PowerShell(*)` grants remain, because they cover every local entry. Untrusted workspaces are read-only."
+          "markdownDescription": "Promote portable approvals from each workspace's `.claude/settings.local.json` — the file Claude Code writes an \"always approve\" into — up to user-scope `settings.json`, then drop the local entries user scope now covers. Only clean command families move (`Bash(<root> *)`, `Tool(<root> <sub> *)`); script blobs, absolute-path executables, MCP tools and file/web families stay local. A local entry is removed only after its promotion is verified in `settings.json`, so a pruned entry is always still granted. Refused while legacy blanket `Bash(*)` and `PowerShell(*)` grants remain, because they cover every local entry. Untrusted workspaces are read-only. A workspace may only make this stricter: it can turn the automatic drain off, never on when your user setting has it off."
         },
         "permissionWildcarding.guidance.enabled": {
           "type": "boolean",

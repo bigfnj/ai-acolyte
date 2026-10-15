@@ -132,6 +132,11 @@ arguments, transcript text, prompts, or absolute transcript filenames.
   after `permissionWildcarding.autoLearn.successThreshold` confirmed successes (default **3**) and
   only while the candidate has zero confirmed failures.
 
+A workspace may lower the mode but never raise it above your user setting (see "Every
+setting"). So **Cycle mode** saves a step above your user setting in user settings, where it
+applies to every workspace that does not lower it, and saves any other step where the mode
+already lives.
+
 Auto-safe excludes destructive, administrative, credential-related, network-capable,
 package-install, arbitrary-wrapper, and ambiguous candidates. They may appear in review, but
 are never automatically applied. Claude `deny` entries and managed policy continue to win.
@@ -153,7 +158,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4340#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4451#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -216,10 +221,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4289#showWarningMessage`).
+`vscode-extension/extension.js:4400#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4109#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4220#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -473,7 +478,7 @@ dashboard title-bar buttons.
 | Auto Learn - Review candidates | Tick the families to grant, with policy overrides labelled |
 | Auto Learn - Apply safe candidates | Apply only the deterministic read-only, suffix-closed ones |
 | Auto Learn - Undo last application | Release this claimant's grants through the claims registry |
-| Auto Learn - Cycle mode | `observe` → `recommend` → `auto-safe` |
+| Auto Learn - Cycle mode | `observe` → `recommend` → `auto-safe`. A step above your user setting is saved in user settings; any other step is saved where the mode already lives |
 | Auto Learn - Why did this prompt? | Diagnose one command against user settings and org policy |
 | Auto Learn - Show families blocked by managed policy | Families whose prompt no user rule can stop, with the rule |
 | Derived guidance - review mitigations for prompts no rule can stop | Accept / decline each measured mitigation by id |
@@ -504,18 +509,25 @@ value, so a repository's `.vscode/settings.json` cannot switch the deadline off.
 `PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` (milliseconds, `0` disables) still applies; once
 set, the setting wins. An edit applies to the next scan, with no reload.
 
+Four keys are **tighten-only**: `autoLearn.mode`, `autoLearn.successThreshold`,
+`autoLearn.codexScope` and `localDrain.enabled`. Each decides whether the extension writes your
+global files unattended, so a workspace or folder value may make it stricter than your user
+setting but never looser. A repository's `.vscode/settings.json` can put one project in
+`observe`, but it cannot switch you to `auto-safe`. A value that would loosen one is ignored, and
+the Acolyte output channel says so once per window. With no user setting, the default is the bar.
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `backupMirrorPath` | `""` | Off-tree copy of the allow/deny backup. Empty means `~/.permission-wildcarding/allow-list.latest.json`; point it at another volume to survive more than a `~/.claude` reset. Machine-scoped: a workspace value is ignored |
 | `autoLearn.enabled` | `true` | Scan history at all |
-| `autoLearn.mode` | `"recommend"` | `observe` / `recommend` / `auto-safe` |
-| `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies |
+| `autoLearn.mode` | `"recommend"` | `observe` / `recommend` / `auto-safe`. A workspace may only make it stricter: a workspace or folder value can lower the mode, and one above your user setting is ignored |
+| `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies. A workspace may only make it stricter: it can raise the threshold, never lower it below your user setting |
 | `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |
 | `autoLearn.debounceSeconds` | `20` | Quiet window a watcher-driven scan waits out |
-| `autoLearn.codexScope` | `"user"` | `user` / `off` — where generated Codex rules land. `workspace` was withdrawn |
+| `autoLearn.codexScope` | `"user"` | `user` / `off` — where generated Codex rules land. `workspace` was withdrawn. A workspace may only make it stricter: it can turn export `off`, never back to `user` when your user setting says `off` |
 | `autoLearn.codexExecutable` | `"codex"` | Codex CLI the extension runs (`execpolicy check`, `--version`, `app-server`). Machine-scoped: a workspace value is ignored |
 | `autoLearn.workerTimeoutSeconds` | `300` | Seconds one worker operation may run before the extension stops waiting; `0` disables. Machine-scoped: a workspace value is ignored |
-| `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button |
+| `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button. A workspace may only make it stricter: it can turn the drain off, never on when your user setting has it off |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation. Machine-scoped: a workspace value is ignored |
 | `gates.enabled` | `true` | Keep the memory-gates block installed on activation. Machine-scoped: a workspace value is ignored |
 | `claudeStripModelCheck` | `true` | Once per new Claude Code binary (about 30 s after activation, on a worker thread), compare its known-safe environment variables with the 2.1.296 list the generalizer models, and warn once on a difference. Never edits the list: a change still needs a release. Machine-scoped: a workspace value is ignored |

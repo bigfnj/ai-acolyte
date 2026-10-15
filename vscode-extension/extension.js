@@ -1091,7 +1091,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2887#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2996#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1214,13 +1214,97 @@ function userSetting(key, fallback) {
   return typeof value === typeof fallback ? value : fallback;
 }
 
+// ── settings a workspace may only tighten (2026-10-15) ──────────────────────────
+// Four window-scoped keys decide whether, and how readily, the extension writes the user's
+// global files unattended. In `auto-safe` every scan applies grants to ~/.claude/settings.json
+// and ~/.codex/rules with no modal; `successThreshold` is how much evidence that takes;
+// `codexScope: user` lets an apply write the Codex rules; `localDrain.enabled` promotes a
+// workspace's .claude/settings.local.json into user scope. A repository's .vscode/settings.json
+// could set all four, so it could opt the user into unattended writes the user had not chosen.
+//
+// The maintainer's decision: a workspace may make each one STRICTER, never looser. A lower mode,
+// a higher threshold, Codex export off and the drain off all take effect per workspace or folder.
+// A value that would loosen the user's own setting is ignored, with one output line, and the
+// user tier stands (the manifest default when the user set nothing). They stay window-scoped,
+// not machine-scoped, because a stricter per-project choice is worth keeping. The census that
+// found them is "The settings census behind S2" in docs/engineering-record.md.
+//
+// `normalize` maps a raw value to a valid one, or undefined: an invalid value at any tier counts
+// as unset. `strictness` orders the valid values, higher is stricter.
+const AUTO_LEARN_MODES = ['observe', 'recommend', 'auto-safe'];
+const CODEX_SCOPES = ['user', 'workspace', 'off'];
+const TIGHTEN_ONLY = {
+  'autoLearn.mode': {
+    fallback: 'recommend', rule: 'a workspace may only lower the mode',
+    normalize: (value) => (AUTO_LEARN_MODES.includes(value) ? value : undefined),
+    strictness: (value) => AUTO_LEARN_MODES.length - 1 - AUTO_LEARN_MODES.indexOf(value),
+  },
+  // Floored at 1, as the manager floors it; a numeric string still counts, as Math.floor took one.
+  'autoLearn.successThreshold': {
+    fallback: 3, rule: 'a workspace may only raise the threshold',
+    normalize: (value) => ((typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+      && Number.isFinite(Number(value)) ? Math.max(1, Math.floor(Number(value))) : undefined),
+    strictness: (value) => value,
+  },
+  // `workspace` is the withdrawn scope. It is still accepted and writes no rules anywhere
+  // (autoLearnConfig, below), so it ranks with `off`; between the two, the user's own stands.
+  'autoLearn.codexScope': {
+    fallback: 'user', rule: 'a workspace may only turn Codex rule export off',
+    normalize: (value) => (CODEX_SCOPES.includes(value) ? value : undefined),
+    strictness: (value) => (value === 'user' ? 0 : 1),
+  },
+  'localDrain.enabled': {
+    fallback: true, rule: 'a workspace may only turn the automatic drain off',
+    normalize: (value) => (typeof value === 'boolean' ? value : undefined),
+    strictness: (value) => (value ? 0 : 1),
+  },
+};
+
+// The effective value of a tighten-only key: the strictest of the user tier, every workspace
+// and folder value that is no looser than it, and VS Code's merged get(). get() can only
+// tighten the answer. In VS Code it is one of those tiers already, and a value that reaches it
+// any other way (a configuration without inspect()) is held to the user tier like the rest.
+// `user` is returned too, because the mode toggle decides by it which tier to write.
+function tightenOnlySetting(config, key) {
+  const spec = TIGHTEN_ONLY[key];
+  const tiers = (typeof config.inspect === 'function' && config.inspect(key)) || {};
+  const userValue = spec.normalize(tiers.globalValue);
+  const user = userValue ?? spec.fallback;
+  const stricter = (a, b) => (b !== undefined && spec.strictness(b) > spec.strictness(a) ? b : a);
+  let value = stricter(user, spec.normalize(config.get(key, spec.fallback)));
+  for (const [tier, raw] of [['workspace', tiers.workspaceValue], ['folder', tiers.workspaceFolderValue]]) {
+    const candidate = spec.normalize(raw);
+    if (candidate === undefined) continue;
+    if (spec.strictness(candidate) < spec.strictness(user)) {
+      noteLooserSettingIgnored(`${tier} setting ${key}=${candidate} ignored: ${spec.rule} `
+        + `(user setting: ${user}${userValue === undefined ? ', the default' : ''}).`);
+    } else value = stricter(value, candidate);
+  }
+  return { value, user };
+}
+
+// One output line per ignored value per activation, never a notification: the value is legal,
+// it just cannot loosen the user's own. autoLearnConfig() runs on every scan and every panel
+// refresh, so without the Set this would print the same line each time. activate() clears it,
+// as it clears warnedOnce.
+const looserSettingsNoted = new Set();
+function noteLooserSettingIgnored(line) {
+  if (looserSettingsNoted.has(line)) return;
+  looserSettingsNoted.add(line);
+  try { sharedChannel()?.appendLine(`[${new Date().toISOString()}] Settings: ${line}`); }
+  catch { /* a log line must never stop a setting being read */ }
+}
+
 // ── activation ────────────────────────────────────────────────────────────────
 // Cross-agent Auto Learn keeps transcript text in memory only. Persistent state
 // contains normalized prefixes, counters, reason labels, hashes, and cursors.
+//
+// mode, successThreshold and codexScope are tighten-only (above): a workspace or
+// folder value may make each stricter than the user's setting, never looser.
 function autoLearnConfig() {
   const cfg = vscode.workspace.getConfiguration('permissionWildcarding');
-  const mode = cfg.get('autoLearn.mode', 'recommend');
-  const codexScope = cfg.get('autoLearn.codexScope', 'user');
+  const mode = tightenOnlySetting(cfg, 'autoLearn.mode').value;
+  const codexScope = tightenOnlySetting(cfg, 'autoLearn.codexScope').value;
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   let codexRulesPath = path.join(CODEX_HOME_DIR, 'rules', 'permission-wildcarding.rules');
   let scopeWarning = '';
@@ -1242,8 +1326,8 @@ function autoLearnConfig() {
   }
   return {
     enabled: cfg.get('autoLearn.enabled', true),
-    mode: ['observe', 'recommend', 'auto-safe'].includes(mode) ? mode : 'recommend',
-    threshold: Math.max(1, Math.floor(cfg.get('autoLearn.successThreshold', 3))),
+    mode,
+    threshold: tightenOnlySetting(cfg, 'autoLearn.successThreshold').value,
     intervalMinutes: Math.max(1, Number(cfg.get('autoLearn.intervalMinutes', 5)) || 5),
     debounceSeconds: Math.max(1, Number(cfg.get('autoLearn.debounceSeconds', 20)) || 20),
     codexScope,
@@ -1379,7 +1463,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5713#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5824#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1634,12 +1718,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5746#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5857#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2668#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2775#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -1902,26 +1986,49 @@ async function undoAutoLearn() {
   dashboard?.refresh();
 }
 
+// The tier the toggle writes (2026-10-15). A workspace may only LOWER the mode (TIGHTEN_ONLY), so a
+// step above the user's own setting is written to user settings: raising is always the user's
+// setting, never a repository's. Any other step writes where the mode already lives, the folder
+// or workspace tier when one holds a value and user settings otherwise, so a stricter
+// per-project choice still sticks.
 async function cycleAutoLearnMode() {
-  const order = ['observe', 'recommend', 'auto-safe'];
   const cfg = autoLearnConfig();
-  const next = order[(order.indexOf(cfg.mode) + 1) % order.length];
+  const next = AUTO_LEARN_MODES[(AUTO_LEARN_MODES.indexOf(cfg.mode) + 1) % AUTO_LEARN_MODES.length];
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  const spec = TIGHTEN_ONLY['autoLearn.mode'];
+  const raising = spec.strictness(next) < spec.strictness(tightenOnlySetting(config, 'autoLearn.mode').user);
+  const inspected = (typeof config.inspect === 'function' && config.inspect('autoLearn.mode')) || {};
+  const { Global, Workspace, WorkspaceFolder } = vscode.ConfigurationTarget;
+  let target = Global;
+  if (!raising && inspected.workspaceFolderValue !== undefined) target = WorkspaceFolder;
+  else if (!raising && inspected.workspaceValue !== undefined) target = Workspace;
+  const where = target === Global ? 'your user settings'
+    : target === Workspace ? "this workspace's settings" : "this folder's settings";
   if (next === 'auto-safe') {
     const answer = await vscode.window.showWarningMessage(
-      `Turn on Auto Learn auto-safe mode? Only deterministic read-only families with ${cfg.threshold}+ successful runs are eligible; every other risk class stays review-only.`,
+      `Turn on Auto Learn auto-safe mode in ${where}${target === Global ? ', for every workspace that does not lower it' : ''}? Only deterministic read-only families with ${cfg.threshold}+ successful runs are eligible; every other risk class stays review-only.`,
       { modal: true }, 'Enable auto-safe'
     );
     if (answer !== 'Enable auto-safe') return;
   }
-  await vscode.workspace.getConfiguration('permissionWildcarding')
-    .update('autoLearn.mode', next, (() => {
-      const inspected = vscode.workspace.getConfiguration('permissionWildcarding').inspect('autoLearn.mode');
-      if (inspected?.workspaceFolderValue !== undefined) return vscode.ConfigurationTarget.WorkspaceFolder;
-      if (inspected?.workspaceValue !== undefined) return vscode.ConfigurationTarget.Workspace;
-      return vscode.ConfigurationTarget.Global;
-    })());
+  await config.update('autoLearn.mode', next, target);
+  // A raise has to show in THIS window too. A folder or workspace value below `next` (it can
+  // only equal the old user setting, or the raise would not be one) still caps the mode here,
+  // so the toggle would report a mode it did not get. That value is removed.
+  const removed = [];
+  if (raising) {
+    for (const [tier, raw, label] of [[WorkspaceFolder, inspected.workspaceFolderValue, 'folder'],
+      [Workspace, inspected.workspaceValue, 'workspace']]) {
+      const value = spec.normalize(raw);
+      if (value === undefined || spec.strictness(value) <= spec.strictness(next)) continue;
+      await config.update('autoLearn.mode', undefined, tier);
+      removed.push(label);
+    }
+  }
   invalidateAutoLearnManager();
-  vscode.window.showInformationMessage(`Auto Learn mode: ${next}.`);
+  vscode.window.showInformationMessage(`Auto Learn mode: ${next}, saved in ${where}.`
+    + (raising ? ' A workspace may only lower the mode, so raising it is a user setting.' : '')
+    + (removed.length ? ` The ${removed.join(' and ')} setting that capped it here was removed.` : ''));
   scheduleAutoLearn(50);
   dashboard?.refresh();
 }
@@ -2688,6 +2795,8 @@ function activate(context) {
   // warnOnce promises "once per activation", and the Set outlives deactivate, so
   // until 2026-10-13 a re-activate stayed silent about a warning already given.
   warnedOnce.clear();
+  // The same promise for the line a loosening workspace setting gets (tightenOnlySetting).
+  looserSettingsNoted.clear();
   // Watch settings.json for any change (Claude Code approval, manual edit, etc.).
   // RelativePattern (not a plain string) — plain strings only watch files inside
   // opened workspace folders, but ~/.claude/settings.json usually isn't one.
@@ -3403,8 +3512,10 @@ function runWildcarding(manual = false) {
 // one entry covers every project, then drop the local entries user scope now
 // covers. src/local-settings.js owns the rules; this owns the VS Code wiring.
 
+// Tighten-only (TIGHTEN_ONLY): a workspace may turn the automatic drain off, never back on for a
+// user who turned it off.
 function localDrainEnabled() {
-  return vscode.workspace.getConfiguration('permissionWildcarding').get('localDrain.enabled', true);
+  return tightenOnlySetting(vscode.workspace.getConfiguration('permissionWildcarding'), 'localDrain.enabled').value;
 }
 
 // The folders whose .claude/settings.local.json this window looks at: one file per

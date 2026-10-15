@@ -152,9 +152,6 @@ const TEST_ONLY = {
   // resolveExecutable left this list 2026-10-13 (src/codex-version.js keys its cache on it); taskkillPath joined 2026-10-14 (the config worker's grace kill is endProcessTree's now).
   'src/exec-resolve.js': ['quoteForCommandProcessor', 'taskkillPath'],
   'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
-  // describePlan words the gates panel's confirmation, which the CLI never shows (2026-10-14):
-  // test-only until the extension's panel consumes it.
-  'src/gates-manage.js': ['describePlan'],
   'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl'],
   'src/legacy-backup-cleanup.js': ['parseBackupText'],
   'src/legacy-max-cleanup.js': ['LEGACY_ALLOW_CORE', 'legacyApproveCommandFor', 'legacyGeneratedAllow'],
@@ -182,7 +179,9 @@ const TEST_ONLY = {
   // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
   // gateOf joined 2026-10-14: test/gate-agents.test.js holds it to recall.py's _gate file by
   // file; in production it is called inside the module, by fullReport and the census.
-  'vscode-extension/memoryLint.js': ['gateOf', 'pickPrimaryDir'],
+  // gateEntryOf joined the same day for the same reason, held to recall.py's _gate_entry (the
+  // card's retired count against the list the gates panel shows).
+  'vscode-extension/memoryLint.js': ['gateEntryOf', 'gateOf', 'pickPrimaryDir'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
   // drives a command-line tool through; the tools themselves are run by hand or by CI.
   'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],

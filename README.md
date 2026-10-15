@@ -101,12 +101,12 @@ matrix and dated evidence are in
 
 Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2660#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4163#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:4182#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:3983#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:4002#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1421#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1856#derivedFor`); observed runs are not reported as measured
@@ -210,6 +210,19 @@ Names are case-insensitive, and a block list (`- codex` lines under `agents:`) w
 `recall.py --lint` and the dashboard name it. `--gates status` and the card give each agent's
 own count, such as "Claude 13 · Codex 14", and a gate moved from one agent to the other leaves
 the first on the next compile.
+
+To set one standing order aside without losing it, retire it. **Manage gates…** on the card, or
+**AI Acolyte: Manage memory gates…** from the palette, lists every gate memory in the store that
+compiles, with the agents each one is for. Uncheck a gate and apply: its memory's `scope: global`
+becomes `scope: retired` and nothing else in the file changes, its `agents:` line included. Recall
+still finds the memory, and from the next session the gate no longer loads in `CLAUDE.md` and
+`AGENTS.md` (or only in the one its `agents:` line names). Check it again to restore it, to the same
+agents. A confirmation says what each file will load first. The memory folder is snapshotted
+before every change into `~/.claude/wildcarding/gate-snapshots` (set `AI_ACOLYTE_GATE_SNAPSHOT_DIR`
+to move it), and the newest 30 snapshots of each store are kept. The change is compiled either
+way, and installed only while memory gates are on: gates you switched off stay off. From a
+terminal, `wildcard-perms --gates list`, `--gates retire <memory>` and `--gates restore <memory>`
+do the same. Only the store that compiles is changed, never the other stores the card reports.
 
 ## 6. Recall over your memory
 
@@ -376,8 +389,19 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2827#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:2831#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
+
+Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They
+rewrite the value of the frontmatter `scope:` line the compiler reads, `global` to `retired` and
+back, and a backstop refuses any rewrite that would not turn back into exactly the original bytes.
+Every name is validated before anything is written, the memory folder is snapshotted first, each
+file is re-read just before its own write, links and hand-set ACLs are refused, and a gate-edit
+lock in `~/.claude/wildcarding` keeps two edits from interleaving. `src/gates-manage.js` plans the
+request for both front ends, computing what each agent loads before and after, so the CLI and the
+panel refuse and report alike. After the edit the change compiles once, through the same atomic
+write every compile uses, and installs through `setGatesAll`'s single read. The corpus watcher
+skips the memories the edit itself rewrote (`isOwnGateEdit`), so one change is one compile.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
 with Okapi BM25 over the whole file, each leg min-max normalized per query. The lexical leg exists

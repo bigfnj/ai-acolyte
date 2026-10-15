@@ -764,6 +764,39 @@ test('a gate whose agents: cannot be read is named as left out, and counted nowh
   // side-store counts 2; in fullReport, count a gate with a problem and gateSources reads 3.
 });
 
+// Retire and restore (2026-10-14): a retired gate memory (`scope: retired`) is no gate source and
+// no other-store gate, and the report names it, with the agents a restore returns it to, for the
+// gates card's "N retired". In compile order, whatever order the directory lists them in.
+test('a retired gate is named as retired with its agents, in compile order, and counted nowhere else', () => {
+  const f = otherStoresFixture();
+  const retired = (text, agents = '') => `---\nmetadata:\n  scope: retired\n${agents ? `  agents: ${agents}\n` : ''}---\n`
+    + `<!-- gate -->\n- **${text}**\n<!-- /gate -->\n`;
+  // `Z-` before `a-` by code point, as recall.py sorts, and after it in NTFS's case-blind listing,
+  // so the order is the sort's and not the file system's.
+  fs.writeFileSync(path.join(f.main, 'Z-retired.md'), retired('Retired gate.'), 'utf8');
+  fs.writeFileSync(path.join(f.main, 'a-retired-codex.md'), retired('Retired Codex gate.', '[codex]'), 'utf8');
+  fs.writeFileSync(path.join(f.main, 'n-not-a-gate.md'), '---\nmetadata:\n  scope: retired\n---\nNo block.\n', 'utf8');
+  fs.writeFileSync(path.join(f.side, 's5-retired.md'), retired('Side retired gate.'), 'utf8');
+  const h = harness(f.tempHome);
+  try {
+    const { dir, report } = h.loaded.memoryReport();
+    assert.equal(dir, f.main);
+    assert.deepEqual(report.gateRetired, [
+      { file: 'Z-retired.md', agents: ['claude', 'codex'], problem: null },
+      { file: 'a-retired-codex.md', agents: ['codex'], problem: null },
+    ]);
+    assert.equal(report.gateSources, 1, 'only the active gate is a source');
+    assert.deepEqual(report.gateBodies, ['- **Main gate.**']);
+    const side = h.loaded.otherStoreGates(dir, report.gateBodies, { maxAgeMs: 0 }).stores.find((s) => s.name === 'side-store');
+    assert.equal(side.count, 1, 'a retired gate in another store is not a gate that store would install');
+  } finally {
+    h.restore();
+    fs.rmSync(f.tempHome, { recursive: true, force: true });
+  }
+  // MUTATION: in fullReport, drop the gateRetired push (a retired gate then falls through to
+  // gateSources, which reads 3); drop the sort and the order follows the listing.
+});
+
 test('a pinned memory.dir is the compile store, and the census reports the rest around it', () => {
   const f = otherStoresFixture();
   fs.writeFileSync(path.join(f.main, 'm5.md'), f.gate('Main-only gate.'), 'utf8');
@@ -1222,7 +1255,7 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
 // this repo, from the pinned-`memory.dir` bug, and is why
-// `memoryStoreDirs` (extension.js:2842-2843#memoryStoreDirs) overrides `dir` before calling this.
+// `memoryStoreDirs` (extension.js:2846-2847#memoryStoreDirs) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

@@ -165,11 +165,18 @@ const output = [];
 function message(kind, m, options, ...choices) {
   shown.push(`${kind === 'error' ? 'ERROR ' : ''}${m}`);
   dialogs.push({ kind, message: String(m), detail: options?.detail || '' });
-  // Only the two tested removal modals are accepted. Other prompts remain closed.
+  // Only the two tested removal modals and the gates panel's two confirmations are accepted.
+  // Other prompts remain closed.
+  if (kind === 'warning' && ['Retire 1 gate?', 'Restore 1 gate?'].includes(m) && choices.includes('Apply')) {
+    return Promise.resolve('Apply');
+  }
   return Promise.resolve(kind === 'warning' &&
     ['Remove shell-style guidance?', 'Remove memory gates?'].includes(m) && choices.includes('Remove')
     ? 'Remove' : undefined);
 }
+// The gates panel (permission-wildcarding.manageGates): every panel the extension opens, with
+// what it posted and a way to send it a message as its page would.
+const panels = [];
 
 // console.error is a real reporting channel for this extension, so the harness has to
 // watch it as well as the vscode stub. Recorded AND still printed, so a failure is
@@ -228,7 +235,26 @@ const vscode = {
     },
     showInputBox: () => Promise.resolve(inputs.shift()),
     withProgress: (_o, task) => task({ report() {} }, { onCancellationRequested: () => ({ dispose() {} }) }),
+    showTextDocument: () => Promise.resolve({}),
+    createWebviewPanel: () => {
+      const on = {};
+      const panel = {
+        posted: [],
+        webview: {
+          html: '',
+          postMessage(message) { panel.posted.push(message); return Promise.resolve(true); },
+          onDidReceiveMessage(cb) { on.message = cb; return { dispose() {} }; },
+        },
+        onDidDispose(cb) { on.dispose = cb; return { dispose() {} }; },
+        reveal() {},
+        dispose() { if (on.dispose) on.dispose(); },
+        send(message) { on.message(message); },
+      };
+      panels.push(panel);
+      return panel;
+    },
   },
+  ViewColumn: { Active: -1, Beside: -2 },
   commands: {
     registerCommand: (id, fn) => { commands.set(id, fn); return { dispose() {} }; },
     executeCommand: () => Promise.resolve(),
@@ -449,6 +475,65 @@ Module._load = function load(request, parent, isMain) {
     assertInstructions(false, false);
     assert.equal(config.get('gates.enabled'), false);
     return `CLAUDE.md and ${path.basename(codexInstructions)}: on/off, preserved user text, independent blocks and persisted settings`;
+  });
+  // Retire and restore one gate (2026-10-14): the packaged panel, the packaged recall.py and the
+  // toolbox Python, against a memory store in the sandbox. A Codex-only gate is retired, which
+  // must change the Codex file alone and leave its memory's agents: line byte for byte, then
+  // restored. The toolbox Python is required, as the Codex CLI is above.
+  await check('a Codex-only memory gate retires and restores through the packaged panel and the real recall.py', async () => {
+    const py = path.join(process.env.CODEX_TOOLBOX
+      || path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'DevToolbox'), 'python', '.venv', 'Scripts', 'python.exe');
+    assert.ok(fs.existsSync(py), `the toolbox Python is required for this check: ${py}`);
+    const store = path.join(home, '.claude', 'projects', 'drive', 'memory');
+    fs.mkdirSync(store, { recursive: true });
+    fs.writeFileSync(path.join(store, 'MEMORY.md'), '# Memory Index\n');
+    const memory = (scope, agents, text) => `---\nname: fixture\nmetadata:\n  scope: ${scope}\n${agents ? `  agents: ${agents}\n` : ''}---\n`
+      + `<!-- gate -->\n- **${text}**\n<!-- /gate -->\n`;
+    fs.writeFileSync(path.join(store, 'fixture_shared.md'), memory('global', '', 'Fixture shared gate.'));
+    const codexFile = path.join(store, 'fixture_codex.md');
+    const codexBefore = memory('global', '[codex]', 'Fixture Codex-only gate.');
+    fs.writeFileSync(codexFile, codexBefore);
+    config.set('gates.enabled', true);
+    const wait = async (test, what) => {
+      for (let i = 0; i < 600 && !test(); i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.ok(test(), `timed out waiting for ${what}`);
+    };
+    await invoke('manageGates');
+    const panel = panels[panels.length - 1];
+    assert.ok(panel, 'Manage gates opened no panel');
+    assert.match(panel.webview.html, /<script nonce="[0-9a-f]{32}">/);
+    panel.send({ type: 'ready' });
+    await wait(() => panel.posted.some((m) => m.type === 'gates'), 'the gate list');
+    const listed = panel.posted.filter((m) => m.type === 'gates').pop();
+    assert.ok(Array.isArray(listed.gates), `the panel could not list the gates: ${listed.unavailable || listed.error}`);
+    assert.deepEqual(listed.gates.map((gate) => [gate.file, gate.state, gate.agents.join('+')]),
+      [['fixture_codex.md', 'active', 'codex'], ['fixture_shared.md', 'active', 'claude+codex']]);
+    const job = async (message) => {
+      const from = panel.posted.length;
+      panel.send(message);
+      await wait(() => panel.posted.slice(from).some((m) => m.type === 'busy' && m.busy === false), message.type);
+      const result = panel.posted.slice(from).filter((m) => m.type === 'result').pop();
+      assert.ok(result && result.ok, `${message.type} did not succeed: ${result ? result.text : '(no result)'}`);
+      return result.text;
+    };
+    // Installed first through the panel's own Compile and install, then the retire.
+    await job({ type: 'finish', store: listed.rawStore });
+    const claudeBefore = fs.readFileSync(instructionFiles[0]);
+    assert.ok(fs.readFileSync(codexInstructions, 'utf8').includes('Fixture Codex-only gate.'), 'precondition: Codex has the gate');
+    assert.ok(!claudeBefore.toString('utf8').includes('Fixture Codex-only gate.'), 'precondition: Claude does not');
+    const retired = await job({ type: 'apply', store: listed.rawStore, retire: ['fixture_codex.md'], restore: [] });
+    assert.equal(fs.readFileSync(codexFile, 'utf8'), codexBefore.replace('scope: global', 'scope: retired'),
+      'the retire rewrote more than the scope value');
+    assert.ok(fs.readFileSync(instructionFiles[0]).equals(claudeBefore), 'retiring a Codex-only gate changed CLAUDE.md');
+    assert.ok(!fs.readFileSync(codexInstructions, 'utf8').includes('Fixture Codex-only gate.'), 'the retired gate is still in the Codex file');
+    assert.ok(fs.readFileSync(codexInstructions, 'utf8').includes('Fixture shared gate.'));
+    const snapshots = path.join(home, '.claude', 'wildcarding', 'gate-snapshots');
+    assert.equal(fs.readdirSync(snapshots).length, 1, 'one snapshot, under the sandbox ~/.claude/wildcarding');
+    await job({ type: 'apply', store: listed.rawStore, retire: [], restore: ['fixture_codex.md'] });
+    assert.equal(fs.readFileSync(codexFile, 'utf8'), codexBefore, 'the restore did not give back the original bytes');
+    assert.ok(fs.readFileSync(codexInstructions, 'utf8').includes('Fixture Codex-only gate.'));
+    assert.ok(fs.readFileSync(instructionFiles[0]).equals(claudeBefore), 'restoring a Codex-only gate changed CLAUDE.md');
+    return retired.slice(0, 160);
   });
 
   try {

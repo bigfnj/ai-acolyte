@@ -36,14 +36,29 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// A gate memory in either state the retire and restore verbs move it between, or null:
+// recall.py's _gate_entry, `scope: global` or `scope: retired` in the frontmatter plus a PAIRED
+// block, with gateAgents' reading of `agents:`. `state` is "active", "excluded" (scope: global,
+// `agents:` unreadable, so left out for every agent) or "retired"; for a retired gate `agents`
+// is who a restore returns it to. The ONE reading of scope and agents here, so the card's
+// retired count and its gate count cannot disagree about a file (2026-10-14).
+function gateEntryOf(raw) {
+  const scope = frontmatter(raw, 'scope');
+  if (scope !== 'global' && scope !== 'retired') return null;
+  const m = GATE_BLOCK.exec(raw);
+  if (!m) return null;
+  const { agents, problem } = gateAgents(raw);
+  const state = scope === 'retired' ? 'retired' : problem === null ? 'active' : 'excluded';
+  return { scope, state, body: m[1].trim(), agents, problem };
+}
+
 // The gate a memory is, or null: recall.py's _gate. `scope: global` in the frontmatter plus a
 // PAIRED block, with gateAgents' reading of `agents:`; `problem` set means the compiler leaves
 // it out for every agent. One rule for the primary's gate count and for the other stores'
 // census below, as recall.py shares one rule between its compiler and its --lint census.
 function gateOf(raw) {
-  if (frontmatter(raw, 'scope') !== 'global') return null;
-  const m = GATE_BLOCK.exec(raw);
-  return m ? { body: m[1].trim(), ...gateAgents(raw) } : null;
+  const entry = gateEntryOf(raw);
+  return entry && entry.scope === 'global' ? { body: entry.body, agents: entry.agents, problem: entry.problem } : null;
 }
 
 // The gate block a memory contributes to the compile, trimmed, or null. recall.py's
@@ -202,7 +217,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:2842-2843#memoryStoreDirs) overrides `dir` before it calls this.
+// (extension.js:2846-2847#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive
@@ -431,6 +446,12 @@ function fullReport(dir, conf, known = null) {
   // read (recall.py _gate_agents), as { file, problem }: the gates card names them, since a
   // standing order that loads nowhere is otherwise visible only in `recall.py --lint`.
   const gateExcluded = [];
+  // Retired gate memories (`scope: retired`, retired from the gates panel or `--gates retire`),
+  // as { file, agents, problem }: the card's "N retired". This report's store is the one the
+  // gates panel lists and edits, because the extension pins it as RECALL_MEMORY_DIR for every
+  // gate step, so the count describes the same memories the panel shows. Read by gateEntryOf,
+  // the reading the gate count above uses, so the two cannot disagree about a file.
+  const gateRetired = [];
   for (const f of files) {
     let raw;
     try { raw = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
@@ -439,13 +460,16 @@ function fullReport(dir, conf, known = null) {
     valid.add(norm(f.slice(0, -3)));
     const nm = raw.slice(0, 400).match(/^\s*name:\s*(.+)$/m);
     if (nm) valid.add(norm(nm[1].trim().replace(/^["']|["']$/g, '')));
-    const gate = f !== MEMORY_INDEX ? gateOf(raw) : null;
-    if (gate && gate.problem !== null) gateExcluded.push({ file: f, problem: gate.problem });
+    const gate = f !== MEMORY_INDEX ? gateEntryOf(raw) : null;
+    if (gate && gate.state === 'retired') gateRetired.push({ file: f, agents: gate.agents, problem: gate.problem });
+    else if (gate && gate.state === 'excluded') gateExcluded.push({ file: f, problem: gate.problem });
     else if (gate) {
       gateSources += 1;
       gateBodies.push(gate.body);
     }
   }
+  // recall.py's order (sorted by code point, its compile order), whatever order the listing came in.
+  gateRetired.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   // AFTER the corpus pass, not before it, so `indexText` and `files` are both available:
   // the listing answers the broken-link probes that were one existsSync each, and the body
   // saves the second read of MEMORY.md. The order costs one thing and it is worth stating
@@ -457,7 +481,7 @@ function fullReport(dir, conf, known = null) {
   const unresolved = [...new Set(
     [...stripCode(all).matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]).filter((l) => !valid.has(norm(l)))
   )].sort();
-  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies, gateExcluded };
+  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies, gateExcluded, gateRetired };
 }
 
 // ── Gates in the OTHER memory stores: reported, never compiled ────────────────────
@@ -952,4 +976,4 @@ function memoryReport() {
 // production importer either, but test/memory-line-cap.test.js and
 // test/memory-lint-watchers.test.js call them directly, and those calls are the
 // mutation-killing assertions for the line cap and the store-selection rule.
-module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf };
+module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf };

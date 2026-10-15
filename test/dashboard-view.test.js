@@ -478,6 +478,7 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['drainLocal', 'permission-wildcarding.drainLocal'],
       ['toggleGuidance', 'permission-wildcarding.toggleGuidance'],
       ['toggleGates', 'permission-wildcarding.toggleGates'],
+      ['manageGates', 'permission-wildcarding.manageGates'],
       // showWildcards left with its switch arm on 2026-10-14 (no sender since c09daab):
       // the reverse census at the bottom of this test is what would have caught it.
       ['codexHook', 'permission-wildcarding.codexHook'],
@@ -779,7 +780,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3201#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3208#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2932,6 +2933,67 @@ test('the gates card counts each agent once a gate names its agents, and names a
   // MUTATION: in gatesCardData, judge `on` over every state (drop `wanted`) and the Codex-only
   // install reads OFF/PARTIAL; drop `counts` and the card reads "— 2 gates"; drop the mgexcluded
   // block from renderGates and the line stays hidden.
+});
+
+// Retire and restore (2026-10-14, rampage e5c0ee7). The card counts the retired gate memories of
+// the store the gates panel edits (memoryLint.js gateEntryOf, in the memory report), as a count
+// in its line and never as a tone, names each one with the agents a restore returns it to, and
+// offers Manage gates… beside the whole-block button.
+test('the gates card counts retired gates in its line, names them, and offers Manage gates', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const compiledFile = path.join(env.tempHome, '.claude', 'gates.generated.md');
+  fs.writeFileSync(compiledFile, '## Standing gates (1 memories, managed)\n\n- Shared.\n');
+  let retired = [{ file: 'feedback_old.md', agents: ['claude', 'codex'], problem: null },
+    { file: 'reference_codex_old.md', agents: ['codex'], problem: null }];
+  const app = harness(env.tempHome, {
+    settings: { 'guidance.enabled': false, 'gates.enabled': false },
+    memoryReport: () => ({
+      conf: { enabled: true, totalBudget: 12000, maxLines: 200 }, dir: null,
+      report: { tokens: 10, bytes: 40, fileCount: 4, lineCount: 1, linesOver: false, over: [], broken: [],
+        unresolved: [], gateSources: 1, gateBodies: [], gateExcluded: [], gateRetired: retired },
+    }),
+  });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    let data = ui.posted.at(-1);
+    assert.deepEqual(data.gates.retired, [{ file: 'feedback_old.md', agents: ['claude', 'codex'] },
+      { file: 'reference_codex_old.md', agents: ['codex'] }]);
+    let rendered = renderDashboard(app.provider, data);
+    // gates.enabled is at its default (on) in this harness, so activation installed the compile.
+    assert.match(rendered.node('mgsub').textContent, /^your standing orders, resident every session · .*CLAUDE\.md · 2 retired$/);
+    assert.equal(rendered.node('mgsub').title, 'Retired (scope: retired), kept in the store and left out of the compile: '
+      + 'feedback_old.md, reference_codex_old.md (codex only). Manage gates restores one.');
+    assert.equal(rendered.node('mgdot').className, 'dot', 'the tone is the install\'s, never the retired count\'s');
+
+    // Nothing compiled because every gate is retired: the card says so rather than "no gate block".
+    fs.writeFileSync(compiledFile, '');
+    app.provider.refresh();
+    await settle();
+    rendered = renderDashboard(app.provider, ui.posted.at(-1));
+    assert.equal(rendered.node('mgsub').textContent, 'no active gate · 2 retired');
+
+    // None retired: no count, and no title.
+    retired = [];
+    app.provider.refresh();
+    await settle();
+    data = ui.posted.at(-1);
+    rendered = renderDashboard(app.provider, data);
+    assert.equal(rendered.node('mgsub').textContent, 'no memory carries a scope:global gate block yet');
+    assert.equal(rendered.node('mgsub').title, '');
+
+    // The button is there and asks for the panel by its own arm.
+    assert.match(ui.view.webview.html, /<button class="managed-action" id="manageGatesBtn"[^>]*>Manage gates…<\/button>/);
+    app.executed.length = 0;
+    ui.on.message({ type: 'manageGates' });
+    assert.deepEqual(app.executed, ['permission-wildcarding.manageGates']);
+  } finally {
+    await app.dispose();
+  }
+  // MUTATION: drop `retired` from gatesCardData and the deepEqual fails on undefined; drop the
+  // retired suffix from renderGates and the line reads without "· 2 retired".
 });
 
 test('partial Codex instruction installation is reported consistently in cards and collapsed badges', async (t) => {

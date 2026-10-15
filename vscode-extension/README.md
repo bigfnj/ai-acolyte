@@ -153,7 +153,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4214#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4233#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -216,10 +216,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4163#showWarningMessage`).
+`vscode-extension/extension.js:4182#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:3983#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4002#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -324,6 +324,12 @@ A 15-minute cooldown prevents back-to-back runs; a status-bar message confirms e
 and a failure is logged to the extension host console without a notification.
 Separately, the gate compiler spawns
 `recall.py --gates-compile`, but only once the memory-gates block is installed.
+**Manage memory gates…** runs `recall.py` only when you open it or click in it: it lists the
+gate memories of the store that compiles, retires or restores the ones you uncheck or check
+(rewriting their `scope:` value and nothing else, after a snapshot of the memory folder into
+`~/.claude/wildcarding/gate-snapshots`), compiles once, and installs the result only while
+`gates.enabled` is on. **Compile and install** in the same panel compiles and installs what the
+memories hold, which is how a change whose compile or install failed is finished.
 `memory.dir`, `gates.enabled` and `guidance.enabled` are **machine-scoped** for the same reason
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`
@@ -478,6 +484,7 @@ dashboard title-bar buttons.
 | Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
+| Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Rebuild recall index | Force a full CPU bge-small re-embed |
 | Search Codex native memory | Search by meaning and keywords, with a visible keyword fallback |

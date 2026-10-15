@@ -61,7 +61,9 @@ const DRAIN_USAGE = 'usage: wildcard-perms --drain [--workspace <path>] [--dry-r
 const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
   '       wildcard-perms --guidance derived\n' +
   '       wildcard-perms --guidance accept|decline|reset <id>\n';
-const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n';
+const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n' +
+  '       wildcard-perms --gates list [--json]\n' +
+  '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';
 const CODEX_HOOK_USAGE = 'usage: wildcard-perms --codex-hook on|off|status\n';
 
 // Every active verb, the two retired MAX flags, and the one-way cleanup for
@@ -79,12 +81,30 @@ const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex
   'usage: wildcard-perms --help | --version\n';
 
 const argv = process.argv.slice(2);
-if (argv.includes('--help') || argv.includes('-h')) {
+// `--gates retire|restore` take memory names, and a memory may be named `-dash.md`, or even
+// after a verb (`--learn.md` is a legal file name). So everything after `retire` or `restore` is
+// a name, never a verb: without this, `--gates retire --seed` dispatched to seed(), because the
+// verbs below are found anywhere in argv. A dashed word there before a `--` is still an option
+// (`--help` explains, anything else is refused by gatesChange), and after the first `--` every
+// argument is a name, `--help` included.
+const gatesAt = argv.indexOf('--gates');
+const gatesVerb = gatesAt === -1 ? '' : String(argv[gatesAt + 1] || '').toLowerCase();
+const takesNames = gatesVerb === 'retire' || gatesVerb === 'restore';
+const namesRegion = takesNames ? argv.slice(gatesAt + 2) : [];
+const endOfOptions = namesRegion.indexOf('--');
+const optionArgs = takesNames
+  ? [...argv.slice(0, gatesAt + 2),
+    ...(endOfOptions === -1 ? namesRegion : namesRegion.slice(0, endOfOptions)).filter((arg) => arg.startsWith('-'))]
+  : argv;
+if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   // Before the verbs on purpose, so `--learn --help` explains rather than runs.
   process.stdout.write(HELP_USAGE);
-} else if (argv.includes('--version') || argv.includes('-V')) {
+} else if (optionArgs.includes('--version') || optionArgs.includes('-V')) {
   // Required lazily: the hook path must not pay for reading package.json.
   process.stdout.write(`${require('../package.json').version}\n`);
+} else if (takesNames) {
+  // Ahead of every other verb, for the reason at the top of this chain.
+  gates(argv);
 } else if (argv.length && !VERBS.some((verb) => argv.includes(verb))
     && argv.some((arg) => arg.startsWith('-'))) {
   // An unrecognized flag must NEVER reach hook mode. Hook mode rewrites
@@ -863,33 +883,227 @@ function guidance(args) {
   }
 }
 
+// Every target's `--gates status` line, or the one line saying there is no target at all.
+// `retire` and `restore` end on the same lines, read after their install.
+function writeGatesStatus(states) {
+  if (!states.length) {
+    process.stdout.write('wildcard-perms gates: no agent instruction file found\n');
+    return;
+  }
+  // Each agent's own count, because a gate can name the agents it is for (src/agent-gates.js):
+  // "[claude]: ON, 13 gates" beside "[codex]: ON, 14 gates". An agent the compile gives none
+  // says so, rather than reading as switched off.
+  for (const state of states) {
+    const count = state.compiled ? `, ${state.gates} gate${state.gates === 1 ? '' : 's'}` : '';
+    process.stdout.write(
+      `wildcard-perms gates [${state.agent}]: ${state.on ? 'ON' : 'OFF'}${count}` +
+      `${state.on && !state.current ? ' (corpus changed — run --gates on to refresh)' : ''}` +
+      `${state.compiled && !state.applicable ? ` (none compiled for ${state.agent})` : ''}` +
+      `${state.compiled ? '' : ' (nothing compiled)'} ` +
+      `(${state.readable ? state.path : `unreadable: ${state.path}`})\n`
+    );
+  }
+}
+
+// ── one gate at a time: --gates list, retire, restore ──────────────────────────
+// Ported from rampage e5c0ee7 (2026-10-09), adapted 2026-10-14. recall.py makes every edit,
+// after a byte snapshot of the memory folder (`--gates-retire`, `--gates-restore`, which
+// rewrite a memory's `scope: global` to `scope: retired` and back, `agents:` untouched), and
+// src/gates-manage.js plans the request and words the outcome, so this and the extension's
+// gates panel refuse and report alike. Every step runs recall.py the way `--gates refresh`
+// does: the store is the one its compile reads (RECALL_MEMORY_DIR, else the largest store),
+// and the gate memories in any other store are never listed or changed.
+//
+// Functions, not consts: the dispatch chain at the top of this file runs while the module is
+// still loading, so a `const` declared down here is not yet initialised when it is reached.
+function recallPath() {
+  return path.join(__dirname, '..', 'memory', 'recall.py');
+}
+
+// recall.py with its output captured. Found on PATH, never spawned bare (refresh's reason).
+// `--gates-list` carries every gate's whole text, so the buffer is well above spawnSync's
+// 1 MB default, which would otherwise end a large store's listing as ENOBUFS.
+function runRecallCaptured(args) {
+  const { spawnSync } = require('child_process');
+  try {
+    const launch = require('../src/exec-resolve').resolvedLaunch(process.env.TOOLBOX_PYTHON || 'python',
+      [recallPath(), ...args], 'spawnSync');
+    return spawnSync(launch.file, launch.args,
+      { ...launch.options, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+  } catch (error) {
+    return { error, status: null, stdout: '', stderr: '' };
+  }
+}
+
+function recallFailure(run) {
+  return (run.error && run.error.message) || (run.stderr || '').trim() || `exit ${run.status}`;
+}
+
+// `recall.py --gates-list`, parsed. Null after saying why on stderr. A successful run's stderr
+// is a warning about the store (one discovery could not read, say) and is passed on, as
+// refresh passes on the compile's.
+function listGates(label) {
+  const { parseGatesList } = require('../src/gates-manage');
+  const run = runRecallCaptured(['--gates-list']);
+  if (run.error || run.status !== 0) {
+    process.stderr.write(`${label}: recall.py --gates-list failed (${recallFailure(run)})\n`);
+    return null;
+  }
+  if (run.stderr) process.stderr.write(run.stderr);
+  try { return { stdout: run.stdout, ...parseGatesList(run.stdout) }; }
+  catch (error) {
+    process.stderr.write(`${label}: ${error.message}\n`);
+    return null;
+  }
+}
+
+// `--gates list [--json]`: every gate memory in the compile store, active, retired or left out
+// for its `agents:`, with the agents each is for, then what CLAUDE.md and AGENTS.md load.
+// `--json` is recall.py's own output, unchanged, once it has parsed. Exit 0, or 1 when the list
+// cannot be had.
+function gatesList(rest) {
+  const { formatGateList } = require('../src/gates-manage');
+  const listing = listGates('wildcard-perms --gates list');
+  if (!listing) { process.exitCode = 1; return; }
+  process.stdout.write(rest.includes('--json') ? listing.stdout : formatGateList(listing));
+}
+
+// `--gates retire|restore [--] <memory>...`: list, plan, edit, compile, install, in that order,
+// and stop at the first failure. Everything up to the edit refuses with nothing changed. After
+// the edit the memories say something the instruction files do not, so every failure from
+// there on says so, names the snapshot and how to finish the job (src/gates-manage.js
+// changedButFailed). Exit 0 only when every step succeeded.
+//
+// The install follows `--gates status` and never changes it: gates switched off stay off. With
+// a gates block installed in an agent's instruction file (ON), each agent's block is rewritten
+// from the fresh compile, or every block removed once no gate is left active. With none (OFF,
+// `--gates off` or never installed), the memories are edited and recompiled and no instruction
+// file is touched: the change takes effect when gates are turned on. The CLI has no setting to
+// read; the extension follows gates.enabled instead.
+function gatesChange(cmd, rest) {
+  const { planGateChanges, gateSteps, parseEditOutput, changedButFailed } = require('../src/gates-manage');
+  const { gatesStatusAll, setGatesAll } = require('../src/agent-gates');
+  const label = `wildcard-perms --gates ${cmd}`;
+  const refuse = (why) => {
+    process.stderr.write(`${label}: ${why}\n${label}: refused, nothing was changed\n`);
+    process.exitCode = 1;
+  };
+  // A dashed word before `--` is an option this verb does not take. After it, a name.
+  const marker = rest.indexOf('--');
+  const before = marker === -1 ? rest : rest.slice(0, marker);
+  const dashed = before.filter((arg) => arg.startsWith('-'));
+  if (dashed.length) {
+    process.stderr.write(`wildcard-perms: unrecognized option ${dashed.join(' ')}\n`
+      + `(a memory name that starts with "-" goes after "--": wildcard-perms --gates ${cmd} -- ${dashed[0]})\n\n${HELP_USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+  const names = [...before, ...(marker === -1 ? [] : rest.slice(marker + 1))];
+  if (!names.length) {
+    process.stderr.write(GATES_USAGE);
+    process.exitCode = 1;
+    return;
+  }
+  const listing = listGates(label);
+  if (!listing) { refuse('the gate list is needed to check the names'); return; }
+
+  const plan = planGateChanges(listing.gates, { [cmd]: names });
+  if (plan.error) {
+    for (const problem of plan.problems.slice(0, -1)) process.stderr.write(`${label}: ${problem}\n`);
+    refuse(plan.problems[plan.problems.length - 1]);
+    return;
+  }
+
+  // Read before anything is written, because it decides the install. An instruction file that
+  // cannot be read is neither ON nor OFF: it may hold a block with the gate being retired in
+  // it, so going ahead could leave that gate resident while reporting success.
+  const states = gatesStatusAll();
+  const unreadable = states.filter((state) => !state.readable);
+  if (unreadable.length) {
+    refuse('cannot tell whether gates are on: '
+      + `${unreadable.map((state) => state.error || `cannot read ${state.path}`).join('; ')}`);
+    return;
+  }
+  const gatesOn = states.some((state) => state.on);
+  const { steps: [edit, compile], install } = gateSteps(plan, { gatesOn });
+  const recall = `${process.env.TOOLBOX_PYTHON ? `"${process.env.TOOLBOX_PYTHON}"` : 'python'} "${recallPath()}"`;
+
+  const edited = runRecallCaptured(edit);
+  const done = parseEditOutput(edited.stdout);
+  const failed = (stage, detail) => {
+    process.stderr.write(`${label}: ${changedButFailed({ stage, detail, ...done, plan, gatesOn, recall })}\n`);
+    process.exitCode = 1;
+  };
+  if (edited.error || edited.status !== 0) {
+    // What recall.py printed decides what can be said. A `retired`/`restored` line names a file
+    // it wrote, so that is a change, not a refusal. With no snapshot line it stopped before the
+    // snapshot, which comes before any memory write, so nothing changed. Between the two it was
+    // past the snapshot when it stopped: it puts back what it rewrote and its own message says
+    // whether that worked, so that message is passed on with no "nothing was changed" of ours.
+    if (done.retired.length || done.restored.length) {
+      failed('edit', recallFailure(edited));
+    } else if (done.snapshot) {
+      process.stderr.write(`${label}: recall.py stopped the edit after the snapshot ${done.snapshot} `
+        + `(${recallFailure(edited)})\n`);
+      process.exitCode = 1;
+    } else {
+      refuse(`recall.py refused the edit (${recallFailure(edited)})`);
+    }
+    return;
+  }
+  // What recall.py says it wrote, not what was asked for.
+  for (const file of done.retired) process.stdout.write(`wildcard-perms gates: retired ${file}\n`);
+  for (const file of done.restored) process.stdout.write(`wildcard-perms gates: restored ${file}\n`);
+  process.stdout.write(`wildcard-perms gates: snapshot of the memory folder: ${done.snapshot || '(recall.py named none)'}\n`);
+  // A successful edit's stderr is a warning, a snapshot it could not prune among them, and is
+  // passed on as the compile's is.
+  if (edited.stderr) process.stderr.write(edited.stderr);
+
+  const compiled = runRecallCaptured(compile);
+  if (compiled.error || compiled.status !== 0) { failed('compile', recallFailure(compiled)); return; }
+  if (compiled.stderr) process.stderr.write(compiled.stderr);
+
+  const retired = listing.gates.filter((gate) => gate.state === 'retired').length + plan.retire.length - plan.restore.length;
+  const leftOut = listing.gates.filter((gate) => gate.state === 'excluded').length - plan.retiredLeftOut.length
+    + plan.restoredLeftOut.length;
+  const counts = `wildcard-perms gates: ${plan.activeAfter} active (CLAUDE.md ${plan.agents.claude.after.length}, `
+    + `AGENTS.md ${plan.agents.codex.after.length}), ${retired} retired${leftOut ? `, ${leftOut} left out` : ''}\n`;
+  if (install === 'none') {
+    process.stdout.write(counts);
+    process.stdout.write(plan.activeAfter === 0
+      ? 'wildcard-perms gates: gates are switched off, so nothing was installed; with no gate active, '
+        + 'none will load when they are turned on either\n'
+      : 'wildcard-perms gates: gates are switched off, so nothing was installed; the change takes effect '
+        + 'when they are turned on (wildcard-perms --gates on)\n');
+    writeGatesStatus(gatesStatusAll());
+    return;
+  }
+
+  // The install every other `--gates` verb takes, one read of the compile it just wrote (G2).
+  // A person ran this and sees the result, so the in-place fallback stays, as `on` keeps it.
+  const results = setGatesAll(install === 'on');
+  const errors = results.length ? results.filter((result) => result.error)
+    .map((result) => `[${result.agent}] ${result.error}`) : ['no agent instruction file to write'];
+  if (errors.length) { failed('install', errors.join('; ')); return; }
+  process.stdout.write(counts);
+  writeGatesStatus(gatesStatusAll());
+}
+
 // The compiled memory gates. Same install plumbing as --guidance, separate markers and
 // separate switch: one is this repo's wording, the other is whatever recall.py last
-// compiled out of the memory corpus, so neither may turn the other off.
+// compiled out of the memory corpus, so neither may turn the other off. `list`, `retire`
+// and `restore` work one gate memory at a time (gatesChange, above).
 function gates(args) {
   const { spawnSync } = require('child_process');
   const { gatesStatusAll, setGatesAll } = require('../src/agent-gates');
-  const cmd = (args[args.indexOf('--gates') + 1] || 'status').toLowerCase();
+  const at = args.indexOf('--gates');
+  const cmd = (args[at + 1] || 'status').toLowerCase();
+
+  if (cmd === 'list') { gatesList(args.slice(at + 2)); return; }
+  if (cmd === 'retire' || cmd === 'restore') { gatesChange(cmd, args.slice(at + 2)); return; }
 
   if (cmd === 'status') {
-    const states = gatesStatusAll();
-    if (!states.length) {
-      process.stdout.write('wildcard-perms gates: no agent instruction file found\n');
-      return;
-    }
-    // Each agent's own count, because a gate can name the agents it is for (src/agent-gates.js):
-    // "[claude]: ON, 13 gates" beside "[codex]: ON, 14 gates". An agent the compile gives none
-    // says so, rather than reading as switched off.
-    for (const state of states) {
-      const count = state.compiled ? `, ${state.gates} gate${state.gates === 1 ? '' : 's'}` : '';
-      process.stdout.write(
-        `wildcard-perms gates [${state.agent}]: ${state.on ? 'ON' : 'OFF'}${count}` +
-        `${state.on && !state.current ? ' (corpus changed — run --gates on to refresh)' : ''}` +
-        `${state.compiled && !state.applicable ? ` (none compiled for ${state.agent})` : ''}` +
-        `${state.compiled ? '' : ' (nothing compiled)'} ` +
-        `(${state.readable ? state.path : `unreadable: ${state.path}`})\n`
-      );
-    }
+    writeGatesStatus(gatesStatusAll());
     return;
   }
 

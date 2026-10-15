@@ -661,6 +661,11 @@ for (const flag of ['--help', '-h']) {
       assert.ok(run.stdout.includes(`usage: wildcard-perms ${verb}`),
         `${verb} is dispatched but undocumented, so --help cannot be trusted to be complete`);
     }
+    // The --gates sub-verbs gates() dispatches beyond on|off|status|refresh (2026-10-14).
+    for (const line of ['wildcard-perms --gates list [--json]',
+      'wildcard-perms --gates retire|restore [--] <memory> [<memory>...]']) {
+      assert.ok(run.stdout.includes(line), `${line} is dispatched but undocumented`);
+    }
     assert.doesNotMatch(run.stdout, /--max|--codex-max/,
       'retired compatibility spellings must not remain in the public help surface');
     assert.ok(bytesOf(home).equals(before), 'help must not touch the policy file');

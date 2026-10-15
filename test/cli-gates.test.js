@@ -377,3 +377,713 @@ test('CLI --gates refresh never runs a python planted in the project directory i
   assert.match(fs.readFileSync(ranFromPath, 'utf8'), /recall\.py" "--gates-compile"/);
   assert.doesNotMatch(found.stderr, /compile failed/);
 });
+
+// ── --gates list, retire, restore ─────────────────────────────────────────────
+//
+// Ported from rampage e5c0ee7 (2026-10-09) and adapted 2026-10-14. No real Python: "Python" is
+// this node binary (TOOLBOX_PYTHON), with a preload that stands in for recall.py whenever the
+// script it was asked to run is named recall.py. The stand-in plays the gate flags over a real
+// memory folder, to the contract recall.py documents and test/gates-manage.sh pins against the
+// real thing: `--gates-list` prints JSON with each gate's state and agents, `--gates-retire` and
+// `--gates-restore` validate every name, snapshot the folder, rewrite each scope value and print
+// `snapshot <dir>` and one `retired`/`restored` line per file, and `--gates-compile` writes
+// gates.generated.md, one section per agent once a gate names its agents, refusing to empty it
+// without --gates-allow-empty. Every call is logged, so a test can say which steps ran. The
+// ACOLYTE_STUB_LIST / _EDIT / _COMPILE knobs make one step misbehave the way a real one can.
+function storeRecall(args) {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const crypto = require('crypto');
+  const home = process.env.USERPROFILE || process.env.HOME;
+  const store = process.env.RECALL_MEMORY_DIR;
+  if (process.env.ACOLYTE_STUB_LOG) fs.appendFileSync(process.env.ACOLYTE_STUB_LOG, `${JSON.stringify(args)}\n`);
+  const fail = (message) => {
+    process.stderr.write(`[recall] ${message}\n`);
+    process.exit(1);
+  };
+  const AGENTS = ['claude', 'codex'];
+  const files = () => fs.readdirSync(store).filter((name) => name.endsWith('.md') && name !== 'MEMORY.md').sort();
+  const read = (name) => fs.readFileSync(path.join(store, name), 'utf8');
+  const front = (text) => (/^---\r?\n([\s\S]*?)\r?\n---/.exec(text) || [])[1] || '';
+  const scopeOf = (text) => (/^\s*scope:\s*"?([a-z]+)"?\s*$/m.exec(front(text)) || [])[1] || '';
+  // `agents: [codex]` or `agents: codex`; absent is every agent; an unknown name is a problem.
+  const agentsOf = (text) => {
+    const line = /^\s*agents:\s*(.*)$/m.exec(front(text));
+    if (!line) return { agents: AGENTS, problem: null };
+    const names = line[1].trim().replace(/^\[|\]$/g, '').split(',').map((name) => name.trim().toLowerCase()).filter(Boolean);
+    if (!names.length) return { agents: AGENTS, problem: null };
+    const unknown = names.filter((name) => !AGENTS.includes(name));
+    if (unknown.length) return { agents: [], problem: `\`agents:\` names an agent this compiler does not know: ${unknown.join(', ')}` };
+    return { agents: AGENTS.filter((agent) => names.includes(agent)), problem: null };
+  };
+  const gateOf = (text) => {
+    const block = /<!-- gate -->([\s\S]*?)<!-- \/gate -->/.exec(text);
+    return block ? block[1].trim() : null;
+  };
+
+  if (args[0] === '--gates-list') {
+    if (process.env.ACOLYTE_STUB_LIST === 'garbage') {
+      process.stdout.write('usage: recall.py [-h] [query ...]\n');
+      process.exit(0);
+    }
+    const gates = [];
+    for (const file of files()) {
+      const text = read(file);
+      const scope = scopeOf(text);
+      const block = gateOf(text);
+      if (block === null || (scope !== 'global' && scope !== 'retired')) continue;
+      const { agents, problem } = agentsOf(text);
+      const first = block.split(/\r?\n/).find((line) => line.trim()) || '';
+      gates.push({ file, scope, state: scope === 'retired' ? 'retired' : problem ? 'excluded' : 'active', agents, problem,
+        title: first.replace(/^\s*[-*]\s+/, '').replace(/\*\*/g, '').trim().slice(0, 160), text: block, description: '' });
+    }
+    // Indented, which no compact re-serialisation reproduces, so `list --json` can be seen to
+    // pass these bytes through rather than its own.
+    process.stdout.write(`${JSON.stringify({ store, gates }, null, 1)}\n`);
+    process.exit(0);
+  }
+
+  if (/^--gates-(retire|restore)(=|$)/.test(args[0])) {
+    // argparse's reading of `nargs="+", action="extend"`: `--gates-retire=<name>` takes the value
+    // verbatim, a bare `--gates-retire` takes the arguments after it up to the next one that
+    // starts with a dash, and a dash argument it cannot place is a usage error, exit 2. That is
+    // what the real recall.py did with a memory named `-dash.md` passed spaced out.
+    const usage = (why) => {
+      process.stderr.write(`usage: recall.py [-h] [--gates-retire NAME [NAME ...]]\nrecall.py: error: ${why}\n`);
+      process.exit(2);
+    };
+    const wanted = [];
+    const want = (name, verb) => {
+      const from = verb === 'retire' ? 'global' : 'retired';
+      wanted.push([name.endsWith('.md') ? name : `${name}.md`, from, from === 'global' ? 'retired' : 'global']);
+    };
+    let verb = null;
+    let taken = 0;
+    for (const arg of args) {
+      const valued = /^--gates-(retire|restore)=([\s\S]*)$/.exec(arg);
+      if (valued) { want(valued[2], valued[1]); verb = null; continue; }
+      const flag = /^--gates-(retire|restore)$/.exec(arg);
+      if (flag || arg.startsWith('-')) {
+        if (verb && !taken) usage(`argument --gates-${verb}: expected at least one argument`);
+        if (!flag) usage(`unrecognized arguments: ${arg}`);
+        verb = flag[1];
+        taken = 0;
+        continue;
+      }
+      if (!verb) usage(`unrecognized arguments: ${arg}`);
+      want(arg, verb);
+      taken += 1;
+    }
+    if (verb && !taken) usage(`argument --gates-${verb}: expected at least one argument`);
+    if (process.env.ACOLYTE_STUB_EDIT === 'refuse') fail('refusing the edit: the stub was told to');
+    for (const [file, scope] of wanted) {
+      if (!fs.existsSync(path.join(store, file)) || scopeOf(read(file)) !== scope) fail(`${file} is not scope ${scope}`);
+    }
+    const ops = [...new Set(wanted.map(([, scope]) => (scope === 'global' ? 'retire' : 'restore')))].join('+');
+    const stamp = `${new Date().toISOString().replace(/[-:]|\.\d+/g, '')}-${process.pid}`;
+    const snapshot = path.join(process.env.AI_ACOLYTE_GATE_SNAPSHOT_DIR || path.join(home, '.claude', 'wildcarding', 'gate-snapshots'),
+      `${stamp}-${ops}`);
+    fs.mkdirSync(snapshot, { recursive: true });
+    for (const file of fs.readdirSync(store).filter((name) => name.endsWith('.md'))) {
+      fs.copyFileSync(path.join(store, file), path.join(snapshot, file));
+    }
+    const out = [`snapshot ${snapshot}`];
+    if (process.env.ACOLYTE_STUB_EDIT === 'stopped') {
+      // recall.py's own shape: a write that fails after the snapshot puts back what it rewrote,
+      // prints no `retired` line, and says in its message what state it left.
+      process.stdout.write(`${out[0]}${os.EOL}`);
+      fail(`stopped: ${wanted[0][0]} changed after it was snapshotted. Nothing was changed; the snapshot is at ${snapshot}.`);
+    }
+    wanted.forEach(([file, , scope], index) => {
+      if (process.env.ACOLYTE_STUB_EDIT === 'partial' && index === 1) {
+        process.stdout.write(`${out.join(os.EOL)}${os.EOL}`);
+        fail(`${file} changed under the edit`);
+      }
+      fs.writeFileSync(path.join(store, file),
+        read(file).replace(/^(\s*scope:\s*"?)(global|retired)/m, (_, head) => `${head}${scope}`));
+      out.push(`${scope === 'retired' ? 'retired' : 'restored'} ${file}`);
+    });
+    // recall.py's warning for a snapshot it could not prune: the edit still succeeds.
+    if (process.env.ACOLYTE_STUB_EDIT === 'warn') {
+      process.stderr.write('[recall] could not prune old snapshot 20200101T000000Z-retire (PermissionError: denied); it is kept.\n');
+    }
+    // os.EOL: a real Python's print() writes CRLF on Windows.
+    process.stdout.write(`${out.join(os.EOL)}${os.EOL}`);
+    process.exit(0);
+  }
+
+  if (args[0] === '--gates-compile') {
+    if (process.env.ACOLYTE_STUB_COMPILE === 'fail') fail('the stub compile refused');
+    const gates = files().map(read).filter((text) => scopeOf(text) === 'global' && gateOf(text) !== null)
+      .map((text) => ({ body: gateOf(text), ...agentsOf(text) })).filter((gate) => gate.problem === null);
+    const target = path.join(home, '.claude', 'gates.generated.md');
+    const installed = fs.existsSync(target) && fs.readFileSync(target, 'utf8').trim();
+    if (!gates.length && installed && !args.includes('--gates-allow-empty')) {
+      fail(`refusing to empty ${target}: no gate blocks. Pass --gates-allow-empty to erase every gate.`);
+    }
+    const render = (bodies) => {
+      if (!bodies.length) return '';
+      const body = bodies.join('\n');
+      const sha = process.env.ACOLYTE_STUB_COMPILE === 'torn' ? '0123456789abcdef'
+        : crypto.createHash('sha256').update(body, 'utf8').digest('hex').slice(0, 16);
+      return `<!-- generated by recall.py --gates-compile; sha ${sha} -->\n## Standing gates (${bodies.length} memories, managed)\n\n${body}\n`;
+    };
+    let text;
+    if (gates.every((gate) => gate.agents.length === AGENTS.length)) text = render(gates.map((gate) => gate.body));
+    else {
+      const sections = AGENTS.map((agent) => render(gates.filter((gate) => gate.agents.includes(agent)).map((gate) => gate.body)));
+      text = `<!-- generated by recall.py --gates-compile; per agent: claude ${Buffer.byteLength(sections[0])}, `
+        + `codex ${Buffer.byteLength(sections[1])} -->\n${sections.join('')}`;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, text);
+    process.stdout.write(`compiled ${gates.length} gate(s)${os.EOL}`);
+    process.exit(0);
+  }
+  if (process.env.ACOLYTE_STUB_FAIL) fail('the stub refused');
+  fail(`the store stub has no answer for ${args.join(' ')}`);
+}
+
+// The stand-in, written to a temp dir rather than test/, where node --test would collect it.
+const STUB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-cli-gates-stub-'));
+test.after(() => fs.rmSync(STUB_DIR, { recursive: true, force: true }));
+const STORE_STUB = path.join(STUB_DIR, 'recall-store-stub.js');
+fs.writeFileSync(STORE_STUB, `'use strict';\nmodule.exports = ${storeRecall.toString()};\n`);
+const STUB = path.join(STUB_DIR, 'recall-preload.js');
+fs.writeFileSync(STUB, `'use strict';
+if (require('path').basename(process.argv[1] || '') === 'recall.py') {
+  if (process.env.ACOLYTE_STUB_FAIL) { process.stderr.write('[recall] the stub refused\\n'); process.exit(1); }
+  require(${JSON.stringify(STORE_STUB)})(process.argv.slice(2));
+}
+`);
+
+// Variables from the developer's own shell that would change which Python or which memory store
+// a run sees. Stripped, so the test sees only what it sets.
+const AMBIENT = ['TOOLBOX_PYTHON', 'CODEX_TOOLBOX', 'RECALL_MODEL_DIR', 'RECALL_MEMORY_DIR', 'RECALL_MEMORY_DIRS',
+  'RECALL_REEXEC', 'AI_ACOLYTE_GATE_SNAPSHOT_DIR', 'NODE_OPTIONS', 'ACOLYTE_STUB_LIST', 'ACOLYTE_STUB_EDIT',
+  'ACOLYTE_STUB_COMPILE', 'ACOLYTE_STUB_FAIL', 'ACOLYTE_STUB_LOG'];
+
+// A synthetic memory in the shape Claude Code's memory writer emits: `scope:` nested under
+// `metadata:`, `agents:` beside it when given, and a gate block when `gate` is given.
+function memoryText({ scope, gate, agents }) {
+  return '---\nname: a synthetic memory\ndescription: for the CLI gate tests\nmetadata:\n'
+    + `  type: feedback\n  scope: ${scope}\n${agents ? `  agents: ${agents}\n` : ''}---\n\nThe body of the memory.\n`
+    + (gate ? `\n<!-- gate -->\n- **${gate}** Follow it.\n<!-- /gate -->\n` : '');
+}
+
+// A temp home with CLAUDE.md, optionally AGENTS.md, a memory folder holding `memories`
+// ({ file: { scope, gate, agents } }), and the stand-in with its call log.
+function storeHome(t, memories, { codex = false } = {}) {
+  const home = tempHome(t, { compiled: null });
+  if (codex) {
+    fs.mkdirSync(path.join(home, '.codex'));
+    fs.writeFileSync(path.join(home, '.codex', 'AGENTS.md'), '# Mine\n');
+  }
+  const store = path.join(home, 'memory');
+  fs.mkdirSync(store);
+  for (const [file, spec] of Object.entries(memories)) fs.writeFileSync(path.join(store, file), memoryText(spec));
+  const log = path.join(home, 'recall-calls.jsonl');
+  const root = path.parse(home).root;
+  const run = (args, extra = {}) => {
+    const base = { ...process.env };
+    for (const name of AMBIENT) delete base[name];
+    return spawnSync(process.execPath, [CLI, ...args], {
+      cwd: home, encoding: 'utf8', windowsHide: true, timeout: 60000,
+      env: {
+        ...base, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
+        HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+        TOOLBOX_PYTHON: process.execPath, RECALL_MEMORY_DIR: store, ACOLYTE_STUB_LOG: log,
+        // Forward slashes: NODE_OPTIONS reads a backslash inside quotes as an escape.
+        NODE_OPTIONS: `--require "${STUB.split(path.sep).join('/')}"`,
+        ...extra,
+      },
+    });
+  };
+  return {
+    home, store, run,
+    file: path.join(home, '.claude', 'CLAUDE.md'),
+    agentsFile: path.join(home, '.codex', 'AGENTS.md'),
+    snapshots: path.join(home, '.claude', 'wildcarding', 'gate-snapshots'),
+    memory: (file) => fs.readFileSync(path.join(store, file), 'utf8'),
+    agentsMd: () => fs.readFileSync(path.join(home, '.codex', 'AGENTS.md'), 'utf8'),
+    calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []),
+    resetCalls: () => fs.rmSync(log, { force: true }),
+  };
+}
+
+// Two active gates, one retired, and two memories that are not listed: a global memory with no
+// gate block, and a gate under a scope that is neither global nor retired.
+const MEMORIES = {
+  'feedback_gadget.md': { scope: 'global', gate: 'Gadget gate.' },
+  'feedback_old_rule.md': { scope: 'retired', gate: 'Old rule.' },
+  'project_alpha.md': { scope: 'global' },
+  'reference_sprocket.md': { scope: 'project', gate: 'Sprocket gate.' },
+  'reference_widget.md': { scope: 'global', gate: 'Widget gate.' },
+};
+const GATES_BEGIN = '<!-- BEGIN permission-wildcarding: memory gates (managed) -->';
+
+const snapshotIn = (stdout) => {
+  const match = /^wildcard-perms gates: snapshot of the memory folder: (.+)$/m.exec(stdout);
+  assert.ok(match, `no snapshot line in ${JSON.stringify(stdout)}`);
+  return match[1];
+};
+
+test('CLI --gates list prints each gate memory with its state and agents, and --json passes recall.py\'s JSON through', (t) => {
+  const s = storeHome(t, { ...MEMORIES,
+    'reference_codex.md': { scope: 'global', gate: 'Codex gate.', agents: '[codex]' },
+    'reference_unknown.md': { scope: 'global', gate: 'Unknown gate.', agents: '[gemini]' } });
+  const list = s.run(['--gates', 'list']);
+  assert.equal(list.status, 0, list.stderr);
+  assert.equal(list.stdout, '[x] feedback_gadget.md  Gadget gate. Follow it.\n'
+    + '[ ] feedback_old_rule.md  Old rule. Follow it.  (retired)\n'
+    + '[x] reference_codex.md  Codex gate. Follow it.  (codex only)\n'
+    + '[-] reference_unknown.md  Unknown gate. Follow it.  (left out for every agent: `agents:` names an agent this compiler does not know: gemini)\n'
+    + '[x] reference_widget.md  Widget gate. Follow it.\n'
+    + '3 active, 1 retired, 1 left out; CLAUDE.md loads 2, AGENTS.md loads 3\n');
+  assert.equal(list.stderr, '');
+
+  const json = s.run(['--gates', 'list', '--json']);
+  assert.equal(json.status, 0, json.stderr);
+  const parsed = JSON.parse(json.stdout);
+  assert.equal(json.stdout, `${JSON.stringify(parsed, null, 1)}\n`, 'recall.py\'s own bytes, not a re-serialisation');
+  assert.equal(parsed.store, s.store);
+  assert.deepEqual(parsed.gates.map((gate) => [gate.file, gate.state, gate.agents.join('+')]), [
+    ['feedback_gadget.md', 'active', 'claude+codex'], ['feedback_old_rule.md', 'retired', 'claude+codex'],
+    ['reference_codex.md', 'active', 'codex'], ['reference_unknown.md', 'excluded', ''], ['reference_widget.md', 'active', 'claude+codex'],
+  ]);
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-list']], 'listing never edits or compiles');
+
+  // No list to show: exit 1 with recall.py's reason, never a stack trace.
+  const garbage = s.run(['--gates', 'list', '--json'], { ACOLYTE_STUB_LIST: 'garbage' });
+  assert.equal(garbage.status, 1);
+  assert.equal(garbage.stdout, '', 'unparseable output is not passed through as JSON');
+  assert.match(garbage.stderr, /^wildcard-perms --gates list: recall\.py --gates-list did not print JSON \(.*\)\n$/);
+  const failing = s.run(['--gates', 'list'], { ACOLYTE_STUB_FAIL: '1' });
+  assert.equal(failing.status, 1);
+  assert.equal(failing.stderr, 'wildcard-perms --gates list: recall.py --gates-list failed ([recall] the stub refused)\n');
+
+  // MUTATIONS: write formatGateList for --json too and the bytes assertion fails; drop the
+  // parse before the pass-through and the garbage case exits 0 with a usage text on stdout.
+});
+
+test('CLI --gates retire retires one gate and reinstalls without it; restore puts it back byte for byte', (t) => {
+  const s = storeHome(t, MEMORIES, { codex: true });
+  assert.equal(s.run(['--gates', 'refresh']).status, 0);
+  const installed = { claude: claudeMd(s.home), codex: s.agentsMd() };
+  const before = s.memory('feedback_gadget.md');
+  assert.ok(installed.claude.includes('Gadget gate.') && installed.claude.includes('Widget gate.'));
+  assert.ok(installed.codex.includes('Gadget gate.'), 'precondition: Codex has the gate too');
+  s.resetCalls();
+
+  const retire = s.run(['--gates', 'retire', 'feedback_gadget']);
+  assert.equal(retire.status, 0, retire.stderr);
+  const snapshot = snapshotIn(retire.stdout);
+  assert.equal(retire.stdout, 'wildcard-perms gates: retired feedback_gadget.md\n'
+    + `wildcard-perms gates: snapshot of the memory folder: ${snapshot}\n`
+    + 'wildcard-perms gates: 1 active (CLAUDE.md 1, AGENTS.md 1), 2 retired\n'
+    + `wildcard-perms gates [claude]: ON, 1 gate (${s.file})\n`
+    + `wildcard-perms gates [codex]: ON, 1 gate (${s.agentsFile})\n`);
+  assert.equal(retire.stderr, '');
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-retire=feedback_gadget.md'], ['--gates-compile']]);
+  assert.equal(s.memory('feedback_gadget.md'), before.replace('scope: global', 'scope: retired'));
+  for (const text of [claudeMd(s.home), s.agentsMd()]) {
+    assert.ok(!text.includes('Gadget gate.'), 'the retired gate is no longer resident in either file');
+    assert.ok(text.includes('Widget gate.'), 'the other gate still is');
+  }
+  assert.ok(snapshot.startsWith(s.snapshots + path.sep), `the snapshot is under ~/.claude/wildcarding: ${snapshot}`);
+  assert.equal(fs.readFileSync(path.join(snapshot, 'feedback_gadget.md'), 'utf8'), before,
+    'the snapshot holds the memory as it was before the edit');
+
+  s.resetCalls();
+  const restore = s.run(['--gates', 'restore', 'feedback_gadget.md']);
+  assert.equal(restore.status, 0, restore.stderr);
+  assert.match(restore.stdout, /^wildcard-perms gates: restored feedback_gadget\.md\n/);
+  assert.match(restore.stdout, /\nwildcard-perms gates: 2 active \(CLAUDE\.md 2, AGENTS\.md 2\), 1 retired\n/);
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-restore=feedback_gadget.md'], ['--gates-compile']]);
+  assert.equal(s.memory('feedback_gadget.md'), before);
+  assert.equal(claudeMd(s.home), installed.claude, 'CLAUDE.md is back byte for byte');
+  assert.equal(s.agentsMd(), installed.codex, 'and AGENTS.md');
+});
+
+// Per agent (`agents:`): a retire is per memory, and a Codex-only gate's memory leaving the
+// compile changes AGENTS.md alone. CLAUDE.md is not even rewritten.
+test('CLI --gates retire of a Codex-only gate changes AGENTS.md and leaves CLAUDE.md byte for byte', (t) => {
+  const s = storeHome(t, {
+    'feedback_gadget.md': { scope: 'global', gate: 'Gadget gate.' },
+    'reference_codex.md': { scope: 'global', gate: 'Codex gate.', agents: '[codex]' },
+  }, { codex: true });
+  assert.equal(s.run(['--gates', 'refresh']).status, 0);
+  const claudeBefore = fs.readFileSync(s.file);
+  const claudeStat = fs.statSync(s.file);
+  assert.ok(s.agentsMd().includes('Codex gate.') && !claudeMd(s.home).includes('Codex gate.'), 'precondition');
+  const memoryBefore = s.memory('reference_codex.md');
+
+  const retire = s.run(['--gates', 'retire', 'reference_codex']);
+  assert.equal(retire.status, 0, retire.stderr);
+  assert.match(retire.stdout, /\nwildcard-perms gates: 1 active \(CLAUDE\.md 1, AGENTS\.md 1\), 1 retired\n/);
+  assert.ok(fs.readFileSync(s.file).equals(claudeBefore), 'CLAUDE.md is byte for byte what it was');
+  assert.equal(fs.statSync(s.file).mtimeMs, claudeStat.mtimeMs, 'and was not even rewritten');
+  assert.ok(!s.agentsMd().includes('Codex gate.') && s.agentsMd().includes('Gadget gate.'));
+  assert.equal(s.memory('reference_codex.md'), memoryBefore.replace('scope: global', 'scope: retired'),
+    'agents: is untouched, so a restore returns the gate to Codex alone');
+
+  const restore = s.run(['--gates', 'restore', 'reference_codex']);
+  assert.equal(restore.status, 0, restore.stderr);
+  assert.ok(fs.readFileSync(s.file).equals(claudeBefore), 'the restore does not reach CLAUDE.md either');
+  assert.ok(s.agentsMd().includes('Codex gate.'));
+});
+
+test('CLI --gates retire of the last active gate compiles with --gates-allow-empty and removes the blocks', (t) => {
+  const s = storeHome(t, {
+    'feedback_gadget.md': { scope: 'global', gate: 'Gadget gate.' },
+    'feedback_old_rule.md': { scope: 'retired', gate: 'Old rule.' },
+  }, { codex: true });
+  assert.equal(s.run(['--gates', 'refresh']).status, 0);
+  assert.ok(claudeMd(s.home).includes(GATES_BEGIN) && s.agentsMd().includes(GATES_BEGIN));
+  s.resetCalls();
+
+  const retire = s.run(['--gates', 'retire', 'feedback_gadget']);
+  assert.equal(retire.status, 0, retire.stderr);
+  assert.deepEqual(s.calls(),
+    [['--gates-list'], ['--gates-retire=feedback_gadget.md'], ['--gates-compile', '--gates-allow-empty']]);
+  assert.equal(claudeMd(s.home), '# Mine\n', 'the block is gone and the user text is as it was');
+  assert.equal(s.agentsMd(), '# Mine\n', 'from AGENTS.md too');
+  assert.equal(fs.readFileSync(path.join(s.home, '.claude', 'gates.generated.md'), 'utf8'), '');
+  assert.match(retire.stdout, /\nwildcard-perms gates: 0 active \(CLAUDE\.md 0, AGENTS\.md 0\), 2 retired\n/);
+  assert.ok(retire.stdout.endsWith(`wildcard-perms gates [codex]: OFF (nothing compiled) (${s.agentsFile})\n`), retire.stdout);
+
+  // And back from nothing. With the blocks gone, gates status is OFF, and a restore does not
+  // switch gates on: an ordinary compile, nothing installed, and the line says how to finish.
+  s.resetCalls();
+  const restore = s.run(['--gates', 'restore', 'feedback_gadget']);
+  assert.equal(restore.status, 0, restore.stderr);
+  assert.deepEqual(s.calls()[2], ['--gates-compile']);
+  assert.equal(claudeMd(s.home), '# Mine\n', 'gates are off, so the instruction file is not touched');
+  assert.match(restore.stdout, /\nwildcard-perms gates: gates are switched off, so nothing was installed; the change takes effect when they are turned on \(wildcard-perms --gates on\)\n/);
+  // The command it names installs the fresh compile.
+  assert.equal(s.run(['--gates', 'on']).status, 0);
+  assert.ok(claudeMd(s.home).includes('Gadget gate.') && s.agentsMd().includes('Gadget gate.'));
+
+  // MUTATIONS (in src/gates-manage.js gateSteps): drop --gates-allow-empty and the compile
+  // refuses to empty the file, exit 1; install 'on' at zero and setGatesAll refuses the empty
+  // compile, exit 1 on the install.
+});
+
+test('CLI --gates retire or restore that is refused changes nothing and exits 1', (t) => {
+  const s = storeHome(t, MEMORIES);
+  s.run(['--gates', 'refresh']);
+  const installed = claudeMd(s.home);
+  const memories = () => Object.keys(MEMORIES).map(s.memory);
+  const before = memories();
+  const untouched = (why) => {
+    assert.deepEqual(memories(), before, `${why}: no memory changed`);
+    assert.equal(claudeMd(s.home), installed, `${why}: the instruction file is as it was`);
+    assert.equal(fs.existsSync(s.snapshots), false, `${why}: no snapshot was taken`);
+  };
+  s.resetCalls();
+
+  // One unknown name among good ones refuses the lot, before recall.py is asked to edit.
+  const mixed = s.run(['--gates', 'retire', 'feedback_gadget', 'nope', 'feedback_old_rule']);
+  assert.equal(mixed.status, 1);
+  assert.equal(mixed.stderr, 'wildcard-perms --gates retire: nope.md is not a gate memory '
+    + '(no memory by that name in the compile store holds a gate block with scope global or retired)\n'
+    + 'wildcard-perms --gates retire: feedback_old_rule.md is already retired\n'
+    + 'wildcard-perms --gates retire: refused, nothing was changed\n');
+  assert.equal(mixed.stdout, '');
+  assert.deepEqual(s.calls(), [['--gates-list']], 'the edit never ran');
+  untouched('an unknown name');
+
+  assert.match(s.run(['--gates', 'restore', 'reference_widget']).stderr,
+    /^wildcard-perms --gates restore: reference_widget\.md is already active\nwildcard-perms --gates restore: refused, nothing was changed\n$/);
+  assert.match(s.run(['--gates', 'retire', 'project_alpha']).stderr, /project_alpha\.md is not a gate memory/,
+    'scope global with no gate block');
+  assert.match(s.run(['--gates', 'retire', 'reference_sprocket']).stderr, /reference_sprocket\.md is not a gate memory/,
+    'a gate block under another scope');
+  untouched('a name in the wrong state');
+
+  // recall.py's own refusal, which also comes before its first write.
+  s.resetCalls();
+  const refused = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_EDIT: 'refuse' });
+  assert.equal(refused.status, 1);
+  assert.equal(refused.stderr, 'wildcard-perms --gates retire: recall.py refused the edit '
+    + '([recall] refusing the edit: the stub was told to)\n'
+    + 'wildcard-perms --gates retire: refused, nothing was changed\n');
+  assert.equal(refused.stdout, '');
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-retire=feedback_gadget.md']], 'no compile after a refused edit');
+  untouched('a refused edit');
+
+  // No list to check the names against.
+  const garbage = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_LIST: 'garbage' });
+  assert.equal(garbage.status, 1);
+  assert.match(garbage.stderr, /^wildcard-perms --gates retire: recall\.py --gates-list did not print JSON \(.*\)\n/);
+  assert.ok(garbage.stderr.endsWith('wildcard-perms --gates retire: the gate list is needed to check the names\n'
+    + 'wildcard-perms --gates retire: refused, nothing was changed\n'), garbage.stderr);
+  const noPython = s.run(['--gates', 'restore', 'feedback_old_rule'], { TOOLBOX_PYTHON: path.join(s.home, 'no-such-python.exe') });
+  assert.equal(noPython.status, 1);
+  assert.match(noPython.stderr, /^wildcard-perms --gates restore: recall\.py --gates-list failed \(.*no-such-python.*\)\n/);
+  assert.doesNotMatch(noPython.stderr, /at Object\.|Traceback/);
+
+  // No names at all is a usage error, and no Python starts.
+  s.resetCalls();
+  const none = s.run(['--gates', 'retire']);
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /^usage: wildcard-perms --gates on\|off\|status\|refresh\n/);
+  assert.deepEqual(s.calls(), []);
+  untouched('every refusal');
+
+  // MUTATIONS: skip the `plan.error` refusal in gatesChange and the mixed case dies inside
+  // gateSteps with a stack trace instead of the three lines; drop the `!names.length` usage
+  // check and the last case lists the gates first (calls() is not empty).
+});
+
+test('CLI --gates retire whose compile fails after the edit says the memories changed, names the snapshot, and exits 1', (t) => {
+  const s = storeHome(t, MEMORIES);
+  s.run(['--gates', 'refresh']);
+  const installed = claudeMd(s.home);
+
+  const failed = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_COMPILE: 'fail' });
+  assert.equal(failed.status, 1);
+  const snapshot = snapshotIn(failed.stdout);
+  assert.ok(fs.existsSync(path.join(snapshot, 'feedback_gadget.md')), 'the named snapshot exists');
+  assert.equal(failed.stderr, 'wildcard-perms --gates retire: the memories WERE changed (retired feedback_gadget.md), '
+    + 'but the compile failed: [recall] the stub compile refused. '
+    + `The memory folder was snapshotted first, to ${snapshot}. `
+    + 'Run `wildcard-perms --gates refresh` to compile and install the gates the memories now hold.\n');
+  assert.match(s.memory('feedback_gadget.md'), /scope: retired/, 'the edit stands');
+  assert.equal(claudeMd(s.home), installed, 'nothing was installed after the failed compile');
+  assert.doesNotMatch(failed.stdout, /wildcard-perms gates \[claude\]/, 'no status line reads as success');
+
+  // The advice it gives works: refresh compiles and installs what the memories now hold.
+  const refresh = s.run(['--gates', 'refresh']);
+  assert.equal(refresh.status, 0, refresh.stderr);
+  assert.ok(!claudeMd(s.home).includes('Gadget gate.') && claudeMd(s.home).includes('Widget gate.'));
+
+  // MUTATION: report the compile failure through refuse() instead of changedButFailed and the
+  // stderr assertion fails on "nothing was changed", which is false here.
+});
+
+test('CLI --gates retire whose install fails after the edit follows the same contract', (t) => {
+  const s = storeHome(t, MEMORIES);
+  s.run(['--gates', 'refresh']);
+  const installed = claudeMd(s.home);
+  // A compiled file whose gates do not hash to its own header, which setGatesAll refuses.
+  const failed = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_COMPILE: 'torn' });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /^wildcard-perms --gates retire: the memories WERE changed \(retired feedback_gadget\.md\), but the install failed: \[all\] .*gates\.generated\.md does not match the sha in its own header/);
+  assert.ok(failed.stderr.includes(`The memory folder was snapshotted first, to ${snapshotIn(failed.stdout)}. `
+    + 'Run `wildcard-perms --gates refresh`'), failed.stderr);
+  assert.equal(claudeMd(s.home), installed);
+  assert.doesNotMatch(failed.stdout, /wildcard-perms gates \[claude\]/);
+  // MUTATION: delete the `if (errors.length)` check in gatesChange and this exits 0 over a
+  // refused install.
+});
+
+test('CLI --gates retire whose edit fails after its first write is reported as a change, not a refusal', (t) => {
+  const s = storeHome(t, MEMORIES);
+  s.run(['--gates', 'refresh']);
+  s.resetCalls();
+  const partial = s.run(['--gates', 'retire', 'feedback_gadget', 'reference_widget'], { ACOLYTE_STUB_EDIT: 'partial' });
+  assert.equal(partial.status, 1);
+  assert.match(partial.stderr, /^wildcard-perms --gates retire: the memories WERE changed \(retired feedback_gadget\.md\), but the edit failed: \[recall\] reference_widget\.md changed under the edit\. The memory folder was snapshotted first, to .+\. Run `wildcard-perms --gates refresh`/);
+  assert.doesNotMatch(partial.stderr, /nothing was changed/);
+  assert.match(s.memory('feedback_gadget.md'), /scope: retired/);
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-retire=feedback_gadget.md', '--gates-retire=reference_widget.md']],
+    'no compile after a failed edit');
+  // MUTATION: drop the `done.retired.length || done.restored.length` branch and this reads
+  // "refused, nothing was changed" over a memory that was changed.
+});
+
+test('CLI --gates retire whose edit stops after the snapshot passes recall.py\'s account on, and adds no claim of its own', (t) => {
+  const s = storeHome(t, MEMORIES);
+  s.run(['--gates', 'refresh']);
+  s.resetCalls();
+  const stopped = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_EDIT: 'stopped' });
+  assert.equal(stopped.status, 1);
+  const snapshot = fs.readdirSync(s.snapshots).map((name) => path.join(s.snapshots, name))[0];
+  assert.equal(stopped.stderr, `wildcard-perms --gates retire: recall.py stopped the edit after the snapshot ${snapshot} `
+    + `([recall] stopped: feedback_gadget.md changed after it was snapshotted. Nothing was changed; the snapshot is at ${snapshot}.)\n`);
+  assert.equal(stopped.stdout, '', 'no "retired" line for a file recall.py did not report writing');
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-retire=feedback_gadget.md']], 'no compile after a failed edit');
+  // MUTATION: drop the `done.snapshot` branch and the stderr gains "refused, nothing was changed",
+  // a claim this CLI cannot make once recall.py was past the snapshot.
+});
+
+// Switched-off gates stay off (the recorded decision): a retire or restore installs only when a
+// gates block is installed, and never switches gates on itself.
+test('CLI --gates retire or restore with gates switched off edits and compiles, and installs nothing', (t) => {
+  const s = storeHome(t, MEMORIES);
+  const compiledText = () => fs.readFileSync(path.join(s.home, '.claude', 'gates.generated.md'), 'utf8');
+
+  // Never installed: the instruction file is the user's own text and nothing else.
+  const fresh = s.run(['--gates', 'retire', 'feedback_gadget']);
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.equal(claudeMd(s.home), '# Mine\n', 'no block is written into a file that never had one');
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-retire=feedback_gadget.md'], ['--gates-compile']]);
+  assert.ok(compiledText().includes('Widget gate.') && !compiledText().includes('Gadget gate.'), 'the compile is current');
+  assert.equal(fresh.stdout, 'wildcard-perms gates: retired feedback_gadget.md\n'
+    + `wildcard-perms gates: snapshot of the memory folder: ${snapshotIn(fresh.stdout)}\n`
+    + 'wildcard-perms gates: 1 active (CLAUDE.md 1, AGENTS.md 1), 2 retired\n'
+    + 'wildcard-perms gates: gates are switched off, so nothing was installed; the change takes effect when they are '
+    + 'turned on (wildcard-perms --gates on)\n'
+    + `wildcard-perms gates [claude]: OFF, 1 gate (${s.file})\n`);
+  assert.equal(fresh.stderr, '');
+
+  // Switched off after being on: a restore does not undo `--gates off`.
+  assert.equal(s.run(['--gates', 'on']).status, 0);
+  assert.ok(claudeMd(s.home).includes(GATES_BEGIN));
+  assert.equal(s.run(['--gates', 'off']).status, 0);
+  assert.equal(claudeMd(s.home), '# Mine\n');
+  const restore = s.run(['--gates', 'restore', 'feedback_gadget']);
+  assert.equal(restore.status, 0, restore.stderr);
+  assert.equal(claudeMd(s.home), '# Mine\n', 'still off');
+  // Turning gates on installs what the memories now hold.
+  assert.equal(s.run(['--gates', 'on']).status, 0);
+  assert.ok(claudeMd(s.home).includes('Gadget gate.') && claudeMd(s.home).includes('Widget gate.'));
+  assert.equal(s.run(['--gates', 'off']).status, 0);
+
+  // No gate left active while off: the empty compile, still nothing installed, and no promise
+  // that turning gates on would load anything.
+  s.resetCalls();
+  const none = s.run(['--gates', 'retire', 'feedback_gadget', 'reference_widget']);
+  assert.equal(none.status, 0, none.stderr);
+  assert.deepEqual(s.calls()[2], ['--gates-compile', '--gates-allow-empty']);
+  assert.equal(compiledText(), '');
+  assert.equal(claudeMd(s.home), '# Mine\n');
+  assert.match(none.stdout, /\nwildcard-perms gates: gates are switched off, so nothing was installed; with no gate active, none will load when they are turned on either\n/);
+
+  // MUTATION: pass { gatesOn: true } to gateSteps in gatesChange whatever the status says, and
+  // the first CLAUDE.md assertion fails with a gates block in the file.
+});
+
+// `--gates refresh` cannot remove the blocks once no gate is active: its compile is refused or
+// finds nothing, and the retired gate stays resident (rampage). `--gates off` can.
+test('CLI --gates retire failure that leaves no gate active points at --gates off, and following it removes the blocks', (t) => {
+  const memories = {
+    'feedback_gadget.md': { scope: 'global', gate: 'Gadget gate.' },
+    'feedback_old_rule.md': { scope: 'retired', gate: 'Old rule.' },
+  };
+  // The compile fails, so the compiled file still holds the retired gate as well.
+  const s = storeHome(t, memories);
+  assert.equal(s.run(['--gates', 'refresh']).status, 0);
+  const failed = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_COMPILE: 'fail' });
+  assert.equal(failed.status, 1);
+  // The compile is named as this CLI runs it, the Python and the recall.py beside it quoted.
+  const recall = `"${process.execPath}" "${path.resolve(__dirname, '..', 'memory', 'recall.py')}"`;
+  assert.ok(failed.stderr.endsWith('No gate is active now, so run `wildcard-perms --gates off` to remove the gates blocks from '
+    + `CLAUDE.md and AGENTS.md, and \`${recall} --gates-compile --gates-allow-empty\` to empty the compiled file, `
+    + 'which still holds the retired gates.\n'), failed.stderr);
+  assert.doesNotMatch(failed.stderr, /gates refresh/);
+  const refresh = s.run(['--gates', 'refresh']);
+  assert.equal(refresh.status, 0, 'refresh, the old advice, installs the stale compile');
+  assert.ok(claudeMd(s.home).includes('Gadget gate.'), 'and leaves the retired gate resident');
+  const off = s.run(['--gates', 'off']);
+  assert.equal(off.status, 0, off.stderr);
+  assert.equal(claudeMd(s.home), '# Mine\n', 'the advice given removes it');
+  // MUTATION: drop the `active > 0` test in changedButFailed (refresh for every gates-on case)
+  // and the endsWith fails on the refresh advice.
+});
+
+test('CLI --gates retire with gates switched off and a failed compile names the compile alone', (t) => {
+  const s = storeHome(t, MEMORIES);
+  const failed = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_COMPILE: 'fail' });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /Gates are switched off, so nothing was installed\. Run `.*recall\.py" --gates-compile` to compile the gates the memories now hold, so that turning gates on installs them\.\n$/);
+  assert.doesNotMatch(failed.stderr, /gates refresh/, 'refresh would switch gates on');
+  assert.equal(claudeMd(s.home), '# Mine\n');
+  // MUTATION: pass gatesOn: true to changedButFailed in gatesChange and the match fails on the
+  // refresh advice.
+});
+
+test('CLI --gates retire refuses when an instruction file cannot be read, before anything is written', (t) => {
+  const s = storeHome(t, MEMORIES);
+  // UTF-16, which the block writer will not rewrite, so whether it holds a gates block cannot be
+  // told, and going ahead could leave the gate being retired resident.
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`# Mine\n${GATES_BEGIN}\n`, 'utf16le')]);
+  fs.writeFileSync(s.file, utf16);
+  const before = Object.keys(MEMORIES).map(s.memory);
+  const refused = s.run(['--gates', 'retire', 'feedback_gadget']);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /^wildcard-perms --gates retire: cannot tell whether gates are on: .*\nwildcard-perms --gates retire: refused, nothing was changed\n$/);
+  assert.equal(refused.stdout, '');
+  assert.deepEqual(Object.keys(MEMORIES).map(s.memory), before);
+  assert.deepEqual(s.calls(), [['--gates-list']], 'the edit never ran');
+  assert.equal(fs.existsSync(s.snapshots), false, 'no snapshot was taken');
+  assert.ok(fs.readFileSync(s.file).equals(utf16));
+  // MUTATION: delete the `unreadable.length` refusal and the retire exits 0 with the memory edited.
+});
+
+test('CLI --gates retire passes a successful edit\'s warning, such as a snapshot it could not prune, to stderr', (t) => {
+  const s = storeHome(t, MEMORIES);
+  const warned = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_EDIT: 'warn' });
+  assert.equal(warned.status, 0, warned.stderr);
+  assert.equal(warned.stderr,
+    '[recall] could not prune old snapshot 20200101T000000Z-retire (PermissionError: denied); it is kept.\n');
+  assert.match(s.memory('feedback_gadget.md'), /scope: retired/, 'a warning is not a failure');
+  // MUTATION: delete `if (edited.stderr) process.stderr.write(edited.stderr)` and stderr is ''.
+});
+
+// The verbs are found anywhere in argv, so a name after `retire` used to be one: `--gates retire
+// --seed` ran --seed, which writes settings.json. After `retire` or `restore` every word is a
+// name, a dashed one before `--` is refused with the way out named, and after `--` a dashed word
+// is a name too.
+test('CLI --gates retire takes a dashed name only after "--", and never reads a name as another verb', (t) => {
+  const s = storeHome(t, {
+    '-dash.md': { scope: 'global', gate: 'Dash gate.' },
+    'feedback_gadget.md': { scope: 'global', gate: 'Gadget gate.' },
+  });
+  const settings = fs.readFileSync(path.join(s.home, '.claude', 'settings.json'), 'utf8');
+  assert.match(s.run(['--gates', 'list']).stdout, /^\[x\] -dash\.md {2}Dash gate\. Follow it\.\n/);
+
+  // Without the marker it is an option, refused before anything runs, with the way out named.
+  s.resetCalls();
+  const bare = s.run(['--gates', 'retire', '-dash']);
+  assert.equal(bare.status, 2);
+  assert.ok(bare.stderr.startsWith('wildcard-perms: unrecognized option -dash\n'
+    + '(a memory name that starts with "-" goes after "--": wildcard-perms --gates retire -- -dash)\n\n'), bare.stderr);
+  assert.deepEqual(s.calls(), []);
+  for (const verb of ['--seed', '--learn', '--drain', '--bypass']) {
+    const run = s.run(['--gates', 'retire', verb]);
+    assert.equal(run.status, 2, `${verb}: ${run.stderr}`);
+    assert.match(run.stderr, new RegExp(`^wildcard-perms: unrecognized option ${verb}\\n`), `${verb} is not dispatched`);
+  }
+  assert.equal(fs.readFileSync(path.join(s.home, '.claude', 'settings.json'), 'utf8'), settings, 'no verb ran');
+  assert.deepEqual(s.calls(), []);
+
+  const retire = s.run(['--gates', 'retire', '--', '-dash']);
+  assert.equal(retire.status, 0, retire.stderr);
+  assert.deepEqual(s.calls(), [['--gates-list'], ['--gates-retire=-dash.md'], ['--gates-compile']]);
+  assert.match(s.memory('-dash.md'), /scope: retired/);
+  assert.match(s.memory('feedback_gadget.md'), /scope: global/);
+  assert.match(retire.stdout, /^wildcard-perms gates: retired -dash\.md\n/);
+  assert.equal(s.run(['--gates', 'restore', '--', '-dash.md']).status, 0);
+  assert.match(s.memory('-dash.md'), /scope: global/);
+
+  // After the marker everything is a name, an option's spelling and a second marker included.
+  const help = s.run(['--gates', 'retire', '--', '--help']);
+  assert.equal(help.status, 1);
+  assert.match(help.stderr, /^wildcard-perms --gates retire: --help\.md is not a gate memory/);
+  assert.match(s.run(['--gates', 'retire', '--', '--seed']).stderr, /--seed\.md is not a gate memory/);
+  assert.match(s.run(['--gates', 'retire', '--', '-dash', '--']).stderr, /--\.md is not a gate memory/);
+  assert.match(s.memory('-dash.md'), /scope: global/, 'refused, so unchanged');
+  // Before the marker --help still explains, as it does after any verb.
+  assert.match(s.run(['--gates', 'retire', '--help']).stdout, /\n {7}wildcard-perms --gates retire\|restore \[--\] <memory>/);
+
+  // MUTATIONS: emit the spaced `--gates-retire -dash.md` in gateSteps and the retire exits 1 on
+  // the stand-in's argparse usage error, as the real recall.py did; drop the `takesNames` branch
+  // in the dispatch chain and `--gates retire --seed` runs --seed (exit 0, settings.json rewritten).
+});
+
+test('CLI --gates retire of a name that starts with a space retires it as spelled, never its twin', (t) => {
+  const s = storeHome(t, {
+    ' lead.md': { scope: 'global', gate: 'Spaced lead gate.' },
+    'lead.md': { scope: 'global', gate: 'Lead gate.' },
+  });
+  const retire = s.run(['--gates', 'retire', ' lead']);
+  assert.equal(retire.status, 0, retire.stderr);
+  assert.deepEqual(s.calls()[1], ['--gates-retire= lead.md']);
+  assert.match(s.memory(' lead.md'), /scope: retired/);
+  assert.match(s.memory('lead.md'), /scope: global/, 'the twin is untouched');
+  assert.match(retire.stdout, /^wildcard-perms gates: retired {2}lead\.md\n/);
+  // MUTATION: put `.trim()` in normaliseName and lead.md is the one retired.
+});

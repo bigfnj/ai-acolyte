@@ -33,6 +33,124 @@ is unmeasurable at the process level.
 
 ---
 
+## Workspace settings may only tighten (2026-10-15)
+
+**FIXED**, `ea1fabe`. This is the maintainer's decision of 2026-10-15 (wave-d1, on `29a2cc1`). It
+closes the four CANDIDATE rows of "The settings census behind S2", below.
+
+**The hole.** `autoLearn.mode`, `autoLearn.successThreshold`, `autoLearn.codexScope` and
+`localDrain.enabled` were window-scoped and read with `get()`, so a workspace value won. A
+repository's `.vscode/settings.json` could do four things:
+- set `auto-safe`, so every scan applied grants to `~/.claude/settings.json` and `~/.codex/rules`
+  with no modal;
+- lower the threshold to 1;
+- turn Codex export back on for a user who chose `off`;
+- turn the drain back on for a user who turned it off.
+
+The grants still came only from the user's own history, through the auto-safe classifier, so a
+repository could not inject a rule. But it could opt the user into unattended writes to global
+files.
+
+**The rule.** A workspace or folder value may make each key stricter than the user's own setting,
+never looser.
+- **Where.** `vscode-extension/extension.js:1268#tightenOnlySetting` applies it, over the table at
+  `vscode-extension/extension.js:1236#TIGHTEN_ONLY`. `autoLearnConfig` reads the mode, threshold
+  and scope through it, and `vscode-extension/extension.js:3517#localDrainEnabled` reads the drain.
+- **The user tier** is `inspect().globalValue`. When it is unset or invalid, the manifest default
+  is the bar.
+- **The effective value** is the strictest of three things: the user tier, every workspace and
+  folder value no looser than it, and the merged `get()`.
+- **Strictness:**
+  - mode: `observe` is stricter than `recommend`, which is stricter than `auto-safe`;
+  - threshold: higher is stricter, floored at 1 as before;
+  - scope: `off` and the withdrawn `workspace` rank together above `user`, because neither writes
+    a rule;
+  - drain: off is stricter than on.
+- **Every tier is a cap**, not VS Code's precedence order. With a user `recommend`, a workspace
+  `observe` and a folder `recommend`, the result is `observe`, where VS Code's own merge would give
+  the folder's `recommend`.
+- **Why `get()` is in the set.** In VS Code it is already one of those tiers, and it can only
+  tighten the result. So a configuration without `inspect()` (several test harnesses) is held to
+  the user tier as well. A harness that sets `codexScope: off` or `localDrain.enabled: false`
+  through `get()` alone keeps working, and one that sets `auto-safe` that way now gets `recommend`.
+- **Why not machine scope**, as S2 used. A stricter per-project choice (`observe` in one
+  repository, a higher bar, export off) is worth keeping, and machine scope would discard it.
+
+**Visibility.** A value that would loosen a key is ignored. It gets one line in the Acolyte output
+channel, never a notification:
+
+`[<time>] Settings: workspace setting autoLearn.mode=auto-safe ignored: a workspace may only lower the mode (user setting: recommend).`
+
+When the user set nothing, the line ends "(user setting: recommend, the default)". It is written
+once per distinct line per activation: `looserSettingsNoted` is cleared in activate, as
+`warnedOnce` is (`vscode-extension/extension.js:2799#looserSettingsNoted`). That Set is not
+decoration. With it removed, two scans in one window printed the line 10 times, because
+`autoLearnConfig` runs on every scan and every refresh.
+
+**The mode toggle** (`vscode-extension/extension.js:1994#cycleAutoLearnMode`, the Cycle mode
+command).
+- **A step above the user's own mode** writes user settings, so raising is always the user's own
+  setting. Its auto-safe confirm says "in your user settings, for every workspace that does not
+  lower it".
+- **The removal.** A raise also removes a folder or workspace value below the new mode
+  (`vscode-extension/extension.js:2018#removed`). Such a value can only equal the old user
+  setting, or the step would not have been a raise. Left in place, it would still cap the mode in
+  this window, and the toast would report a mode the window did not get.
+- **Any other step** writes as before: the folder tier, else the workspace tier when one holds a
+  value, else user settings.
+- **The toast names the tier**, as in "Auto Learn mode: observe, saved in this workspace's
+  settings."
+
+**Residuals.**
+- A workspace can no longer raise the mode for one repository. A user who wants auto-safe in one
+  repository alone must set it at the user tier and lower it everywhere else. That is the decision,
+  not a gap.
+- A raise through the toggle changes the user tier, so it reaches every workspace that does not
+  lower it. Its confirm and its toast both say so.
+- A raise's removal edits the repository's `.vscode/settings.json`, which the old toggle also
+  wrote.
+- The learner persists the mode each scan is handed. That is now the effective mode.
+- A release before this one still honours a workspace raise from the same settings file.
+
+**Tests.** `test/workspace-tighten-only.test.js` drives the real extension over a temp home. Its
+configuration answers tier by tier and writes back the tier `update()` names, and its scripted
+worker records what each scan is handed. Every mutation below was applied alone, the file was run
+once, and extension.js was restored and checked by hash.
+- **The whole fix reverted** (`29a2cc1`'s extension.js): 6 of 7 tests fail.
+- **"with nothing set, … keep their defaults"** is the control, so it passes with the fix reverted
+  by design. It fails with the mode fallback changed to `observe` or the threshold fallback changed
+  to 1.
+- **"a workspace auto-safe over a user recommend is ignored, with one output line"** fails with
+  `get()` for the mode, the dedupe dropped, or the mode fallback changed.
+- **"a workspace observe under a user recommend takes effect, and a folder cannot raise it back"**
+  fails with `get()` for the mode (its folder case), or with the user tier alone returned (the
+  machine-scope reading).
+- **"a workspace threshold below the user's is ignored, and one above it takes effect"** fails with
+  `get()` for the threshold, the user tier alone, or the threshold fallback changed.
+- **"the mode toggle writes user settings to raise the mode, and the workspace tier to lower it"**
+  fails with:
+  - the old `cycleAutoLearnMode` restored whole;
+  - only the old target choice restored;
+  - the removal skipped;
+  - user settings always written;
+  - `get()` for the mode.
+- **"a workspace may turn Codex rule export off, never back on…"** fails with `get()` for the
+  scope, or the user tier alone.
+- **"a workspace may turn the automatic drain off, never back on…"** fails with `get()` for the
+  drain, or the user tier alone.
+
+**One existing test changed, and none pinned the old behaviour.** No test set a workspace-tier
+value for any of the four keys, and none drove `autoLearnCycleMode`. The runtime test in
+`test/codex-workspace-scope.test.js` set `autoLearn.mode: auto-safe` and the withdrawn
+`codexScope: workspace` through `get()` alone, with an empty `inspect()`. It still passed, but its
+auto-safe was held to the default `recommend`, so its scan no longer took the unattended apply
+path; Apply safe still granted. Its `inspect()` now reports both at the user tier. The other
+harnesses that set `codexScope: off` or `localDrain.enabled: false` through `get()` alone are
+unchanged and pass: dashboard-view, extension-lifecycle-async, codex-inventory-ui,
+extension-managed-blocked and local-drain-extension.
+
+---
+
 ## Claude Code's strip model, checked on each update (2026-10-15)
 
 The maintainer's go of 2026-10-15 (wave-s1, on `83d7c89`). `scripts/check-claude-strip-model.js`
@@ -413,13 +531,13 @@ a read from `inspect().globalValue`.
 | `memory.dir` | the gate compile's corpus, then the global `CLAUDE.md` and `AGENTS.md`; the recall rebuild and sync | **machine, S2** |
 | `gates.enabled` | installing or removing the gates block in those files, and arming the unattended recompile | **machine, S2** |
 | `guidance.enabled` | installing or removing the guidance block in the same files | **machine, S2** |
-| `autoLearn.mode` | in `auto-safe` each scan applies grants unattended to `~/.claude/settings.json` and `~/.codex/rules` (`applyUnlocked` in the manager's scan) | **CANDIDATE**, the strongest left. A workspace value skips the confirmation `cycleAutoLearnMode` shows before auto-safe. Bounded: auto-safe takes only deterministic read-only families proved by the user's own transcripts for this workspace, the same class as the drain's accepted risk below. Not changed here, because `cycleAutoLearnMode` deliberately writes the workspace tier when one exists, so whether a mode may be per-workspace is a product decision |
-| `autoLearn.successThreshold` | how many successes an auto-safe grant needs (floor 1) | CANDIDATE with `mode`: it lowers the bar only once auto-safe is on |
-| `autoLearn.codexScope` | `user` lets an apply write `~/.codex/rules`; `off` stops it | CANDIDATE with `mode`: a workspace can turn Codex export back on for a user who chose `off` |
-| `localDrain.enabled` | promoting a workspace's `.claude/settings.local.json` into `~/.claude/settings.json` | CANDIDATE, low: a workspace can turn the extension's drain back on for a user who turned it off. What moves is the workspace's own file, which is the accepted risk in "The CLI drain has no trust gate" (2026-09-24), and the hook drains that file with no setting at all |
+| `autoLearn.mode` | in `auto-safe` each scan applies grants unattended to `~/.claude/settings.json` and `~/.codex/rules` (`applyUnlocked` in the manager's scan) | **CANDIDATE**, the strongest left. A workspace value skips the confirmation `cycleAutoLearnMode` shows before auto-safe. Bounded: auto-safe takes only deterministic read-only families proved by the user's own transcripts for this workspace, the same class as the drain's accepted risk below. Not changed here, because `cycleAutoLearnMode` deliberately writes the workspace tier when one exists, so whether a mode may be per-workspace is a product decision. **Since 2026-10-15, tighten-only**: see "Workspace settings may only tighten (2026-10-15)" |
+| `autoLearn.successThreshold` | how many successes an auto-safe grant needs (floor 1) | CANDIDATE with `mode`: it lowers the bar only once auto-safe is on. **Since 2026-10-15, tighten-only**: see "Workspace settings may only tighten (2026-10-15)" |
+| `autoLearn.codexScope` | `user` lets an apply write `~/.codex/rules`; `off` stops it | CANDIDATE with `mode`: a workspace can turn Codex export back on for a user who chose `off`. **Since 2026-10-15, tighten-only**: see "Workspace settings may only tighten (2026-10-15)" |
+| `localDrain.enabled` | promoting a workspace's `.claude/settings.local.json` into `~/.claude/settings.json` | CANDIDATE, low: a workspace can turn the extension's drain back on for a user who turned it off. What moves is the workspace's own file, which is the accepted risk in "The CLI drain has no trust gate" (2026-09-24), and the hook drains that file with no setting at all. **Since 2026-10-15, tighten-only**: see "Workspace settings may only tighten (2026-10-15)" |
 | `autoLearn.enabled` | the scan, which reads history and writes only the learner's own state | safe: nothing is granted outside auto-safe |
 | `autoLearn.intervalMinutes`, `autoLearn.debounceSeconds` | scan cadence, floored at 1 min and 1 s | safe: cost only |
-| `autoLearn.mode` through `inspect()` in `cycleAutoLearnMode` | which settings tier the mode toggle writes | safe: it writes VS Code settings only |
+| `autoLearn.mode` through `inspect()` in `cycleAutoLearnMode` | which settings tier the mode toggle writes | safe: it writes VS Code settings only. Since 2026-10-15 a step above the user's mode writes user settings (same section) |
 | `memory.enabled` | the Claude and Codex memory lints, which read | safe |
 | `memory.lineBudget`, `memory.maxLines`, `memory.totalBudget` | what the lint reports | safe |
 

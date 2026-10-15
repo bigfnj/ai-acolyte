@@ -17,6 +17,13 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-15 as 1.6.6 and 1.6.7.**
+- 1.6.6 (`36696ec`): the Claude Code strip model is checked on each update.
+- 1.6.7 (`f1407bf`): workspace settings may only tighten Auto Learn and the drain.
+
+The live hook now runs a release worktree, moved to each new tag (first done for v1.6.7). The
+record has the details under "Decided 2026-10-15: the live hook".
+
 **Released 2026-10-15 as 1.6.5** (tag `v1.6.5` at `6f6ed60`, CI green on all 8 jobs including the new
 Python gate-edit job, the asset verified entry by entry). It ports rampage's memory-gates work: G1–G7
 hardening, per-agent gates and retire/restore. It also reports gates found in other stores. **1.6.4** (`35c3358`) fixed the silent Review button.
@@ -76,17 +83,6 @@ Also from wave-f15, ACCEPTED-RECORDED rather than queued:
   non-npm batch-file codex.
 - **The version probe still runs an npm `codex.cmd` through cmd.exe.** It is safe with fixed
   arguments.
-
-### Decided 2026-10-15: the live hook runs a pinned release copy, asynchronously
-
-The maintainer chose both options from the v1.6.2 audit:
-- The live PostToolUse hook now runs a separate worktree pinned to a release tag (`v1.6.6`), not the
-  development checkout.
-- The hook is registered with `"async": true`. It was repointed through the compare-and-swap
-  settings writer, and nothing else in `settings.json` changed.
-
-After each release, move the live copy to the new tag; README "Build, test, release" has the
-command. These entries close when that release step has run once.
 
 ### VS Code acceptance has not run against the 1.6.2 tree
 

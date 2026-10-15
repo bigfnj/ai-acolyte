@@ -33,6 +33,15 @@ is unmeasurable at the process level.
 
 ---
 
+## Decided 2026-10-15: the live hook runs a pinned release copy, asynchronously
+
+The v1.6.2 audit left two decisions to the maintainer. Both were taken on 2026-10-15, and both are **DONE**.
+
+| Decision | Disposition | Evidence |
+|---|---|---|
+| The live hook ran the development checkout, so every edit, branch switch or mutation run changed the code the next real tool call ran | **DONE**: the hook runs a detached worktree pinned to a release tag | The worktree was created at `v1.6.6` and moved to `v1.6.7` once that release was published; this was the release step's first use, and the README's "Build, test, release" section has the step. The hook was repointed through the compare-and-swap settings writer by a maintainer one-off script, outside the repo. Before and after the change, every field of `settings.json` except `hooks` compared identical, the 831 allow entries included. |
+| The live registration lacked `"async": true` | **DONE**, applied in the same write | Claude Code no longer waits about 0.35–0.57 s for the hook on each Bash or PowerShell call. A pass killed at a `claude -p` teardown cannot empty `settings.json`, because the hook never writes in place (wave-f8); it is redone on the next call. |
+
 ## Workspace settings may only tighten (2026-10-15)
 
 **FIXED**, `ea1fabe`. This is the maintainer's decision of 2026-10-15 (wave-d1, on `29a2cc1`). It

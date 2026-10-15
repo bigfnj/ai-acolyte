@@ -46,6 +46,9 @@ const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const {
+  MODELLED_VERSION: STRIP_MODEL_MODELLED, checkOffThread: checkStripModelOffThread, defaultBinary: findClaudeCodeBinary,
+} = require('./src/claude-strip-model');
+const {
   applicationSummary, backupPruneSuffix, candidatePendingTargets, claudeDecisionExplanation,
   claudePermissionDecision, codexCheckVariants, codexExecpolicyArgs, codexRestartSuffix,
   codexInventoryItems, codexInventoryDetail, codexRemovalExplanation, codexRemovalNote,
@@ -1088,7 +1091,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2782#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2887#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1376,7 +1379,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5601#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5713#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1631,12 +1634,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5634#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5746#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2563#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2668#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -2536,6 +2539,108 @@ function sharedChannel({ fresh = false } = {}) {
   return outputChannel;
 }
 
+// ── Claude Code's strip model, re-read once per binary (2026-10-15) ─────────────
+// CLAUDE_SAFE_ENV_VARS (src/permission-match.js) is the list of `NAME=value` prefixes Claude
+// Code strips before it matches an allow rule, read out of 2.1.296's binary because the docs do
+// not name them. When Claude Code changes that list the generalizer writes rules that keep
+// prompting, and nothing said so. src/claude-strip-model.js reads the list back out of the
+// installed binary; this runs it about 30 s after activation, once per binary.
+//
+// The normal start costs one stat: the key is the binary's path, size and mtime, and an
+// unchanged key does nothing. A new key runs the scan on a worker thread (the whole binary is
+// read: 492 ms for 257 MB on 2026-10-15), and stores the key with the result, a failed one
+// included, so a binary the scan cannot parse is not re-read on every start. A missing binary
+// is silent; an unparseable one is one output line; the same list is at most one; a different
+// list, or a lookup that now converts case, is one warning per binary. It never edits the list
+// or any setting: a list change still needs a release.
+const STRIP_MODEL_DELAY_MS = 30000;
+const STRIP_MODEL_STATE = 'claudeStripModel.lastCheck';
+let stripModelTimer = null;   // the deferred check, so deactivate can cancel it
+let stripModelThread = null;  // { promise, terminate } of the scan in flight, so deactivate can end it
+
+function scheduleStripModelCheck(context) {
+  clearTimeout(stripModelTimer);
+  const generation = activationGeneration;
+  stripModelTimer = setTimeout(() => {
+    stripModelTimer = null;
+    return checkClaudeStripModel(context, generation);
+  }, STRIP_MODEL_DELAY_MS);
+  if (typeof stripModelTimer?.unref === 'function') stripModelTimer.unref();
+}
+
+const stripModelLive = (generation) => !deactivated && generation === activationGeneration;
+
+// Runs from a timer, so it never rejects.
+async function checkClaudeStripModel(context, generation) {
+  try {
+    if (!stripModelLive(generation) || !userSetting('claudeStripModelCheck', true)) return;
+    const state = context?.globalState;
+    if (typeof state?.get !== 'function' || typeof state?.update !== 'function') return;
+    const located = findClaudeCodeBinary(os.homedir());
+    if (!located) return;
+    let stat;
+    try { stat = fs.statSync(located.path); } catch { return; }
+    const key = `${located.path}|${stat.size}|${stat.mtimeMs}`;
+    if (state.get(STRIP_MODEL_STATE)?.key === key) return;
+    const thread = checkStripModelOffThread(located.path);
+    stripModelThread = thread;
+    let result;
+    try {
+      result = await thread.promise;
+    } catch (error) {
+      // The thread was lost (deactivate ended it, or it could not start). That says nothing
+      // about the binary, so nothing is stored and the next start tries again.
+      if (stripModelLive(generation)) console.error('ai-acolyte: the Claude Code strip-model check stopped —', error);
+      return;
+    } finally {
+      if (stripModelThread === thread) stripModelThread = null;
+    }
+    if (!stripModelLive(generation)) return;
+    const summary = {
+      key, version: located.version.join('.'), status: result.status, count: result.count ?? null,
+      added: result.added || [], dropped: result.dropped || [], lookupCase: result.lookupCase ?? null,
+      checkedAt: new Date().toISOString(),
+    };
+    await Promise.resolve(state.update(STRIP_MODEL_STATE, summary)).catch(() => {});
+    if (!stripModelLive(generation)) return;
+    reportStripModel(summary, result);
+  } catch (error) {
+    console.error('ai-acolyte: the Claude Code strip-model check failed —', error);
+  }
+}
+
+function reportStripModel(summary, result) {
+  const channel = sharedChannel();
+  const head = `Claude Code ${summary.version}`;
+  if (summary.status !== 'same' && summary.status !== 'drift') {
+    const why = summary.status === 'unreadable' ? `its binary could not be read (${result.error})`
+      : `its safe-variable list could not be located in the binary (${result.candidates} candidate lists; the bundle changed shape)`;
+    channel?.appendLine(`${head}: strip model not checked, ${why}. This binary will not be re-scanned.`);
+    return;
+  }
+  const changed = summary.added.length + summary.dropped.length > 0;
+  const folded = summary.lookupCase === 'folded';
+  if (!changed && !folded) {
+    const lookup = summary.lookupCase === 'exact' ? 'case-exact' : 'lookup case not read';
+    channel?.appendLine(`${head}: strip model unchanged (${summary.count} names, ${lookup})`);
+    return;
+  }
+  const names = [...summary.added.map((name) => `+${name}`), ...summary.dropped.map((name) => `−${name}`)].join(', ');
+  const what = [changed ? `changed its safe-variable list (${names})` : '',
+    folded ? 'now converts case before its safe-variable lookup' : ''].filter(Boolean).join(' and ');
+  if (channel) {
+    channel.appendLine(`${head} (${result.binary}): the strip model differs from the ${STRIP_MODEL_MODELLED} one AI Acolyte's generalizer models.`);
+    if (summary.added.length) channel.appendLine(`  Claude Code now strips, AI Acolyte does not: ${summary.added.join(' ')}`);
+    if (summary.dropped.length) channel.appendLine(`  AI Acolyte strips, Claude Code no longer does: ${summary.dropped.join(' ')}`);
+    if (folded) channel.appendLine('  The membership lookup now converts case; AI Acolyte models it case-exact.');
+    channel.appendLine('  Some approvals may keep prompting. Nothing was changed: the list changes only with an AI Acolyte release.');
+  }
+  const message = `${head} ${what}; AI Acolyte's generalizer models ${STRIP_MODEL_MODELLED}, so some approvals may keep prompting. Update AI Acolyte.`;
+  Promise.resolve(vscode.window.showWarningMessage(message, 'Show details')).then((choice) => {
+    if (choice === 'Show details') sharedChannel()?.show(true);
+  }, () => {});
+}
+
 function activate(context) {
   // The module can outlive a deactivate (an extension disable/enable, or an
   // upgrade, re-activates in the same realm), so the teardown flag has to be
@@ -2780,6 +2885,8 @@ function activate(context) {
   // Sync the recall index on startup when the model is present and the cache is behind
   // the corpus. Deferred 10 s so the extension host settles first.
   recallSyncTimer = setTimeout(autoSyncRecallIfStale, 10000);
+  // Whether Claude Code changed the env-var list the generalizer models: 30 s in, once per binary.
+  try { scheduleStripModelCheck(context); } catch (err) { console.error('ai-acolyte: strip-model check not scheduled —', err); }
 
   // Memory-index hygiene lint: status-bar bloat gauge + editor squiggles on over-budget
   // hook lines / broken index links. Isolated so a failure here never breaks wildcarding.
@@ -5552,6 +5659,11 @@ async function deactivate() {
   clearTimeout(gatesBounce);
   clearTimeout(recallSyncTimer);
   clearTimeout(dashboardBounce);
+  // The strip-model check: its timer, and a scan already running on its thread.
+  clearTimeout(stripModelTimer);
+  stripModelTimer = null;
+  stripModelThread?.terminate();
+  stripModelThread = null;
   // A cleared timer only stops a spawn that had not started. These four had, and
   // nothing retained them, so a reload left up to a 180s python child running
   // against a torn-down host — and the gate compile's callback wrote policy.

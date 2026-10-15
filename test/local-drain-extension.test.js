@@ -119,7 +119,7 @@ function harness(tempHome, { guidance = true, localDrain = true } = {}) {
   // re-required under the mocked `os` above. A module that captured the real
   // homedir at first load would send this test's writes to the real ~/.claude.
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:56#autoLearnUi,
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:59#autoLearnUi,
   // extension.js:10#createAutoLearnWorkerRunner).
   const extensionDir = path.dirname(extensionPath) + path.sep;
   for (const cached of Object.keys(require.cache)) {

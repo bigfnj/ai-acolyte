@@ -186,7 +186,9 @@ const TEST_ONLY = {
   // drives a command-line tool through; the tools themselves are run by hand or by CI.
   'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],
   'scripts/auto-mode-audit.js': ['audit', 'main', 'parseArgs', 'readAllow', 'render', 'stripCredentials'],
-  'scripts/check-claude-strip-model.js': ['check', 'defaultBinary', 'main'],
+  // check and defaultBinary moved to src/claude-strip-model.js on 2026-10-15, where the script
+  // and the extension consume them; the script exports only its main.
+  'scripts/check-claude-strip-model.js': ['main'],
   'scripts/check-codex-runtime.js': ['PROVENANCE_ROOTS', 'localRequireClosure'],
   'scripts/check-line-refs.js': ['anchorLines', 'anchorsFrom', 'checkBounds', 'checkVacuous', 'collectRefs', 'fixAnchored', 'isVacuousSpan', 'stripRefs', 'tracked'],
   'scripts/mirror-pack.js': ['NEVER_MIRROR', 'mirrorTargets'],

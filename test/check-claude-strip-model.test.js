@@ -1,9 +1,10 @@
 'use strict';
 
-// scripts/check-claude-strip-model.js, against synthetic "binaries": bytes that hold the
-// list the way the 2.1.296 bundle does (`new Set(["GOEXPERIMENT",...])`, measured 2026-10-13)
-// among filler and decoys. The real installed binary is never read here: the check is a
-// maintenance command for a developer's machine, and CI has no Claude Code to read.
+// src/claude-strip-model.js and its command line, scripts/check-claude-strip-model.js, against
+// synthetic "binaries": bytes that hold the list the way the 2.1.296 bundle does
+// (`new Set(["GOEXPERIMENT",...])`, measured 2026-10-13) among filler and decoys. The real
+// installed binary is never read here: CI has no Claude Code to read. The extension's use of the
+// same reader is tested in test/claude-strip-model-check.test.js.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,7 +15,8 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'check-claude-strip-model.js');
-const { check, defaultBinary, main } = require(SCRIPT);
+const { main } = require(SCRIPT);
+const { check, defaultBinary } = require('../src/claude-strip-model');
 const { CLAUDE_SAFE_ENV_VARS, claudeStripsAssignment } = require('../src/permission-match');
 
 const KNOWN = [...CLAUDE_SAFE_ENV_VARS];
@@ -90,7 +92,7 @@ test('no list, two different lists, or no binary is no decision, exit 2', (t) =>
 });
 
 test('a list that straddles a read boundary is still read whole', (t) => {
-  // MUTATION: set OVERLAP to 0 in the script. The literal is cut in two at the 4096-byte
+  // MUTATION: set OVERLAP to 0 in src/claude-strip-model.js. The literal is cut in two at the 4096-byte
   // boundary and neither half is found. Confirmed 2026-10-13.
   const file = binary(t, crypto.randomBytes(4096 - 100), literal(KNOWN), crypto.randomBytes(5000));
   assert.equal(check(file, CLAUDE_SAFE_ENV_VARS, 4096).status, 'same');

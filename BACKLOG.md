@@ -17,6 +17,9 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-15 as 1.6.5** (tag `v1.6.5` at `6f6ed60`, CI green on all 8 jobs including the new
+Python gate-edit job, the asset verified entry by entry). It ports rampage's memory-gates work: G1–G7
+hardening, per-agent gates and retire/restore. It also reports gates found in other stores. **1.6.4** (`35c3358`) fixed the silent Review button.
 **Released 2026-10-14 as 1.6.3** (tag `v1.6.3` at `1fb294a`, CI green on all 7 jobs, the published
 asset verified entry by entry against the local build). Every finding from the 1.6.3 confirmation
 audits, their follow-up waves and the final pre-tag audit is fixed or recorded in

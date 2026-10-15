@@ -507,6 +507,16 @@ bash test/recall-py.sh              # the Python half; NOT part of node --test
 python memory/recall.py --lint      # index clean, gates not stale against source
 ```
 
+If you develop in the same checkout your hook runs from, every edit, branch switch or
+mutation run there changes the code the next real tool call runs against your real
+`settings.json`. Instead, point the hook at a separate worktree pinned to a release tag
+(`git worktree add --detach ../ai-acolyte-live vX.Y.Z`, then register that copy's
+`bin/wildcard-perms`). After each release, move the live copy to the new tag:
+
+```bash
+git -C ../ai-acolyte-live checkout --detach vX.Y.Z
+```
+
 `test/recall-py.sh` is listed because nothing else invokes it. It is not in `node --test`
 (it needs the toolbox Python, which CI has no way to provide) and it was not in this
 checklist either, so three real repairs made to it were exercised only if somebody

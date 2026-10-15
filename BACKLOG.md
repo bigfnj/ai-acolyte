@@ -59,7 +59,7 @@ Code") has feature work on memory gates and on Project-local draining. Its memor
 gates one at a time" (`e5c0ee7`) in wave-h3 (the record's "Retire and restore memory gates
 (2026-10-14)"). Its Project-local drain work is not mapped yet. Check it before designing that.
 
-### For the maintainer to decide: may a workspace raise Auto Learn's mode? (2026-10-14)
+### Decided 2026-10-15, in flight: a workspace may lower Auto Learn's mode, never raise it
 
 wave-f15's settings census ("The settings census behind S2" in the record) found
 `autoLearn.mode` is still window-scoped. So a repository's `.vscode/settings.json` can set
@@ -81,24 +81,16 @@ Also from wave-f15, ACCEPTED-RECORDED rather than queued:
 - **The version probe still runs an npm `codex.cmd` through cmd.exe.** It is safe with fixed
   arguments.
 
-### For the maintainer to decide (from the v1.6.2 audit, 2026-10-14)
+### Decided 2026-10-15: the live hook runs a pinned release copy, asynchronously
 
-The audit's findings are fixed and recorded in `docs/engineering-record.md` under "The v1.6.2
-post-release audit (2026-10-14)". Two need the maintainer, because each changes the live
-environment rather than the code:
+The maintainer chose both options from the v1.6.2 audit:
+- The live PostToolUse hook now runs a separate worktree pinned to a release tag (`v1.6.6`), not the
+  development checkout.
+- The hook is registered with `"async": true`. It was repointed through the compare-and-swap
+  settings writer, and nothing else in `settings.json` changed.
 
-- **The live hook runs the development checkout.** Any edit, branch checkout or mutation run in
-  the maintained checkout changes the code the next real tool call runs against the real
-  `settings.json` (the fixed-point stamp invalidates, so the edited generalizer runs at once).
-  The backup mirror makes that recoverable. Pointing the hook at a stable copy (a worktree
-  pinned to the latest tag, or the installed VSIX's bundled CLI) would separate the two.
-- **Applying `"async": true` to the live hook registration.** The installers now write it (it
-  takes a Node spawn, about 0.35–0.57 s on this box, off every Bash/PowerShell call). Re-running
-  the installer from the checkout the hook should use applies it. The recorded cost is that
-  `claude -p` kills a still-running async hook at teardown. Since wave-f8 (2026-10-14), that
-  kill can no longer empty `settings.json`: the hook never writes in place. A killed pass is
-  simply redone on the next tool call. See the engineering record's v1.6.2 post-release audit
-  section.
+After each release, move the live copy to the new tag; README "Build, test, release" has the
+command. These entries close when that release step has run once.
 
 ### VS Code acceptance has not run against the 1.6.2 tree
 

@@ -171,9 +171,11 @@ function matchCacheStats() {
 // permissions.js and, through it, src/auto-learn.js import them.
 //
 // Re-read on each Claude Code release; measured from 2.1.296 on 2026-10-13. The name list
-// below is checked by `node scripts/check-claude-strip-model.js`, which reads the installed
-// CLI binary and exits 1 when its list differs from this one. The value class, the wrapper
-// shapes and the matcher's order are a manual read of the same binary (that script's
+// below is checked by src/claude-strip-model.js, which reads the installed CLI binary: the
+// extension runs it once per new Claude Code binary and warns on drift (since 2026-10-15),
+// and `node scripts/check-claude-strip-model.js` exits 1 when the list differs from this one.
+// Neither changes this list; a change still needs a release. The value class, the wrapper
+// shapes and the matcher's order are a manual read of the same binary (that module's
 // header says where to look).
 
 // Claude Code 2.1.296's known-safe environment variables, copied verbatim from its
@@ -182,7 +184,7 @@ function matchCacheStats() {
 // known-safe environment variables" (read 2026-10-13). The evidence and what the
 // wildcarding pass does with any other assignment are above splitEnvPrefix in
 // src/permissions.js. Re-read on each Claude Code release; measured from 2.1.296 on
-// 2026-10-13 (scripts/check-claude-strip-model.js compares it with an installed binary).
+// 2026-10-13 (src/claude-strip-model.js compares it with an installed binary).
 const CLAUDE_SAFE_ENV_VARS = new Set([
   'GOEXPERIMENT', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'GO111MODULE', 'RUST_BACKTRACE', 'RUST_LOG',
   'NODE_ENV', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'PYTEST_DISABLE_PLUGIN_AUTOLOAD',
@@ -357,8 +359,9 @@ function matchesThroughXargs(rule, targets) {
 //
 // The strip helpers are exported for src/permissions.js (the wildcarding pass and its
 // cover index) and, through it, src/auto-learn.js, so all three agree on one routine.
-// CLAUDE_SAFE_ENV_VARS is exported for scripts/check-claude-strip-model.js only, which
-// reads it and never writes it (2026-10-13).
+// CLAUDE_SAFE_ENV_VARS is exported for src/claude-strip-model.js and its command line,
+// scripts/check-claude-strip-model.js, which read it and never write it (2026-10-13; the
+// reader moved to src/ on 2026-10-15).
 module.exports = {
   normalizeRule, ruleMatches, sameRule,
   matchCacheStats, MATCH_CACHE_LIMIT,

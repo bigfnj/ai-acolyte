@@ -136,5 +136,8 @@ screenshots, which stay until a re-capture.
 requirements are read only from the local bundle cache; Codex account identity is
 deliberately never read because that would mean opening `~/.codex/auth.json`; and the
 Claude Code allow-path model (the 39 known-safe environment variables and the wrapper
-stripper in `src/permission-match.js`) was read from Claude Code 2.1.296 and must be re-read
-when Claude Code updates, because the public docs list neither.
+stripper in `src/permission-match.js`) was read from Claude Code 2.1.296, because the public
+docs list neither. Since 2026-10-15 the variable list is checked automatically on each Claude
+Code update: the extension re-reads it once per new binary and warns when it differs
+(`src/claude-strip-model.js`). A list change still needs a release, and the wrapper stripper
+and value class are still re-read by hand.

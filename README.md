@@ -8,7 +8,9 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.6.5 adds per-agent memory gates and retire/restore**: a gate marked `agents: [codex]`
+**Version 1.6.6 warns when a Claude Code update changes its safe-variable list**, checked once
+per new Claude Code binary in the background. Version 1.6.5 added per-agent memory gates and
+retire/restore: a gate marked `agents: [codex]`
 reaches only Codex, one gate can be switched off and back on, gates compile and install atomically,
 and gates in other memory stores are reported instead of silently ignored. Version 1.6.4 made
 Review answer every click: the Auto Learn card counts only what Review
@@ -51,7 +53,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v165.vsix
+code --install-extension ai-acolyte-v166.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

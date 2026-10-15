@@ -52,10 +52,9 @@ defects surfaced along the way, and all three are closed, with their evidence in
 
 **Note (user, 2026-10-14):** the private spin-off `bigfnj/rampage` ("a memory manager for Claude
 Code") has feature work on memory gates and on Project-local draining. Its memory-gates hardening
-(`7139659`) was ported in wave-h1 (the record section above). Rampage's later "retire and restore
-memory gates one at a time" (`e5c0ee7`) and its Project-local drain work are not mapped yet. Check
-them before designing either. The record's "Per-agent memory gates (2026-10-14)" ends with how
-retire and restore should treat `agents:`.
+(`7139659`) was ported in wave-h1 (the record section above), and its "retire and restore memory
+gates one at a time" (`e5c0ee7`) in wave-h3 (the record's "Retire and restore memory gates
+(2026-10-14)"). Its Project-local drain work is not mapped yet. Check it before designing that.
 
 ### For the maintainer to decide: may a workspace raise Auto Learn's mode? (2026-10-14)
 

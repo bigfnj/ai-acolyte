@@ -104,14 +104,14 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2765#showCodexRules`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2874#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4289#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:4400#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:4109#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:4220#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1421#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1856#derivedFor`); observed runs are not reported as measured
@@ -394,7 +394,7 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:2938#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:3047#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They

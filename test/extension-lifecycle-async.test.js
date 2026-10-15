@@ -838,7 +838,8 @@ test('every child process the extension starts is handed over to be killable', (
       text: source.slice(lineStart, lineEnd === -1 ? source.length : lineEnd),
     });
   }
-  assert.equal(sites.length, 4, `the four known spawn sites, found ${sites.length}`);
+  // Five since 2026-10-14: the gates panel's runRecallStep (list, edit, compile) is the fifth.
+  assert.equal(sites.length, 5, `the five known spawn sites, found ${sites.length}`);
 
   const untracked = [];
   let wrapped = 0;
@@ -862,6 +863,15 @@ test('every child process the extension starts is handed over to be killable', (
   assert.equal(wrapped + assigned, sites.length,
     `every site must be classified; recognised ${wrapped} wrapped + ${assigned} assigned `
     + `of ${sites.length}`);
+
+  // ONE tracked child is let finish by deactivate, on purpose (2026-10-14): a memory gate edit,
+  // which a kill part way leaves half-written with nothing put back (runRecallStep). It is
+  // still tracked and still bounded; killLiveChildren skips only what finishingChildren holds,
+  // and only runRecallStep's `finish` puts anything there. test/gates-panel.test.js shows a
+  // reload during the edit leaves it running and kills the list before it.
+  assert.equal((source.match(/finishingChildren\.add\(/g) || []).length, 1, 'one place lets a child finish');
+  assert.match(source, /if \(finish\) finishingChildren\.add\(child\);/);
+  assert.match(source, /\[\.\.\.liveChildren\]\.filter\(\(child\) => !finishingChildren\.has\(child\)\)/);
 });
 
 // EVERY DEADLINE ENDS THE WHOLE TREE (2026-10-14). execFile's own `timeout` kills the
@@ -889,8 +899,9 @@ test('every execFile site takes its deadline from endTreeAfter, never from execF
     deadlines.push(close ? Number(close[1]) : null);
   }
   // The four lengths the sites had as execFile timeouts, in file order: the recall
-  // rebuild and the recall sync, the execpolicy check, the gate compile.
-  assert.deepEqual(deadlines, [180000, 180000, 30000, 60000]);
+  // rebuild and the recall sync, the execpolicy check, the gate compile. Then the gates
+  // panel's recall.py steps (2026-10-14), at the gate compile's 60 s.
+  assert.deepEqual(deadlines, [180000, 180000, 30000, 60000, 60000]);
 });
 
 // memoryLint.cfg() is the single enumeration of the permissionWildcarding.memory.* keys.

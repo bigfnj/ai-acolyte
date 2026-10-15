@@ -32,13 +32,20 @@ Usage (from anywhere):
     python recall.py --rebuild         # force re-embed every file
     python recall.py --list            # show what's indexed
     python recall.py --selftest        # verify the embedder reproduces its reference cosines
+    python recall.py --gates-list      # every scope:global / scope:retired gate, as JSON
+    python recall.py --gates-retire NAME [NAME ...]    # scope: global -> retired, after a
+    python recall.py --gates-restore NAME [NAME ...]   # snapshot; the caller compiles next
 
 Config via env:
     RECALL_MEMORY_DIR   corpus to index      (default: the ~/.claude/projects/*/memory
                                              holding the most memory files)
     RECALL_MEMORY_DIRS  corpora to SEARCH    (os.pathsep-separated; default: the one above.
-                                             --lint and --gates-compile never span these)
+                                             --lint, --gates-compile and the gate edits
+                                             never span these)
     RECALL_MODEL_DIR    bge-small.onnx dir   (default ./models)
+    AI_ACOLYTE_GATE_SNAPSHOT_DIR             where --gates-retire / --gates-restore snapshot
+                                             the memory dir first (default
+                                             ~/.claude/wildcarding/gate-snapshots)
 
 Retrieval quality is measured by bench/gate_recall.py, not asserted here.
 """
@@ -1129,6 +1136,7 @@ def lint():
             or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
             or other_gates or other_unreadable or gate_excluded):
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
+    return texts
 
 
 # normpath because expanduser substitutes a backslash HOME into a forward-slash literal and
@@ -1376,7 +1384,7 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: vscode-extension/extension.js:3687#slice cuts this stderr
+            # Kept short on purpose: vscode-extension/extension.js:3694#slice cuts this stderr
             # to 300 chars before showing it (`#slice` is checked by scripts/check-line-refs.js;
             # this said :3013 until 2026-10-13, when .py comments were first scanned). Re-measured
             # 2026-09-14 after MEMORY_DIR was normpath'd and `installed` became a real byte count:
@@ -1444,6 +1452,650 @@ def compile_gates(allow_empty=False):
     print()
 
 
+# --- one gate at a time: --gates-list, --gates-retire, --gates-restore ------------------------
+#
+# Ported from rampage e5c0ee7 (2026-10-09), adapted 2026-10-14. A gate is RETIRED by rewriting
+# its memory's `scope: global` to `scope: retired`, and RESTORED by the reverse. Nothing else in
+# the file changes, `agents:` included, and the memory stays in the store, so recall still finds
+# it, while _gate() selects on scope == "global" and so simply stops compiling it. A retire is
+# per memory, never per agent: moving a gate between agents is an edit of `agents:`, and the
+# compile already removes it from the agent it left. A restored gate returns to the agents its
+# `agents:` names, because that line was never touched.
+#
+# These verbs act on MEMORY_DIR alone, the one store that compiles (RECALL_MEMORY_DIR, which the
+# extension pins from memory.dir or the largest store, else discovery's pick). The other stores
+# --lint reports are never listed, retired or restored here. The verbs never compile: the caller
+# (bin/wildcard-perms, the extension's gates panel) compiles next, which keeps the one refusal of
+# an empty result where it already lives, in compile_gates().
+#
+# The memory folder is not version controlled, so a bad rewrite there has no undo. Every edit is
+# preceded by a byte snapshot of the whole folder, and a snapshot that cannot be written stops the
+# command before any memory is touched.
+GATE_SCOPES = ("global", "retired")    # the only two states these verbs move a gate between
+SNAPSHOT_KEEP = 30                      # snapshot dirs kept per store, counting the one just written
+# Only names this code mints are ever pruned. AI_ACOLYTE_GATE_SNAPSHOT_DIR can point anywhere,
+# and a looser match would make the prune an rmtree over whatever else lives in that directory.
+SNAPSHOT_NAME = re.compile(r"^\d{8}T\d{6}Z-(?:retire|restore|retire\+restore)(?:-\d+)?$")
+
+
+def _snapshot_root():
+    # Beside the extension's other Claude-side state (~/.claude/wildcarding holds the policy lock,
+    # the learner's state and the recall model), because the store being snapshotted is Claude
+    # Code's. normpath for GATES_OUT's reason: the path is printed, and expanduser mixes separators.
+    return os.path.normpath(os.environ.get("AI_ACOLYTE_GATE_SNAPSHOT_DIR")
+                            or os.path.expanduser(r"~/.claude/wildcarding/gate-snapshots"))
+
+
+def _gate_entry(name, text):
+    """The --gates-list record for one memory, or None when it is not a gate these verbs manage.
+
+    _fm, GATE_BLOCK and _gate_agents are the compiler's own, so "listed as active" and "compiled"
+    are one test rather than two that happen to agree today. `state` is "active" exactly when
+    _gate() would compile the memory for at least one agent, "excluded" for a scope:global gate
+    whose `agents:` cannot be read (left out for every agent, so neither active nor retired), and
+    "retired" for scope: retired. `agents` is _gate_agents' reading, for a retired gate the agents
+    a restore returns it to; `problem` is its reason when it cannot be read."""
+    scope = _fm(text, "scope")
+    if scope not in GATE_SCOPES:
+        return None
+    m = GATE_BLOCK.search(text)
+    if not m:
+        return None
+    agents, problem = _gate_agents(text)
+    state = "retired" if scope == "retired" else ("active" if problem is None else "excluded")
+    body = m.group(1).strip()
+    first = next((ln for ln in body.splitlines() if ln.strip()), "")
+    title = re.sub(r"^\s*[-*+]\s+", "", first).replace("**", "").strip()[:160].rstrip()
+    return {"file": name, "scope": scope, "state": state, "agents": list(agents),
+            "problem": problem, "title": title, "text": body,
+            "description": _fm(text, "description")}
+
+
+def _gate_files():
+    """The files _compile_gates_text() walks, in its order: *.md in MEMORY_DIR, sorted by
+    filename, the index skipped. One copy of that rule for the list and the edit verbs both."""
+    return [n for n in sorted(os.listdir(MEMORY_DIR)) if n.endswith(".md") and n not in EXCLUDE]
+
+
+def _gate_entries(texts=None):
+    """Every scope:global or scope:retired gate in MEMORY_DIR, in compile order, each file read
+    exactly as _compile_gates_text() reads it. `texts` is lint()'s {stem: text} map, when the
+    caller has already read the store.
+
+    An unreadable file exits rather than being skipped. A list that quietly left one out would
+    show the gates panel a store with one standing order fewer than the compiler sees."""
+    if not os.path.isdir(MEMORY_DIR):
+        return []
+    out = []
+    for name in _gate_files():
+        text = texts.get(name[:-3]) if texts is not None else None
+        if text is None:
+            try:
+                text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace").read()
+            except OSError as e:
+                sys.exit(f"[recall] cannot read {name} in {MEMORY_DIR} ({type(e).__name__}); "
+                         f"a gate list without it would hide a gate.")
+        entry = _gate_entry(name, text)
+        if entry:
+            out.append(entry)
+    return out
+
+
+def gates_list():
+    """--gates-list: JSON for bin/wildcard-perms and the extension's gates panel. No model, no
+    write. `store` is the one store that compiles; no other store is ever listed."""
+    print(json.dumps({"store": MEMORY_DIR, "gates": _gate_entries()}, indent=2))
+
+
+def _lint_retired(texts):
+    """--lint's note on retired gates, from the texts lint() already read. main() prints it AFTER
+    lint() returns, on purpose: a retired gate is a decision the owner made, not a finding, and
+    living outside lint() keeps it out of the `clean:` condition by construction. Worded without
+    the phrase "not compiled", which scripts/verify-release.ps1's standing-order check fails on."""
+    retired = [g["file"][:-3] for g in _gate_entries(texts) if g["state"] == "retired"]
+    if retired:
+        print(f"  {len(retired)} retired gate memor{'y' if len(retired) == 1 else 'ies'} "
+              f"(scope: retired), kept in the store and left out of the compile by choice: "
+              f"{', '.join(retired)}\n")
+
+
+def _as_compiler_reads(raw):
+    """What `open(path, encoding="utf-8", errors="replace").read()` returns for these bytes: the
+    same decoder and the same universal-newline translation. One read of the bytes then serves
+    both the rewrite and the _fm check of what the rewrite produced."""
+    import io
+    return io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="replace").read()
+
+
+def _rescope(raw, want):
+    """`raw` with the scope VALUE on the line _fm reads replaced by `want`, every other byte kept:
+    a BOM, CRLF or LF, the indentation of a key nested under `metadata:`, the quotes (`"global"`
+    becomes `"retired"`), any spaces after the value, and every other key, `agents:` among them.
+    None when there is no such line.
+
+    The search mirrors _fm over the file with its own line endings intact, decoded with
+    surrogateescape so every byte round-trips. The value stops at a CR as well as a LF, because the
+    compiler's reader ends a line at a lone CR. Not trusted alone: _change_gate_scopes() requires
+    _fm to read the new value back, and this to turn the result back into exactly `raw`, so a
+    disagreement refuses instead of rewriting some other `scope:` line or any other byte."""
+    s = raw.decode("utf-8", errors="surrogateescape")
+    lead = len(s) - len(s.lstrip(chr(0xFEFF) + " \t\r\n"))
+    head = s[lead:]
+    if not head.startswith("---"):
+        return None
+    end = head.find("\n---", 3)
+    if end == -1:
+        return None
+    m = re.search(r'^\s*scope:\s*([^\r\n]+)', head[3:end], re.MULTILINE)
+    if not m:
+        return None
+    a, b = m.span(1)
+    v = m.group(1)
+    for chars in (None, '"', "'"):     # _fm's .strip().strip('"').strip("'"), kept as a span
+        t = v.lstrip(chars)
+        a, v = a + len(v) - len(t), t
+        t = v.rstrip(chars)
+        b, v = b - (len(v) - len(t)), t
+    a, b = a + lead + 3, b + lead + 3
+    return (s[:a] + want + s[b:]).encode("utf-8", errors="surrogateescape")
+
+
+def _write_bytes_atomic(path, data, expect):
+    """compile_gates()'s write, for a memory file: a pid-named temp beside it, then os.replace,
+    with the same retry for a Windows reader that holds the file open. Before every retry the file
+    is read again and must still hold `expect`, the bytes the caller checked: that reader may have
+    saved an edit while this waited, and the replace would erase it. The temp takes the original's
+    mode, so a 0600 memory is not widened. Any failure removes the temp and raises."""
+    import shutil
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        shutil.copymode(path, tmp)
+        for attempt in range(10):
+            if attempt:
+                time.sleep(0.02 * attempt)
+                _require_bytes(path, expect)
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+    except OSError:
+        _remove_temp(tmp)
+        raise
+
+
+def _write_snapshot(op, expected):
+    """Byte copies of every *.md in MEMORY_DIR, and manifest.json, in a new directory under
+    _snapshot_root(). Returns that directory, or exits having removed it.
+
+    `expected` maps each file about to change to the bytes that were validated. The snapshot must
+    hold exactly those, or it is not the before-image of the edit it exists to undo, so a file
+    that changed in between refuses the command here. Every copy is read back and hashed before
+    the manifest is written: the manifest's presence means the copies beside it are whole."""
+    import datetime, shutil
+    root = _snapshot_root()
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snap, why = None, None
+    try:
+        os.makedirs(root, exist_ok=True)
+        for n in range(1, 100):            # two runs inside one second must not share a dir
+            candidate = os.path.join(root, f"{stamp}-{op}" + (f"-{n}" if n > 1 else ""))
+            try:
+                os.mkdir(candidate)
+            except FileExistsError:
+                continue
+            snap = candidate
+            break
+        if snap is None:
+            raise FileExistsError(f"99 snapshot dirs already named {stamp}-{op}")
+        files = {}
+        for name in sorted(os.listdir(MEMORY_DIR)):
+            src = os.path.join(MEMORY_DIR, name)
+            if not name.endswith(".md") or not os.path.isfile(src):
+                continue
+            with open(src, "rb") as f:
+                data = f.read()
+            with open(os.path.join(snap, name), "wb") as f:
+                f.write(data)
+            files[name] = hashlib.sha256(data).hexdigest()
+        moved = [n for n, raw in expected.items() if files.get(n) != hashlib.sha256(raw).hexdigest()]
+        if moved:
+            why = f"{', '.join(moved)} changed while this command ran; run it again"
+        else:
+            for name, digest in files.items():
+                with open(os.path.join(snap, name), "rb") as f:
+                    if hashlib.sha256(f.read()).hexdigest() != digest:
+                        raise OSError(f"the copy of {name} did not read back intact")
+            with open(os.path.join(snap, "manifest.json"), "w", encoding="utf-8", newline="\n") as f:
+                json.dump({"op": op, "store": MEMORY_DIR, "changed": list(expected),
+                           "files": files}, f, indent=2)
+                f.write("\n")
+    except OSError as e:
+        why = f"the snapshot could not be written ({type(e).__name__}: {e})"
+    if why:
+        if snap:
+            shutil.rmtree(snap, ignore_errors=True)
+        sys.exit(f"[recall] refusing to change any gate: {why}. Nothing was written to {MEMORY_DIR}.")
+    return snap
+
+
+def _prune_snapshots(snap):
+    """Keep the newest SNAPSHOT_KEEP snapshots OF THIS STORE, counting `snap` (the one just
+    written), and never remove `snap` itself, even when a clock that went backwards sorts it
+    oldest. Newest is by name, which leads with the UTC stamp, and the oldest go first. A dir that
+    cannot be removed is reported and kept: the snapshot guarding this run is already whole, so the
+    prune is housekeeping, not a gate.
+
+    Only a dir this code wrote is a candidate: a SNAPSHOT_NAME name AND a manifest that names
+    MEMORY_DIR (_snapshot_of_this_store). The name alone once let a hand-made dir with that shape
+    be deleted, and let 30 edits to one store delete another store's only before-image, because the
+    default root is shared by every store. Every dir this code leaves behind carries a manifest:
+    one whose snapshot failed is removed (_write_snapshot). A FILE with a snapshot's name has no
+    manifest to read, so the same test keeps it out."""
+    import shutil
+    root, mine = os.path.split(snap)
+    try:
+        old = sorted((n for n in os.listdir(root)
+                      if n != mine and SNAPSHOT_NAME.match(n)
+                      and not os.path.islink(os.path.join(root, n))), reverse=True)
+    except OSError as e:
+        print(f"[recall] could not list {root} to prune old snapshots ({type(e).__name__}); "
+              f"none were removed.", file=sys.stderr)
+        return
+    old = [n for n in old if _snapshot_of_this_store(os.path.join(root, n))]
+    for n in reversed(old[SNAPSHOT_KEEP - 1:]):
+        try:
+            shutil.rmtree(os.path.join(root, n))
+        except OSError as e:
+            print(f"[recall] could not prune old snapshot {n} ({type(e).__name__}: {e}); it is kept.",
+                  file=sys.stderr)
+
+
+def _snapshot_of_this_store(d):
+    """True when `d` holds a manifest.json that _write_snapshot could have written for MEMORY_DIR:
+    a JSON object whose `op` is one of the three and whose `store` is MEMORY_DIR, both spellings
+    normalised (normpath and normcase), so a drive letter's case or a trailing separator does not
+    matter. Anything else, unreadable, malformed or another store's, is not this store's to prune."""
+    try:
+        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as f:
+            man = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return (isinstance(man, dict) and man.get("op") in ("retire", "restore", "retire+restore")
+            and isinstance(man.get("store"), str)
+            and os.path.normcase(os.path.normpath(man["store"])) == os.path.normcase(MEMORY_DIR))
+
+
+def change_gate_scopes(retire=(), restore=()):
+    """--gates-retire and --gates-restore, together or apart.
+
+    Every name is validated before anything is written, then one snapshot, then one in-place
+    rewrite per file, each re-read and compared with the bytes that were validated and
+    snapshotted immediately before its own write. Never compiles. Prints `snapshot <dir>`, then
+    `retired <file>` or `restored <file>` per file. A refusal exits 1 having written nothing; a
+    failure part way through puts back the files already rewritten, so the caller's rule "an edit
+    failure means nothing changed" holds, and says so loudly in the one case where it cannot.
+
+    The whole read-decide-write runs under the gate-edit lock (_take_gate_lock). Without it, two
+    runs at once interleaved: one run's put-back reverted a file the other had just reported as
+    retired, measured by rampage in 1 of 25 trials of two real processes. A second edit now
+    refuses instead."""
+    owner = _take_gate_lock()
+    try:
+        _change_gate_scopes(retire, restore)
+    finally:
+        _drop_gate_lock(owner)
+
+
+def _change_gate_scopes(retire, restore):
+    """change_gate_scopes()'s body, run while it holds the gate-edit lock."""
+    # compile_gates()'s refusal, for its reason: discovery that could not read a store may have
+    # picked the wrong one, and this edits standing orders just as surely as compiling does.
+    if _DISCOVERY_ERRORS:
+        store, err = _DISCOVERY_ERRORS[0]
+        sys.exit(f"[recall] refusing to change any gate: cannot read {os.path.normpath(store)} "
+                 f"({type(err).__name__}), so {MEMORY_DIR} may be the wrong store. Fix that, "
+                 f"or set RECALL_MEMORY_DIR.")
+    if not os.path.isdir(MEMORY_DIR):
+        sys.exit(f"[recall] refusing to change any gate: no memory dir at {MEMORY_DIR}.")
+
+    def named(names):                  # with or without .md; a repeat is the same request
+        out = []
+        for n in names:
+            n = n if n.endswith(".md") else n + ".md"
+            if n not in out:
+                out.append(n)
+        return out
+
+    wanted = ([("retire", n, "global", "retired") for n in named(retire)] +
+              [("restore", n, "retired", "global") for n in named(restore)])
+    both = set(named(retire)) & set(named(restore))
+    present, walked = set(os.listdir(MEMORY_DIR)), set(_gate_files())
+    plan, problems = [], []
+    for verb, name, have, want in wanted:
+        why, raw, new = None, None, None
+        if name in both:
+            if verb == "restore":
+                continue                       # reported once, under retire
+            why = "named in both --gates-retire and --gates-restore"
+        elif os.path.basename(name) != name:
+            why = "is a path; name a memory file in the store"
+        elif name not in present:              # exact spelling: the output names what it changed
+            why = f"no such memory in {MEMORY_DIR}"
+        elif name not in walked:               # present and *.md, so the one file the walk skips
+            why = "is the index, which is never compiled"
+        elif (link := _link_problem(os.path.join(MEMORY_DIR, name))):
+            why = link
+        else:
+            try:
+                with open(os.path.join(MEMORY_DIR, name), "rb") as f:
+                    raw = f.read()
+            except OSError as e:
+                why = f"cannot be read ({type(e).__name__})"
+            else:
+                text = _as_compiler_reads(raw)
+                scope = _fm(text, "scope")
+                new = _rescope(raw, want)
+                if not GATE_BLOCK.search(text):
+                    why = f"holds no {GATE_BEGIN} ... {GATE_END} block, so it is not a gate"
+                elif scope == want:
+                    # "scope: global", not "active": a scope:global gate whose `agents:` cannot be
+                    # read compiles for no agent, and is still not one a restore can change.
+                    why = ("is already retired (scope: retired)" if want == "retired"
+                           else "is already scope: global, not retired")
+                elif scope != have:
+                    why = (f"has scope: {scope}; only a scope: {have} gate can be {verb}d" if scope
+                           else f"has no scope: line; only a scope: {have} gate can be {verb}d")
+                elif new is None or _fm(_as_compiler_reads(new), "scope") != want:
+                    why = ("its scope: line could not be located the way the compiler reads it; "
+                           "edit it by hand")
+                elif _rescope(new, have) != raw:
+                    # The backstop for _rescope itself: the edit must be exactly reversible, so a
+                    # span that ran past the value (a lone CR once let it eat the next key) refuses.
+                    why = "rewriting its scope: value would change other bytes too; edit it by hand"
+                else:
+                    why = _acl_problem(os.path.join(MEMORY_DIR, name))
+        if why:
+            problems.append(f"  {name}: {why}")
+        else:
+            plan.append((verb, name, raw, new))
+    if problems:
+        sys.exit("[recall] refusing to change any gate; nothing was written:\n" + "\n".join(problems))
+
+    op = "+".join(v for v in ("retire", "restore") if any(p[0] == v for p in plan))
+    snap = _write_snapshot(op, {name: raw for _, name, raw, _ in plan})
+    print(f"snapshot {snap}", flush=True)
+    _prune_snapshots(snap)
+
+    done, why = [], None
+    for verb, name, raw, new in plan:
+        path = os.path.join(MEMORY_DIR, name)
+        try:
+            with open(path, "rb") as f:
+                if f.read() != raw:
+                    why = f"{name} changed after it was snapshotted"
+                    break
+            _write_bytes_atomic(path, new, raw)
+        except OSError as e:
+            why = f"{name} could not be written ({type(e).__name__}: {e})"
+            break
+        done.append((name, raw, new))
+    if why:
+        # Put back what this run rewrote, newest first, but only a file still holding the bytes
+        # this run wrote: anything else was edited by someone after us, and is theirs to keep.
+        stuck = []
+        for name, raw, new in reversed(done):
+            path = os.path.join(MEMORY_DIR, name)
+            try:
+                with open(path, "rb") as f:
+                    if f.read() != new:
+                        raise OSError("it changed again after this run wrote it")
+                _write_bytes_atomic(path, raw, new)
+            except OSError:
+                stuck.append(name)
+        if stuck:
+            # The per-file lines are the record of what this run WROTE (bin/wildcard-perms and the
+            # extension read them whatever the exit status), so a file left changed is named
+            # there too, not only here.
+            for verb, name, _, _ in plan:
+                if name in stuck:
+                    print(f"{'retired' if verb == 'retire' else 'restored'} {name}")
+            sys.exit(f"[recall] stopped part way: {why}. {', '.join(stuck)} could NOT be put back "
+                     f"and still differ from the snapshot at {snap}; copy them back from there.")
+        undone = f" ({len(done)} file(s) already rewritten were put back)" if done else ""
+        sys.exit(f"[recall] stopped: {why}. Nothing was changed{undone}; the snapshot is at {snap}.")
+    for verb, name, _, _ in plan:
+        print(f"{'retired' if verb == 'retire' else 'restored'} {name}")
+
+
+def _require_bytes(path, expect):
+    """Raise OSError unless `path` holds exactly `expect`; _write_bytes_atomic asks before every
+    retry. A read that fails raises too: a file this cannot see is not one to replace blind."""
+    with open(path, "rb") as f:
+        if f.read() != expect:
+            raise OSError("it changed while waiting to replace it")
+
+
+def _remove_temp(tmp):
+    """Remove a temp _write_bytes_atomic made. copymode gave it the memory's mode, and on Windows
+    the temp of a read-only memory is read-only too, so os.remove failed and the temp, holding the
+    rewritten text, stayed in the store while the run said nothing was changed. The write bit goes
+    back on first. Best effort, because the caller is already raising."""
+    import stat
+    try:
+        os.chmod(tmp, stat.S_IREAD | stat.S_IWRITE)
+    except OSError:
+        pass
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+
+
+def _link_problem(path):
+    """Why the memory at `path` must not be rewritten because it is a link, or None.
+
+    os.replace swaps the NAME for a new file. A symbolic link or a junction became a plain copy
+    holding the new scope while its target kept the old one, and a hard link would be split from
+    its other names; a snapshot holds bytes only, so neither can be put back from it. So a name
+    whose real path is not the store's own entry for it (realpath resolves symlinks and junctions
+    alike) is refused, and so is a file with more than one name. A store that is itself a link is
+    fine: the file and the temp beside it are then both in the real directory."""
+    own = os.path.join(os.path.realpath(MEMORY_DIR), os.path.basename(path))
+    if os.path.normcase(os.path.realpath(path)) != os.path.normcase(own):
+        return ("is a symbolic link or junction, so a rewrite would replace the link with a copy "
+                "and leave its target as it was; edit the target by hand")
+    try:
+        links = os.lstat(path).st_nlink
+    except OSError:
+        return None                       # the read that follows names the failure
+    if links > 1:
+        return f"has {links} hard links, so a rewrite would split it from the others; edit it by hand"
+    return None
+
+
+def _acl_problem(path):
+    """Why the memory at `path` must not be rewritten because of its access rules, or None.
+
+    A rewrite is a new file, and on Windows a new file takes the folder's inherited ACL. A memory
+    whose ACL was set by hand (inheritance cut off, or an entry granted or denied on the file
+    itself) lost it without a word: one user's Modify became the folder's SYSTEM, Administrators
+    and OWNER RIGHTS. Such a memory is refused. One holding only inherited entries, which is what
+    Git Bash, a heredoc, Node and Python all write (measured by rampage 2026-10-09), gets the same
+    ACL back. Rules that cannot be read refuse too. POSIX keeps the mode through copymode, and a
+    volume that stores no ACLs (FAT, exFAT) has none to lose, so neither is checked."""
+    if os.name != "nt" or not _volume_keeps_acls(path):
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class Acl(ctypes.Structure):
+        _fields_ = [("rev", ctypes.c_ubyte), ("sbz1", ctypes.c_ubyte), ("size", wintypes.WORD),
+                    ("count", wintypes.WORD), ("sbz2", wintypes.WORD)]
+
+    class AceHeader(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("size", wintypes.WORD)]
+
+    P = ctypes.c_void_p
+    advapi, kernel = ctypes.WinDLL("advapi32"), ctypes.WinDLL("kernel32")   # own instances: no
+    get_info = advapi.GetNamedSecurityInfoW                                 # shared argtypes
+    get_info.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, P, P,
+                         ctypes.POINTER(P), P, ctypes.POINTER(P)]
+    get_info.restype = wintypes.DWORD
+    get_control = advapi.GetSecurityDescriptorControl
+    get_control.argtypes = [P, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD)]
+    get_control.restype = wintypes.BOOL
+    get_ace = advapi.GetAce
+    get_ace.argtypes = [P, wintypes.DWORD, ctypes.POINTER(P)]
+    get_ace.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [P]
+    kernel.LocalFree.restype = P
+    sd, dacl, control, revision = P(), P(), wintypes.WORD(), wintypes.DWORD()
+    # SE_FILE_OBJECT is 1, DACL_SECURITY_INFORMATION is 4.
+    err = get_info(path, 1, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(sd))
+    if err:
+        return f"its access rules (ACL) could not be read (Windows error {err}); edit it by hand"
+    try:
+        own = (not dacl.value                     # a NULL DACL grants everyone: set on purpose
+               or not get_control(sd, ctypes.byref(control), ctypes.byref(revision))
+               or bool(control.value & 0x1000))   # SE_DACL_PROTECTED: inheritance cut off
+        for i in range(0 if own else ctypes.cast(dacl, ctypes.POINTER(Acl)).contents.count):
+            ace = P()
+            if (not get_ace(dacl, i, ctypes.byref(ace))
+                    or not ctypes.cast(ace, ctypes.POINTER(AceHeader)).contents.flags & 0x10):
+                own = True                        # not INHERITED_ACE: an entry set on the file
+                break
+    finally:
+        kernel.LocalFree(sd)
+    return ("has access rules of its own (an ACL set on the file), which a rewrite would replace "
+            "with the folder's; edit it by hand" if own else None)
+
+
+def _volume_keeps_acls(path):
+    """False only when Windows says the volume holding `path` stores no ACLs. Any failure to ask
+    answers True, so the ACL is then checked rather than assumed absent."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32")
+    kernel.GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    kernel.GetVolumePathNameW.restype = wintypes.BOOL
+    D = ctypes.POINTER(wintypes.DWORD)
+    kernel.GetVolumeInformationW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+                                             D, D, D, wintypes.LPWSTR, wintypes.DWORD]
+    kernel.GetVolumeInformationW.restype = wintypes.BOOL
+    root, flags = ctypes.create_unicode_buffer(1024), wintypes.DWORD()
+    if not (kernel.GetVolumePathNameW(path, root, len(root)) and
+            kernel.GetVolumeInformationW(root.value, None, 0, None, None, ctypes.byref(flags), None, 0)):
+        return True
+    return bool(flags.value & 0x8)                # FILE_PERSISTENT_ACLS
+
+
+# The gate-edit lock: one O_EXCL file in ~/.claude/wildcarding, held across a whole retire or
+# restore, so two edits never interleave whichever process started them (the CLI, the extension's
+# gates panel, a shell). It follows the instruction lock in src/policy-lock.js: created with
+# O_EXCL, never waited on (a second edit is told to run again), released only by its owner, and
+# reclaimed once it is older than the stale window. Age alone decides staleness, never the pid in
+# it: a pid that answers after a crash is usually a reused one, and on Windows os.kill(pid, 0)
+# does not probe a process, it terminates it. The work under the lock is a snapshot of one store
+# and a handful of small writes, so thirty seconds is generous.
+GATE_LOCK_STALE_S = 30
+
+
+def _gate_lock_path():
+    return os.path.normpath(os.path.expanduser(r"~/.claude/wildcarding/gates-edit.lock"))
+
+
+def _take_gate_lock():
+    """Create the gate-edit lock and return this run's owner token, or exit 1 having written
+    nothing to any store. A lock older than GATE_LOCK_STALE_S is reclaimed once."""
+    path = _gate_lock_path()
+    owner = os.urandom(16).hex()
+    stop = "[recall] refusing to change any gate:"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError as e:
+        sys.exit(f"{stop} cannot create {os.path.dirname(path)} for the gate-edit lock "
+                 f"({type(e).__name__}). Nothing was written.")
+    for attempt in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                         0o600)
+        except (FileExistsError, PermissionError) as e:
+            # PermissionError is a busy lock too: on Windows a lock its holder has just removed
+            # stays delete-pending until the last handle closes, and creating it then fails so.
+            if attempt == 0 and _reclaim_gate_lock(path):
+                continue
+            how = "" if isinstance(e, FileExistsError) else f" ({type(e).__name__} creating it)"
+            sys.exit(f"{stop} another AI Acolyte gate edit holds {path}{how}. Nothing was written; "
+                     f"run it again in a moment. A lock left by a run that died is reclaimed once "
+                     f"it is {GATE_LOCK_STALE_S} s old.")
+        except OSError as e:
+            sys.exit(f"{stop} the gate-edit lock {path} could not be created "
+                     f"({type(e).__name__}: {e}). Nothing was written.")
+        try:
+            os.write(fd, (json.dumps({"pid": os.getpid(), "owner": owner, "at": time.time()})
+                          + "\n").encode("utf-8"))
+        except OSError as e:
+            os.close(fd)
+            try:
+                os.remove(path)               # O_EXCL made it, so it is this run's to remove
+            except OSError:
+                pass
+            sys.exit(f"{stop} the gate-edit lock {path} could not be written "
+                     f"({type(e).__name__}: {e}). Nothing was written.")
+        os.close(fd)
+        return owner
+
+
+def _reclaim_gate_lock(path):
+    """True when the lock is gone, or was older than GATE_LOCK_STALE_S, read the same twice, and
+    has been removed. False while it is live, or when it changed while that was being decided."""
+    try:
+        first = os.stat(path)
+        if time.time() - first.st_mtime <= GATE_LOCK_STALE_S:
+            return False
+        with open(path, "rb") as f:
+            text = f.read()
+        again = os.stat(path)
+        with open(path, "rb") as f:
+            if f.read() != text:
+                return False
+        # mtime in float seconds, the unit the index writes: test/recall-index.test.js holds this
+        # whole file to that unit, so the nanosecond field is not used here either. Two stats of an
+        # unchanged file give the same float, and size, inode and the bytes read twice above back
+        # up a change too small for a float of seconds to show.
+        if (again.st_size, again.st_mtime, again.st_ino) != (first.st_size, first.st_mtime,
+                                                             first.st_ino):
+            return False
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _drop_gate_lock(owner):
+    """Remove the gate-edit lock if it is still this run's. One that is not was reclaimed by another
+    run after this one outlived the stale window, and is that run's to remove. A lock that cannot
+    be removed is reported: until it is stale, every later gate edit refuses."""
+    path = _gate_lock_path()
+    try:
+        with open(path, "rb") as f:
+            held = json.loads(f.read().decode("utf-8"))
+        if not isinstance(held, dict) or held.get("owner") != owner:
+            return
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as e:
+        print(f"[recall] could not remove the gate-edit lock {path} ({type(e).__name__}); gate "
+              f"edits refuse until it is {GATE_LOCK_STALE_S} s old.", file=sys.stderr)
+
+
 def selftest():
     e = Bge()
     a, b, c = (np.array(e.embed(t)) for t in
@@ -1472,13 +2124,44 @@ def main():
                          "(refuses to overwrite a compiled file with nothing)")
     ap.add_argument("--gates-allow-empty", action="store_true",
                     help="with --gates-compile: allow an empty result to erase every compiled gate")
+    ap.add_argument("--gates-list", action="store_true",
+                    help="print every scope:global or scope:retired gate in the compile store as JSON "
+                         "(no model)")
+    ap.add_argument("--gates-retire", nargs="+", action="extend", default=[], metavar="NAME",
+                    help="set these gate memories to scope: retired, after a snapshot of the "
+                         "memory dir (does not compile)")
+    ap.add_argument("--gates-restore", nargs="+", action="extend", default=[], metavar="NAME",
+                    help="set these retired gate memories back to scope: global, after a snapshot "
+                         "of the memory dir (does not compile)")
     ap.add_argument("--selftest", action="store_true", help="verify the embedder's reference cosines")
     ap.add_argument("--vector-only", action="store_true", help="rank by embedding cosine alone")
     ap.add_argument("--lexical-only", action="store_true", help="rank by BM25 alone (no model load)")
     args = ap.parse_args()
 
+    editing = bool(args.gates_retire or args.gates_restore)
+    if args.gates_list or editing:
+        # Each runs alone. `--gates-retire x --gates-compile` reads as "retire, then compile", and
+        # quietly doing half of it is the shape of failure this file keeps removing. Exit 2 is
+        # argparse's usage error, distinct from a refusal's 1.
+        mixed = [flag for flag, on in (("--gates-list", args.gates_list and editing),
+                                       ("--lint", args.lint), ("--gates-compile", args.gates_compile),
+                                       ("--gates-allow-empty", args.gates_allow_empty),
+                                       ("--selftest", args.selftest), ("--rebuild", args.rebuild),
+                                       ("--list", args.list), ("a query", bool(args.query))) if on]
+        if mixed:
+            ap.error(f"--gates-list, --gates-retire and --gates-restore run on their own (retire "
+                     f"and restore may share a run), not with {', '.join(mixed)}. Compile in a "
+                     f"second run.")
+        if args.gates_list:
+            gates_list()
+        else:
+            change_gate_scopes(args.gates_retire, args.gates_restore)
+        return
     if args.lint:
-        lint(); return
+        texts = lint()
+        if texts is not None:
+            _lint_retired(texts)
+        return
     if args.gates_compile:
         compile_gates(allow_empty=args.gates_allow_empty); return
     if args.selftest:

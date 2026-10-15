@@ -685,7 +685,7 @@ test('legacy cleanup preserves MCP blankets for servers introduced after MAX', a
 // fires `onWrite(allow, deny)` after a successful write, and only the caller that supplies
 // it takes a backup; the CLI deliberately supplies none, because giving the hook path one
 // would be a behaviour change smuggled in beside a correctness fix
-// (bin/wildcard-perms:379-382#rebasing says exactly that).
+// (bin/wildcard-perms:399-402#rebasing says exactly that).
 //
 // Until now that sentence was the only thing holding the arrangement up. Nothing asserted
 // the CLI writer had no `onWrite`, so "deliberate rather than dropped" rested on a comment,

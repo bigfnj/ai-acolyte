@@ -174,7 +174,7 @@ function trackChild(child) {
 // that leads one (the trust worker, spawned detached for this). Returns a promise
 // for the reaping, which deactivate awaits, bounded, after dropping its retainers.
 function killLiveChildren() {
-  const reaped = [...liveChildren].map((child) => endProcessTree(child));
+  const reaped = [...liveChildren].filter((child) => !finishingChildren.has(child)).map((child) => endProcessTree(child));
   liveChildren.clear();
   return Promise.all(reaped);
 }
@@ -1088,7 +1088,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2778#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:2782#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1133,14 +1133,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:565-573#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:589-597#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:864-868#conf.enabled), and test/memory-lint-watchers.test.js:429#lintMemory
+    // (memoryLint.js:888-892#conf.enabled), and test/memory-lint-watchers.test.js:429#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:793#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:817#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1376,7 +1376,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5570#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5601#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1631,7 +1631,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5600#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5634#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -2753,7 +2753,9 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('permission-wildcarding.drainLocal', () => drainLocal(true)),
     vscode.commands.registerCommand('permission-wildcarding.toggleGuidance', () => toggleGuidance()),
-    vscode.commands.registerCommand('permission-wildcarding.toggleGates', () => toggleGates())
+    vscode.commands.registerCommand('permission-wildcarding.toggleGates', () => toggleGates()),
+    // Retire or restore one memory gate at a time, from the card's Manage gates… or the palette.
+    vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates())
   );
   try {
     registerLocalWatchers(context);
@@ -2772,6 +2774,8 @@ function activate(context) {
   // Gates too. Install-only: this never spawns python, so a corpus edit reaches the block
   // through the compiled file that the CLI or the SessionStart hook last wrote.
   ensureGates();
+  // A retire or restore a reload or a crash cut short, reported once (pending-gates.<pid>.json).
+  try { reportInterruptedGateChanges(); } catch (err) { console.error('ai-acolyte: pending gate change check failed —', err); }
   startAutoLearn(context);
   // Sync the recall index on startup when the model is present and the cache is behind
   // the corpus. Deferred 10 s so the extension host settles first.
@@ -2868,6 +2872,9 @@ function memoryCardBump() {
 function gatesCorpusBump(uri) {
   // The index carries hooks, never gate blocks, and it changes far more often.
   if (uri && path.basename(uri.fsPath) === 'MEMORY.md') return;
+  // A memory a retire or restore of this host just rewrote: that apply compiles and installs
+  // itself, so recompiling here would compile the same memories a second time (isOwnGateEdit).
+  if (uri && isOwnGateEdit(uri.fsPath)) return;
   if (!gatesEnabled()) return;
   try {
     if (!gatesStatusAll().some((state) => state.on)) return;
@@ -3144,7 +3151,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:463-472#NEGATIVE — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:483-492#NEGATIVE — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -3306,7 +3313,7 @@ function localDrainEnabled() {
 // promoting them into user scope from a parent window is the same trust problem the
 // gate below exists for. A Claude session running in a subfolder is covered anyway:
 // the CLI hook drains each session's own cwd on every tool call
-// (bin/wildcard-perms:507-516#hookCwd, `hookCwd(input)`).
+// (bin/wildcard-perms:527-536#hookCwd, `hookCwd(input)`).
 //
 // A folder on another file system (a virtual workspace, or a non-file scheme mixed
 // into a multi-root workspace) has an fsPath that names no file on this disk, so
@@ -3676,9 +3683,9 @@ function compileGates({ quiet = false } = {}) {
     warn(`DevToolbox venv python not found at ${st.py} — cannot compile gates.`);
     return Promise.resolve(false);
   }
-  const { dir } = memoryReport();
+  // The store every gate step pins (gateCompileEnv): memory.dir when it is set, else the largest.
+  const env = gateCompileEnv();
   return new Promise((resolve) => {
-    const env = { ...process.env, RECALL_REEXEC: '1', ...(dir ? { RECALL_MEMORY_DIR: dir } : {}) };
     endTreeAfter(trackChild(execFile(st.py, [script, '--gates-compile'], { env }, (err, _out, stderr) => {
       // Resolve false rather than true, so no caller chains into a policy write
       // on the strength of a compile the teardown just cancelled.
@@ -3791,7 +3798,9 @@ async function toggleGates() {
         modal: true,
         detail: `Deletes the managed block from ${files}. Your standing orders stop being `
           + 'loaded every session, so they apply only when a recall happens to surface them. '
-          + 'The memory files themselves are untouched and a backup is written first.',
+          + 'The memory files themselves are untouched and a backup is written first. '
+          + 'This switches gates.enabled off, and while it is off nothing is installed, by a retire or '
+          + 'restore either. To drop one gate and keep the rest, use Manage gates.',
       },
       'Remove');
     if (choice !== 'Remove') return;
@@ -3851,6 +3860,16 @@ function gatesCardData(precomputed = null) {
       excluded: (() => {
         try { return ((precomputed || memoryReport()).report?.gateExcluded || []).map((entry) => ({ ...entry })); }
         catch { return []; }
+      })(),
+      // Retired gate memories (scope: retired, from the gates panel or `--gates retire`), with the
+      // agents a restore returns each to: memoryLint.js gateEntryOf, the reading the count above
+      // uses, over the same report. Its store is the one the panel lists and edits, because every
+      // gate step pins it (gatesRunner), so the card and the panel describe the same memories.
+      retired: (() => {
+        try {
+          return ((precomputed || memoryReport()).report?.gateRetired || [])
+            .map((entry) => ({ file: entry.file, agents: [...entry.agents] }));
+        } catch { return []; }
       })(),
       // Whether compiling could produce anything at all, so the card can decline
       // to offer an action that cannot succeed. Undefined when the memory report
@@ -4225,6 +4244,7 @@ class WildcardingViewProvider {
         case 'drainLocal':   vscode.commands.executeCommand('permission-wildcarding.drainLocal'); break;
         case 'toggleGuidance': vscode.commands.executeCommand('permission-wildcarding.toggleGuidance'); break;
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
+        case 'manageGates': vscode.commands.executeCommand('permission-wildcarding.manageGates'); break;
         // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
         // c09daab (the shared Saved permissions picker replaced that button), and the
         // two synthetic test rows posting it directly were all that kept it alive. The
@@ -4709,6 +4729,7 @@ class WildcardingViewProvider {
         <div class="muted sub" id="mgother" hidden></div>
         <div class="muted sub" id="mgexcluded" hidden></div>
         <button class="managed-action" id="gatesBtn">Compile and add</button>
+        <button class="managed-action" id="manageGatesBtn" title="Retire or restore one gate at a time, in the store that compiles">Manage gates…</button>
       </div>
     </div>
   </section>
@@ -5309,12 +5330,21 @@ class WildcardingViewProvider {
     $('mgtext').textContent = 'Memory gates: ' + state
       + (g.on && g.count ? ' — ' + (perAgent || (g.count + ' gate' + (g.count === 1 ? '' : 's'))) : '');
     $('mgtext').style.fontWeight = '600';
-    $('mgsub').textContent = !g.compiled
-      ? 'no memory carries a scope:global gate block yet'
+    // A retired gate is the owner's decision, not a fault, so it is a count in the line and never
+    // a tone, and the line's title names each one with the agents a restore returns it to.
+    const retired = Array.isArray(g.retired) ? g.retired : [];
+    $('mgsub').textContent = (!g.compiled
+      ? (retired.length ? 'no active gate' : 'no memory carries a scope:global gate block yet')
       : g.on || g.partial
         ? 'your standing orders, resident every session · ' + g.path
         : perAgent ? 'compiled gates waiting to be installed: ' + perAgent
-          : g.count + ' compiled gate' + (g.count === 1 ? '' : 's') + ' waiting to be installed';
+          : g.count + ' compiled gate' + (g.count === 1 ? '' : 's') + ' waiting to be installed')
+      + (retired.length ? ' · ' + retired.length + ' retired' : '');
+    $('mgsub').title = retired.length
+      ? 'Retired (scope: retired), kept in the store and left out of the compile: '
+        + retired.map((entry) => entry.file + (entry.agents.length === 1 ? ' (' + entry.agents[0] + ' only)' : '')).join(', ')
+        + '. Manage gates restores one.'
+      : '';
     // Gate memories the compile leaves out, because their agents: line cannot be read.
     const excluded = g.excluded || [];
     const excludedLine = $('mgexcluded');
@@ -5488,6 +5518,7 @@ class WildcardingViewProvider {
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));
+  $('manageGatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'manageGates' }));
   window.addEventListener('message', (e) => { if (e.data?.type === 'data') render(e.data); });
   applyRows();
   vscode.postMessage({ type: 'refresh' });
@@ -5570,6 +5601,9 @@ async function deactivate() {
   autoLearnManager = null;
   autoLearnManagerKey = null;
   autoLearnCardCache = null;
+  // The gates panel too. A change still in flight finds `deactivated` set at its next step and
+  // stops there, so a torn-down host never compiles or writes an instruction file.
+  closeGatesPanel();
 
   // The drain is STARTED here, synchronously, exactly where it always was: a
   // same-realm activate() can run during the first await below, and it decides
@@ -5598,6 +5632,1011 @@ async function deactivate() {
   // hold it, so only clear it if no re-activate happened while we awaited.
   // `activate()` bumps the generation, which is the cheapest way to tell.
   if (generation === activationGeneration) autoLearnBusy = false;
+}
+
+// ── one gate at a time: the gates panel ───────────────────────────────────────
+// Ported from rampage e5c0ee7 (2026-10-09), adapted 2026-10-14. The dashboard's other gates
+// action installs or removes every block at once. This panel retires a single gate instead: its
+// memory's frontmatter `scope: global` becomes `scope: retired`, nothing else in the file changes
+// (`agents:` included), the memory stays in the store where recall still finds it, and the
+// compile, which takes `scope: global` only, leaves it out of CLAUDE.md and AGENTS.md (or only
+// out of the one its `agents:` line names). Restoring is the reverse. recall.py makes every edit,
+// after a byte snapshot of the memory folder, which is not version controlled (`--gates-retire`,
+// `--gates-restore`); src/gates-manage.js plans the request and words the outcome, and
+// bin/wildcard-perms `--gates retire|restore` runs the same module, so both refuse and report
+// alike.
+//
+// Only the compile store is ever listed or changed: the one store compileGates pins
+// (gateCompileEnv), memory.dir when it is set, else the store with the most memory files. Gate
+// memories in the other stores, which the card only reports, are never touched here.
+//
+// Gates switched off stay off (GATES_FOLLOW_THE_SETTING, as rampage records it): in the extension
+// gates are on exactly when gates.enabled is, read from user settings only. A retire or restore
+// edits and compiles either way, installs only while the setting is on, and never changes it.
+//
+// Memory text is untrusted in the panel. The HTML carries none of it: the gate list reaches the
+// page by postMessage, already made safe to show (forDisplay), and the page renders every field
+// through textContent.
+
+const {
+  parseGatesList, planGateChanges, gateSteps, describePlan, parseEditOutput, changedButFailed,
+} = require('./src/gates-manage');
+const { GATES_BEGIN, GATES_END } = require('./src/agent-gates');
+
+let gatesPanel = null;          // the one panel; a second open reveals it
+let gatesPanelListing = null;   // the list the panel was last shown, which openMemory answers to
+let gatesApplying = null;       // the change in flight, so a second click cannot start another
+
+const gatesWord = (count) => `${count} gate${count === 1 ? '' : 's'}`;
+const AGENT_FILE = { claude: 'CLAUDE.md', codex: 'AGENTS.md' };
+
+// The panel's one way to finish a change a compile or an install failed after the edit. The
+// panel's Compile and install compiles what the memories hold and installs it while gates are on,
+// which covers every case the CLI names a separate command for (src/gates-manage.js
+// changedButFailed): a gate left active, none left, and gates switched off.
+const FINISH_ADVICE = 'Click Compile and install in the gates panel to finish: it compiles what the memories '
+  + 'now hold, and installs it while memory gates are on.';
+
+// The environment every gate step runs recall.py in, compileGates' included: RECALL_MEMORY_DIR
+// pinned to memoryReport()'s store (memory.dir from user settings only, else the store with the
+// most memory files), so the list, the edit and the compile all act on the store that compiles.
+function gateCompileEnv() {
+  const { dir } = memoryReport();
+  return { ...process.env, RECALL_REEXEC: '1', ...(dir ? { RECALL_MEMORY_DIR: dir } : {}) };
+}
+
+// ── the corpus watcher and this host's own edits ──────────────────────────────
+// A retire or restore compiles and installs itself, and its edit is a memory file changing, which
+// the *.md watcher answers with gatesCorpusBump's compile two seconds later: the same memories
+// compiled a second time. So each file the edit rewrites is recorded here, by path: null while
+// recall.py is writing it, then the (mtimeMs, size) it left. An event for one of those while it
+// still has that stamp is this host's own write and is skipped. Any later edit, by anyone, moves
+// the stamp, drops the entry, and is compiled as before.
+const ownGateEdits = new Map();
+const gateEditKey = (file) => {
+  const resolved = path.resolve(file);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+};
+const statStamp = (file) => {
+  try { const stat = fs.statSync(file); return `${stat.mtimeMs}:${stat.size}`; } catch { return null; }
+};
+
+function isOwnGateEdit(file) {
+  const key = gateEditKey(file);
+  if (!ownGateEdits.has(key)) return false;
+  const expected = ownGateEdits.get(key);
+  if (expected === null) return true;
+  if (statStamp(file) === expected) return true;
+  ownGateEdits.delete(key);
+  return false;
+}
+
+function markGateEdits(store, names) {
+  for (const name of names) ownGateEdits.set(gateEditKey(path.join(store, name)), null);
+}
+
+function settleGateEdits(store, names) {
+  for (const name of names) {
+    const file = path.join(store, name);
+    const stamp = statStamp(file);
+    if (stamp) ownGateEdits.set(gateEditKey(file), stamp);
+    else ownGateEdits.delete(gateEditKey(file));
+  }
+}
+
+// ── the panel ─────────────────────────────────────────────────────────────────
+
+// `permission-wildcarding.manageGates`: open the panel, or bring the open one forward. The page
+// asks for its list when it loads, and again each time VS Code rebuilds a hidden page on show (the
+// panel keeps no context while hidden), so revealing needs no list of its own.
+function manageGates() {
+  if (deactivated) return;
+  if (gatesPanel) { gatesPanel.reveal(); return; }
+  const panel = vscode.window.createWebviewPanel('permission-wildcarding.gates', 'AI Acolyte: memory gates',
+    vscode.ViewColumn.Active, { enableScripts: true, localResourceRoots: [] });
+  gatesPanel = panel;
+  panel.webview.html = gatesPanelHtml();
+  panel.webview.onDidReceiveMessage((msg) => onGatesPanelMessage(panel, msg));
+  panel.onDidDispose(() => {
+    if (gatesPanel !== panel) return;
+    gatesPanel = null;
+    gatesPanelListing = null;
+  });
+}
+
+function closeGatesPanel() {
+  const panel = gatesPanel;
+  gatesPanel = null;
+  gatesPanelListing = null;
+  gatesApplying = null;
+  if (panel) { try { panel.dispose(); } catch { /* already gone with the host */ } }
+}
+
+// The only four things the panel can ask for, and each one answers to what the extension listed,
+// never to what the page says: a name the last list did not hold opens nothing, and an apply is
+// checked again against a list taken after the click. Anything else is ignored, and so is a
+// message from a panel that is no longer THE panel (one closed, or a host gone down).
+function onGatesPanelMessage(panel, msg) {
+  if (gatesPanel !== panel || !msg || typeof msg !== 'object') return;
+  if (msg.type === 'ready') {
+    // A page that loads while a change runs (a panel opened again, or a hidden page rebuilt on
+    // show) is told so, and the run posts its outcome to whichever panel is live when it ends.
+    postGateList(panel).then(() => {
+      if (gatesApplying && gatesPanel === panel) panel.webview.postMessage({ type: 'busy', busy: true });
+    });
+  } else if (msg.type === 'openMemory') openListedMemory(msg.file);
+  else if (msg.type === 'apply') runGatePanelJob(panel, msg, 'apply');
+  else if (msg.type === 'finish') runGatePanelJob(panel, msg, 'finish');
+}
+
+// The python and recall.py every panel step runs, found as compileGates finds them: the toolbox
+// Python only, never one on PATH, and the recall.py the user tier names or the extension ships.
+// `env` is the compile store's (gateCompileEnv). What is missing is a sentence for the panel,
+// because the panel is where the user is looking.
+function gatesRunner() {
+  const script = recallScriptPath();
+  if (!script) {
+    return { unavailable: 'recall.py was not found, so the gates cannot be listed. Set '
+      + 'permissionWildcarding.memory.recallScript in user settings to a memory/recall.py.' };
+  }
+  const py = toolboxPython();
+  if (!fs.existsSync(py)) {
+    return { unavailable: `The toolbox Python is needed to list the gates, and there is none at ${py}. `
+      + 'Install the DevToolbox venv there, or set CODEX_TOOLBOX to the toolbox root.' };
+  }
+  return { py, script, env: gateCompileEnv() };
+}
+
+// The one tracked child deactivate does not kill: a gate edit in flight (runRecallStep's
+// `finish`). killLiveChildren skips what is in here, and ends everything else as before.
+const finishingChildren = new WeakSet();
+
+// One recall.py run, output captured. The list carries every gate's whole text, so the buffer is
+// 64 MB rather than execFile's 1 MB default, past which a large store's list would end in a
+// maxBuffer error. Tracked and bounded like every other child here: the deadline ends the whole
+// tree (endTreeAfter), as compileGates' does.
+//
+// `finish` is for the edit alone. Every other child is killed when the host goes down, and the
+// edit is not: recall.py rewrites the memories one file at a time, and a kill part way is final
+// (rampage's review measured it on a 400-gate store: killed 30 ms after its snapshot line, 18
+// files were left retired, nothing was put back). Left alone it finishes or puts its own work
+// back, which takes milliseconds, and the pending-change record tells the next activation that
+// the compile and the install never followed. Its 60 s deadline still applies.
+function runRecallStep(runner, args, { finish = false } = {}) {
+  return new Promise((resolve) => {
+    if (deactivated) { resolve({ err: new Error('extension deactivated'), stdout: '', stderr: '' }); return; }
+    let child;
+    try {
+      child = endTreeAfter(trackChild(execFile(runner.py, [runner.script, ...args], { env: runner.env, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      })), 60000);
+    } catch (err) {
+      resolve({ err, stdout: '', stderr: '' });
+      return;
+    }
+    if (finish) finishingChildren.add(child);
+  });
+}
+
+// What a failed run said. A refusal names every bad file on its own line, so this keeps more
+// than compileGates' 300 characters.
+const stepFailure = (run) => (run.stderr || (run.err && run.err.message) || '').trim().slice(0, 600);
+
+// `{ runner, store, gates, warning }`, or `{ unavailable }` / `{ error }` naming why not. Every
+// later step of the same change runs against the store this list came from, named outright, so
+// a store that changes under an open panel can only be refused, never edited unseen.
+async function readGateList() {
+  const runner = gatesRunner();
+  if (runner.unavailable) return { unavailable: runner.unavailable };
+  const run = await runRecallStep(runner, ['--gates-list']);
+  if (run.err) return { error: `recall.py --gates-list failed: ${stepFailure(run)}` };
+  try {
+    const parsed = parseGatesList(run.stdout);
+    if (parsed.store) runner.env = { ...runner.env, RECALL_MEMORY_DIR: parsed.store };
+    // A successful list's stderr is a warning about the store, passed on as the CLI passes it on.
+    return { runner, ...parsed, warning: run.stderr.trim().slice(0, 600) };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+// Whether gates are switched on, as a retire or restore must read it (src/gates-manage.js): in the
+// extension, gates.enabled from user settings and nothing else. Read at the moment it decides
+// something, never earlier: the apply reads it again after the modal and again before the install,
+// because the card can switch gates off while either waits.
+function gatesSwitch() {
+  const gatesOn = !!gatesEnabled();
+  return { gatesOn, why: gatesOn ? '' : 'Memory gates are switched off (permissionWildcarding.gates.enabled)' };
+}
+
+// The agents with an instruction file at all, so the confirmation names no file that is not there.
+function gateTargets() {
+  try { return gatesStatusAll().map((state) => state.agent); } catch { return undefined; }
+}
+
+// How many gates each agent loads now: the count in the header of the gates block its instruction
+// file holds, which is what the agent reads, whatever the memories or the compiled file say. A file
+// with no block loads 0; one that cannot be read is left out, so the confirmation shows no number
+// rather than guess one.
+function loadedGateCounts() {
+  const counts = {};
+  try {
+    for (const state of gatesStatusAll()) {
+      if (!state.readable) continue;
+      if (!state.on) { counts[state.agent] = 0; continue; }
+      const text = fs.readFileSync(state.path, 'utf8');
+      const start = text.indexOf(GATES_BEGIN);
+      const end = start === -1 ? -1 : text.indexOf(GATES_END, start);
+      const body = end === -1 ? '' : text.slice(start + GATES_BEGIN.length, end);
+      const header = body.match(/##\s+Standing gates\s+\((\d+)\s+memor/);
+      counts[state.agent] = header ? Number(header[1]) : (body.match(/^-\s/gm) || []).length;
+    }
+  } catch { /* a count that cannot be read is left out */ }
+  return counts;
+}
+
+// Memory text is untrusted, and a file name or a title that carries a direction override or an
+// invisible character can show as another one: `feedback_` + U+202E + `elur_ytefas` + U+202C +
+// `.md` reads as `feedback_safety_rule.md`. Every such character becomes `?` wherever this file
+// SHOWS memory text (the page, the modal, a toast); the real name still goes into every message
+// and every recall.py argument. Rampage's ranges, as code points, so no invisible character sits
+// in this source.
+const HIDDEN_RANGES = [[0x00, 0x08], [0x09, 0x0a], [0x0b, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c],
+  [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x2064], [0x2066, 0x206f], [0xfeff, 0xfeff]];
+const hiddenPattern = (keepLines) => new RegExp(`[${HIDDEN_RANGES
+  .filter(([from]) => !(keepLines && from === 0x09))
+  .map(([from, to]) => `${String.fromCharCode(from)}-${String.fromCharCode(to)}`).join('')}]`, 'g');
+const HIDDEN_IN_NAME = hiddenPattern(false);
+const HIDDEN_IN_TEXT = hiddenPattern(true);
+const forDisplay = (text) => String(text ?? '').replace(HIDDEN_IN_NAME, '?');
+// A whole message keeps its line breaks and tabs, and a Windows Python writes them to stderr as
+// CRLF, so those become plain line breaks first rather than a `?` at the end of every line.
+const forDisplayText = (text) => String(text ?? '').replace(/\r\n?/g, '\n').replace(HIDDEN_IN_TEXT, '?');
+
+// List, and show the result in `panel`. Only the fields the page renders are sent, each made safe
+// to show here, plus the real file name the page posts back.
+async function postGateList(panel) {
+  const listing = await readGateList();
+  if (gatesPanel !== panel) return listing;   // closed meanwhile, by the user or by deactivate()
+  gatesPanelListing = listing.gates ? listing : null;
+  const { gatesOn, why } = gatesSwitch();
+  panel.webview.postMessage({
+    type: 'gates',
+    store: forDisplay(listing.store || ''),
+    rawStore: String(listing.store || ''),
+    // Why none of the listed gates load now, or '' when gates are on.
+    off: gatesOn ? '' : why,
+    unavailable: forDisplayText(listing.unavailable || ''),
+    error: forDisplayText(listing.error || ''),
+    warning: forDisplayText(listing.warning || ''),
+    gates: listing.gates ? listing.gates.map((gate) => ({
+      file: String(gate.file),
+      label: forDisplay(gate.file),
+      state: String(gate.state),
+      agents: gate.agents.map(String),
+      only: gate.agents.length === 1 ? `${gate.agents[0]} only` : '',
+      problem: gate.problem === null ? '' : forDisplay(gate.problem),
+      title: forDisplay(String(gate.title || '').trim()),
+      text: forDisplayText(gate.text || ''),
+      description: forDisplay(gate.description || ''),
+    })) : null,
+  });
+  return listing;
+}
+
+// The filename link. Only a name the last list held, and only a bare name: a path from the page
+// (or from a recall.py the user tier names, whose list is no more trusted than the page) would
+// otherwise open any file the editor can read.
+function openListedMemory(file) {
+  const listing = gatesPanelListing;
+  const listed = !!listing && typeof file === 'string' && path.basename(file) === file
+    && listing.gates.some((gate) => gate.file === file);
+  if (!listed) {
+    console.error(`ai-acolyte: the gates panel asked to open ${JSON.stringify(forDisplay(String(file).slice(0, 120)))}, `
+      + 'which is not a listed gate memory, so nothing was opened');
+    return;
+  }
+  const uri = vscode.Uri.file(path.join(listing.store, file));
+  Promise.resolve(vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Beside, preview: true }))
+    .catch((error) => vscode.window.showErrorMessage(`ai-acolyte: could not open ${forDisplay(file)}: ${error.message || error}`));
+}
+
+// ── the change in flight, on disk ─────────────────────────────────────────────
+// A reload, a closed window or a crash can land between the edit and the install. The memories
+// are then changed and the instruction files are not, and nothing a later activation does on its
+// own mends that: activation installs, it never compiles, so it sees the old compile as current.
+// So the apply writes down what it is about to do before the edit, and removes the record once the
+// user has been told the outcome. One file per extension host (`pending-gates.<pid>.json`), in
+// ~/.claude/wildcarding beside the snapshots, because two windows can each run a change. The next
+// activation reports any record whose host is gone (or is this one, re-activated in the same
+// process), names the snapshot, and says how to finish.
+const PENDING_STALE_MS = 10 * 60 * 1000;   // no change runs this long: three 60 s steps and a modal
+
+function pendingGatesDir() {
+  return path.join(os.homedir(), '.claude', 'wildcarding');
+}
+
+function pendingGatesFile(pid = process.pid) {
+  return path.join(pendingGatesDir(), `pending-gates.${pid}.json`);
+}
+
+// Where recall.py snapshots the memory folder (recall.py _snapshot_root).
+function gateSnapshotRoot() {
+  return process.env.AI_ACOLYTE_GATE_SNAPSHOT_DIR || path.join(os.homedir(), '.claude', 'wildcarding', 'gate-snapshots');
+}
+
+// recall.py names each snapshot directory for the UTC second it was taken: YYYYmmddTHHMMSSZ.
+const utcStamp = (date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+
+function writePendingGateChange(record) {
+  fs.mkdirSync(pendingGatesDir(), { recursive: true });
+  writeFileAtomicSync(pendingGatesFile(), `${JSON.stringify(record, null, 2)}\n`);
+}
+
+function clearPendingGateChange() {
+  try { fs.unlinkSync(pendingGatesFile()); } catch { /* already gone */ }
+}
+
+// The first snapshot recall.py took at or after `at`, or null.
+function gateSnapshotSince(at) {
+  try {
+    const since = utcStamp(new Date(at));
+    const names = fs.readdirSync(gateSnapshotRoot()).filter((name) => /^\d{8}T\d{6}Z/.test(name)).sort();
+    const found = names.find((name) => name.slice(0, 16) >= since);
+    return found ? path.join(gateSnapshotRoot(), found) : null;
+  } catch {
+    return null;
+  }
+}
+
+// On activation: every record a gone host left behind, reported once and removed.
+function reportInterruptedGateChanges() {
+  let names;
+  try { names = fs.readdirSync(pendingGatesDir()); } catch { return; }
+  for (const name of names) {
+    const match = /^pending-gates\.(\d+)\.json$/.exec(name);
+    if (!match) continue;
+    const file = path.join(pendingGatesDir(), name);
+    let record;
+    try { record = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { record = {}; }
+    if (!record || typeof record !== 'object') record = {};
+    const pid = Number(match[1]);
+    // process.kill(pid, 0) only asks whether the process exists (Node does not send a signal 0,
+    // on Windows either). ESRCH is gone; any other answer (EPERM) is a process that runs.
+    let running = pid !== process.pid;
+    if (running) {
+      try { process.kill(pid, 0); } catch (error) { running = error.code !== 'ESRCH'; }
+    }
+    const age = Date.now() - Date.parse(record.at || 0);
+    // Another window's change, still running. Its own host removes the record when it ends.
+    if (running && age < PENDING_STALE_MS) continue;
+    try { fs.unlinkSync(file); } catch { /* another window got to it first */ }
+    const asked = [
+      ...(Array.isArray(record.retire) ? record.retire.map((item) => `retire ${forDisplay(item)}`) : []),
+      ...(Array.isArray(record.restore) ? record.restore.map((item) => `restore ${forDisplay(item)}`) : []),
+    ].join(', ') || 'a retire or restore';
+    // A record with no start time cannot name its snapshot: the oldest one would be a guess.
+    const known = typeof record.at === 'string' && !Number.isNaN(Date.parse(record.at));
+    const snapshot = known ? gateSnapshotSince(record.at) : null;
+    vscode.window.showWarningMessage(forDisplayText(`ai-acolyte: a memory gate change (${asked}) started at `
+      + `${known ? record.at : 'an unknown time'} was interrupted by a window reload or shutdown before it finished, `
+      + 'so the memories may have been changed while CLAUDE.md and AGENTS.md were not. '
+      + (snapshot ? `recall.py snapshotted the memory folder first, to ${snapshot}. `
+        : !known ? `recall.py snapshots the memory folder before it changes anything, under ${gateSnapshotRoot()}. `
+          : `No snapshot taken after it began is in ${gateSnapshotRoot()}, and recall.py takes one before it changes `
+            + 'anything, so it most likely stopped before the edit. ')
+      + 'Run "AI Acolyte: Manage memory gates…" to see what the memories hold now, and click Compile and install to finish.'));
+  }
+}
+
+// ── apply and finish ──────────────────────────────────────────────────────────
+
+// The page's Apply and Compile and install buttons. One at a time; the outcome is a toast and a
+// line in the panel, and the panel and the dashboard are listed afresh whatever happened.
+// Everything after the start is posted to whichever panel is live then, not to the one that
+// asked: a panel closed and opened again during the run is a new panel, and the old one hears
+// nothing.
+async function runGatePanelJob(panel, msg, kind) {
+  const post = (payload) => { if (gatesPanel) gatesPanel.webview.postMessage(payload); };
+  // Shape first: an apply is two lists of names and the store the page was shown, as the page
+  // builds them; a finish is the store alone. Anything else is not a request.
+  const names = (value) => (Array.isArray(value) && value.length <= 1000
+    && value.every((name) => typeof name === 'string' && name.length > 0 && name.length <= 255) ? value : null);
+  const retire = kind === 'apply' ? names(msg.retire) : [];
+  const restore = kind === 'apply' ? names(msg.restore) : [];
+  if (!retire || !restore || typeof msg.store !== 'string') {
+    const text = 'the gates panel sent a request AI Acolyte cannot read. Refused: nothing was changed.';
+    vscode.window.showErrorMessage(`ai-acolyte: ${text}`);
+    post({ type: 'result', ok: false, text });
+    post({ type: 'busy', busy: false });
+    return;
+  }
+  if (gatesApplying) {
+    // The page that asked set itself busy on the click, and stays busy: a change IS running, and
+    // when it ends it posts its outcome, the fresh list and busy:false to whichever panel is live.
+    const text = 'a gate change is already running, so this one was not started. '
+      + 'This panel is listed again when that one ends.';
+    vscode.window.showWarningMessage(`ai-acolyte: ${text}`);
+    post({ type: 'result', ok: false, tone: '', text });
+    return;
+  }
+  const token = { panel, generation: activationGeneration };
+  gatesApplying = token;
+  post({ type: 'busy', busy: true });
+  let outcome;
+  try {
+    outcome = kind === 'apply' ? await runGateChange(retire, restore, msg.store, token)
+      : await runGateFinish(msg.store, token);
+  } catch (error) {
+    // Nothing in either is expected to throw past its own stages, so where this one stopped is
+    // not known: say what the contract says after an edit, which is never wrong.
+    outcome = { ok: false, text: `the gate change stopped unexpectedly (${error.message || error}), so the `
+      + `memories may have been changed. ${FINISH_ADVICE}` };
+  } finally {
+    if (gatesApplying === token) gatesApplying = null;
+  }
+  // A host going down says nothing, and leaves any record of a change in flight for the next
+  // activation to report.
+  if (deactivated || token.generation !== activationGeneration) return;
+  // Told now, in the toast below, so the next activation has nothing to report.
+  if (kind === 'apply') clearPendingGateChange();
+  const text = forDisplayText(outcome.text);
+  if (text && !outcome.quiet) {
+    if (outcome.ok) vscode.window.showInformationMessage(`ai-acolyte: ${text}`);
+    else vscode.window.showErrorMessage(`ai-acolyte: ${text}`);
+  }
+  dashboard?.refresh();
+  // The fresh list first, so the outcome lands on the list it describes.
+  if (gatesPanel) await postGateList(gatesPanel);
+  if (text) post({ type: 'result', ok: outcome.ok, tone: outcome.tone, text });
+  post({ type: 'busy', busy: false });
+}
+
+// The modal's title: "Retire 1 gate?", "Retire 1 gate and restore 2 gates?".
+function planTitle(plan) {
+  const parts = [];
+  if (plan.retire.length) parts.push(`retire ${gatesWord(plan.retire.length)}`);
+  if (plan.restore.length) parts.push(`restore ${gatesWord(plan.restore.length)}`);
+  const text = parts.join(' and ');
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}?`;
+}
+
+// What each agent's instruction file loads after an install, from the status read after it:
+// "CLAUDE.md loads 12 gates from the next session; AGENTS.md loads 14 gates ...".
+function loadsAfterInstall(results) {
+  let states;
+  try { states = new Map(gatesStatusAll().map((state) => [state.agent, state])); } catch { states = new Map(); }
+  return results.map((result) => {
+    const file = AGENT_FILE[result.agent] || result.agent;
+    const state = states.get(result.agent);
+    if (state && state.on) return `${file} loads ${gatesWord(state.gates)} from the next session`;
+    return `${file} loads no gate from the next session${result.changed ? ', and its gates block was removed' : ''}`;
+  }).join('; ');
+}
+
+// The install every other gates path takes: setGatesAll, one read of the compile just written
+// (G2), each agent its own section and an agent the compile gives none its block removed. On or
+// off from what the compile produced, not only from the plan: a restore run from a terminal while
+// the modal was open leaves gates to install where the plan expected none. A person clicked this
+// and sees the result, so the in-place fallback stays, as the toggle keeps it.
+function installCompiledGates(install) {
+  const wantOn = install === 'on' || gatesStatusAll().some((state) => state.compiled);
+  const results = setGatesAll(wantOn);
+  const errors = results.length
+    ? results.filter((result) => result.error).map((result) => `${result.agent}: ${result.error}`)
+    : ['no agent instruction file to write'];
+  return { results, errors };
+}
+
+// What the install does to an instruction file that describePlan does not say, for the modal:
+// with gates on and gates left to load, a file with no gates block gets one.
+function installNote(plan) {
+  let states;
+  try { states = gatesStatusAll().filter((state) => state.readable); } catch { return ''; }
+  if (plan.activeAfter === 0 || !states.length || states.some((state) => state.on)) return '';
+  return '\n\nNo instruction file holds a gates block yet, and the install adds one, because '
+    + 'permissionWildcarding.gates.enabled is on.';
+}
+
+// List, plan, confirm, edit, compile, install, in that order, stopping at the first failure.
+// Resolves `{ ok, text }`; `quiet` when there is nothing to tell (a host going down).
+//
+// The failure contract (src/gates-manage.js): up to the edit, a failure is a refusal and nothing
+// changed. Once recall.py has rewritten a memory, the memories say something the instruction
+// files do not, so every failure from there on says the memories WERE changed, names the
+// snapshot, and names how to finish (changedButFailed, with FINISH_ADVICE).
+//
+// The memory edits fire the corpus watcher; ownGateEdits makes gatesCorpusBump skip them, so the
+// compile below is the only one this change causes. The compile writes gates.generated.md, whose
+// own watcher runs ensureGates, which finds the install below already current and writes nothing,
+// and with the setting off removes a block a CLI `--gates on` left, as activation would.
+async function runGateChange(retire, restore, store, token) {
+  const torn = () => deactivated || token.generation !== activationGeneration;
+  const quiet = { ok: false, text: '', quiet: true };
+  const refused = (why) => ({ ok: false, text: `${String(why).trim().replace(/\.$/, '')}. Refused: nothing was changed.` });
+  const listing = await readGateList();
+  if (torn()) return quiet;
+  if (!listing.gates) return refused(listing.unavailable || listing.error);
+  // The page names files from the list it was shown, of the store it was shown. The compile store
+  // is memory.dir, else the store holding the most memory files, so a store that grows past the
+  // main one moves the target under an open panel, and a name the two stores share would then be
+  // changed in the store the user never saw.
+  if (listing.store !== store) {
+    return refused(`the store that compiles changed since the panel listed it: it showed `
+      + `${forDisplay(store) || '(no store)'}, and recall.py now reads ${forDisplay(listing.store) || '(no store)'}`);
+  }
+  // Every name must be in THIS list, spelled as recall.py spelled it: planGateChanges would add a
+  // missing `.md` and so accept a name the page was never shown.
+  const listed = new Set(listing.gates.map((gate) => gate.file));
+  const unlisted = [...retire, ...restore].filter((name) => !listed.has(name));
+  if (unlisted.length) {
+    return refused(`${unlisted.map(forDisplay).join(', ')} ${unlisted.length === 1 ? 'is' : 'are'} not in the gate list recall.py printed`);
+  }
+  const plan = planGateChanges(listing.gates, { retire, restore });
+  if (plan.error) return refused(plan.problems.map(forDisplay).join('; '));
+  // The state the modal describes, and nothing more: no step is decided by it (rampage's R5).
+  const shown = gatesSwitch();
+  const { steps: [edit, compile] } = gateSteps(plan, { gatesOn: shown.gatesOn });
+
+  // Shown names go through forDisplay; the plan itself keeps the real ones for recall.py.
+  const shownPlan = { ...plan, retire: plan.retire.map(forDisplay), restore: plan.restore.map(forDisplay),
+    retiredLeftOut: plan.retiredLeftOut.map(forDisplay),
+    restoredLeftOut: plan.restoredLeftOut.map((entry) => ({ file: forDisplay(entry.file), problem: forDisplay(entry.problem) })) };
+  const detail = describePlan(shownPlan, { gatesOn: shown.gatesOn, loadedNow: shown.gatesOn ? loadedGateCounts() : undefined,
+    targets: gateTargets() })
+    + (shown.gatesOn ? installNote(plan) : `\n\n${shown.why}.`)
+    + `\n\nMemory store: ${listing.store}\nOnly this store compiles (memory.dir when it is set, else the store with `
+    + 'the most memory files); gate memories in other stores are never changed here.';
+  const choice = await vscode.window.showWarningMessage(planTitle(plan), { modal: true, detail: forDisplayText(detail) }, 'Apply');
+  if (choice !== 'Apply') return { ok: true, text: 'Cancelled: nothing was changed.', tone: '', quiet: true };
+  if (torn()) return quiet;
+
+  // On or off as it is now that the user has answered, immediately before the steps run: what the
+  // record says and what the edit's failure advises. The install reads it once more for itself.
+  const { gatesOn } = gatesSwitch();
+
+  // Written down before the edit, so a host that goes down from here on leaves a record the next
+  // activation reports. Not written, not started: without it an interrupted change says nothing.
+  const started = new Date();
+  try {
+    writePendingGateChange({ at: started.toISOString(), pid: process.pid, store: listing.store,
+      retire: plan.retire, restore: plan.restore, gatesOn });
+  } catch (error) {
+    return refused(`AI Acolyte could not record the change before making it (${error.message || error})`);
+  }
+
+  const touched = [...plan.retire, ...plan.restore];
+  markGateEdits(listing.store, touched);
+  let edited;
+  try { edited = await runRecallStep(listing.runner, edit, { finish: true }); }
+  finally { settleGateEdits(listing.store, touched); }
+  if (torn()) return quiet;
+  // Read whatever the exit status: the lines are the record of what recall.py WROTE.
+  const done = parseEditOutput(edited.stdout);
+  const shownDone = { ...done, retired: done.retired.map(forDisplay), restored: done.restored.map(forDisplay) };
+  if (edited.err) {
+    // Killed (the 60 s deadline, or from outside): recall.py names the files it wrote only once
+    // it has written them all, and a kill puts nothing back. What it changed is not known.
+    if (edited.err.killed || edited.err.signal) {
+      const snapshot = done.snapshot || gateSnapshotSince(started);
+      return { ok: false, text: `recall.py was stopped part way through the edit (${edited.err.killed ? 'it ran past 60 s' : `signal ${edited.err.signal}`}), `
+        + 'so the memories may have been changed. '
+        + (snapshot ? `The memory folder was snapshotted first, to ${snapshot}. ` : `No snapshot from it is in ${gateSnapshotRoot()}. `)
+        + FINISH_ADVICE };
+    }
+    // As bin/wildcard-perms reads them. A `retired`/`restored` line names a file left changed. A
+    // snapshot line alone means recall.py stopped past the snapshot and put back what it had
+    // rewritten, and its own message says whether that worked, so no "nothing was changed" is
+    // added to it. Neither means it refused before the snapshot, which precedes every write.
+    if (done.retired.length || done.restored.length) {
+      return { ok: false, text: changedButFailed({ stage: 'edit', detail: stepFailure(edited), ...shownDone, plan, gatesOn, advice: FINISH_ADVICE }) };
+    }
+    if (done.snapshot) {
+      return { ok: false, text: `recall.py stopped the edit after the snapshot ${done.snapshot} (${stepFailure(edited)})` };
+    }
+    return refused(`recall.py refused the edit (${stepFailure(edited)})`);
+  }
+  const failed = (stage, detail, on) => ({ ok: false,
+    text: changedButFailed({ stage, detail, ...shownDone, plan, gatesOn: on, advice: FINISH_ADVICE }) });
+  // A successful edit can still have something to say: a snapshot it could not prune, kept.
+  const warned = edited.stderr.trim() ? ` recall.py also said: ${edited.stderr.trim().slice(0, 600)}` : '';
+
+  const compiled = await runRecallStep(listing.runner, compile);
+  if (torn()) return quiet;
+  if (compiled.err) return failed('compile', stepFailure(compiled), gatesSwitch().gatesOn);
+
+  // What recall.py says it wrote, not what was asked for.
+  const changed = [...shownDone.retired.map((file) => `retired ${file}`), ...shownDone.restored.map((file) => `restored ${file}`)];
+  const snapshot = `Snapshot of the memory folder: ${done.snapshot || '(recall.py named none)'}`;
+  // The install is the step on or off decides, so it reads the setting now, after the edit and the
+  // compile: gates switched off while they ran stay off.
+  const now = gatesSwitch();
+  const { install } = gateSteps(plan, { gatesOn: now.gatesOn });
+  if (install === 'none') {
+    return { ok: true, tone: 'ok', text: `${changed.join(', ')}. ${now.why}, so nothing was installed: the change `
+      + `takes effect when gates are turned on. ${snapshot}.${warned}` };
+  }
+  let installed;
+  try { installed = installCompiledGates(install); }
+  catch (error) { return failed('install', error.message || String(error), now.gatesOn); }
+  if (installed.errors.length) return failed('install', installed.errors.join('; '), now.gatesOn);
+  return { ok: true, tone: 'ok', text: `${changed.join(', ')}. ${loadsAfterInstall(installed.results)}. ${snapshot}.${warned}` };
+}
+
+// Compile and install: compile what the memories of the compile store hold now and install it
+// while gates are on, with no memory edited. It is how a change whose compile or install failed is
+// finished (FINISH_ADVICE), and a refresh for anyone who edited a gate by hand with no block
+// installed, which the corpus watcher does not compile for.
+async function runGateFinish(store, token) {
+  const torn = () => deactivated || token.generation !== activationGeneration;
+  const quiet = { ok: false, text: '', quiet: true };
+  const listing = await readGateList();
+  if (torn()) return quiet;
+  if (!listing.gates) return { ok: false, text: `${String(listing.unavailable || listing.error).trim().replace(/\.$/, '')}. Nothing was compiled.` };
+  if (listing.store !== store) {
+    return { ok: false, text: `the store that compiles changed since the panel listed it: it showed ${forDisplay(store) || '(no store)'}, `
+      + `and recall.py now reads ${forDisplay(listing.store) || '(no store)'}. Nothing was compiled.` };
+  }
+  const active = listing.gates.filter((gate) => gate.state === 'active').length;
+  // With no gate active the empty result is what the memories hold, so it may empty the file.
+  const compiled = await runRecallStep(listing.runner, ['--gates-compile', ...(active === 0 ? ['--gates-allow-empty'] : [])]);
+  if (torn()) return quiet;
+  if (compiled.err) return { ok: false, text: `the compile failed: ${stepFailure(compiled).replace(/\.$/, '')}. Nothing was installed.` };
+  const now = gatesSwitch();
+  if (!now.gatesOn) return { ok: true, tone: 'ok', text: `Compiled ${gatesWord(active)}. ${now.why}, so nothing was installed.` };
+  let installed;
+  try { installed = installCompiledGates(active > 0 ? 'on' : 'off'); }
+  catch (error) { return { ok: false, text: `compiled ${gatesWord(active)}, but the install failed: ${error.message || error}` }; }
+  if (installed.errors.length) return { ok: false, text: `compiled ${gatesWord(active)}, but the install failed: ${installed.errors.join('; ')}` };
+  return { ok: true, tone: 'ok', text: `Compiled ${gatesWord(active)}. ${loadsAfterInstall(installed.results)}.` };
+}
+
+// ── the page ──────────────────────────────────────────────────────────────────
+
+function gatesPanelHtml() {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  // The dashboard's policy: nothing loads but the one script carrying this render's nonce.
+  const csp = [
+    "default-src 'none'",
+    "style-src 'unsafe-inline'",
+    `script-src 'nonce-${nonce}'`,
+  ].join('; ');
+
+  // One template literal, as the dashboard is. The inline script below therefore holds no
+  // backtick, no dollar-brace and no backslash: everything it shows arrives by postMessage,
+  // already made safe to show, so it needs no pattern of its own.
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Acolyte: memory gates</title>
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+         background: var(--vscode-editor-background); font-size: 13px; padding: 14px 20px 0; max-width: 960px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
+  .muted { color: var(--vscode-descriptionForeground); font-size: 12px; }
+  .intro { max-width: 72ch; margin-bottom: 10px; }
+  #store { word-break: break-all; }
+  #counts { margin-top: 4px; font-weight: 600; }
+  .notice { margin: 10px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere;
+            border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border, #888));
+            background: var(--vscode-textBlockQuote-background, transparent); }
+  .notice:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .notice.error { border-left-color: var(--vscode-errorForeground, #f85149); }
+  .notice.ok { border-left-color: var(--vscode-charts-green, #3fb950); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0; margin-top: 8px;
+             border-bottom: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
+  /* After the list in the tab order, so Tab from the last gate reaches Apply, and sticky, so it
+     stays in reach at the bottom of a long list. */
+  .actions { position: sticky; bottom: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+             padding: 10px 0 14px; background: var(--vscode-editor-background);
+             border-top: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
+  #filter { flex: 1 1 220px; min-width: 0; padding: 4px 8px; font: inherit; border-radius: 2px;
+            color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+            border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent)); }
+  #filter:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  button.act { padding: 5px 14px; border-radius: 2px; cursor: pointer; font: inherit;
+               border: 1px solid var(--vscode-button-border, transparent);
+               color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+  button.act:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+  button.act.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+  button.act.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+  button.act:disabled { opacity: 0.5; cursor: not-allowed; }
+  .gate { display: flex; gap: 10px; align-items: flex-start; padding: 10px 4px 10px 8px;
+          border-bottom: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
+  /* A pending change is marked by an edge AND a word ("will retire"), never by hue alone. */
+  .gate.changed { box-shadow: inset 3px 0 0 var(--vscode-charts-yellow, #d29922); }
+  .gate input { margin: 2px 0 0; flex: 0 0 auto; }
+  /* Memory text is anybody's: an unbroken 2,000-character description or a 160-character title
+     breaks where it must instead of widening the page past the window. */
+  .gate .body { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  button.file { padding: 0; border: none; background: none; cursor: pointer; text-align: left; word-break: break-all;
+                font-family: var(--vscode-editor-font-family); font-size: 12px; color: var(--vscode-textLink-foreground); }
+  button.file:hover { text-decoration: underline; }
+  .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 0 5px; border-radius: 3px;
+         border: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.4)); color: var(--vscode-descriptionForeground); }
+  .tag.pending { border-color: var(--vscode-charts-yellow, #d29922); color: var(--vscode-foreground); }
+  details { margin-top: 4px; }
+  summary { cursor: pointer; }
+  pre.text { margin: 6px 0 0; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; border-radius: 3px;
+             font-family: var(--vscode-editor-font-family); font-size: 12px;
+             background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.1)); }
+  .desc { margin-top: 4px; }
+  /* The hidden attribute has to win over a display the class sets, or a hidden toolbar shows. */
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>AI Acolyte: memory gates</h1>
+  <div class="muted intro">Uncheck a gate and apply to retire it: its memory's <code>scope: global</code>
+    becomes <code>scope: retired</code>, nothing else in the file changes, it stops loading in CLAUDE.md and
+    AGENTS.md from the next session (only in the one its <code>agents:</code> line names, for a gate that names
+    one), and recall still finds it. Check it again to restore it, to the same agents. The memory folder is
+    snapshotted before every change. Only the store below compiles: memory.dir when it is set, else the store
+    with the most memory files. Gate memories in other stores are counted on the dashboard and never changed here.</div>
+  <div class="muted" id="store"></div>
+  <div id="counts"></div>
+  <div class="notice" id="switchedOff" hidden></div>
+  <div class="notice" id="notice" role="status" aria-live="polite" tabindex="-1">Loading the gate list…</div>
+  <div class="toolbar" id="toolbar" hidden>
+    <input id="filter" type="search" placeholder="Filter by file name or text" aria-label="Filter gates">
+  </div>
+  <div id="list"></div>
+  <div class="muted" id="nomatch" hidden>No gate matches the filter.</div>
+  <div class="actions" id="actions" hidden>
+    <button class="act" id="apply" disabled>Apply changes</button>
+    <button class="act secondary" id="revert" disabled>Revert</button>
+    <button class="act secondary" id="finish" title="Compile what the memories hold now, and install it while memory gates are on">Compile and install</button>
+  </div>
+
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  const $ = (id) => document.getElementById(id);
+
+  // Every field a memory supplies (the file name, the title, the gate text, the description, a
+  // problem) arrives already made safe to show by the extension, and reaches the page only through
+  // textContent. Nothing on this page assigns innerHTML, so a gate that holds markup shows as the
+  // characters it is. The real file name travels beside its label, for the messages posted back.
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function setNotice(text, tone) {
+    const node = $('notice');
+    node.textContent = String(text || '');
+    node.className = 'notice' + (tone ? ' ' + tone : '');
+    node.hidden = !text;
+  }
+
+  // The list as recall.py printed it (file to checked, which is scope: global), and the changes
+  // made on top of it (file to the state wanted). Only a real change is kept in wanted, so its
+  // size is what the Apply button counts. Both survive VS Code rebuilding the page on show.
+  const saved = vscode.getState() || {};
+  let loaded = new Map();
+  const wanted = new Map((Array.isArray(saved.wanted) ? saved.wanted : [])
+    .filter((pair) => Array.isArray(pair) && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'));
+  let rows = [];
+  let busy = false;
+  let serial = 0;
+  // The store the list came from. A request names it, and the extension refuses one whose store is
+  // no longer the one that compiles.
+  let listedStore = '';
+  $('filter').value = typeof saved.filter === 'string' ? saved.filter : '';
+
+  // Keyboard focus, remembered by what it was on rather than by element: a relist rebuilds every
+  // row, and a control disabled while a change runs drops the focus to the page body. It is put
+  // back after each rebuild and when the change ends, unless the user has moved it meanwhile.
+  let focusKey = '';
+  for (const id of ['filter', 'apply', 'revert', 'finish', 'notice']) $(id).dataset.focus = id;
+  document.addEventListener('focusin', (event) => {
+    const key = event.target && event.target.dataset ? event.target.dataset.focus : '';
+    if (key) focusKey = key;
+  });
+  const usable = (node) => !!node && !node.disabled && !node.hidden && node.isConnected !== false;
+  function restoreFocus() {
+    if (busy || !focusKey) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && usable(active)) return;
+    let target = null;
+    for (const row of rows) {
+      if (row.node.hidden) continue;
+      if (focusKey === 'box:' + row.file) target = row.box;
+      if (focusKey === 'file:' + row.file) target = row.name;
+    }
+    if (!target && focusKey.indexOf(':') === -1) target = $(focusKey);
+    // Apply is disabled once its change has gone through: the outcome is the next thing to read.
+    if (!usable(target)) target = $('notice').textContent && !$('notice').hidden ? $('notice') : $('filter');
+    if (usable(target)) target.focus();
+  }
+
+  function changes() {
+    const retire = [];
+    const restore = [];
+    for (const [file, checked] of wanted) (checked ? restore : retire).push(file);
+    return { retire: retire.sort(), restore: restore.sort() };
+  }
+
+  function update() {
+    const { retire, restore } = changes();
+    const count = retire.length + restore.length;
+    const apply = $('apply');
+    apply.disabled = busy || !count;
+    apply.textContent = busy ? 'Applying…'
+      : count ? 'Retire ' + retire.length + ', restore ' + restore.length : 'Apply changes';
+    $('revert').disabled = busy || !count;
+    $('finish').disabled = busy;
+    for (const row of rows) row.box.disabled = busy;
+    vscode.setState({ wanted: [...wanted], filter: $('filter').value });
+  }
+
+  function mark(row) {
+    const change = wanted.has(row.file) ? (wanted.get(row.file) ? 'will restore' : 'will retire') : '';
+    row.pending.textContent = change;
+    row.pending.hidden = !change;
+    row.node.className = change ? 'gate changed' : 'gate';
+  }
+
+  function gateRow(gate) {
+    const file = String(gate.file);
+    const label = String(gate.label || '');
+    const id = 'gate-' + (serial++);
+    const node = el('div', 'gate');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = wanted.has(file) ? wanted.get(file) : gate.state !== 'retired';
+    box.dataset.focus = 'box:' + file;
+    box.setAttribute('aria-label', 'Load ' + label + ' in every session');
+    // The rule and the pending change, read out with the box, not only the file name.
+    box.setAttribute('aria-describedby', id + '-title ' + id + '-pending');
+    const body = el('div', 'body');
+    const head = el('div', 'head');
+    const name = el('button', 'file', label);
+    name.type = 'button';
+    name.title = 'Open ' + label;
+    name.dataset.focus = 'file:' + file;
+    name.addEventListener('click', () => vscode.postMessage({ type: 'openMemory', file }));
+    head.appendChild(name);
+    if (gate.state === 'retired') head.appendChild(el('span', 'tag', 'retired'));
+    if (gate.only) head.appendChild(el('span', 'tag', String(gate.only)));
+    if (gate.problem) {
+      head.appendChild(el('span', 'tag', gate.state === 'excluded'
+        ? 'left out for every agent: ' + gate.problem : 'agents: unreadable: ' + gate.problem));
+    }
+    if (label !== file) head.appendChild(el('span', 'tag', 'hidden characters in the name'));
+    const pending = el('span', 'tag pending');
+    pending.id = id + '-pending';
+    head.appendChild(pending);
+    const details = el('details');
+    const summary = el('summary');
+    const title = el('b', '', String(gate.title || '') || '(no title line)');
+    title.id = id + '-title';
+    summary.appendChild(title);
+    details.appendChild(summary);
+    details.appendChild(el('pre', 'text', String(gate.text || '')));
+    body.appendChild(head);
+    body.appendChild(details);
+    if (gate.description) body.appendChild(el('div', 'muted desc', String(gate.description)));
+    node.appendChild(box);
+    node.appendChild(body);
+    const row = { file, node, box, name, pending,
+      haystack: [label, gate.title, gate.text, gate.description, gate.only].map((part) => String(part || '').toLowerCase()).join(' ') };
+    box.addEventListener('change', () => {
+      if (box.checked === loaded.get(file)) wanted.delete(file); else wanted.set(file, box.checked);
+      mark(row);
+      update();
+    });
+    mark(row);
+    return row;
+  }
+
+  function applyFilter() {
+    const query = String($('filter').value || '').trim().toLowerCase();
+    let shownRows = 0;
+    for (const row of rows) {
+      row.node.hidden = !!query && !row.haystack.includes(query);
+      if (!row.node.hidden) shownRows += 1;
+    }
+    $('nomatch').hidden = !rows.length || shownRows > 0;
+  }
+
+  function render(msg) {
+    listedStore = typeof msg.rawStore === 'string' ? msg.rawStore : '';
+    $('store').textContent = msg.store ? 'Memory store (the one that compiles): ' + msg.store : '';
+    $('list').textContent = '';
+    rows = [];
+    loaded = new Map();
+    $('switchedOff').hidden = true;
+    if (!Array.isArray(msg.gates)) {
+      // No python, no recall.py, or a list that could not be read: a sentence and no checkboxes,
+      // because a checkbox would claim a state nobody has read.
+      $('toolbar').hidden = true;
+      $('actions').hidden = true;
+      $('counts').textContent = '';
+      $('nomatch').hidden = true;
+      setNotice(String(msg.unavailable || msg.error || 'The gate list could not be read.'), 'error');
+      restoreFocus();
+      return;
+    }
+    for (const gate of msg.gates) loaded.set(String(gate.file), gate.state !== 'retired');
+    // A change made before the page was rebuilt, or before an apply listed again, is kept while it
+    // still changes something. One the apply carried out is the listed state now, and drops.
+    for (const [file, checked] of [...wanted]) {
+      if (!loaded.has(file) || loaded.get(file) === checked) wanted.delete(file);
+    }
+    for (const gate of msg.gates) {
+      const row = gateRow(gate);
+      rows.push(row);
+      $('list').appendChild(row.node);
+    }
+    let active = 0;
+    let retired = 0;
+    let leftOut = 0;
+    let claude = 0;
+    let codex = 0;
+    for (const gate of msg.gates) {
+      if (gate.state === 'retired') retired += 1;
+      else if (gate.state === 'excluded') leftOut += 1;
+      else {
+        active += 1;
+        if (gate.agents.indexOf('claude') !== -1) claude += 1;
+        if (gate.agents.indexOf('codex') !== -1) codex += 1;
+      }
+    }
+    $('counts').textContent = active + ' active, ' + retired + ' retired' + (leftOut ? ', ' + leftOut + ' left out' : '')
+      + ' · CLAUDE.md loads ' + claude + ', AGENTS.md loads ' + codex;
+    // Why none of these load now, when gates are off. A change is still made and compiled, and
+    // never switches them on.
+    const off = typeof msg.off === 'string' ? msg.off : '';
+    $('switchedOff').textContent = off ? off + ', so none of these load now. A change here is still made and '
+      + 'compiled, and takes effect when gates are turned on.' : '';
+    $('switchedOff').hidden = !off;
+    $('toolbar').hidden = false;
+    $('actions').hidden = false;
+    setNotice(msg.gates.length ? String(msg.warning || '')
+      : 'No memory in this store holds a gate block with scope global or retired.', '');
+    applyFilter();
+    update();
+    restoreFocus();
+  }
+
+  $('filter').addEventListener('input', () => { applyFilter(); update(); });
+  $('apply').addEventListener('click', () => {
+    const { retire, restore } = changes();
+    if (busy || !(retire.length + restore.length)) return;
+    busy = true;
+    update();
+    setNotice('', '');
+    vscode.postMessage({ type: 'apply', store: listedStore, retire, restore });
+  });
+  $('revert').addEventListener('click', () => {
+    wanted.clear();
+    for (const row of rows) { row.box.checked = loaded.get(row.file); mark(row); }
+    setNotice('', '');
+    update();
+  });
+  $('finish').addEventListener('click', () => {
+    if (busy) return;
+    busy = true;
+    update();
+    setNotice('', '');
+    vscode.postMessage({ type: 'finish', store: listedStore });
+  });
+  window.addEventListener('message', (event) => {
+    const msg = event.data || {};
+    if (msg.type === 'gates') render(msg);
+    else if (msg.type === 'busy') { busy = msg.busy === true; update(); restoreFocus(); }
+    else if (msg.type === 'result') setNotice(String(msg.text || ''), typeof msg.tone === 'string' ? msg.tone : (msg.ok ? 'ok' : 'error'));
+  });
+  vscode.postMessage({ type: 'ready' });
+</script>
+</body>
+</html>`;
 }
 
 module.exports = { activate, deactivate };

@@ -140,6 +140,11 @@
         "icon": "$(law)"
       },
       {
+        "command": "permission-wildcarding.manageGates",
+        "title": "AI Acolyte: Manage memory gates…",
+        "icon": "$(checklist)"
+      },
+      {
         "command": "permission-wildcarding.lintMemory",
         "title": "AI Acolyte: Lint memory index (MEMORY.md bloat + broken links)",
         "icon": "$(book)"
@@ -300,7 +305,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "markdownDescription": "Maintain a second managed block holding your own **standing orders**, compiled out of your Claude Code file-memory. `recall.py --gates-compile` lifts the `<!-- gate -->` section from every memory marked `scope: global` into `~/.claude/gates.generated.md`, and this installs it into each agent's instruction file. Why it needs to be resident: the memory index is a list of one-line hooks, so the enforceable half of a rule sits in a file that only loads if a recall surfaces it — which never happens for a rule you are already breaking, because nothing triggers the lookup. Reference material is fine on demand; policy is not. Installing is a file read and runs on activation; compiling spawns python, an explicit action until the block is installed and then again after each memory edit. Marker-fenced separately from the shell-style block, so turning either off leaves the other byte-identical. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
+          "markdownDescription": "Maintain a second managed block holding your own **standing orders**, compiled out of your Claude Code file-memory. `recall.py --gates-compile` lifts the `<!-- gate -->` section from every memory marked `scope: global` into `~/.claude/gates.generated.md`, and this installs it into each agent's instruction file. Why it needs to be resident: the memory index is a list of one-line hooks, so the enforceable half of a rule sits in a file that only loads if a recall surfaces it — which never happens for a rule you are already breaking, because nothing triggers the lookup. Reference material is fine on demand; policy is not. Installing is a file read and runs on activation; compiling spawns python, an explicit action until the block is installed and then again after each memory edit. Marker-fenced separately from the shell-style block, so turning either off leaves the other byte-identical. To retire or restore one gate at a time instead, run **AI Acolyte: Manage memory gates…**: it edits and recompiles either way, and installs its change only while this is on, which it never changes. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
         },
         "permissionWildcarding.memory.enabled": {
           "type": "boolean",

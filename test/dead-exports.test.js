@@ -179,7 +179,9 @@ const TEST_ONLY = {
   // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
   // gateOf joined 2026-10-14: test/gate-agents.test.js holds it to recall.py's _gate file by
   // file; in production it is called inside the module, by fullReport and the census.
-  'vscode-extension/memoryLint.js': ['gateOf', 'pickPrimaryDir'],
+  // gateEntryOf joined the same day for the same reason, held to recall.py's _gate_entry (the
+  // card's retired count against the list the gates panel shows).
+  'vscode-extension/memoryLint.js': ['gateEntryOf', 'gateOf', 'pickPrimaryDir'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
   // drives a command-line tool through; the tools themselves are run by hand or by CI.
   'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],

@@ -187,3 +187,74 @@ test('gateOf agrees with recall.py _gate file by file over generated frontmatter
   // MUTATION: in memoryLint.js gateAgents, strip with JavaScript's trim() instead of pyStrip,
   // or split lines on /\r?\n/ without the universal-newline pass, and files here disagree.
 });
+
+// Retire and restore (2026-10-14, ported from rampage e5c0ee7). The dashboard card's "N retired"
+// is memoryLint.js gateEntryOf, and the gates panel shows recall.py's --gates-list, which is
+// _gate_entry: two readers of one rule again, so the second is held to the first the same way,
+// state and agents both, over the same generated files (a quarter of them carry scope: retired).
+const entryOf = (text) => {
+  const entry = memoryLint.gateEntryOf(text);
+  return entry && `${entry.state} ${entry.problem === null ? entry.agents.join('+') : 'PROBLEM'}`;
+};
+
+test('gateEntryOf reads retired gates with their agents, and is gateOf for a scope: global one', () => {
+  assert.equal(entryOf(memory('scope: retired\nagents: [codex]\n')), 'retired codex');
+  assert.equal(entryOf(memory('metadata:\n  scope: "retired"\n')), 'retired claude+codex');
+  assert.equal(entryOf(memory('scope: retired\nagents: [gemini]\n')), 'retired PROBLEM');
+  assert.equal(entryOf(memory('scope: global\nagents: [gemini]\n')), 'excluded PROBLEM');
+  assert.equal(entryOf(memory('scope: global\nagents: [codex]\n')), 'active codex');
+  assert.equal(entryOf(memory('scope: project\n')), null);
+  assert.equal(entryOf('---\nscope: retired\n---\n<!-- gate -->\nno closing marker\n'), null);
+  assert.equal(entryOf(memory('scope: retired  # was global\n')), null, 'a value with a comment is not "retired" to _fm');
+  // MUTATION: accept any scope in gateEntryOf, or drop the GATE_BLOCK test, and the last three fail.
+});
+
+const PY_ENTRY_READER = `
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("recall", sys.argv[1])
+recall = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recall)
+out = {}
+for name in sorted(os.listdir(sys.argv[2])):
+    text = open(os.path.join(sys.argv[2], name), encoding="utf-8", errors="replace").read()
+    entry = recall._gate_entry(name, text)
+    out[name] = None if entry is None else entry["state"] + " " + ("+".join(entry["agents"]) if entry["problem"] is None else "PROBLEM")
+print(json.dumps(out))
+`;
+
+test('gateEntryOf agrees with recall.py _gate_entry file by file over generated frontmatter', (t) => {
+  if (!fs.existsSync(TOOLBOX_PY)) {
+    t.skip(`no toolbox python at ${TOOLBOX_PY}; the forms above still pin the reading`);
+    return;
+  }
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-gate-entries-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const dir = path.join(home, 'memory');
+  fs.mkdirSync(dir);
+  const files = generated(20261014, 480);
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text, 'utf8');
+  const run = spawnSync(TOOLBOX_PY, ['-c', PY_ENTRY_READER, RECALL, dir], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, USERPROFILE: home, RECALL_MEMORY_DIR: dir, RECALL_REEXEC: '1' },
+    windowsHide: true,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const python = JSON.parse(run.stdout);
+  const names = Object.keys(files);
+  assert.equal(Object.keys(python).length, names.length);
+  // Non-degenerate: every state is common, retired ones with and without readable agents.
+  const outcomes = {};
+  for (const name of names) {
+    const key = python[name] === null ? 'null' : python[name].split(' ')[0] + (python[name].endsWith('PROBLEM') ? '!' : '');
+    outcomes[key] = (outcomes[key] || 0) + 1;
+  }
+  for (const outcome of ['null', 'active', 'excluded!', 'retired', 'retired!']) {
+    assert.ok((outcomes[outcome] || 0) >= 10, `only ${outcomes[outcome] || 0} files read as ${outcome}: ${JSON.stringify(outcomes)}`);
+  }
+  t.diagnostic(`states ${JSON.stringify(outcomes)}`);
+  const wrong = names.filter((name) => entryOf(fs.readFileSync(path.join(dir, name), 'utf8')) !== python[name])
+    .map((name) => `${name}: python ${python[name]}, js ${entryOf(fs.readFileSync(path.join(dir, name), 'utf8'))} ${JSON.stringify(files[name])}`);
+  assert.deepEqual(wrong, [], 'gateEntryOf and recall.py _gate_entry read these files differently');
+  // MUTATION: read the retired state with JavaScript's own frontmatter rules (a /^\s*scope:/m
+  // match) in gateEntryOf, or call a gate with a problem "active", and files here disagree.
+});

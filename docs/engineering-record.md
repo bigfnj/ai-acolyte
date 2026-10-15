@@ -33,6 +33,101 @@ is unmeasurable at the process level.
 
 ---
 
+## Retire and restore memory gates (2026-10-14)
+
+Ported from the spin-off rampage, `e5c0ee7` (2026-10-09, rampage 0.2.0, "retire and restore memory
+gates one at a time"), on the maintainer's go of 2026-10-14 (wave-h3, on `d6ccb0d`). Before it, the
+one way to drop a standing order was to remove every gate at once. A gate is now RETIRED in place:
+its memory's `scope: global` value becomes `retired` and nothing else in the file changes, so the
+memory stays in the store, recall still finds it, and the compile, which selects on `scope:
+global`, leaves it out. Restoring is the reverse. Four commits: `f5f4e91` (recall.py), `107987b`
+(the planner and the CLI), `b3872e4` (the panel and the card), and this record.
+
+**What was ported.** `recall.py --gates-list` (JSON), `--gates-retire` and `--gates-restore`
+(`memory/recall.py:1732#change_gate_scopes`): every name validated before anything is written, one
+byte snapshot of the memory folder per change (the newest 30 per store kept, and only directories
+this code minted for this store pruned, `memory/recall.py:1685#_prune_snapshots`), each file re-read
+just before its own write and put back when a later write fails, the scope value rewritten as a
+span (`memory/recall.py:1570#_rescope`) and refused unless the rewrite turns back into exactly the
+original bytes, symlinks, junctions, hard links and hand-set ACLs refused, and the whole edit under
+an O_EXCL gate-edit lock reclaimed by age alone (`memory/recall.py:2011#_take_gate_lock`). `--lint`
+names retired gates after its verdict (`memory/recall.py:1550#_lint_retired`). `src/gates-manage.js`
+is the planner both front ends run (`src/gates-manage.js:107#planGateChanges`). The CLI and a
+dashboard panel with Apply, Revert and a filter are the two front ends, and the card shows a
+retired count. A change a reload cut short is recorded and reported on the next activation
+(`vscode-extension/extension.js:5993#reportInterruptedGateChanges`).
+
+**Adaptations.**
+
+| Rampage | AI Acolyte, and why |
+|---|---|
+| Data under `~/.claude/rampage/`, override `RAMPAGE_SNAPSHOT_DIR` | `~/.claude/wildcarding/`: `gate-snapshots/`, `gates-edit.lock`, `pending-gates.<pid>.json` (`memory/recall.py:1481#_snapshot_root`, `memory/recall.py:2007#_gate_lock_path`). It is the extension's Claude-side state directory: the policy lock, the learner's state and backups, and the recall model already live there, and the store being edited is Claude Code's. `~/.ai-acolyte/` holds Codex-profile state and the Codex backup catalog. The override is `AI_ACOLYTE_GATE_SNAPSHOT_DIR`. |
+| Settings read with `get()` | `gates.enabled` through `userSetting` (`vscode-extension/extension.js:5847#gatesSwitch`); `memory.dir` through memoryReport's `cfg()`, `inspect().globalValue` (wave-f15); `memory.recallScript` through `recallScriptPath`. A workspace value of any of them is ignored. |
+| No pin: recall.py picks the store | Every step pins the compile store, the one compileGates already pinned (`vscode-extension/extension.js:5683#gateCompileEnv`), and the list's own `store` is named outright for the edit and the compile, so a store that changes under an open panel can only be refused. compileGates now takes its environment from the same helper. |
+| `--gates-list` entries: `scope`, `active` | `scope`, `state` (`active`, `retired`, or `excluded`: scope global with an `agents:` line that cannot be read, so neither active nor retired), `agents`, `problem` (`memory/recall.py:1489#_gate_entry`). gates-manage.sh holds the list's active gates to the compiler's own per-agent output. |
+| One instruction file | Per agent. A retire is per memory and rewrites the scope value only, so `agents:` survives a retire and a restore byte for byte (fixtures: a flow list, a CRLF block list before the scope, `agents:` after a lone CR, an unknown agent). The plan carries each agent's gates before and after, and the modal says what CLAUDE.md and AGENTS.md each load (`src/gates-manage.js:222#describePlan`): a Codex-only retire reads "CLAUDE.md: not changed by this", and CLAUDE.md is not rewritten. An excluded gate may be retired (it changes no file) and is not restorable (it is scope: global already). |
+| The card's own `frontmatterScope` | memoryLint.js `gateEntryOf` (`vscode-extension/memoryLint.js:45#gateEntryOf`), built on wave-h2's `frontmatter` and `gateAgents`; `gateOf` now reads through it, so there is no third parser. fullReport lists `gateRetired`, in compile order, for the card. test/gate-agents.test.js holds it to `_gate_entry` over the 480 generated memories (243 active, 81 retired, 20 retired with an unreadable `agents:`, 75 excluded, 61 none, measured 2026-10-14). |
+| `rampage gates list\|retire\|restore` | `wildcard-perms --gates list [--json]` and `--gates retire\|restore [--] <memory>...` (`bin/wildcard-perms:983#gatesChange`), beside `on\|off\|status\|refresh`, in `--help` and its census. Every word after `retire` or `restore` is a name, never a verb (`bin/wildcard-perms:92#takesNames`): the dispatch finds verbs anywhere in argv, so `--gates retire --seed` ran `--seed`. A dashed name goes after `--`. |
+| Legacy ai-acolyte block branches | Dropped. The UI and the CLI name CLAUDE.md and AGENTS.md. |
+| Failure advice: `rampage gates refresh`, `gates off`, `rampage recall --gates-compile` | The CLI names `wildcard-perms --gates refresh` / `--gates off` and the recall.py it runs, in backticks (the commands carry quoted paths). The panel names its own **Compile and install** (`vscode-extension/extension.js:6270#runGateFinish`), which finishes every case, because the extension ships no CLI on PATH. |
+| A second compile 2 s later by the corpus watcher, "harmless by construction" | One change, one compile. The memories the edit rewrites are marked before it starts and stamped (mtimeMs, size) when it ends, and `gatesCorpusBump` skips an event for one while it still has that stamp (`vscode-extension/extension.js:5704#isOwnGateEdit`). A later edit moves the stamp and compiles as before. The compile is recall.py's atomic replace (G1) and the install `setGatesAll`'s single read (G2); the compiled-file watcher's ensureGates then finds the install current. |
+| The edit untracked, so a reload cannot kill it | It is tracked and bounded like every child (the execFile censuses in test/extension-lifecycle-async.test.js now count five sites), and it is the one child deactivate lets finish (`vscode-extension/extension.js:5792#finishingChildren`): rampage measured a kill 30 ms after the snapshot line leaving 18 memories retired and nothing put back. |
+| `--lint` note "not compiled" | "kept in the store and left out of the compile by choice": scripts/verify-release.ps1 fails its standing-order check on "not compiled". |
+| CI runs recall-py.sh and gates-stale.sh | Neither is in this repo's CI (the brief assumed they were). gates-manage.sh got its own job, `gates-manage` in .github/workflows/test.yml, on rampage's pins (Python 3.11, numpy 2.4.6, onnxruntime 1.30.0) with `CI=true` turning a missing interpreter into a failure. It has not run on GitHub: nothing was pushed. |
+
+**Decision recorded: gates switched off stay off** (rampage's GATES_FOLLOW_THE_SETTING). A retire
+or restore never switches gates on or off. In the extension gates are on exactly when
+`gates.enabled` is: with it off, the edit and the compile run and nothing is installed, and the
+setting is read again after the modal and before the install, so switching gates off while a
+change runs keeps them off. The CLI has no setting and counts gates as on when a gates block is
+installed in some agent's instruction file; with none, it edits and compiles and installs nothing.
+Turning gates on later installs the fresh compile. Kept from rampage on the maintainer's approval.
+
+**Tests, each failing with its fix reverted** (every mutation run one at a time by a runner that
+restores the file and checks it by sha256):
+- test/gates-manage.sh, rampage's adapted plus the per-agent sections: ALL PASS. Seven mutations,
+  each killed: recall.py as at `d6ccb0d` (fails at `--gates-list exited 2`), an excluded gate listed
+  active, a retire that widens `agents: [codex]`, the restore refusal worded "active", the default
+  snapshot root named for rampage, the lock elsewhere, the lint note worded "not compiled".
+- test/gates-manage.test.js (31): thirteen planner mutations, each killed (per-agent loads, a
+  restore always active, names deduplicated, trimmed, gates-off installing, no allow-empty at zero,
+  describePlan from the total, an unreadable count as zero, refresh at zero, an excluded gate marked
+  active, the state/scope cross-check, terminal text unfiltered, the advice override ignored).
+- test/cli-gates.test.js (16 new) and the --help census: thirteen CLI mutations, each killed,
+  including bin/wildcard-perms as at `f5f4e91`, the takesNames branch, `--help` after `--`, a dashed
+  name before `--`, gates always on, and the unreadable-file refusal.
+- test/gates-panel.test.js (34), test/dashboard-view.test.js, test/memory-lint-watchers.test.js,
+  test/gate-agents.test.js: 20 mutations of extension.js and memoryLint.js, each killed (the
+  own-edit skip, marking before the edit, the store pin, gates always on, an unfiltered title, the
+  store and unlisted refusals, a compile failure as a refusal, the install always on, the install
+  decided before the modal, no pending record, a live host's record reported, a listed path opened,
+  the card's list and line, the dashboard arm, gateEntryOf's scope test and its JavaScript reading,
+  gateRetired's push and its order), and two more against the final shape of the one child
+  deactivate lets finish (the edit not added to finishingChildren; killLiveChildren not skipping
+  it). Whole-file reverts of extension.js and memoryLint.js fail 34, 1 and 3 tests.
+- scripts/drive-installed.js: a Codex-only gate retired and restored through the packaged panel,
+  the packaged recall.py and the toolbox Python in the sandbox. AGENTS.md changes, CLAUDE.md stays
+  byte for byte, and the memory comes back byte for byte. 15/15 on the staged build, in the default
+  and the custom-override Codex layouts.
+
+**Not ported:** the legacy-block migration and its CLI notes, the `rampage recall` passthrough, the
+`rampage.*` settings and model home, rampage's drive-vscode and vscode-acceptance renderer changes
+(this wave runs neither), and its CI floor arithmetic (this repo's suite has no `--min-pass`).
+
+**Residuals, not changed here:**
+- Not run: drive-vscode on real VS Code, and the new CI job on GitHub.
+- `isOwnGateEdit` keys on the path the store is listed under, case-folded on Windows. A store the
+  watcher reports under another spelling (through a junction, say) would not match, and the
+  watcher's compile would run once more, harmlessly, as in rampage.
+- The panel does not re-list when a memory changes outside it; it re-lists on open, on show and
+  after every change it runs (rampage the same).
+- The corpus watcher still compiles only while a block is installed (unchanged). A hand edit with
+  no block installed waits for Compile and install, the toggle, or the next change.
+- The CLI counts gates as on when any agent's file holds a block, for every agent's install.
+- The snapshot root is shared by every store; the prune keeps 30 per store, so the root can hold
+  30 per store.
+- The other-store census still compares gate text only (wave-h2's residual).
+
 ## Per-agent memory gates (2026-10-14)
 
 Backlog gap 2, **FIXED** in `c6a1878`, built on the maintainer's go of 2026-10-14 (wave-h2, on
@@ -49,7 +144,7 @@ subset of agents the compile is exactly what it was, one gate set every agent in
 does, `gates.generated.md` becomes a first line, `<!-- generated by recall.py --gates-compile; per
 agent: claude N, codex M -->`, giving each section's size in UTF-8 bytes, then each agent's own
 compile back to back, header and sha included, an agent with no gates contributing nothing
-(`memory/recall.py:1248#_compile_gates_text`). `compiledForAgents` cuts it at those sizes from one
+(`memory/recall.py:1256#_compile_gates_text`). `compiledForAgents` cuts it at those sizes from one
 read and refuses the whole file, for every agent, unless the sizes add up to the file and every
 section matches its own sha (`src/agent-gates.js:117#compiledForAgents`). The reasons against a
 file per agent: both agents' gates then cross the disk in two replaces and leave it in two reads,
@@ -61,7 +156,7 @@ with its retry and G2's single read unchanged, needs no compile id, and has no p
 anyone could leave behind. Each installed block is exactly that agent's section trimmed, the same
 shape a compile of that agent's gates alone installs.
 
-**Syntax** (`memory/recall.py:812#_gate_agents`). `agents:` anywhere in the frontmatter, at any
+**Syntax** (`memory/recall.py:819#_gate_agents`). `agents:` anywhere in the frontmatter, at any
 indent, like `scope:`; `codex`, `claude`, a flow list or a block list of `- name` lines,
 case-insensitive, an optional trailing `# comment`. Absent or empty means every agent. What cannot
 be read is never guessed at, because "every agent" is the leak the key exists to prevent: an
@@ -70,13 +165,13 @@ list item (a plain scalar continued on the next line) each leave the gate out fo
 Three readings were found while writing it that would have fallen back to every agent, and each
 is pinned: a comment line inside a block list, that continuation line, and `agents :` with a
 space before the colon, which is still the key in YAML. `_gate` is the one selection rule
-(`memory/recall.py:1163#_gate`), and `_gate_body` stays the census's entry to it, so a gate left out
+(`memory/recall.py:1171#_gate`), and `_gate_body` stays the census's entry to it, so a gate left out
 is not counted in another store either.
 
-**The JavaScript mirror** (`vscode-extension/memoryLint.js:121#gateAgents`) reads with Python's
-whitespace (`vscode-extension/memoryLint.js:61#PY_SPACE`, the 29 code points `str.isspace()` and
+**The JavaScript mirror** (`vscode-extension/memoryLint.js:136#gateAgents`) reads with Python's
+whitespace (`vscode-extension/memoryLint.js:76#PY_SPACE`, the 29 code points `str.isspace()` and
 `re`'s `\s` share, re-measured under the toolbox Python 3.11.15) and Python's universal newlines.
-`frontmatter`, which reads `scope:`, was rewritten the same way (`vscode-extension/memoryLint.js:101#frontmatter`),
+`frontmatter`, which reads `scope:`, was rewritten the same way (`vscode-extension/memoryLint.js:116#frontmatter`),
 the reading rampage `e5c0ee7` gave its card's `frontmatterScope`, because the agreement test below
 compares the whole selection and the old JavaScript `\s` reading disagreed with Python on `scope:`.
 test/gate-agents.test.js holds `gateOf` to `recall.py`'s `_gate` file by file over 480 generated
@@ -124,17 +219,17 @@ gates carry none.
   files. Only a mixed install can meet that (a newer `recall.py` named by `memory.recallScript`
   under an older extension), and only once a gate names its agents. Run one version.
 
-**Surfaces.** `--gates status` gives each agent's count (`bin/wildcard-perms:884#count`), "ON, 13
+**Surfaces.** `--gates status` gives each agent's count (`bin/wildcard-perms:897#count`), "ON, 13
 gates", and "(none compiled for claude)" for an agent with none; `on` and `refresh` print "OFF,
 none compiled for claude" for the removal. `--lint` prints "N gate memories compile: claude X,
 codex Y" and reports a gate left out, with the reason, as a finding that keeps `clean:` from
 printing; the compile names it on stderr, which `--gates refresh` passes through. The dashboard
 card reads "Claude 13 · Codex 14" in its text and badge once the agents differ, judges ON and
-PARTIAL over the agents that have gates (`vscode-extension/extension.js:3838#wanted`), and names a
+PARTIAL over the agents that have gates (`vscode-extension/extension.js:3847#wanted`), and names a
 left-out gate memory. Its count now comes from the status rows, which removed `compiledGateCount`
 and one read of the compiled file per push; `readCompiled` became test-only. `ensureGates` treats
-a gateless agent with no block as settled (`vscode-extension/extension.js:3715#wants`), and the toggle
-counts that install as complete (`vscode-extension/extension.js:3761#installed`).
+a gateless agent with no block as settled (`vscode-extension/extension.js:3722#wants`), and the toggle
+counts that install as complete (`vscode-extension/extension.js:3768#installed`).
 `scripts/verify-release.ps1` compares `CLAUDE.md` with Claude's section
 (`scripts/verify-release.ps1:221#GetBytes`); its extraction was run alone under PowerShell 5.1 and 7
 against a per-agent compile with non-ASCII text, never through the release script.
@@ -196,14 +291,14 @@ that kills them.
 
 | Item | Disposition | Evidence |
 |---|---|---|
-| G1: `compile_gates` wrote `gates.generated.md` in place, so a reader racing it could see it empty or partial | **PORTED**, `452a752` (rampage `7139659`) | The write goes through a pid-named temp and `os.replace` (`memory/recall.py:1409#tmp`), retried 10 times on `PermissionError` at 20 to 180 ms. Windows refuses to replace a file another process holds open. There is **no in-place fallback**: a holder that never lets go makes the compile exit non-zero with the previous file whole, and the temp is removed. Rampage's measurement, quoted in the comment: written in place, 2,275 and 2,136 empty reads in two 5 s runs against a reader loop; replaced, none. **Adaptations:** `time` is imported at module top, where rampage imported it in the loop. The schedule is cited against `src/permissions.js` writeFileAtomicSync, because rampage's `src/fs-atomic.js` is not ported. **Test**, in test/recall-py.sh: "the gates write replaces the file rather than truncating it, and leaves no .tmp residue". The file id (`st_ino`) must change across a recompile. Reverting to an in-place write fails it on the file-id assertion. |
-| G3: an unreadable store made discovery compile the next-largest store's gates, exit 0 | **PORTED**, `452a752` (rampage `7139659`) | `_discover_memory_dir` records each store it cannot read, and a projects root it cannot list for any reason but absence (`memory/recall.py:160#_DISCOVERY_ERRORS`). `compile_gates` refuses on any of them before reading or writing (`memory/recall.py:1335#_DISCOVERY_ERRORS`), and names the store. Search and `--lint` still run on such a pick and warn. An explicit `RECALL_MEMORY_DIR` skips discovery. The extension passes one whenever memoryReport has a store, so this is mostly the CLI's and a bare run's path. **Tests**, in test/recall-py.sh: "a store discovery cannot read stops --gates-compile, which names it and writes nothing" (os.listdir raises for the largest store inside the harness; the control is the same home compiling with nothing denied), and "a home with no ~/.claude/projects is a fresh machine, and its gates compile stays a no-op". Three mutations, each failing one assertion: delete the refusal; drop the per-store append; record the root's `FileNotFoundError`. |
+| G1: `compile_gates` wrote `gates.generated.md` in place, so a reader racing it could see it empty or partial | **PORTED**, `452a752` (rampage `7139659`) | The write goes through a pid-named temp and `os.replace` (`memory/recall.py:1417#tmp`), retried 10 times on `PermissionError` at 20 to 180 ms. Windows refuses to replace a file another process holds open. There is **no in-place fallback**: a holder that never lets go makes the compile exit non-zero with the previous file whole, and the temp is removed. Rampage's measurement, quoted in the comment: written in place, 2,275 and 2,136 empty reads in two 5 s runs against a reader loop; replaced, none. **Adaptations:** `time` is imported at module top, where rampage imported it in the loop. The schedule is cited against `src/permissions.js` writeFileAtomicSync, because rampage's `src/fs-atomic.js` is not ported. **Test**, in test/recall-py.sh: "the gates write replaces the file rather than truncating it, and leaves no .tmp residue". The file id (`st_ino`) must change across a recompile. Reverting to an in-place write fails it on the file-id assertion. |
+| G3: an unreadable store made discovery compile the next-largest store's gates, exit 0 | **PORTED**, `452a752` (rampage `7139659`) | `_discover_memory_dir` records each store it cannot read, and a projects root it cannot list for any reason but absence (`memory/recall.py:167#_DISCOVERY_ERRORS`). `compile_gates` refuses on any of them before reading or writing (`memory/recall.py:1343#_DISCOVERY_ERRORS`), and names the store. Search and `--lint` still run on such a pick and warn. An explicit `RECALL_MEMORY_DIR` skips discovery. The extension passes one whenever memoryReport has a store, so this is mostly the CLI's and a bare run's path. **Tests**, in test/recall-py.sh: "a store discovery cannot read stops --gates-compile, which names it and writes nothing" (os.listdir raises for the largest store inside the harness; the control is the same home compiling with nothing denied), and "a home with no ~/.claude/projects is a fresh machine, and its gates compile stays a no-op". Three mutations, each failing one assertion: delete the refusal; drop the per-store append; record the root's `FileNotFoundError`. |
 | G2: the gates install read the compiled file once for its check and then re-read it in the block body | **PORTED**, `659be23` (rampage `7139659`) | **Counted** with a readFileSync wrapper, for one `setGatesAll(true)` over Claude and Codex: 5 reads of `gates.generated.md` before, 1 after. A read that failed (EBUSY while a writer held it) or came back truncated after the check had passed installed an empty or partial block and reported success. Rampage measured it: 23 of 38 first-time migrations replaced the user's gates with an empty block. **What changed:** `setGatesAll` reads once and builds the block from that string (`src/agent-gates.js:217#setGatesAll`), and `gatesStatusAll` reads once too. A null read is refused (`src/agent-gates.js:194#refusalFor`). A compile whose gates do not hash to the sha in its own header is refused (`src/agent-gates.js:88#compiledIsWhole`), and so is a read torn inside the header line, which used to pass as headerless. A headerless file is still taken as it is. **Adaptations:** kept the Codex target and `setGuidanceAll`'s override selection, the existing markers and the `pre-gates` backup name. Dropped rampage's legacy block, `escape` and `targets.js` arguments. The refusals name `wildcard-perms`. **Tests**, test/agent-gates.test.js: rampage's four ("read once per write", "cannot be read is refused", "do not match its own header sha", "torn inside its own header line", at six cuts). Each fails with its fix reverted, and all four fail with the whole file reverted. "a compile shaped exactly as recall.py writes it installs" is a control and passes on the old code. |
 | G6: `src/agent-gates.js` said gates need `type: feedback` + `scope: global` (backlog gap 3) | **FIXED**, `659be23` | The header now says selection is on `scope: global` alone, that `type:` plays no part, and that only one store compiles. Comment only, so no test. |
-| G4: the managed-block writer matched markers as substrings, rewrote non-UTF-8 files, swept bare `\n` only, kept one backup slot and replaced symlinks | **PORTED**, `edec1fa` (rampage `7139659`), patched into `src/agent-guidance.js` in place | Not imported, because `derived-guidance.js` and `codex-memory-gates.js` build their blocks with this module's `createManagedBlock`. They inherit the new marker, fence and CRLF rules, and the lock at the real path, through `withInstructionLock`. **What changed:** (a) Markers count only as whole lines, after a byte-order mark on line 1 (`src/agent-guidance.js:153#markerLineAt`). A pair wholly inside a closed code fence is an example (`src/agent-guidance.js:175#fencedSpans`). The range starts at the last begin line before the first end line. (b) Removal counts `\r\n` and `\n` as one terminator each and keeps the user's own bytes. Only the install's own blank line goes, and a file holding only a BOM takes the block straight after it. (c) The file is read as bytes. A file that does not round-trip through UTF-8, or holds a NUL, is refused with nothing written or backed up (`src/agent-guidance.js:392#readInstructionFile`). (d) Two backups from the raw bytes: `<name>` is written once and never overwritten, and `<name>-prev` holds the file before the latest change. (e) A symlinked file is written through to its target and locked there (`src/agent-guidance.js:416#writablePath`), and a link to a missing file is refused. **Adaptations:** the rolling slot is per block and per file, `CLAUDE.md.pre-gates-prev`, where rampage's is per file (`*.rampage-prev`). An INACTIVE Codex file that is not UTF-8 and holds no block blocks nothing (`src/agent-guidance.js:445#blocksCleanup`). Without that, a UTF-16 `AGENTS.md` shadowed by a nonempty override stopped guidance and gates being installed in the override at all. **inPlaceFallback, decided:** this repo's `writeFileAtomicSync` stays. The unattended writers pass `inPlaceFallback: false`: `ensureGates` and `ensureGuidance` (activation, the compiled-file watcher, the corpus recompile) and `--gates refresh` (`bin/wildcard-perms:942#inPlaceFallback`). Their update is redone by the next activation, recompile or session. An in-place write truncates and refills CLAUDE.md or AGENTS.md while any new session may be loading it, and the 2026-10-14 audit measured it running on every write once a holder kept the file open 0.9 s or more. The interactive toggles and the CLI's on/off keep the fallback, because a person sees the result. **Tests**, test/agent-guidance.test.js, ported: "a lock that cannot be created for a sharing reason is a busy row", "not UTF-8 text is refused byte for byte", the two stand-in symlink tests, "the first-ever backup is kept for good", "removal between CRLF lines", "an editor saves as CRLF", "only the install's own blank line goes", "a byte-order mark is not user text", "a marker quoted in the user's prose", "a begin line left on its own", "inside a closed code fence", "a fence can hide only a pair it encloses". New: the BOM-and-CRLF `AGENTS.md` round trip through `setGuidanceAll` (on, status, off, an editor-saved copy, a block at the very top); "an inactive Codex file that is not UTF-8 and holds no block blocks nothing"; "inPlaceFallback: false leaves a held instruction file untouched". Also new: an activation test with a held CLAUDE.md (test/extension-activation.test.js), and a CLI refresh test against a held CLAUDE.md (test/cli-gates.test.js). Twenty mutations of the two modules, two of the extension's calls and one of the CLI's call, each killed. With `src/agent-guidance.js` reverted whole, 12 of these tests fail. Four pass on the old file by design: "removal between CRLF lines" (the old arithmetic agrees on that input), the fence-encloses control, and the inactive UTF-16 case all guard the new code's edges; the sharing-lock row rides on G5's policy-lock change and fails when isContended answers EEXIST alone. **Skipped:** "a real symbolic link survives the write". It needs the symlink privilege, which Windows reserves for an elevated or Developer Mode session, and the stand-ins cover the path. Also skipped: the legacy, `escape` and `requireBlock` cases. "a string target backs up beside the file" is not ported either, see the residual below. |
+| G4: the managed-block writer matched markers as substrings, rewrote non-UTF-8 files, swept bare `\n` only, kept one backup slot and replaced symlinks | **PORTED**, `edec1fa` (rampage `7139659`), patched into `src/agent-guidance.js` in place | Not imported, because `derived-guidance.js` and `codex-memory-gates.js` build their blocks with this module's `createManagedBlock`. They inherit the new marker, fence and CRLF rules, and the lock at the real path, through `withInstructionLock`. **What changed:** (a) Markers count only as whole lines, after a byte-order mark on line 1 (`src/agent-guidance.js:153#markerLineAt`). A pair wholly inside a closed code fence is an example (`src/agent-guidance.js:175#fencedSpans`). The range starts at the last begin line before the first end line. (b) Removal counts `\r\n` and `\n` as one terminator each and keeps the user's own bytes. Only the install's own blank line goes, and a file holding only a BOM takes the block straight after it. (c) The file is read as bytes. A file that does not round-trip through UTF-8, or holds a NUL, is refused with nothing written or backed up (`src/agent-guidance.js:392#readInstructionFile`). (d) Two backups from the raw bytes: `<name>` is written once and never overwritten, and `<name>-prev` holds the file before the latest change. (e) A symlinked file is written through to its target and locked there (`src/agent-guidance.js:416#writablePath`), and a link to a missing file is refused. **Adaptations:** the rolling slot is per block and per file, `CLAUDE.md.pre-gates-prev`, where rampage's is per file (`*.rampage-prev`). An INACTIVE Codex file that is not UTF-8 and holds no block blocks nothing (`src/agent-guidance.js:445#blocksCleanup`). Without that, a UTF-16 `AGENTS.md` shadowed by a nonempty override stopped guidance and gates being installed in the override at all. **inPlaceFallback, decided:** this repo's `writeFileAtomicSync` stays. The unattended writers pass `inPlaceFallback: false`: `ensureGates` and `ensureGuidance` (activation, the compiled-file watcher, the corpus recompile) and `--gates refresh` (`bin/wildcard-perms:1156#inPlaceFallback`). Their update is redone by the next activation, recompile or session. An in-place write truncates and refills CLAUDE.md or AGENTS.md while any new session may be loading it, and the 2026-10-14 audit measured it running on every write once a holder kept the file open 0.9 s or more. The interactive toggles and the CLI's on/off keep the fallback, because a person sees the result. **Tests**, test/agent-guidance.test.js, ported: "a lock that cannot be created for a sharing reason is a busy row", "not UTF-8 text is refused byte for byte", the two stand-in symlink tests, "the first-ever backup is kept for good", "removal between CRLF lines", "an editor saves as CRLF", "only the install's own blank line goes", "a byte-order mark is not user text", "a marker quoted in the user's prose", "a begin line left on its own", "inside a closed code fence", "a fence can hide only a pair it encloses". New: the BOM-and-CRLF `AGENTS.md` round trip through `setGuidanceAll` (on, status, off, an editor-saved copy, a block at the very top); "an inactive Codex file that is not UTF-8 and holds no block blocks nothing"; "inPlaceFallback: false leaves a held instruction file untouched". Also new: an activation test with a held CLAUDE.md (test/extension-activation.test.js), and a CLI refresh test against a held CLAUDE.md (test/cli-gates.test.js). Twenty mutations of the two modules, two of the extension's calls and one of the CLI's call, each killed. With `src/agent-guidance.js` reverted whole, 12 of these tests fail. Four pass on the old file by design: "removal between CRLF lines" (the old arithmetic agrees on that input), the fence-encloses control, and the inactive UTF-16 case all guard the new code's edges; the sharing-lock row rides on G5's policy-lock change and fails when isContended answers EEXIST alone. **Skipped:** "a real symbolic link survives the write". It needs the symlink privilege, which Windows reserves for an elevated or Developer Mode session, and the stand-ins cover the path. Also skipped: the legacy, `escape` and `requireBlock` cases. "a string target backs up beside the file" is not ported either, see the residual below. |
 | G5: a sharing error creating a lock crashed the writer; a `null` lock was never reclaimable; a live pid was honoured forever | **PORTED, SCOPED**, `5c9c4e0` (rampage `7139659`) | (a) EPERM, EACCES and EBUSY creating the lock are a busy lock (`src/policy-lock.js:34#isContended`), as EEXIST was. The codes are src/permissions.js RETRYABLE_RENAME_CODES, the one shared set, looked up lazily on the failure path, because test/rename-retry-policy.test.js forbids a second spelling of it (a literal Set failed that census on the first full run). A code other than EEXIST is named in the message and kept as `cause`. A sharing code from the metadata write, after this process created the lock, is still its own failure. (b) The lock is read through `Object(JSON.parse(...))`. (c) Reclaiming a lock whose pid answers, or cannot be probed, once it passes the stale window is an **opt-in**, `reclaimLiveWhenStale` (`src/policy-lock.js:65#reclaimLiveWhenStale`). Only `withInstructionLock` (30 s) passes it. The drain hook, `withPolicyLock` and Auto Learn share `POLICY_LOCK_PATH` with a ten-minute window. A scan that outlasts that window is still a live writer of settings.json, so they never reclaim a live holder. (d) `POLICY_LOCK_PATH` and `POLICY_LOCK_BUSY_MESSAGE` stay exported; rampage deleted both. The CLI's `withPolicyLock` prints the busy error's own message, so a permanent EACCES no longer reads as "Auto Learn is mid-scan". **Tests**, test/policy-lock.test.js: rampage's four (the live pid and the EPERM probe under the opt-in; non-object JSON; sharing codes busy and named; a metadata-write EACCES stays EACCES). Added: "without the opt-in, a live-pid holder is never reclaimed, however old its lock is". It also pins that only `src/agent-guidance.js` passes the opt-in. Added in test/agent-guidance.test.js: "an instruction lock older than its window is reclaimed even when its pid answers". Each fails under its mutation, and three fail with the whole file reverted. The metadata-write and no-opt-in tests are controls and pass on the old code. |
-| G7: `--gates refresh` printed advice to run itself, and swallowed a successful compile's stderr; `ensureGates` dropped every error | **PORTED**, `59d4655` (rampage `7139659`) | **What changed in refresh:** when the install is refused, refresh says what happened (`bin/wildcard-perms:947#refused`). It prints "compile failed, and nothing was installed (...)", with the reason when the compile was not empty, or "the compile found no scope:global gate blocks, so there is nothing to install". It no longer prints the refusal's "run `recall.py --gates-compile`" / "`--gates refresh`" advice. "Installing whatever was last compiled" is printed only when something was. A successful compile's stderr is passed through (`bin/wildcard-perms:930#compile.stderr`). The comment that said `--gates status` reports the staleness a failed compile leaves now says it cannot, and that `recall.py --lint` does. Refusal rows carry `refusal` and a bare `reason` beside `error` for this. AI Acolyte's `resolvedLaunch` spawn is kept. **Extension:** `ensureGates` writes each failed target's error to the output channel (`vscode-extension/extension.js:3726#failed`). That is the shared channel, named "Acolyte"; no channel is named "AI Acolyte". **Tests:** test/cli-gates.test.js "CLI --gates refresh says what happened, never advises refresh, and passes compile warnings through" (a compile that cannot run, and a stand-in python that warns and compiles nothing); test/extension-activation.test.js requires one log line for the held gates target. Each fails with its fix reverted. |
-| New: a `scope: global` gate in any store but the compile store was ignored in silence (backlog gap 1) | **FIXED by reporting**, `a9a2dbf` | The maintainer's decision: such gates are still never compiled; they are now reported. `recall.py --lint` names each other `~/.claude/projects/*/memory` store by folder name, with its count of gate memories that are not installed, and any store it could not read (`memory/recall.py:1197#_other_store_gates`). "Not installed" means the block's text is not one the compile store compiles, so a copied store is not reported for gates it shares. The section counts toward `clean:`. It avoids the phrase "not compiled", which verify-release.ps1's standing-order check fails on. One selection rule, `_gate_body` (`memory/recall.py:1178#_gate_body`), serves the compiler and the census, and the compiler's output is unchanged. The dashboard's gates card shows "N gates in other memory stores are not installed: <folder> (n)" from `otherStoreGates` (`vscode-extension/memoryLint.js:498#otherStoreGates`). It is called by `gatesCardData` with memoryReport's `dir` (the store compileGates pins) and that store's `gateBodies` (`vscode-extension/extension.js:3874#otherStores`). It is not part of memoryReport, whose syscall budget is pinned by test. **Measured** in one process, which is indicative only and not this file's fresh-process protocol: 4 other stores of 50 files cost 207 ms cold and 12.5 ms min / 15.7 ms p50 warm, one stat per file. So the answer is held for a minute per compile store and gate set (`vscode-extension/memoryLint.js:486#CENSUS_MAX_AGE_MS`), and a census reads a file only when its mtime or size changed. **Which store compiles is unchanged:** memory.dir when set, else the largest. **Tests:** test/recall-py.sh covers an other-store gate reported by folder and count and not compiled; compile bytes identical with and without that store; no section once no other store holds a gate; `RECALL_MEMORY_DIR` deciding the compile store; an unreadable store named. test/memory-lint-watchers.test.js has the same census in JS, the memory.dir pin, an unreadable store, the per-file memo, the one-store budget (one listing of `~/.claude/projects`) and the minute's cache. test/dashboard-view.test.js covers the card line, singular, hidden and unknown, and checks the census is asked about the compile store. Fifteen mutations, each killed. The `== primary` skip in the Python census is not separately falsifiable: the dedup already zeroes the compile store. The JS one is caught by the one-store budget. |
+| G7: `--gates refresh` printed advice to run itself, and swallowed a successful compile's stderr; `ensureGates` dropped every error | **PORTED**, `59d4655` (rampage `7139659`) | **What changed in refresh:** when the install is refused, refresh says what happened (`bin/wildcard-perms:1161#refused`). It prints "compile failed, and nothing was installed (...)", with the reason when the compile was not empty, or "the compile found no scope:global gate blocks, so there is nothing to install". It no longer prints the refusal's "run `recall.py --gates-compile`" / "`--gates refresh`" advice. "Installing whatever was last compiled" is printed only when something was. A successful compile's stderr is passed through (`bin/wildcard-perms:1144#compile.stderr`). The comment that said `--gates status` reports the staleness a failed compile leaves now says it cannot, and that `recall.py --lint` does. Refusal rows carry `refusal` and a bare `reason` beside `error` for this. AI Acolyte's `resolvedLaunch` spawn is kept. **Extension:** `ensureGates` writes each failed target's error to the output channel (`vscode-extension/extension.js:3733#failed`). That is the shared channel, named "Acolyte"; no channel is named "AI Acolyte". **Tests:** test/cli-gates.test.js "CLI --gates refresh says what happened, never advises refresh, and passes compile warnings through" (a compile that cannot run, and a stand-in python that warns and compiles nothing); test/extension-activation.test.js requires one log line for the held gates target. Each fails with its fix reverted. |
+| New: a `scope: global` gate in any store but the compile store was ignored in silence (backlog gap 1) | **FIXED by reporting**, `a9a2dbf` | The maintainer's decision: such gates are still never compiled; they are now reported. `recall.py --lint` names each other `~/.claude/projects/*/memory` store by folder name, with its count of gate memories that are not installed, and any store it could not read (`memory/recall.py:1205#_other_store_gates`). "Not installed" means the block's text is not one the compile store compiles, so a copied store is not reported for gates it shares. The section counts toward `clean:`. It avoids the phrase "not compiled", which verify-release.ps1's standing-order check fails on. One selection rule, `_gate_body` (`memory/recall.py:1186#_gate_body`), serves the compiler and the census, and the compiler's output is unchanged. The dashboard's gates card shows "N gates in other memory stores are not installed: <folder> (n)" from `otherStoreGates` (`vscode-extension/memoryLint.js:522#otherStoreGates`). It is called by `gatesCardData` with memoryReport's `dir` (the store compileGates pins) and that store's `gateBodies` (`vscode-extension/extension.js:3893#otherStores`). It is not part of memoryReport, whose syscall budget is pinned by test. **Measured** in one process, which is indicative only and not this file's fresh-process protocol: 4 other stores of 50 files cost 207 ms cold and 12.5 ms min / 15.7 ms p50 warm, one stat per file. So the answer is held for a minute per compile store and gate set (`vscode-extension/memoryLint.js:510#CENSUS_MAX_AGE_MS`), and a census reads a file only when its mtime or size changed. **Which store compiles is unchanged:** memory.dir when set, else the largest. **Tests:** test/recall-py.sh covers an other-store gate reported by folder and count and not compiled; compile bytes identical with and without that store; no section once no other store holds a gate; `RECALL_MEMORY_DIR` deciding the compile store; an unreadable store named. test/memory-lint-watchers.test.js has the same census in JS, the memory.dir pin, an unreadable store, the per-file memo, the one-store budget (one listing of `~/.claude/projects`) and the minute's cache. test/dashboard-view.test.js covers the card line, singular, hidden and unknown, and checks the census is asked about the compile store. Fifteen mutations, each killed. The `== primary` skip in the Python census is not separately falsifiable: the dedup already zeroes the compile store. The JS one is caught by the one-store budget. |
 | G8: rampage stops pinning `RECALL_MEMORY_DIR` for the compile | **NOT PORTED** | It conflicts with wave-f15 (S2 of the final pre-tag audit): `memory.dir` is machine-scoped, and the extension pins the compile store from it, so a repository cannot choose the corpus that becomes the user's standing orders. Kept as it is. Also not ported: rampage's legacy migration, `src/targets.js`, `src/fs-atomic.js`, the `rampage.*` settings and the model home. Seen in the same recall.py diff and out of this scope: the 200-line `MEMORY.md` cap in `--lint`, the `--selftest` reference tolerance, `_load_session` and the two-file model dir check. |
 
 **Residuals, not changed here:**
@@ -299,7 +394,7 @@ PostToolUse hook spawns nothing; `bin/wildcard-perms` has one spawn, behind `--g
 
 | Site | Program | Runs in | Bare name before | Planted copy could run | Disposition |
 |---|---|---|---|---|---|
-| `--gates refresh` (`bin/wildcard-perms:911#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
+| `--gates refresh` (`bin/wildcard-perms:1125#resolvedLaunch`) | `TOOLBOX_PYTHON`, else `python` | a SessionStart hook's cwd, the session's project (no installer registers one; a user can), or the shell's | yes, whenever `TOOLBOX_PYTHON` is unset | **yes**, reproduced | **FIXED**: found on PATH; nothing found still reads "spawnSync python ENOENT" |
 | `execFileCaptured` in vscode-extension/extension.js, "Why did this prompt?" | `autoLearn.codexExecutable`, default `codex` | the extension host's: wherever VS Code was started, per 1e11efa (not re-measured; listing a live host's directory handle needs elevation) | yes: commandLaunch handed an unresolved name back bare | **yes**, reproduced | **FIXED**: rejects with "spawn codex ENOENT", the words execFile used |
 | The version probe, both doors (`src/codex-version.js:254#commandLaunch`, `src/codex-version.js:311#commandLaunch`) | the located codex | `--learn status`: the shell's; the dashboard probe: the host's | only when the second PATH walk, made after the location was cached, found nothing | in that window only | **FIXED**: launches the identity's own file, so the launch and the cache key are one file |
 | Every `.cmd`/`.bat` launch (`src/exec-resolve.js:161#systemProgram`) | `ComSpec`, else `cmd.exe` | every caller's | yes, with ComSpec unset or relative | then | **FIXED**: ComSpec only when absolute, else System32's |
@@ -544,10 +639,10 @@ through Node's own open (which shares read, write and delete) made `writeFileAto
   to both of its writes, and through `drainLocalSettings` (`src/local-settings.js:219#inPlaceFallback`)
   to the drain's snapshot and its prune.
 - The hook passes `false` for every write it makes: the wildcarding write
-  (`bin/wildcard-perms:573#inPlaceFallback`) and the drain (`bin/wildcard-perms:609#inPlaceFallback`),
+  (`bin/wildcard-perms:593#inPlaceFallback`) and the drain (`bin/wildcard-perms:629#inPlaceFallback`),
   which carries it to the promotion into settings.json and to the snapshot and prune of
   settings.local.json. CONTENDED is handled like a busy policy lock
-  (`bin/wildcard-perms:602#SETTINGS_CONTENDED_CODE`): exit 0, nothing on stderr, nothing written,
+  (`bin/wildcard-perms:622#SETTINGS_CONTENDED_CODE`): exit 0, nothing on stderr, nothing written,
   and the next tool call redoes the pass, which is idempotent. The fixed-point cache needed no
   change. It writes with a plain `writeFileSync`, where a torn key is a miss, and the hook records
   a key only for bytes it verified as a fixed point, never after a write attempt. So a contended
@@ -1678,7 +1773,7 @@ already a fixed point, which is the only state in which it must fire zero times.
   inert. **A future transform whose side effects are not idempotent must not use
   this writer** — now stated in the code as well.
 - **The fixed-point code stamp covers `permissions.js` and `permission-match.js`
-  but not `settings?.permissions?.allow` at `bin/wildcard-perms:460#allow`,** where the
+  but not `settings?.permissions?.allow` at `bin/wildcard-perms:480#allow`,** where the
   allow array the pass runs on is extracted. Changing *which* field feeds the
   pass would not invalidate existing keys.
 - **12 module-level frozen-home constants**, not the 8 recorded earlier: 6 in
@@ -1933,13 +2028,13 @@ Today `runWildcarding` satisfies that **by accident of structure** — its
 `readSettings()` happens to sit inside the lock, so the snapshot is nearly
 `latest`. **Moving the read out of the lock without an authoritative in-lock
 re-read and recompute reintroduces the MAX / `Bash(npm test)` deletion bug**
-that the note above `wildcardUnderLock` (`bin/wildcard-perms:549-554#DISCARDED`) guards
+that the note above `wildcardUnderLock` (`bin/wildcard-perms:569-574#DISCARDED`) guards
 against. Its worked `Bash(npm test)` example left that note with MAX in `d947565`, so Git
 holds the full text.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3134-3136#rides`);
+  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3141-3143#rides`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -1962,7 +2057,7 @@ rebuilt, deny-only edits lost, poisoning the memo on a busy-lock-deferred pass
 
 Also worth folding in eventually: activation takes **two** lock acquisitions
 back to back — `runWildcarding()` then `drainLocal()` — which is the shape
-`bin/wildcard-perms:487-500#ONE` ("ONE lock acquisition covering both jobs") was
+`bin/wildcard-perms:507-520#ONE` ("ONE lock acquisition covering both jobs") was
 deliberately fixed away from for the hook.
 
 ## `preMax` is misnamed, and the audit's read of it was wrong too
@@ -2466,7 +2561,7 @@ and `--selftest`, yet both are imported at module scope. `--lint`, `--lexical-on
 `--gates-compile` and `--list` therefore pay **237 min / 244 p50 ms** of imports they never
 touch, and `--gates-compile` is on the extension's corpus-watcher path.
 
-**That was fixed and this entry did not say so.** `memory/recall.py:104-105#_LazyModule` now binds both
+**That was fixed and this entry did not say so.** `memory/recall.py:111-112#_LazyModule` now binds both
 through a `_LazyModule` proxy (`np = _LazyModule("numpy")`, `ort = _LazyModule("onnxruntime")`),
 and the comment at line 51 records the change from the old `import onnxruntime, numpy`.
 Verified 2026-09-27 rather than read off the source: `python -X importtime recall.py --lint`
@@ -2543,7 +2638,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:4897#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:4918#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

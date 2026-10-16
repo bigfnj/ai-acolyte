@@ -17,7 +17,10 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
-**Released 2026-10-16 as 1.7.0.** The Saved permissions card counts how often each Claude rule
+**Released 2026-10-16 as 1.7.0.** The tag `v1.7.0` is at `0c7ad66`. CI is green on all 8 jobs. The
+published asset matches the local build in all 61 entries, apart from line endings. The installed
+drive passed 15 of 15 and the real-editor drive 6 of 6. The live worktree has moved to the tag.
+The Saved permissions card counts how often each Claude rule
 is used and offers the rules with no use found for review. A new Agent sessions row lists the
 sessions active in the last 15 minutes. Both came from AgentFlow. The record has them under
 "Rule use and agent sessions, from AgentFlow", including the AgentFlow features that were declined.

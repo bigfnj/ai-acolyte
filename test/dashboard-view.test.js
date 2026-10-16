@@ -780,7 +780,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3424#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3430#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2045,7 +2045,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:2880-2882#errors records — a file that failed every
+// defect src/auto-learn-manager.js:2893-2895#errors records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which
@@ -2213,7 +2213,7 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
   // the counts that gate an auto-safe apply. That protected set has had a ceiling of its
   // own since 455ab97, but a family carrying a human decision is never evicted to meet
   // it, so the map can still stay over its limit after the prune has done all it can
-  // (src/auto-learn-manager.js:1057-1060#evictable, which also says that residue is all
+  // (src/auto-learn-manager.js:1063-1066#evictable, which also says that residue is all
   // `retainedObservations` reports now; before 455ab97 the set had no bound at all).
   //
   // It was reported to the state file and to the CLI. The panel, which is the only UI
@@ -2511,6 +2511,47 @@ test('a skipped unreadable stretch is trouble, unlike a deferral', async (t) => 
     const none = structuredClone(data);
     none.autoLearn.scan.unreadable = 0;
     assert.match(renderDashboard(app.provider, none).alScanHealth, /read 9 files cleanly/);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// Codex compresses idle rollouts to .jsonl.zst (2026-10-16). A runtime with no
+// zstd, or a file past the decompression ceiling, cannot read one, and gets the
+// same answer on every scan: said beside the verdict, never the verdict, or the
+// row would read "scan degraded" for good, the false alarm this whole class is.
+test('a compressed transcript the scan could not read is said, and is not a degraded scan', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const app = harness(env.tempHome, { settings: { 'autoLearn.enabled': true } });
+  try {
+    seedAutoLearnState(env.tempHome, { ...SCAN_SEED, compressedUnsupported: 2, compressedOversize: 1 });
+
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.scan.compressedUnsupported, 2, 'witness:compressed-count -- the count never reached the panel');
+    assert.equal(data.autoLearn.scan.compressedOversize, 1);
+    const rendered = renderDashboard(app.provider, data);
+    assert.match(rendered.alScanHealth,
+      /✓ last scan read 9 files cleanly · 2 compressed transcripts not read \(this runtime has no zstd\) · 1 compressed transcript not read \(over 256 MB decompressed\)/,
+      `the card body said "${rendered.alScanHealth}"`);
+    assert.doesNotMatch(rendered.stAutoLearn, /degraded/,
+      'witness:compressed-not-trouble -- a compressed transcript the runtime cannot read badged the row as degraded');
+
+    // The control: real trouble beside it still degrades the row, and the note
+    // is still said rather than swallowed.
+    const troubled = structuredClone(data);
+    troubled.autoLearn.scan.errors = 1;
+    const both = renderDashboard(app.provider, troubled);
+    assert.match(both.alScanHealth, /1 unreadable file · 2 compressed transcripts not read/);
+    assert.equal(both.stAutoLearn, 'scan degraded');
+    const clean = structuredClone(data);
+    clean.autoLearn.scan.compressedUnsupported = 0;
+    clean.autoLearn.scan.compressedOversize = 0;
+    assert.doesNotMatch(renderDashboard(app.provider, clean).alScanHealth, /compressed/);
   } finally {
     await app.dispose();
   }

@@ -1091,7 +1091,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:2996#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:3002#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1463,7 +1463,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5824#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:5841#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1539,7 +1539,7 @@ function autoLearnEvidence(cfg) {
 // that DID return, reporting that part of the corpus was unreadable, and they
 // were visible nowhere in the UI while `bin/wildcard-perms --learn scan` printed
 // every one of them. That is the exact shape of the defect that sat unnoticed for
-// eight days (src/auto-learn-manager.js:2880-2882#errors: "`errors` was computed here
+// eight days (src/auto-learn-manager.js:2893-2895#errors: "`errors` was computed here
 // all along and then not returned, so a file that failed every scan for eight
 // days was invisible"). Surfacing it in the CLI and not in the panel most users
 // live in only moves where it hides.
@@ -1594,6 +1594,8 @@ function autoLearnScanHealth(stats) {
       f && typeof f.name === 'string' && f.name && !/[\\/]/.test(f.name)).map((f) => ({ name: f.name, link: f.link === true })),
     // Budget deferral is catch-up, drawn beside what is left; a skipped stretch is lost bytes, and trouble.
     deferredBytes: count(stats.deferredBytes), unreadable: count(stats.unreadable),
+    // Compressed Codex transcripts not read, by why. Said beside the verdict, never trouble.
+    compressedUnsupported: count(stats.compressedUnsupported), compressedOversize: count(stats.compressedOversize),
   };
 }
 
@@ -1718,12 +1720,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5857#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:5874#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2775#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2781#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -2455,6 +2457,10 @@ function registerAutoLearnWatchers(context) {
     // Flat, no date folders: archiving moves a rollout here (2026-10-13), and
     // the scan reads it, so a move is a change worth a scan.
     [CODEX_HOME_DIR, 'archived_sessions/*.jsonl'],
+    // Codex compresses idle rollouts in place to .jsonl.zst (2026-10-16), and
+    // archives compressed ones too: either move only touches the .zst.
+    [CODEX_HOME_DIR, 'sessions/**/*.jsonl.zst'],
+    [CODEX_HOME_DIR, 'archived_sessions/*.jsonl.zst'],
   ]) {
     try {
       const watcher = vscode.workspace.createFileSystemWatcher(
@@ -5277,13 +5283,24 @@ class WildcardingViewProvider {
     if (trouble.length) {
       health.className = 'memissues';
       health.style.color = 'var(--vscode-charts-yellow, #d29922)';
-      health.textContent = '⚠ last scan: ' + trouble.join(' · ') + catchUp(s);
+      health.textContent = '⚠ last scan: ' + trouble.join(' · ') + catchUp(s) + notRead(s);
     } else {
       health.className = 'memissues muted';
       health.style.color = '';
       health.textContent = '✓ last scan read ' + s.files + ' file' + (s.files === 1 ? '' : 's')
-        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '') + catchUp(s);
+        + ' cleanly' + (s.pruned ? ' · ' + s.pruned + ' pruned' : '') + catchUp(s) + notRead(s);
     }
+  }
+
+  // Compressed Codex transcripts the scan did not read, and why. Beside the
+  // verdict, never trouble: the runtime or the size decides it, and the answer is
+  // the same on every scan. Codex compresses a rollout only once it has gone idle
+  // (eight days or more, measured 2026-10-16), so a scan that was running then
+  // read it while it was still plain.
+  function notRead(s) {
+    const phrase = (n, why) => ' · ' + n + ' compressed transcript' + (n === 1 ? '' : 's') + ' not read (' + why + ')';
+    return (s.compressedUnsupported ? phrase(s.compressedUnsupported, 'this runtime has no zstd') : '')
+      + (s.compressedOversize ? phrase(s.compressedOversize, 'over 256 MB decompressed') : '');
   }
 
   // A file the per-scan ingest budget deferred is CATCH-UP: the cursor stopped

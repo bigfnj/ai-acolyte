@@ -788,6 +788,12 @@ function scanStats(value) {
     // is results whose call the scan could not reach -- normal in small numbers,
     // evidence of a problem when it persists, so counted rather than inferred.
     partial: count('partial'), deferredBytes: count('deferredBytes'), unreadable: count('unreadable'),
+    // Compressed Codex transcripts (`.jsonl.zst`) a scan did not read, by why:
+    // the runtime has no zstd, or the file is past the decompression ceiling.
+    // Both are said and neither is trouble, because both are the same answer on
+    // every scan and neither is a fault of the data (history-adapters.js,
+    // COMPRESSED_SUFFIX).
+    compressedUnsupported: count('compressedUnsupported'), compressedOversize: count('compressedOversize'),
     unmatchedResults: count('unmatchedResults'),
     prunedObservations: count('prunedObservations'),
     // Dedupe entries the cap could not evict because their families are still
@@ -993,7 +999,7 @@ function changeOutcome(item, before, after, source) {
 // deduped by `observationHashes`, so it cannot inflate a count", and for the
 // files it evicts that was false. A cursor-less file takes `mode: 'full'`
 // (`safeContinuation` returns false with no prior), a full read emits every
-// observation in the file wholesale (`src/history-adapters.js:2278#selected`), and each
+// observation in the file wholesale (`src/history-adapters.js:2487#selected`), and each
 // one whose hash is gone is counted again -- into `counts.success`, which is
 // what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
 // on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with
@@ -2742,6 +2748,10 @@ function createAutoLearnManager(options = {}) {
       let rebuildWaitingFor = []; // missingFolders, the same folders as data (scanStats)
       if (rebuildingCodex) {
         const codexFiles = scannedFiles.filter((entry) => entry.source === 'codex');
+        // Not `skipped`: a compressed transcript this runtime cannot read, or one
+        // past the ceiling, gets the same answer on every scan, so holding the
+        // rebuild open for it would block auto-safe apply for good. Its cursor is
+        // carried forward, and a runtime that can read it does.
         const incomplete = codexFiles.filter((entry) =>
           ['error', 'partial', 'unreadable'].includes(entry.mode) || Number(entry.unmatchedResults) > 0);
         const pendingFiles = new Set(state.codexEvidencePendingFiles);
@@ -2875,6 +2885,9 @@ function createAutoLearnManager(options = {}) {
         return total + (Number.isFinite(left) && left > 0 ? left : 0);
       }, 0);
       const unreadable = scanned.filter((item) => item.mode === 'unreadable').length;
+      const skipped = (reason) => scanned.filter((item) => item.mode === 'skipped' && item.reason === reason).length;
+      const compressedUnsupported = skipped('zstd-unavailable');
+      const compressedOversize = skipped('too-large');
       state.lastScanAt = now();
       state.lastScanStats = {
         files: Array.isArray(result.files) ? result.files.length : Object.keys(state.cursors).length,
@@ -2884,6 +2897,8 @@ function createAutoLearnManager(options = {}) {
           ? result.files.filter((item) => item.mode === 'partial').length : 0,
         deferredBytes,
         unreadable,
+        compressedUnsupported,
+        compressedOversize,
         unmatchedResults: Array.isArray(result.files)
           ? result.files.reduce((total, item) => total + (Number(item.unmatchedResults) || 0), 0) : 0,
         prunedObservations,
@@ -2919,6 +2934,8 @@ function createAutoLearnManager(options = {}) {
         partial: state.lastScanStats.partial,
         deferredBytes: state.lastScanStats.deferredBytes,
         unreadable: state.lastScanStats.unreadable,
+        compressedUnsupported: state.lastScanStats.compressedUnsupported,
+        compressedOversize: state.lastScanStats.compressedOversize,
         unmatchedResults: state.lastScanStats.unmatchedResults,
         prunedObservations, retainedObservations,
         prunedCursors: prunedCursorCount, prunedCandidates: prunedCandidatesTotal, prunedGrants,

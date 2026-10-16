@@ -264,9 +264,9 @@ test('a derived block never disturbs the static shell-style block', () => {
 // It is read from `~/.claude/remote-settings.json`, a local client-refreshed
 // cache, and it lands inside a code span in the user's own instruction file. The
 // two sources that feed `costliestRules` disagreed about sanitising it: the
-// managed-hits side cleans it (`auto-learn-manager.js:2657#observation.managedRule`, and
-// `auto-learn-manager.js:2552#observation.managedRule` in its recount), while the inert-family
-// side reached `addCost` raw (`auto-learn-manager.js:1810#family.rule`; addCost has cleaned it
+// managed-hits side cleans it (`auto-learn-manager.js:2663#observation.managedRule`, and
+// `auto-learn-manager.js:2558#observation.managedRule` in its recount), while the inert-family
+// side reached `addCost` raw (`auto-learn-manager.js:1816#family.rule`; addCost has cleaned it
 // too since 20959d2). So any local process able to write that cache could choose text
 // that closed the code span, broke the block, or forged a marker line.
 

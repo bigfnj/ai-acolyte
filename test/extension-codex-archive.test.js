@@ -137,6 +137,13 @@ test('a real scan reads the archive, watches it, and logs each Codex reason once
       && path.resolve(pattern.base.fsPath) === path.resolve(codex)),
     `witness:archive-watcher -- nothing watches the folder archiving moves rollouts into: ${
       JSON.stringify(watchers.map((pattern) => pattern.pattern))}`);
+    // Codex compresses idle rollouts in place (2026-10-16), and archives the
+    // compressed ones: in both folders, a move then touches only the .zst.
+    for (const glob of ['sessions/**/*.jsonl.zst', 'archived_sessions/*.jsonl.zst']) {
+      assert.ok(watchers.some((pattern) => pattern.pattern === glob
+        && path.resolve(pattern.base.fsPath) === path.resolve(codex)),
+      `witness:compressed-watcher -- nothing watches ${glob}: ${JSON.stringify(watchers.map((pattern) => pattern.pattern))}`);
+    }
 
     await commands.get('permission-wildcarding.autoLearnScan')();
     first = logged().slice();

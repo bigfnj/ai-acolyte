@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const { isLearnableTool, toolTarget, toolPath } = require('./tool-learn');
@@ -31,6 +32,31 @@ const INGEST_HARD_MAX_BYTES = 256 * 1024 * 1024;
 // landed after the cursor. It used to re-read the whole file, which is what
 // made a 2 GiB transcript cost 570 ms of every tick without ever finishing.
 const RECONCILE_MAX_BYTES = 64 * 1024 * 1024;
+// CODEX COMPRESSES ITS OLDER ROLLOUTS IN PLACE. MEASURED 2026-10-16 on the
+// development box: nine of the seventeen rollouts had become
+// `rollout-<ts>-<uuid>.jsonl.zst` (zstd, one frame, the content size declared in
+// the frame header), in both `sessions/YYYY/MM/DD/` and `archived_sessions/`.
+// Every compressed one was last written eight or more days earlier and every
+// plain one within three, so it looks like idle time, not creation date (a plain
+// rollout created 2026-10-02 was still being written on 10-14). Codex's own
+// records go on naming the `.jsonl`:
+// `state_5.sqlite` `threads.rollout_path` still ends in `.jsonl`, and the
+// history store's cursor (`next_rollout_byte_offset`) equals the DECOMPRESSED
+// size for all nine. A reader that took `.jsonl` only lost those threads, and the
+// history-store check called them orphans: "scan degraded" for good, over a
+// store that had diverged from nothing.
+//
+// So a `.jsonl.zst` is a transcript. It is decompressed whole into memory and
+// read from there with exactly the logic a plain file gets (cursor, ingest cap,
+// append, reconcile), through `readRange` taking the Buffer in place of a path.
+// Node added `zlib.zstdDecompressSync` in v23.8.0 / v22.15.0; on an older runtime
+// the file is reported `skipped` and never read, which is a property of the
+// runtime, like the sqlite tier, and not an error. The ceiling is the widened
+// read's, so no compressed transcript costs more memory than the worst plain
+// read does: the largest measured is 170,042,613 bytes, decompressed in 0.5 s.
+const COMPRESSED_SUFFIX = '.zst';
+const COMPRESSED_MAX_BYTES = INGEST_HARD_MAX_BYTES;
+const ZSTD_DECOMPRESS = typeof zlib.zstdDecompressSync === 'function' ? zlib.zstdDecompressSync : null;
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -1639,7 +1665,7 @@ function findJsonlFiles(root, source, output, failures, missing) {
       try { stat = fs.statSync(current); } catch (error) { note(current, error); continue; }
     }
     if (stat && stat.isFile()) {
-      if (current.toLowerCase().endsWith('.jsonl')) output.push({ source, path: path.resolve(current) });
+      if (isTranscriptName(current)) output.push({ source, path: path.resolve(current) });
       continue;
     }
     if (stat && !stat.isDirectory()) continue;
@@ -1685,7 +1711,7 @@ function findJsonlFiles(root, source, output, failures, missing) {
         pending.push({ path: child, dir: true, canonical: canonical + path.sep + name });
       }
       else if (entry.isSymbolicLink()) pending.push(child);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl')) {
+      else if (entry.isFile() && isTranscriptName(entry.name)) {
         output.push({ source, path: path.resolve(child) });
       }
     }
@@ -1701,6 +1727,12 @@ function hashBuffer(buffer) {
 // and a cap that only its own default can reach is a guard nothing can prove.
 function readRange(file, start, length, chunk = READ_CHUNK_BYTES) {
   if (length <= 0) return Buffer.alloc(0);
+  // A compressed transcript's decompressed bytes, already in memory
+  // (COMPRESSED_SUFFIX above): the same range, without a copy, and short at the
+  // end exactly where a read of a file that size would be.
+  if (Buffer.isBuffer(file)) {
+    return file.subarray(Math.min(start, file.length), Math.min(start + length, file.length));
+  }
   const descriptor = fs.openSync(file, 'r');
   try {
     const buffer = Buffer.allocUnsafe(length);
@@ -1727,6 +1759,124 @@ function readRange(file, start, length, chunk = READ_CHUNK_BYTES) {
     // theirs for the same reason; this was the one that did not.
     try { fs.closeSync(descriptor); } catch {}
   }
+}
+
+// A transcript name, as the scanner's walk and the history-store probe's walk
+// both recognise one: `.jsonl`, or `.jsonl.zst` once Codex has compressed it.
+function isTranscriptName(name) {
+  const lower = String(name).toLowerCase();
+  return lower.endsWith('.jsonl') || lower.endsWith(`.jsonl${COMPRESSED_SUFFIX}`);
+}
+
+function isCompressedTranscript(file) {
+  return String(file).toLowerCase().endsWith(`.jsonl${COMPRESSED_SUFFIX}`);
+}
+
+// The content size a zstd frame header declares, or null where it declares
+// none (the field is optional) or the bytes are not a zstd frame. RFC 8878
+// section 3.1.1.1: the magic number, then a descriptor byte whose top two bits
+// size the field and whose Single_Segment bit both drops the window byte and
+// turns a 0 flag into a 1-byte field; a 2-byte value is stored minus 256.
+//
+// ONE FRAME'S size. A file of several frames declares only its first here, so
+// this is a claim to check against, never a length to read to.
+function zstdContentSize(file) {
+  let head;
+  try { head = readRange(file, 0, 18); } catch { return null; }
+  if (head.length < 6 || head.readUInt32LE(0) !== 0xFD2FB528) return null;
+  const descriptor = head[4];
+  const single = (descriptor >> 5) & 1;
+  const width = [single ? 1 : 0, 2, 4, 8][descriptor >> 6];
+  if (!width) return null;
+  const at = 5 + (single ? 0 : 1) + [0, 1, 2, 4][descriptor & 3];
+  if (head.length < at + width) return null;
+  if (width === 1) return head[at];
+  if (width === 2) return head.readUInt16LE(at) + 256;
+  if (width === 4) return head.readUInt32LE(at);
+  const value = head.readBigUInt64LE(at);
+  return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+}
+
+// Where each frame of a zstd file ends, from the frame and block headers alone
+// (RFC 8878 section 3.1), or null when the bytes are not a whole number of
+// complete frames. Skippable frames are stepped over.
+//
+// WHY THE WALK, MEASURED 2026-10-16 on Node 24.19.0: `zstdDecompressSync`
+// decompresses the FIRST frame of a multi-frame file and returns it as if it
+// were all of it, and given a file cut in half it returns a short buffer (0 of
+// 300,000 bytes in the probe) without an error. Either would be read as a whole
+// transcript, the cursor would record the short length, and every later call in
+// it would be lost in silence. So the decompressor is handed one frame at a time
+// and only frames this walk proves complete.
+function zstdFrames(buffer) {
+  const frames = [];
+  let at = 0;
+  while (at < buffer.length) {
+    if (buffer.length - at < 8) return null;
+    const magic = buffer.readUInt32LE(at);
+    if ((magic & 0xFFFFFFF0) === 0x184D2A50) {
+      const end = at + 8 + buffer.readUInt32LE(at + 4);
+      if (end > buffer.length) return null;
+      at = end;
+      continue;
+    }
+    if (magic !== 0xFD2FB528) return null;
+    const descriptor = buffer[at + 4];
+    const single = (descriptor >> 5) & 1;
+    let cursor = at + 5 + (single ? 0 : 1) + [0, 1, 2, 4][descriptor & 3]
+      + [single ? 1 : 0, 2, 4, 8][descriptor >> 6];
+    for (;;) {
+      if (cursor + 3 > buffer.length) return null;
+      const header = buffer[cursor] | (buffer[cursor + 1] << 8) | (buffer[cursor + 2] << 16);
+      const type = (header >> 1) & 3;
+      if (type === 3) return null;
+      // A raw or compressed block stores Block_Size bytes; an RLE block stores one.
+      cursor += 3 + (type === 1 ? 1 : header >>> 3);
+      if (cursor > buffer.length) return null;
+      if (header & 1) break;
+    }
+    if ((descriptor >> 2) & 1) cursor += 4;
+    if (cursor > buffer.length) return null;
+    frames.push({ start: at, end: cursor });
+    at = cursor;
+  }
+  return frames;
+}
+
+// The whole of a compressed transcript, or why it was not read: `skip` is
+// 'zstd-unavailable' (the runtime has no decompressor) or 'too-large' (past
+// `maxBytes` decompressed). A file that is not complete zstd throws, and the
+// caller reports it as an unreadable file. `size` is the file's own: zstd's
+// encoder stores a block raw whenever compressing would enlarge it, so a file
+// already past the ceiling holds more than the ceiling, and it is refused
+// without being read into memory.
+function decompressTranscript(file, size, decompress, maxBytes) {
+  if (!decompress) return { skip: 'zstd-unavailable' };
+  if (size > maxBytes) return { skip: 'too-large' };
+  const packed = readRange(file, 0, size);
+  const frames = zstdFrames(packed);
+  if (!frames) throw new Error('compressed transcript is truncated or is not zstd');
+  const parts = [];
+  let total = 0;
+  for (const frame of frames) {
+    let part;
+    try {
+      part = decompress(packed.subarray(frame.start, frame.end), { maxOutputLength: Math.max(1, maxBytes - total) });
+    } catch (error) {
+      if (error?.code === 'ERR_BUFFER_TOO_LARGE') return { skip: 'too-large' };
+      throw error;
+    }
+    parts.push(part);
+    total += part.length;
+  }
+  return { bytes: parts.length === 1 ? parts[0] : Buffer.concat(parts, total), packedBytes: packed.length };
+}
+
+// What the cursor logic is told about a compressed transcript: the file's own
+// mtime and identity, with its DECOMPRESSED size, because that is the space every
+// offset and cursor is in.
+function transcriptStat(stat, size) {
+  return { size, mtimeMs: stat.mtimeMs, ino: stat.ino };
 }
 
 function fingerprintFile(file, size) {
@@ -1766,9 +1916,9 @@ function continuedFingerprint(prior, size) {
 // `session_meta` line. An append slice starts at `prior.size - overlapBytes`,
 // so the head is absent, both stay undefined, and the manager then drops the
 // observation outright when a workspace root is configured
-// (`src/auto-learn-manager.js:2608#within`, `within(root, undefined) === false`) --
+// (`src/auto-learn-manager.js:2614#within`, `within(root, undefined) === false`) --
 // or keeps it under a SECOND identity, because `session` is part of `identityParts`
-// (`src/history-adapters.js:95-97#identityParts`). Two ids for one call defeat the
+// (`src/history-adapters.js:121-123#identityParts`). Two ids for one call defeat the
 // `observationHashes` dedupe and inflate `counts.success`, which is what gates auto-safe apply.
 //
 // So the head line is re-read, and deliberately NOT cached on the cursor: a
@@ -2029,6 +2179,13 @@ function scanHistoryFiles(options = {}) {
   const ingestHardMax = Number.isFinite(options.ingestHardMaxBytes)
     ? Math.max(1, Math.floor(options.ingestHardMaxBytes))
     : INGEST_HARD_MAX_BYTES;
+  // Both injectable so a test can reach the two refusals: `null` is a runtime
+  // without zstd (Node before v22.15.0), and a small ceiling stands in for a
+  // quarter-gigabyte transcript.
+  const decompress = options.zstdDecompress !== undefined ? options.zstdDecompress : ZSTD_DECOMPRESS;
+  const compressedMaxBytes = Number.isFinite(options.compressedMaxBytes)
+    ? Math.max(1, Math.floor(options.compressedMaxBytes))
+    : COMPRESSED_MAX_BYTES;
   const found = [];
   // Reported through the same per-file error channel as a failed read, so a
   // root we could not enumerate raises the error count instead of looking like
@@ -2056,6 +2213,13 @@ function scanHistoryFiles(options = {}) {
   for (const entry of found) {
     const key = process.platform === 'win32' ? entry.path.toLowerCase() : entry.path;
     if (!unique.has(key)) unique.set(key, entry);
+  }
+  // A rollout Codex is compressing can be listed twice, as `X.jsonl` and
+  // `X.jsonl.zst`. The plain one is read and its twin is left alone until it is
+  // the only copy: until then it may still be being written, and the twin holds
+  // the same calls, which would only be read twice.
+  for (const key of [...unique.keys()]) {
+    if (isCompressedTranscript(key) && unique.has(key.slice(0, -COMPRESSED_SUFFIX.length))) unique.delete(key);
   }
   const observations = [];
   const cursors = {};
@@ -2089,17 +2253,62 @@ function scanHistoryFiles(options = {}) {
     // pulled 118 MB off disk is how the oversized-transcript defect stayed
     // invisible in `lastScanStats` for eight days.
     let readBytes = 0;
+    // What every read below reads, and the name a call's identity is computed
+    // from. For a compressed transcript the first becomes its decompressed bytes
+    // and the second its `.jsonl` name, so a call without a call id keeps the
+    // synthetic id it had before Codex compressed the file (`createObservation`
+    // hashes the name into it). Reads from memory are not counted in `bytesRead`,
+    // which stays bytes off disk: for a compressed file, the file itself.
+    const compressed = isCompressedTranscript(file);
+    const transcript = compressed ? file.slice(0, -COMPRESSED_SUFFIX.length) : file;
+    const flags = compressed ? { compressed: true } : {};
+    let body = file;
     const readSlice = (from, to) => {
-      const slice = readRange(file, from, to - from, readChunkBytes);
-      readBytes += slice.length;
+      const slice = readRange(body, from, to - from, readChunkBytes);
+      if (!compressed) readBytes += slice.length;
       return slice;
     };
     try {
-      safe = safeContinuation(file, stat, prior, entry.source);
+      if (compressed) {
+        // UNCHANGED WITHOUT DECOMPRESSING. The header's declared size is the
+        // decompressed size of a one-frame file (all nine measured), so a cursor
+        // that consumed exactly that much of a file with the same mtime has read
+        // it: the same test `safeContinuation` makes of a plain file, which it
+        // answers before reading anything once size and mtime match, so `file` is
+        // never read here. Anything else, including a file of several frames
+        // whose header understates it, is decompressed and judged on its bytes.
+        const declared = zstdContentSize(file);
+        const declaredStat = declared === null ? null : transcriptStat(stat, declared);
+        const kept = declaredStat && isObject(prior) && prior.size === declared && prior.mtimeMs === stat.mtimeMs
+          && safeContinuation(file, declaredStat, prior, entry.source) ? continuedFingerprint(prior, declared) : null;
+        if (kept) {
+          cursors[cursorKey] = cursorForFile(file, entry.source, declaredStat, kept);
+          files.push({ path: file, source: entry.source, mode: 'unchanged', size: declared, bytesRead: 0, ...flags });
+          continue;
+        }
+        const opened = decompressTranscript(file, stat.size, decompress, compressedMaxBytes);
+        if (opened.skip) {
+          // Not read, and SAID, never an error: the runtime or the ceiling
+          // decides it, and it is the same answer on every scan. A cursor this
+          // runtime cannot check is carried forward rather than dropped, so a
+          // scan that can read the file (the extension host, on a newer Node than
+          // a CLI's) resumes where it was instead of starting over.
+          if (prior) cursors[cursorKey] = prior;
+          files.push({
+            path: file, source: entry.source, mode: 'skipped', reason: opened.skip,
+            ...(declared !== null ? { size: declared } : {}), bytesRead: 0, ...flags,
+          });
+          continue;
+        }
+        body = opened.bytes;
+        readBytes = opened.packedBytes;
+        stat = transcriptStat(stat, body.length);
+      }
+      safe = safeContinuation(body, stat, prior, entry.source);
       if (safe && stat.size === prior.size) {
-        cursors[cursorKey] = cursorForFile(file, entry.source, stat,
+        cursors[cursorKey] = cursorForFile(body, entry.source, stat,
           continuedFingerprint(prior, stat.size));
-        files.push({ path: file, source: entry.source, mode: 'unchanged', size: stat.size, bytesRead: 0 });
+        files.push({ path: file, source: entry.source, mode: 'unchanged', size: stat.size, bytesRead: readBytes, ...flags });
         continue;
       }
 
@@ -2216,9 +2425,9 @@ function scanHistoryFiles(options = {}) {
         // claiming it covered capped reads -- which begin at 0 and so were
         // never the case. Dropped rather than kept as decoration.
         const seed = entry.source === 'codex' && start > 0
-          ? codexHeadSeed(file) : null;
+          ? codexHeadSeed(body) : null;
         let parsed = parseHistorySlice(entry.source, buffer, {
-          file, baseOffset: start, platform: options.platform,
+          file: transcript, baseOffset: start, platform: options.platform,
           probeMatcher: options.probeMatcher,
           session: seed && seed.session, cwd: seed && seed.cwd,
         });
@@ -2259,7 +2468,7 @@ function scanHistoryFiles(options = {}) {
                 // outright, and which otherwise files the call under a SECOND
                 // identity, because session is part of identityParts.
                 parsed = parseHistorySlice(entry.source, buffer, {
-                  file, baseOffset: start, platform: options.platform,
+                  file: transcript, baseOffset: start, platform: options.platform,
                   probeMatcher: options.probeMatcher,
                   ...(start > 0 ? { session: seed && seed.session, cwd: seed && seed.cwd } : {}),
                 });
@@ -2284,7 +2493,7 @@ function scanHistoryFiles(options = {}) {
         // The cursor records what was CONSUMED, not how big the file is. On a
         // capped read those differ, and claiming the larger number is what
         // would turn a bounded catch-up into a silent skip.
-        cursors[cursorKey] = cursorForFile(file, entry.source, stat, null, consumedEnd);
+        cursors[cursorKey] = cursorForFile(body, entry.source, stat, null, consumedEnd);
         files.push({
           path: file, source: entry.source,
           mode: unreadableBytes ? 'unreadable' : (partial ? 'partial' : mode),
@@ -2293,6 +2502,7 @@ function scanHistoryFiles(options = {}) {
           ...(partial ? { consumedEnd } : {}),
           ...(unmatched ? { unmatchedResults: unmatched } : {}),
           ...(unreadableBytes ? { unreadableFrom, unreadableBytes } : {}),
+          ...flags,
         });
     } catch (error) {
       // Carry the prior cursor forward ONLY when it still describes the file.
@@ -2311,7 +2521,7 @@ function scanHistoryFiles(options = {}) {
       if (safe && prior) cursors[cursorKey] = prior;
       files.push({
         path: file, source: entry.source, mode: 'error', size: stat.size,
-        bytesRead: readBytes, error: error.message,
+        bytesRead: readBytes, error: error.message, ...flags,
       });
     }
   }
@@ -2372,6 +2582,14 @@ function scanHistoryFiles(options = {}) {
 // `archived = 1` with a `rollout_path` in the archive -- CLASSIFIES a thread
 // that is still missing after the walk. It never ADDS one: a row can exist
 // before its transcript does, so a thread only that table knows proves nothing.
+//
+// AND IN WHAT FORM. MEASURED 2026-10-16: Codex compresses an idle rollout in
+// place to `.jsonl.zst` (COMPRESSED_SUFFIX near the top of this file), and every
+// compressed live thread read as an orphan, every compressed archived one as a
+// deleted archive, until both walks took the suffix. The state row goes on naming
+// the `.jsonl`, so its `.zst` twin counts as the recorded file, and the projection
+// cursor counts DECOMPRESSED bytes, so a compressed file's length is its
+// decompressed one (transcriptLength).
 //
 // WHAT IS DIVERGENCE (a reason, so `stale`) AND WHAT IS ONLY CONTEXT (a note).
 //
@@ -2476,7 +2694,7 @@ function rolloutIndex(dirs, prewalked = null) {
       for (const entry of entries) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) { pending.push(full); continue; }
-        if (!entry.name.toLowerCase().endsWith('.jsonl')) continue;
+        if (!isTranscriptName(entry.name)) continue;
         if (add(full, entry.name)) count += 1;
       }
     }
@@ -2771,6 +2989,26 @@ function isFile(file) {
   try { return fs.statSync(file).isFile(); } catch { return false; }
 }
 
+// How long a transcript is, for the projection check: a plain file's size, and
+// a compressed one's DECOMPRESSED length, which is what Codex's cursor counts
+// (equal for 9 of 9 on 2026-10-16; against the file's own size all nine would
+// have read as a store ahead of its transcript). The declared size answers
+// without decompressing whenever it already reaches `atLeast`; only a header
+// that falls short is checked by decompressing, because it declares one frame
+// and a file of several would otherwise read as ahead. A length that cannot be
+// learned is -1, and an unknown is never reported as divergence. Throws where
+// the file is gone, which the caller already treats as moved since the walk.
+function transcriptLength(file, atLeast, decompress) {
+  const size = fs.statSync(file).size;
+  if (!isCompressedTranscript(file)) return size;
+  const declared = zstdContentSize(file);
+  if (declared !== null && declared >= atLeast) return declared;
+  const opened = decompressTranscript(file, size, decompress, COMPRESSED_MAX_BYTES);
+  if (!opened.skip) return opened.bytes.length;
+  // Past the ceiling is still a length: at least the ceiling.
+  return opened.skip === 'too-large' && atLeast <= COMPRESSED_MAX_BYTES ? atLeast : -1;
+}
+
 // `malformed` used to be counted here and returned, and no caller in the repo
 // or the tests ever read it. It is gone rather than wired: a line of this file
 // with no id field is not evidence of anything a reader could act on, and the
@@ -2828,6 +3066,8 @@ function codexHistoryStoreState(options = {}) {
   const scannedDirs = listed.length ? listed
     : options.sessionsDir ? [String(options.sessionsDir)]
       : codexHome ? [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')] : [];
+  // As scanHistoryFiles takes it: `null` is a runtime without zstd.
+  const decompress = options.zstdDecompress !== undefined ? options.zstdDecompress : ZSTD_DECOMPRESS;
   const reasons = [];
   const notes = [];
   if (!codexHome || !scannedDirs.length) {
@@ -2984,7 +3224,9 @@ function codexHistoryStoreState(options = {}) {
     if (rollouts.ids.has(id)) continue;
     const row = threadState ? threadState.threads.get(id) : null;
     const recorded = row && row.rolloutPath ? path.resolve(codexHome, plainPath(row.rolloutPath)) : null;
-    if (recorded && isFile(recorded)) {
+    // The `.zst` beside the recorded path counts as it: the row keeps naming the
+    // `.jsonl` after Codex compresses it (COMPRESSED_SUFFIX).
+    if (recorded && (isFile(recorded) || isFile(recorded + COMPRESSED_SUFFIX))) {
       // Inside a folder the walk covered, it IS accounted for -- the walk just
       // could not recognise it by name. Outside, Codex is writing where the
       // reader does not read, which is the whole failure this detector names.
@@ -3018,7 +3260,7 @@ function codexHistoryStoreState(options = {}) {
     if (prewalked && files.some((file) => (prewalked.sizes.get(dirKey(file)) ?? -1) >= offset)) continue;
     let size = -1;
     for (const file of files) {
-      try { size = Math.max(size, fs.statSync(file).size); } catch { /* moved or gone since the walk */ }
+      try { size = Math.max(size, transcriptLength(file, offset, decompress)); } catch { /* moved or gone since the walk */ }
     }
     if (size >= 0 && offset > size) aheadIds.push(id);
   }

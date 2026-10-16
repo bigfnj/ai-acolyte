@@ -24,7 +24,7 @@ Codex entries open their existing rule review. The overflow link searches both a
 A separate **Codex memory** row provides native
 memory search, diagnostics and gate controls.
 
-Version **1.6.7** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.6.8** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -86,7 +86,8 @@ anyway.
 
 Auto Learn incrementally scans local Claude Code history
 (`~/.claude/projects/**/*.jsonl`) and Codex history (`~/.codex/sessions/**/*.jsonl`, plus
-`~/.codex/archived_sessions/*.jsonl`, where Codex moves an archived thread's transcript). It
+`~/.codex/archived_sessions/*.jsonl`, where Codex moves an archived thread's transcript, and
+the `.jsonl.zst` files Codex compresses idle transcripts into, in either folder). It
 correlates each requested tool call with its matching result. Confirmed successes add positive
 evidence. Confirmed failures are retained as negative evidence and block `auto-safe`
 eligibility; they do not increase the success threshold. Unanswered, incomplete, and pending
@@ -158,7 +159,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4451#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4457#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -221,10 +222,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4400#showWarningMessage`).
+`vscode-extension/extension.js:4406#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4220#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4226#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes

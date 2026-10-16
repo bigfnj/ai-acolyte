@@ -22,7 +22,7 @@ function disposable() { return { dispose() {} }; }
 // `delete require.cache[extensionPath]` alone was all this file did, and it is not
 // isolation. The top-level require above caches src/auto-learn-manager.js holding the
 // REAL `os` (src/auto-learn-manager.js:9#os), and its home default is read at CALL time
-// (`src/auto-learn-manager.js:1381#os.homedir`), so the extension loaded underneath the
+// (`src/auto-learn-manager.js:1387#os.homedir`), so the extension loaded underneath the
 // mock was handed a manager that resolves the developer's own ~/.claude for any call that
 // omits `options.home`. Same implementation as test/extension-activation.test.js and
 // test/policy-backup.test.js.

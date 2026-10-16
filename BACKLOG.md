@@ -17,6 +17,10 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-16 as 1.6.8.** Auto Learn reads the `.jsonl.zst` files Codex compresses idle
+rollouts into, which ends the second "scan degraded" false alarm. The record has it under "Codex
+compresses idle rollouts to `.jsonl.zst`".
+
 **Released 2026-10-15 as 1.6.6 and 1.6.7.**
 - 1.6.6 (`36696ec`): the Claude Code strip model is checked on each update.
 - 1.6.7 (`f1407bf`): workspace settings may only tighten Auto Learn and the drain.

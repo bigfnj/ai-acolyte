@@ -42,7 +42,9 @@
 //   node scripts/check-line-refs.js --json          machine-readable
 //   node scripts/check-line-refs.js --quiet         only the counts
 //   node scripts/check-line-refs.js --fix-anchored  repoint every BROKEN anchored reference
-//                                                    whose anchor is on exactly one line now
+//                                                    whose anchor is on exactly one line now,
+//                                                    or that was right at HEAD and whose line
+//                                                    the diff since can place (see planFix)
 //   node scripts/check-line-refs.js --root <dir>    check another checkout instead of this one
 //
 // Exit 1 only when something is BROKEN. STALE does not fail the run, because a
@@ -100,7 +102,7 @@ const REF_RE_TEST = new RegExp(REF_RE.source);
 //
 // The cost was false STALE and UNVERIFIABLE verdicts on references that were correct.
 // Two agents hit it independently, on different files, during one correction pass:
-// `src/history-adapters.js:1687#entry.isSymbolicLink` queues `entry.isSymbolicLink()` children
+// `src/history-adapters.js:1713#entry.isSymbolicLink` queues `entry.isSymbolicLink()` children
 // reported STALE on the anchor "point", and it only resolved when the symbol was moved AHEAD
 // of the citation. Writing the anchor first was a workaround for this bug, not a convention.
 //
@@ -174,6 +176,52 @@ function linesOf(rel, root = ROOT) {
 // A trailing newline makes split() yield one empty element past the last line.
 function lineCount(lines) {
   return lines.length && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
+}
+
+// HEAD's copy of a tracked file, split as linesOf splits it, and the hunks of the diff
+// from it to the working tree. Cached per root and file like linesOf, and null where git
+// cannot answer: no commit yet, or a file that is new since HEAD.
+const headCache = new Map();
+function headView(rel, root = ROOT) {
+  const key = root + '\u0000' + rel;
+  if (headCache.has(key)) return headCache.get(key);
+  let view = null;
+  try {
+    const git = (...args) => execFileSync('git', ['-C', root, ...args],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const lines = git('show', `HEAD:${rel}`).split(/\r?\n/);
+    const hunks = [...git('diff', '--no-color', '--no-ext-diff', '-U0', 'HEAD', '--', rel)
+      .matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)]
+      .map((m) => ({ a: +m[1], b: m[2] === undefined ? 1 : +m[2], c: +m[3], d: m[4] === undefined ? 1 : +m[4] }));
+    view = { lines, hunks };
+  } catch {
+    view = null;
+  }
+  headCache.set(key, view);
+  return view;
+}
+
+// Where line `line` of HEAD's copy is in the working tree, from the hunk headers alone,
+// or null when that line was itself changed. A hunk `-a,b +c,d` replaces old lines
+// a..a+b-1 with new lines c..c+d-1; b = 0 inserts after old line a, and d = 0 deletes,
+// with c then naming the new line before the gap.
+function headLineNow(hunks, line) {
+  let delta = 0;
+  for (const { a, b, c, d } of hunks) {
+    if (line < (b === 0 ? a + 1 : a)) break;
+    if (b > 0 && line < a + b) return null;
+    delta = (d === 0 ? c + 1 : c + d) - (b === 0 ? a + 1 : a + b);
+  }
+  return line + delta;
+}
+
+// Where a citation that was RIGHT AT HEAD points now (see planFix), or null.
+function movedSinceHead(rel, root, anchor, start, end) {
+  const view = headView(rel, root);
+  if (!view) return null;
+  if (!anchorLines(anchor, view.lines).some((line) => line >= start && line <= end)) return null;
+  const now = { start: headLineNow(view.hunks, start), end: headLineNow(view.hunks, end) };
+  return now.start === null || now.end === null ? null : now;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +311,16 @@ function listLines(hits) {
 // fixed range, but its old offset is not recorded anywhere, so the range is re-headed
 // on it, and the FIXED line says "re-headed" so a reader can look. A shift that would
 // run the range past the end of the file is refused rather than clipped.
-function planFix(ref, rel, occurs, count) {
+//
+// TWO OR MORE LINES, AND THE CITATION WAS RIGHT AT HEAD (2026-10-16). `moved` (from
+// movedSinceHead) says where the cited line of HEAD's copy is now, but only when the
+// anchor was ON that line at HEAD. That is the same exactness by another route: the
+// author's citation was correct, and the diff says where that line went, so there is
+// still one answer. A release that inserts a block above a much-cited identifier used to
+// leave dozens of these for a person (60 on 2026-10-16, `autoLearnBusy` on seven lines).
+// Anything the diff cannot place (no HEAD, a citation already wrong at HEAD, a cited line
+// that was itself edited) stays AMBIGUOUS.
+function planFix(ref, rel, occurs, count, moved = () => null) {
   const a = '#' + ref.declaredAnchor;
   if (ref.end < ref.start) {
     return { kind: 'UNFIXABLE', why: 're-derive both ends by hand, since no shift repairs a descending range' };
@@ -272,7 +329,12 @@ function planFix(ref, rel, occurs, count) {
     return { kind: 'MISSING', why: `${a} occurs nowhere in ${rel}; repoint by hand or drop the anchor` };
   }
   if (occurs.length > 1) {
-    return { kind: 'AMBIGUOUS', why: `${a} occurs on ${occurs.length} lines: ${listLines(occurs)}; repoint by hand` };
+    // Both ends are mapped, so a range keeps exactly the lines it covered.
+    const now = moved(ref.start, ref.end);
+    if (!now || !occurs.some((line) => line >= now.start && line <= now.end)) {
+      return { kind: 'AMBIGUOUS', why: `${a} occurs on ${occurs.length} lines: ${listLines(occurs)}; repoint by hand` };
+    }
+    return { ...now, via: 'diff' };
   }
   const start = occurs[0];
   const end = ref.end + (start - ref.start);
@@ -289,6 +351,10 @@ function planFix(ref, rel, occurs, count) {
 function planHint(plan) {
   if (plan.why) return plan.why;
   const to = plan.start === plan.end ? `${plan.start}` : `${plan.start}-${plan.end}`;
+  if (plan.via === 'diff') {
+    return `it was on the cited line at HEAD, and the diff since puts that line at ${plan.start}, ` +
+      `so --fix-anchored will repoint this to :${to}`;
+  }
   return `it occurs only on line ${plan.start}, so --fix-anchored will repoint this to :${to}`;
 }
 
@@ -312,7 +378,8 @@ function judgeAnchored(ref, index, root = ROOT) {
   const cited = ref.start === ref.end ? `line ${ref.start}` : `lines ${ref.start}-${ref.end}`;
   const occurs = anchorLines(ref.declaredAnchor, lines);
   const count = lineCount(lines);
-  const plan = planFix(ref, rel, occurs, count);
+  const plan = planFix(ref, rel, occurs, count,
+    (start, end) => movedSinceHead(rel, root, ref.declaredAnchor, start, end));
   const extra = { resolved: rel, occurs, plan };
   let problem;
   if (ref.end < ref.start) problem = `cites a DESCENDING range ${ref.start}-${ref.end}`;
@@ -942,7 +1009,9 @@ function fixAnchored(root = ROOT) {
   }
   for (const w of writes) fs.writeFileSync(w.abs, w.out, 'utf8');
   if (writes.length) {
-    for (const key of [...fileCache.keys()]) if (key.startsWith(root + '\u0000')) fileCache.delete(key);
+    for (const cache of [fileCache, headCache]) {
+      for (const key of [...cache.keys()]) if (key.startsWith(root + '\u0000')) cache.delete(key);
+    }
   }
   return { examined: anchored.length, fixed, left, written: writes.map((w) => w.rel) };
 }

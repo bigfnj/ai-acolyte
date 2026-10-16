@@ -488,3 +488,70 @@ test('the --fix-anchored CLI reports the run and exits 1 while anything is left 
   assert.equal(fs.readFileSync(path.join(root, 'src/use.js'), 'utf8'),
     USE_JS_BEFORE.replace('src/mod.js:2#uniqueMover', 'src/mod.js:4#uniqueMover'));
 });
+
+// THE DIFF TIE-BREAK (2026-10-16). An anchor on several lines used to be AMBIGUOUS
+// whatever had happened, and a release that inserted a block above a much-cited
+// identifier left 60 of them for a person. Now a citation that was RIGHT AT HEAD is
+// carried through `git diff HEAD` to where its line is now, both ends of a range
+// mapped. Everything the diff cannot place stays AMBIGUOUS: a citation already wrong
+// at HEAD, and one whose cited line was itself edited.
+//
+// This fixture is COMMITTED, unlike fixtureRepo's, because the tie-break reads HEAD.
+// The identity and the signing setting are pinned for the reason fixtureRepo pins
+// autocrlf: a throwaway repository, where a machine-wide setting must not matter.
+const DUP_HEAD = [
+  "'use strict';", 'function twin() { return 2; }', 'const again = twin();',
+  'const third = twin();', '// tail', 'function last() {}', '',
+].join('\n');
+const DUP_NOW = [
+  "'use strict';", '// pad', '// pad', '// pad', 'function twin() { return 2; }',
+  'const again = twin();', 'const third = twin() * 1;', '// tail', 'function last() {}', '',
+].join('\n');
+const DUP_NOTES = [
+  '- right at HEAD: `src/dup.js:2#twin`',
+  '- the second, right at HEAD: `src/dup.js:3#twin`',
+  '- a range, right at HEAD: `src/dup.js:2-3#twin`',
+  '- its cited line was edited: `src/dup.js:4#twin`',
+  '- already wrong at HEAD: `src/dup.js:1#twin`',
+  '- unique, the old rule: `src/dup.js:6#last`',
+  '',
+].join('\n');
+
+function committedRepo(t, files) {
+  const root = fixtureRepo(t, files);
+  execFileSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fixture'], { cwd: root, stdio: 'pipe' });
+  return root;
+}
+
+test('--fix-anchored carries an ambiguous anchor that was right at HEAD through the diff, and only that', (t) => {
+  const root = committedRepo(t, { 'src/dup.js': DUP_HEAD, 'notes.md': DUP_NOTES });
+  fs.writeFileSync(path.join(root, 'src/dup.js'), DUP_NOW);
+
+  const report = fixAnchored(root);
+  assert.deepEqual(report.fixed.map((f) => `${f.where} ${f.raw} -> ${f.to}`), [
+    'notes.md:1 src/dup.js:2#twin -> 5',
+    'notes.md:2 src/dup.js:3#twin -> 6',
+    'notes.md:3 src/dup.js:2-3#twin -> 5-6',
+    'notes.md:6 src/dup.js:6#last -> 9',
+  ], 'witness:diff-tie-break -- a citation that was right at HEAD was not carried to where its line is now');
+  // The controls: nothing the diff cannot place is guessed at.
+  assert.deepEqual(report.left.map((l) => [l.where, l.kind]), [
+    ['notes.md:4', 'AMBIGUOUS'],
+    ['notes.md:5', 'AMBIGUOUS'],
+  ]);
+  assert.equal(fs.readFileSync(path.join(root, 'notes.md'), 'utf8'), DUP_NOTES
+    .replace('src/dup.js:2#twin', 'src/dup.js:5#twin').replace('src/dup.js:3#twin', 'src/dup.js:6#twin')
+    .replace('src/dup.js:2-3#twin', 'src/dup.js:5-6#twin').replace('src/dup.js:6#last', 'src/dup.js:9#last'));
+
+  // The report run names the route, so a reader can see why the fixer would act.
+  const hinted = JSON.parse(spawnSync(process.execPath, [CHECKER, '--json', '--root', root], { encoding: 'utf8' }).stdout);
+  assert.match(hinted.results.find((r) => r.sourceLine === 4).detail, /#twin occurs on 3 lines: 5, 6, 7; repoint by hand/);
+});
+
+test('without a commit the tie-break has no HEAD to read, and an ambiguous anchor stays ambiguous', (t) => {
+  const root = fixtureRepo(t, { 'src/dup.js': DUP_NOW, 'notes.md': DUP_NOTES });
+  const report = fixAnchored(root);
+  assert.deepEqual(report.fixed.map((f) => f.where), ['notes.md:6']);
+  assert.deepEqual(report.left.map((l) => l.kind), ['AMBIGUOUS', 'AMBIGUOUS', 'AMBIGUOUS', 'AMBIGUOUS', 'AMBIGUOUS']);
+});

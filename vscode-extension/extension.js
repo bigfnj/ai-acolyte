@@ -42,6 +42,10 @@ const { CodexMemoryLint } = require('./codexMemoryLint');
 const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
 const { createPermissionActions } = require('./permissionActions');
 const { readCodexPermissionSummary, deadShellApprovals, overBroadShellGrants } = require('./src/permission-summary');
+const {
+  summarizeRuleUsage, countOffThread: countRuleUsageOffThread, ruleUsagePath, allowFingerprint, usesOf,
+} = require('./src/rule-usage');
+const { discoverSessions, sessionsSignature } = require('./src/agent-sessions');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
@@ -1091,7 +1095,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:3002#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:3132#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1463,7 +1467,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:5841#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:6142#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1720,12 +1724,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:5874#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:6175#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2781#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2902#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -2101,6 +2105,123 @@ function refreshProjectTrustForDashboard(cfg) {
     projectTrustRefreshing = false;
     if (landed) dashboard?.refresh();
   });
+}
+
+// RULE USE (src/rule-usage.js), for the Saved permissions card: how often each allow rule
+// covered a call, over all Claude history, against the rules as they are now. One pass on its own
+// thread (~10 s on 1.9 GB, measured 2026-10-16), at most one at a time, and only when it is due:
+// no result yet, a result over a day old, or one counted against a list that has changed since,
+// and never more often than every ten minutes (which also spaces out retries after a failure).
+// The push draws from the saved result; the pass's landing pushes again.
+//
+// A TIMER STARTS IT, NOT THE PUSH. The first look is two minutes after activation and then every
+// fifteen; each look counts only if a count is due. The push only READS the saved result. A push
+// that started passes put a thread behind every dashboard test and a late second push under
+// whatever that test asserted next. The palette command and the card's click count at once.
+const RULE_USAGE_FILE = ruleUsagePath(os.homedir());
+const RULE_USAGE_MAX_AGE_MS = 24 * 3600 * 1000;
+const RULE_USAGE_MIN_GAP_MS = 10 * 60 * 1000;
+const RULE_USAGE_FIRST_MS = 2 * 60 * 1000;
+const RULE_USAGE_EVERY_MS = 15 * 60 * 1000;
+let ruleUsageTimer = null;       // the next look, so deactivate can cancel it
+let ruleUsageThread = null;      // { promise, terminate } of the pass in flight, so deactivate can end it
+let ruleUsageStartedAt = 0;
+let ruleUsageError = null;
+let ruleUsageMemo = null;        // { mtimeMs, size, saved }: the file is re-parsed only when it changes
+
+function readRuleUsage() {
+  let stat;
+  try { stat = fs.statSync(RULE_USAGE_FILE); } catch { return null; }
+  if (ruleUsageMemo && ruleUsageMemo.mtimeMs === stat.mtimeMs && ruleUsageMemo.size === stat.size) return ruleUsageMemo.saved;
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(RULE_USAGE_FILE, 'utf8')); } catch { saved = null; }
+  ruleUsageMemo = { mtimeMs: stat.mtimeMs, size: stat.size, saved };
+  return saved;
+}
+
+function ruleUsageDue(allow, saved, now) {
+  if (!saved || typeof saved !== 'object') return true;
+  const at = Date.parse(saved.computedAt);
+  if (!Number.isFinite(at) || now - at > RULE_USAGE_MAX_AGE_MS) return true;
+  return saved.allowFingerprint !== allowFingerprint(allow);
+}
+
+// The timer's look: the live list, read whole, or no look at all. Counting against a list that
+// could not be read would report every rule as uncounted.
+function scheduleRuleUsage(delay = RULE_USAGE_FIRST_MS) {
+  clearTimeout(ruleUsageTimer);
+  const generation = activationGeneration;
+  ruleUsageTimer = setTimeout(() => {
+    ruleUsageTimer = null;
+    if (deactivated || generation !== activationGeneration) return;
+    try {
+      const live = readSettingsState();
+      const allow = live.state === SETTINGS_PRESENT ? live.settings?.permissions?.allow : null;
+      if (Array.isArray(allow) && allow.every((entry) => typeof entry === 'string')) countRuleUsage({ allow });
+    } catch (error) {
+      console.error('ai-acolyte: the rule-use look failed —', error);
+    }
+    scheduleRuleUsage(RULE_USAGE_EVERY_MS);
+  }, delay);
+  if (typeof ruleUsageTimer?.unref === 'function') ruleUsageTimer.unref();
+}
+
+// Starts a pass when one is due (or `force`), and reports whether it did.
+function countRuleUsage({ allow = [], force = false } = {}) {
+  if (ruleUsageThread || deactivated) return false;
+  const now = Date.now();
+  if (!force && (now - ruleUsageStartedAt < RULE_USAGE_MIN_GAP_MS || !ruleUsageDue(allow, readRuleUsage(), now))) return false;
+  ruleUsageStartedAt = now;
+  const generation = activationGeneration;
+  const thread = countRuleUsageOffThread({ home: os.homedir(), settingsPath: SETTINGS, projectsDir: PROJECTS_DIR });
+  ruleUsageThread = thread;
+  thread.promise.then((result) => {
+    if (deactivated || generation !== activationGeneration) return;
+    fs.mkdirSync(path.dirname(RULE_USAGE_FILE), { recursive: true });
+    writeFileAtomicSync(RULE_USAGE_FILE, JSON.stringify(result) + '\n');
+    ruleUsageError = null;
+  }).catch((error) => {
+    if (generation === activationGeneration) ruleUsageError = String(error?.message || error).slice(0, 200);
+  }).finally(() => {
+    if (ruleUsageThread === thread) ruleUsageThread = null;
+    if (!deactivated && generation === activationGeneration) dashboard?.refresh();
+  });
+  return true;
+}
+
+// AGENT SESSIONS (src/agent-sessions.js), for the Agent sessions card: the Claude and Codex
+// sessions that wrote a transcript in the last fifteen minutes. A look is async file stats plus a
+// short read of each active transcript (88 ms on the development box, 2026-10-16). One look at a
+// time; a push starts one when the last is over 30 s old, and a minute's tick does while the view
+// is open. A look pushes again when the list changed, and on a tick whenever any session is listed,
+// so the "last active" ages are redrawn about once a minute and an empty card is never redrawn.
+// The ages are drawn by the extension's push, not by a timer in the webview: the tests run that
+// script in-process, where an interval would keep the test runner alive for good.
+const AGENT_SESSIONS_STALE_MS = 30 * 1000;
+const AGENT_SESSIONS_TICK_MS = 60 * 1000;
+let agentSessions = { at: 0, signature: sessionsSignature([]), sessions: [], error: null };
+let agentSessionsLooking = false;
+let agentSessionsTimer = null;
+const agentSessionsCache = new Map();
+
+function lookForAgentSessions({ tick = false } = {}) {
+  if (agentSessionsLooking || deactivated) return;
+  agentSessionsLooking = true;
+  const generation = activationGeneration;
+  discoverSessions({ claudeRoot: PROJECTS_DIR, codexRoot: CODEX_SESSIONS_DIR, cache: agentSessionsCache })
+    .then((sessions) => {
+      if (deactivated || generation !== activationGeneration) return;
+      const signature = sessionsSignature(sessions);
+      const changed = signature !== agentSessions.signature;
+      agentSessions = { at: Date.now(), signature, sessions, error: null };
+      if (changed || (tick && sessions.length)) dashboard?.refresh();
+    })
+    .catch((error) => {
+      if (generation === activationGeneration) agentSessions = { ...agentSessions, at: Date.now(), error: String(error?.message || error).slice(0, 200) };
+    })
+    // Unconditionally: a same-realm successor must not inherit a latch its predecessor's look holds
+    // (it would never look again), and a second look overlapping a late one only reads.
+    .finally(() => { agentSessionsLooking = false; });
 }
 
 // `codexRuleFiles(cfg)` used to sit here, returning `.files` off the set above.
@@ -2917,6 +3038,15 @@ function activate(context) {
       }
     }),
     vscode.commands.registerCommand('permission-wildcarding.viewPermissions', (selection) => showSavedPermissionPicker(selection)),
+    // A pass now, whether or not one is due (countRuleUsage). The card says "counting" and
+    // redraws when it lands; a second press while one runs is a no-op that says so.
+    vscode.commands.registerCommand('permission-wildcarding.countRuleUse', () => {
+      const started = countRuleUsage({ force: true });
+      dashboard?.refresh();
+      vscode.window.showInformationMessage(started
+        ? 'AI Acolyte: counting how often each saved Claude rule is used. The Saved permissions card updates when it finishes.'
+        : 'AI Acolyte: rule use is already being counted.');
+    }),
     vscode.commands.registerCommand('permission-wildcarding.restorePermissions', () =>
       choosePermissionAgent('Restore permissions', restoreFromBackup, showCodexRestorePicker)),
     vscode.commands.registerCommand('permission-wildcarding.importPermissions', () =>
@@ -3002,6 +3132,7 @@ function activate(context) {
   recallSyncTimer = setTimeout(autoSyncRecallIfStale, 10000);
   // Whether Claude Code changed the env-var list the generalizer models: 30 s in, once per binary.
   try { scheduleStripModelCheck(context); } catch (err) { console.error('ai-acolyte: strip-model check not scheduled —', err); }
+  try { scheduleRuleUsage(); } catch (err) { console.error('ai-acolyte: rule-use count not scheduled —', err); }
 
   // Memory-index hygiene lint: status-bar bloat gauge + editor squiggles on over-budget
   // hook lines / broken index links. Isolated so a failure here never breaks wildcarding.
@@ -4299,7 +4430,24 @@ const SAVED_PERMISSION_FILTERS = Object.freeze({
     placeHolder: 'Wildcards keyed on shell grammar, which match more than the command they came from; choose one to inspect or remove',
     empty: 'AI Acolyte: no over-broad wildcard grants are saved now.',
   }),
+  // Rules the last rule-use pass found no use for (src/rule-usage.js, 2026-10-16). "No use FOUND",
+  // never "unused": a session that keeps no transcript (claude -p --no-session-persistence, the
+  // SDK) and history Claude has cleaned up are both invisible to the pass.
+  'no-use': Object.freeze({
+    entries: (allow) => summarizeRuleUsage(allow, readRuleUsage()).noUseRules,
+    description: 'Claude · allow · no use found',
+    title: 'Saved permissions · rules with no use found in your Claude transcripts',
+    placeHolder: 'No transcript call used these; sessions that keep no transcript are not seen. Choose one to inspect or remove',
+    empty: 'AI Acolyte: every counted rule has a use, or rule use has not been counted yet.',
+  }),
 });
+
+// " · used 42×" for a Claude rule the last rule-use pass counted, "" for one it did not.
+function ruleUseSuffix(permission, saved) {
+  const uses = usesOf(permission, saved);
+  if (uses === null) return '';
+  return uses ? ` · used ${uses}×` : ' · no use found';
+}
 
 async function showSavedPermissionPicker(selection) {
   try {
@@ -4316,8 +4464,11 @@ async function showSavedPermissionPicker(selection) {
     const view = Object.prototype.hasOwnProperty.call(SAVED_PERMISSION_FILTERS, selection?.filter)
       ? SAVED_PERMISSION_FILTERS[selection.filter] : null;
     const only = view ? new Set(view.entries(allow)) : null;
+    // The use count rides on the unfiltered list's rows. The no-use view says it in its own
+    // description, and the other two views are about the rule's shape, not its use.
+    const usage = view ? null : readRuleUsage();
     const items = allow.filter((permission) => !only || only.has(permission)).sort().map((permission) => ({
-      label: permission, description: view ? view.description : 'Claude · allow', agent: 'claude',
+      label: permission, description: view ? view.description : `Claude · allow${ruleUseSuffix(permission, usage)}`, agent: 'claude',
     }));
     const permissions = settings.settings?.permissions;
     const claudeComplete = settings.state !== SETTINGS_UNREADABLE
@@ -4481,6 +4632,7 @@ class WildcardingViewProvider {
         case 'rebuildCodexMemory': vscode.commands.executeCommand('permission-wildcarding.rebuildCodexMemory'); break;
         case 'codexMemoryGates': vscode.commands.executeCommand('permission-wildcarding.codexMemoryGates'); break;
         case 'inspectCodexMemory': vscode.commands.executeCommand('permission-wildcarding.inspectCodexMemory'); break;
+        case 'countRuleUse': vscode.commands.executeCommand('permission-wildcarding.countRuleUse'); break;
         case 'refresh':      this.refresh(); break;
         case 'remove':       this._remove(msg.value); break;
       }
@@ -4500,9 +4652,19 @@ class WildcardingViewProvider {
     // Identity-checked before nulling: a hide/show race can resolve the next
     // view before the previous one's disposal is delivered, and clearing
     // unconditionally would drop the live view instead of the dead one.
-    view.onDidDispose(() => { if (this.view === view) this.view = null; });
+    view.onDidDispose(() => {
+      if (this.view === view) this.view = null;
+      clearInterval(agentSessionsTimer);
+      agentSessionsTimer = null;
+    });
 
     view.onDidChangeVisibility(() => { if (view.visible) this.refresh(); });
+    // The Agent sessions card's minute tick (lookForAgentSessions), for this view only. A look
+    // pushes only on a change, and nothing is pushed to a hidden view (_push).
+    clearInterval(agentSessionsTimer);
+    agentSessionsTimer = setInterval(() => { if (this.view === view && view.visible !== false) lookForAgentSessions({ tick: true }); },
+      AGENT_SESSIONS_TICK_MS);
+    if (typeof agentSessionsTimer?.unref === 'function') agentSessionsTimer.unref();
     this.refresh();
   }
 
@@ -4612,6 +4774,20 @@ class WildcardingViewProvider {
       const broad = overBroadShellGrants(allow);
       overBroadGrants = { count: broad.count, total: broad.total, byReason: broad.byReason };
     } catch { /* keep the empty shape: the line simply does not render */ }
+    // How often each rule is used (countRuleUsage). The summary is pure, off the saved result and
+    // this same `allow`; the list of rules with no use found stays out of the payload, and the
+    // picker recomputes it from disk, as it does for the two diagnostics above. This only reads:
+    // scheduleRuleUsage starts the passes.
+    let ruleUsage = { counted: false };
+    try {
+      const { noUseRules, ...summary } = summarizeRuleUsage(allow, readRuleUsage());
+      ruleUsage = summary;
+    } catch { /* keep the empty shape: the line says it has not counted */ }
+    ruleUsage = { ...ruleUsage, counting: !!ruleUsageThread, error: ruleUsageError };
+    // The Agent sessions card: the last look's list, and a new look when that one is stale. The
+    // look is async and pushes again only if the list changed (lookForAgentSessions).
+    if (Date.now() - agentSessions.at > AGENT_SESSIONS_STALE_MS) lookForAgentSessions();
+    const sessionsCard = { sessions: agentSessions.sessions, lookedAt: agentSessions.at || null, error: agentSessions.error };
     // A count, not the list. The payload used to carry `wildcards`, every wildcard
     // entry sorted, on every push, and the webview never read it: the only reader
     // is the Claude total's hover title, which wants this number. `pendingWildcard`
@@ -4662,6 +4838,8 @@ class WildcardingViewProvider {
       ],
       deadApprovals,
       overBroadGrants,
+      ruleUsage,
+      agentSessions: sessionsCard,
       wildcardCount,
       specificCount: allow.length - wildcardCount,
       backupCount: backupCount(),
@@ -4786,6 +4964,8 @@ class WildcardingViewProvider {
   li.more { color: var(--vscode-textLink-foreground); cursor: pointer; font-size: 11px;
             padding: 6px; }
   li.more:hover { text-decoration: underline; }
+  /* Agent sessions: what the transcript says beside the folder name, muted. */
+  li .when { flex: 0 0 auto; font-size: 11px; color: var(--vscode-descriptionForeground); text-align: right; }
   #memDir { word-break: break-all; }
   .memissues { margin: 8px 2px 6px; font-size: 11px; }
   .memlink { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
@@ -4908,6 +5088,17 @@ class WildcardingViewProvider {
     </div>
   </section>
 
+  <section class="row">
+    <div class="rowhead" data-row="sessions">
+      <span class="chev">▸</span><span class="glyph">◷</span>
+      <span class="rowname">Agent sessions</span><span class="rowstate" id="stSessions"></span>
+    </div>
+    <div class="rowbody" id="bodySessions" hidden>
+      <div class="muted sub" id="sessionsSub"></div>
+      <ul id="sessionsList"></ul>
+    </div>
+  </section>
+
   <section class="row" id="localCard" style="display:none">
     <div class="rowhead" data-row="local">
       <span class="chev">▸</span><span class="glyph">▤</span>
@@ -5006,6 +5197,7 @@ class WildcardingViewProvider {
     <div class="rowbody" id="bodyList" hidden>
       <button type="button" class="deadnote" id="deadApprovals" hidden></button>
       <button type="button" class="deadnote" id="overBroadGrants" hidden></button>
+      <button type="button" class="deadnote" id="ruleUsage" hidden></button>
       <ul id="list"></ul>
     </div>
   </section>
@@ -5195,6 +5387,89 @@ class WildcardingViewProvider {
       : '';
   }
 
+  // How often each saved Claude rule is used (src/rule-usage.js, 2026-10-16). Muted like the two
+  // lines beside it, for the same reason: no use FOUND is a prompt to look, not a verdict, and the
+  // hover says what the count cannot see. The click opens the picker filtered to those rules, with
+  // per-entry removal as everywhere else; with nothing to review it asks for a recount instead.
+  // No backtick in these comments on purpose: this script lives inside the webview template.
+  let ruleNoUseShown = 0;
+  function shortDate(iso) {
+    const t = Date.parse(iso);
+    return Number.isFinite(t) ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+  }
+  function renderRuleUsage(d) {
+    const el = $('ruleUsage');
+    const u = (d && d.ruleUsage) || {};
+    const used = Number(u.used) || 0;
+    const noUse = Number(u.noUse) || 0;
+    ruleNoUseShown = u.counted ? noUse : 0;
+    let text = '';
+    if (u.counted) {
+      text = 'Rule use' + (u.since ? ' since ' + shortDate(u.since) : '') + ': ' + used + ' used'
+        + (noUse ? ' · ' + noUse + ' with no use found — review' : '') + (u.counting ? ' · counting again…' : '');
+    } else if (u.counting) {
+      text = 'Counting how often each saved rule is used…';
+    } else if (u.error) {
+      text = 'Rule use could not be counted: ' + u.error + ' — retry';
+    }
+    el.hidden = !text;
+    el.textContent = text;
+    const parts = [];
+    if (u.counted) {
+      parts.push('Counted over ' + (Number(u.calls) || 0) + ' Claude calls in your transcripts'
+        + (u.computedAt ? ', ' + agoText(u.computedAt) : '') + '. Recounted daily and after the list changes.');
+      parts.push('A rule with no use found may still be used by sessions that keep no transcript'
+        + ' (claude -p with --no-session-persistence, the SDK), or in history Claude has already cleaned up.'
+        + ' Codex calls are not counted: Codex follows its own rules files.');
+      if (u.untracked) parts.push(u.untracked + ' not tracked (Skill rules, file rules with a path).');
+      if (u.notCounted) parts.push(u.notCounted + ' added since the count, not counted yet.');
+      if (u.notLately) parts.push(u.notLately + ' used, but not in the last 30 days.');
+      if (u.top && u.top.length) parts.push('Most used: ' + u.top.map((t) => t.rule + ' ' + t.uses + '×').join(', ') + '.');
+      if (u.error) parts.push('The last recount failed: ' + u.error);
+    }
+    el.title = parts.join(' ');
+  }
+
+  // Agent sessions (src/agent-sessions.js, 2026-10-16): the sessions that wrote a transcript in
+  // the last fifteen minutes. When, never why: a transcript cannot say whether a panel is working
+  // or waiting on a prompt, so the card shows only what it does say. Folder names only; textContent
+  // everywhere. No backtick in these comments: this script lives inside the webview template.
+  function renderSessions(card) {
+    const c = card || {};
+    const sessions = Array.isArray(c.sessions) ? c.sessions : [];
+    const list = $('sessionsList');
+    list.innerHTML = '';
+    for (const s of sessions) {
+      const li = document.createElement('li');
+      const agent = document.createElement('span');
+      agent.className = 'agent';
+      agent.textContent = s.agent === 'codex' ? 'Codex' : 'Claude';
+      const name = document.createElement('code');
+      name.textContent = s.project || '(unknown folder)';
+      const when = document.createElement('span');
+      when.className = 'when';
+      const subs = Number(s.subagents) || 0;
+      when.textContent = [s.app, s.mode, agoText(s.lastActiveAt),
+        subs ? subs + ' subagent' + (subs === 1 ? '' : 's') + ' working' : ''].filter(Boolean).join(' · ');
+      li.title = (s.agent === 'codex' ? 'Codex' : 'Claude') + ' session ' + s.id;
+      li.appendChild(agent); li.appendChild(name); li.appendChild(when);
+      list.appendChild(li);
+    }
+    if (!sessions.length) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = c.lookedAt ? 'No Claude or Codex session has written a transcript in the last 15 minutes.'
+        : 'Looking for agent sessions…';
+      list.appendChild(li);
+    }
+    $('sessionsSub').textContent = c.error ? 'Sessions could not be read: ' + c.error
+      : 'Sessions that wrote a transcript in the last 15 minutes. A transcript says when a session last worked, not whether it is waiting on you.';
+    const claude = sessions.filter((s) => s.agent !== 'codex').length;
+    const codex = sessions.length - claude;
+    setState('stSessions', !c.lookedAt ? '' : !sessions.length ? 'none active'
+      : sessions.length + ' active' + (claude && codex ? ' · ' + claude + ' Claude, ' + codex + ' Codex' : ''));
+  }
+
   // The sibling line (2026-10-13): saved WILDCARD grants whose head is shell grammar
   // (a keyword, an expansion, the PowerShell call operator) rather than a command, so
   // they match more than the approval they came from. Same rules as the line above:
@@ -5223,6 +5498,18 @@ class WildcardingViewProvider {
         + ' starts that way, whatever it runs. Nothing is removed automatically. '
         + Object.keys(by).sort().map((key) => key + ': ' + by[key]).join(' · ')
       : '';
+  }
+
+  // "just now", "4 min ago", "3 h ago", "2 days ago", for an epoch-ms or ISO time; '' for none.
+  function agoText(at) {
+    const t = typeof at === 'number' ? at : Date.parse(at);
+    if (!Number.isFinite(t)) return '';
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 45) return 'just now';
+    if (s < 3600) return Math.max(1, Math.round(s / 60)) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    const days = Math.round(s / 86400);
+    return days + ' day' + (days === 1 ? '' : 's') + ' ago';
   }
 
   function timeAgo(ts) {
@@ -5643,6 +5930,7 @@ class WildcardingViewProvider {
     $('version').textContent = d.version ? 'v' + d.version : '';
     $('watching').textContent = 'watching ' + d.settingsPath + (d.codexWatching ? ' + Codex history' : '');
     renderAutoLearn(d.autoLearn);
+    renderSessions(d.agentSessions);
     renderLocal(d.local);
     renderGuidance(d.guidance);
     renderGates(d.gates);
@@ -5725,6 +6013,7 @@ class WildcardingViewProvider {
     }
     renderDeadApprovals(d);
     renderOverBroadGrants(d);
+    renderRuleUsage(d);
     applyRows();
     renderRowStates(d);
   }
@@ -5740,6 +6029,10 @@ class WildcardingViewProvider {
   });
   $('overBroadGrants').addEventListener('click', () => {
     if (overBroadShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'over-broad' } });
+  });
+  $('ruleUsage').addEventListener('click', () => {
+    if (ruleNoUseShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'no-use' } });
+    else vscode.postMessage({ type: 'countRuleUse' });
   });
   $('permissionsRestore').addEventListener('click', () => vscode.postMessage({ type: 'restorePermissions' }));
   $('permissionsImport').addEventListener('click', () => vscode.postMessage({ type: 'importPermissions' }));
@@ -5792,6 +6085,14 @@ async function deactivate() {
   stripModelTimer = null;
   stripModelThread?.terminate();
   stripModelThread = null;
+  // The rule-use pass, the same way: it writes nothing on its thread, so ending it loses only the
+  // count, and the next activation counts again when it is due.
+  clearTimeout(ruleUsageTimer);
+  ruleUsageTimer = null;
+  clearInterval(agentSessionsTimer);
+  agentSessionsTimer = null;
+  ruleUsageThread?.terminate();
+  ruleUsageThread = null;
   // A cleared timer only stops a spawn that had not started. These four had, and
   // nothing retained them, so a reload left up to a 180s python child running
   // against a torn-down host — and the gate compile's callback wrote policy.

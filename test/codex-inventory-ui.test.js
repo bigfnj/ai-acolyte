@@ -299,6 +299,51 @@ test('the over-broad filter over a list with none says so, and an unknown filter
   assert.equal(app.pickers[0].config.title, 'Saved permissions · Claude + Codex');
 });
 
+// The rule-use line opens the same picker with `{ filter: 'no-use' }` (2026-10-16): the rules the
+// last counting pass found no use for, from its saved result (src/rule-usage.js).
+function saveRuleUsage(home, rules) {
+  const { ruleKey } = require('../src/rule-usage');
+  const file = path.join(home, '.claude', 'wildcarding', 'rule-usage.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, computedAt: new Date().toISOString(), calls: 9,
+    rules: Object.fromEntries(Object.entries(rules).map(([rule, uses]) => [ruleKey(rule), { uses, lastUsedAt: null }])) }));
+}
+
+test('the no-use filter lists only rules with no use found and removes one through the usual confirmation', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'Bash(rsync *)', 'Bash(pnpm *)', 'Skill(x)'], choice: 'Remove',
+    pick: (items) => items.find((item) => item.label === 'Bash(rsync *)') });
+  saveRuleUsage(app.home, { 'Bash(git *)': 12, 'Bash(rsync *)': 0, 'Bash(pnpm *)': 0 });
+  await app.shared({ filter: 'no-use' });
+  const picker = app.pickers[0];
+  assert.equal(picker.config.title, 'Saved permissions · rules with no use found in your Claude transcripts');
+  assert.match(picker.config.placeHolder, /keep no transcript are not seen/);
+  // Untracked rules (Skill) are never in this list: no call could ever credit them.
+  assert.deepEqual(picker.items.map((item) => item.label), ['Bash(pnpm *)', 'Bash(rsync *)'],
+    'witness:rule-use-filter -- the no-use view offered a rule that is used, or one no call can credit');
+  assert.ok(picker.items.every((item) => /no use found/.test(item.description)));
+  assert.deepEqual(app.calls.map((call) => call.operation), [], 'the filtered view reads no Codex inventory');
+  // A wildcard rule's confirmation names it a wildcard (confirmClaudePermissionRemoval).
+  assert.equal(app.messages.find((item) => item.level === 'warning')?.message, 'Remove this wildcard?',
+    'removal is the ordinary per-entry confirmation, not a bulk action');
+  const allow = JSON.parse(fs.readFileSync(path.join(app.home, '.claude', 'settings.json'), 'utf8')).permissions.allow;
+  assert.deepEqual(allow, ['Bash(git *)', 'Bash(pnpm *)', 'Skill(x)']);
+});
+
+test('the unfiltered picker shows each Claude rule\'s use count, and the no-use filter says when there is nothing', async (t) => {
+  const app = await harness(t, { allow: ['Bash(git *)', 'Bash(rsync *)', 'Skill(x)'], pick: false });
+  await app.shared({ filter: 'no-use' });
+  assert.equal(app.pickers.length, 0, 'never counted: no empty picker');
+  assert.match(app.messages.at(-1)?.message || '', /every counted rule has a use, or rule use has not been counted yet/);
+  saveRuleUsage(app.home, { 'Bash(git *)': 12, 'Bash(rsync *)': 0 });
+  await app.shared();
+  const claude = app.pickers.at(-1).items.filter((item) => item.agent === 'claude');
+  assert.deepEqual(claude.map((item) => [item.label, item.description]), [
+    ['Bash(git *)', 'Claude · allow · used 12×'],
+    ['Bash(rsync *)', 'Claude · allow · no use found'],
+    ['Skill(x)', 'Claude · allow'],
+  ]);
+});
+
 for (const [name, options, unavailableLabel] of [
   ['an interrupted Codex approval', { inventory: { pendingApproval: true } }, 'Codex change needs attention'],
   ['a failed Codex inventory read', { inventoryError: 'Fixture policy store is unavailable.' }, 'Codex permissions unavailable'],

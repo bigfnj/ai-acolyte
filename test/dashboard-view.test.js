@@ -292,7 +292,7 @@ function harness(tempHome, opts = {}) {
   // local-drain-extension.test.js already does this, for the same reason.
   //
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:59#autoLearnUi,
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:63#autoLearnUi,
   // extension.js:10#createAutoLearnWorkerRunner), so leaving them cached leaves a second
   // harness holding the first one's instances.
   const extensionDir = path.dirname(extensionPath) + path.sep;
@@ -487,6 +487,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['rebuildCodexMemory', 'permission-wildcarding.rebuildCodexMemory'],
       ['codexMemoryGates', 'permission-wildcarding.codexMemoryGates'],
       ['inspectCodexMemory', 'permission-wildcarding.inspectCodexMemory'],
+      // The rule-use line's click when it has nothing to review (2026-10-16).
+      ['countRuleUse', 'permission-wildcarding.countRuleUse'],
     ];
     for (const [type, command] of routes) {
       app.executed.length = 0;
@@ -780,7 +782,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3430#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3561#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -2552,6 +2554,116 @@ test('a compressed transcript the scan could not read is said, and is not a degr
     clean.autoLearn.scan.compressedUnsupported = 0;
     clean.autoLearn.scan.compressedOversize = 0;
     assert.doesNotMatch(renderDashboard(app.provider, clean).alScanHealth, /compressed/);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// Rule use (src/rule-usage.js, 2026-10-16): the card says how often its rules are used, off the
+// result the counting thread saved, and opens the rules with no use found. Synthetic rules, the
+// shapes the one-off test above uses, so activation does not rewrite the list under test.
+test('the saved-permissions card says how often its rules are used and opens the ones with no use found', async (t) => {
+  const { ruleKey, allowFingerprint } = require('../src/rule-usage');
+  const env = setup(t);
+  const allow = ['Bash(git status *)', 'Bash(./scripts/build.sh --release)', 'Skill(dataviz)'];
+  env.write({ permissions: { allow, deny: [] } });
+  const file = path.join(env.tempHome, '.claude', 'wildcarding', 'rule-usage.json');
+  const save = (rules, list = allow) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, computedAt: new Date().toISOString(),
+      since: '2026-08-07T13:34:53.801Z', calls: 1234, files: 3, errors: 0, allowFingerprint: allowFingerprint(list), rules }));
+  };
+  save({ [ruleKey(allow[0])]: { uses: 42, lastUsedAt: new Date().toISOString() },
+    [ruleKey(allow[1])]: { uses: 0, lastUsedAt: null } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.deepEqual(env.read().permissions.allow, allow, 'precondition: the list was not rewritten');
+    const data = ui.posted.at(-1);
+    // MUTATION: drop `ruleUsage,` from the _push payload. The line then never renders.
+    const { counted, used, noUse, untracked, notCounted, current } = data.ruleUsage || {};
+    assert.deepEqual({ counted, used, noUse, untracked, notCounted, current },
+      { counted: true, used: 1, noUse: 1, untracked: 1, notCounted: 0, current: true },
+      'witness:rule-use-payload -- the card was not given the saved count');
+    assert.equal(data.ruleUsage.noUseRules, undefined, 'the list stays out of the payload; the picker reads it');
+    assert.equal(data.ruleUsage.counting, false, 'a push only reads: no counting thread was started');
+
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    const line = panel.dom.byId.get('ruleUsage');
+    assert.equal(line.hidden, false);
+    assert.match(line.textContent, /^Rule use since .+: 1 used · 1 with no use found — review$/);
+    assert.match(line.title, /keep no transcript/, 'the hover says what the count cannot see');
+    assert.match(line.title, /Most used: Bash\(git status \*\) 42×/);
+    assert.match(line.title, /1 not tracked/);
+    panel.posted.length = 0;
+    line.click();
+    assert.deepEqual(panel.posted, [{ type: 'viewPermissions', selection: { filter: 'no-use' } }],
+      'witness:rule-use-review -- the line did not open the rules with no use found');
+
+    // Nothing to review: the click asks for a recount instead.
+    save({ [ruleKey(allow[0])]: { uses: 42, lastUsedAt: new Date().toISOString() },
+      [ruleKey(allow[1])]: { uses: 3, lastUsedAt: new Date().toISOString() } });
+    app.provider.refresh();
+    await settle();
+    panel.deliver(ui.posted.at(-1));
+    assert.match(line.textContent, /^Rule use since .+: 2 used$/);
+    panel.posted.length = 0;
+    line.click();
+    assert.deepEqual(panel.posted, [{ type: 'countRuleUse' }]);
+
+    // Never counted: the line is quiet rather than claiming a zero.
+    fs.rmSync(file);
+    app.provider.refresh();
+    await settle();
+    const none = ui.posted.at(-1);
+    assert.equal(none.ruleUsage.counted, false);
+    panel.deliver(none);
+    assert.equal(line.hidden, true);
+  } finally {
+    await app.dispose();
+  }
+});
+
+// Agent sessions (src/agent-sessions.js, 2026-10-16): the card lists the sessions that wrote a
+// transcript in the last fifteen minutes, from a look that lands after the first push. Synthetic
+// transcripts in the temp home; folder names only reach the panel.
+test('the agent sessions card lists active sessions by folder name and says none when there are none', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
+  const file = path.join(env.tempHome, '.claude', 'projects', 'c--work-alpha', '11111111-aaaa-4aaa-8aaa-000000000001.jsonl');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify({ type: 'user', cwd: path.join(env.tempHome, 'work', 'alpha'),
+    entrypoint: 'claude-vscode', permissionMode: 'auto', message: { role: 'user', content: 'x' } })}\n`);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    let data;
+    for (let i = 0; i < 80 && !(data?.agentSessions?.sessions?.length); i += 1) { await settle(); data = ui.posted.at(-1); }
+    // MUTATION: drop `agentSessions: sessionsCard,` from the _push payload, or the look's refresh.
+    assert.deepEqual(data?.agentSessions?.sessions?.map((s) => [s.agent, s.id, s.app, s.project, s.mode]),
+      [['claude', '11111111', 'VS Code', 'alpha', 'auto']],
+      'witness:sessions-card -- the active session never reached the panel');
+    assert.ok(!JSON.stringify(data.agentSessions).includes(env.tempHome.replace(/\\/g, '\\\\')), 'no path reached the panel');
+
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    assert.equal(panel.dom.byId.get('stSessions').textContent, '1 active');
+    const rows = panel.dom.byId.get('sessionsList').children;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].children[0].textContent, 'Claude');
+    assert.equal(rows[0].children[1].textContent, 'alpha');
+    assert.match(rows[0].children[2].textContent, /^VS Code · auto · (just now|\d+ min ago)$/);
+    assert.match(panel.dom.byId.get('sessionsSub').textContent, /not whether it is waiting on you/);
+
+    // None active: the badge and the list say so rather than going blank.
+    panel.deliver({ ...data, agentSessions: { sessions: [], lookedAt: Date.now(), error: null } });
+    assert.equal(panel.dom.byId.get('stSessions').textContent, 'none active');
+    // The last child: fakeDom's innerHTML is a plain property, so it keeps earlier rows.
+    assert.match(panel.dom.byId.get('sessionsList').children.at(-1).textContent, /No Claude or Codex session/);
   } finally {
     await app.dispose();
   }

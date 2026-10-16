@@ -8,7 +8,11 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.6.8 reads the Codex transcripts Codex compresses**: Codex rewrites an idle rollout as
+**Version 1.7.0 shows how often each saved rule is used, and which agent sessions are
+active**: the Saved permissions card counts each Claude allow rule's use over all your
+transcripts and offers the rules with no use found for review, and a new Agent sessions row
+lists the Claude and Codex sessions active in the last 15 minutes. Version 1.6.8 reads the
+Codex transcripts Codex compresses: Codex rewrites an idle rollout as
 `.jsonl.zst`, and Auto Learn now reads those as it reads plain ones, so they no longer show as
 missing threads and a false "scan degraded". Version 1.6.7 lets a workspace only tighten Auto
 Learn: a repository's settings can lower
@@ -58,7 +62,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v168.vsix
+code --install-extension ai-acolyte-v170.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -109,14 +113,14 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2880#showCodexRules`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3001#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4406#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:4557#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:4226#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:4357#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
@@ -260,6 +264,39 @@ the overflow link and **View / remove permissions** open one searchable list.
 Backups are taken before every write. Expand **Permission tools** and choose
 **Restore permissions**, then **Claude Code**, to recover entries a pass removed.
 
+**How often each rule is used.** A muted line under the list counts how often each saved
+Claude allow rule covered a call, for example "Rule use since Aug 7: 261 used · 257 with no
+use found — review".
+- **What it reads:** every Claude transcript on the machine, matched against the rules as
+  they are now. It runs in the background, daily and after the list changes, and takes
+  about 10 s over 1.9 GB of history.
+- **Recounting:** **Count how often each saved Claude rule is used** recounts at once.
+- **Reviewing:** **review** opens the list filtered to the rules with no use found. Each
+  removal is still confirmed one at a time.
+
+"No use found" is not "unused". Sessions that keep no transcript (`claude -p
+--no-session-persistence`, the Agent SDK) are invisible to it, and so is history Claude has
+already cleaned up. Codex calls are not counted, and Skill rules and file rules with a path
+are not tracked. A deny or ask rule, yours or the managed policy's, takes the credit for any
+call it decided. Only counts are stored, keyed by a hash of each rule.
+
+> **Buys you:** a list worth pruning, without deleting a rule something still uses.
+
+## 8. Agent sessions
+
+The **Agent sessions** row lists the Claude and Codex sessions that wrote a transcript in the
+last 15 minutes. For each one it shows:
+- the agent and the app (VS Code, CLI or desktop);
+- the name of the project folder;
+- the permission mode, when the transcript records it;
+- when it was last active, and how many of its subagents are working.
+
+It reads only the transcripts, so it sees sessions in every app and needs nothing switched on.
+It cannot tell whether a session is waiting on a permission prompt: that is the panel's own
+state, which an extension cannot read.
+
+> **Buys you:** one place to see what every agent on the machine is doing right now.
+
 ---
 
 ## How it actually works
@@ -399,7 +436,7 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:3053#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:3184#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They

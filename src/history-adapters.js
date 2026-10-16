@@ -2152,6 +2152,34 @@ function appendedResultIds(source, buffer) {
   return ids;
 }
 
+// The walk's findings, one entry per transcript, sorted by path. Spelling-
+// insensitive on Windows, where one file reached two ways would be read twice.
+//
+// A rollout Codex is compressing can be listed twice, as `X.jsonl` and
+// `X.jsonl.zst`. The plain one is read and its twin is left alone until it is
+// the only copy: until then it may still be being written, and the twin holds
+// the same calls, which would only be read twice.
+function uniqueTranscripts(found) {
+  const unique = new Map();
+  for (const entry of found) {
+    const key = process.platform === 'win32' ? entry.path.toLowerCase() : entry.path;
+    if (!unique.has(key)) unique.set(key, entry);
+  }
+  for (const key of [...unique.keys()]) {
+    if (isCompressedTranscript(key) && unique.has(key.slice(0, -COMPRESSED_SUFFIX.length))) unique.delete(key);
+  }
+  return [...unique.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+// Every transcript scanHistoryFiles would read for these roots, by the same walk
+// and the same twin rule, as `{ path, source }`. For src/rule-usage.js, which
+// reads them one file at a time to bound its memory.
+function listTranscriptFiles(options = {}) {
+  const found = [];
+  for (const root of normalizeRootEntries(options)) findJsonlFiles(root.path, root.source, found, [], []);
+  return uniqueTranscripts(found);
+}
+
 // Safe appends read a bounded overlap plus new bytes. Stable observation ids let
 // callers upsert a call when its result arrives on the other side of a cursor.
 function scanHistoryFiles(options = {}) {
@@ -2209,22 +2237,10 @@ function scanHistoryFiles(options = {}) {
       walkedRoots.push({ path: path.resolve(root.path), source: root.source });
     }
   }
-  const unique = new Map();
-  for (const entry of found) {
-    const key = process.platform === 'win32' ? entry.path.toLowerCase() : entry.path;
-    if (!unique.has(key)) unique.set(key, entry);
-  }
-  // A rollout Codex is compressing can be listed twice, as `X.jsonl` and
-  // `X.jsonl.zst`. The plain one is read and its twin is left alone until it is
-  // the only copy: until then it may still be being written, and the twin holds
-  // the same calls, which would only be read twice.
-  for (const key of [...unique.keys()]) {
-    if (isCompressedTranscript(key) && unique.has(key.slice(0, -COMPRESSED_SUFFIX.length))) unique.delete(key);
-  }
   const observations = [];
   const cursors = {};
   const files = [...walkFailures];
-  const sorted = [...unique.values()].sort((a, b) => a.path.localeCompare(b.path));
+  const sorted = uniqueTranscripts(found);
 
   for (const entry of sorted) {
     const file = entry.path;
@@ -3350,6 +3366,7 @@ module.exports = {
   extractNestedShellCommands,
   cursorKeyForFile,
   scanHistoryFiles,
+  listTranscriptFiles,
   codexHistoryStoreState,
   // Exported for the guard that pins it below the int32 ceiling readSync
   // enforces. Nothing in production reads it from here.

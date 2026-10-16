@@ -8,7 +8,10 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.6.7 lets a workspace only tighten Auto Learn**: a repository's settings can lower
+**Version 1.6.8 reads the Codex transcripts Codex compresses**: Codex rewrites an idle rollout as
+`.jsonl.zst`, and Auto Learn now reads those as it reads plain ones, so they no longer show as
+missing threads and a false "scan degraded". Version 1.6.7 lets a workspace only tighten Auto
+Learn: a repository's settings can lower
 the mode, raise the threshold, or turn Codex export or the local drain off, but never loosen them.
 Version 1.6.6 warns when a Claude Code update changes its safe-variable list, checked once
 per new Claude Code binary in the background. Version 1.6.5 added per-agent memory gates and
@@ -55,7 +58,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v167.vsix
+code --install-extension ai-acolyte-v168.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -106,17 +109,17 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2874#showCodexRules`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:2880#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4400#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:4406#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:4220#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:4226#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
-(`src/auto-learn-manager.js:1421#codexBackupPath`). Codex derived guidance has separate policy and run
-evidence (`src/auto-learn-manager.js:1856#derivedFor`); observed runs are not reported as measured
+(`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
+evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
 approval prompts. Actual restore and guidance controls now pass in a staged VS Code
 host, with deliberate no-op controls that fail the intended checks. The detailed
 development evidence and supported boundaries remain in the compatibility document.
@@ -396,7 +399,7 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:3047#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:3053#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They

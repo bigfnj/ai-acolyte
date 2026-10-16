@@ -17,9 +17,12 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
-**Released 2026-10-16 as 1.6.8.** Auto Learn reads the `.jsonl.zst` files Codex compresses idle
-rollouts into, which ends the second "scan degraded" false alarm. The record has it under "Codex
-compresses idle rollouts to `.jsonl.zst`".
+**Released 2026-10-16 as 1.6.8.** The tag `v1.6.8` is at `bb5c6d8`. CI is green on all 8 jobs.
+The published asset matches the local build entry by entry, apart from line endings. The
+real-editor drive passed 6 of 6 on VS Code 1.142.0, and the live worktree has moved to the tag.
+Auto Learn now reads the `.jsonl.zst` files Codex compresses idle rollouts into, which ends the
+second "scan degraded" false alarm. The record has it under "Codex compresses idle rollouts to
+`.jsonl.zst`".
 
 **Released 2026-10-15 as 1.6.6 and 1.6.7.**
 - 1.6.6 (`36696ec`): the Claude Code strip model is checked on each update.
@@ -42,6 +45,23 @@ Re-verify before acting on anything here, including this paragraph.
 ---
 
 ## Open
+
+### Two process-timing tests fail on the development box under full-suite load (2026-10-16)
+
+**Open, and not a regression.** On 2026-10-16, `node --test` failed the same two tests in three
+out of three full runs: on the 1.6.8 branch, under `mask-sqlite`, and on untouched `main`
+(`75265d2`), which CI had passed the day before.
+- **`test/codex-mcp-config.test.js`**, "the config worker's grace kill skips an app-server that
+  exited by a signal, and still ends a live one". The stand-in's exit arrived 2 s after the grace
+  kill had already fired.
+- **`test/dashboard-project-trust.test.js`**, "a cold push starts no process on the host thread,
+  and both Codex answers still arrive". The stand-in never answered within the 30 s limit.
+
+Both pass when their two files run alone (34 of 34), and both passed on all 8 CI jobs for
+`bb5c6d8`. Two things changed on the box that day: VS Code updated itself to 1.142.0, and the
+workstation restarted after a crash. The suspects are process-spawn pressure from a full run, or an
+endpoint security filter holding a freshly spawned process. **Not yet diagnosed.** The next step is
+a timing capture of the stand-in process during a full run.
 
 ### Memory gates: `agents:` targeting (2026-10-14; all three gaps closed)
 

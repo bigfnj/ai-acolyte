@@ -122,6 +122,12 @@ const PENDING_REMOVAL = {};
 // adding one is a deliberate act and so that a name QUIETLY losing its last production
 // caller shows up here instead of looking unchanged.
 const TEST_ONLY = {
+  // 2026-10-16, both new. rule-usage.js: production enters through countOffThread (the thread
+  // runs countRuleUsage inside the module) and summarizeRuleUsage; these are the seams
+  // test/rule-usage.test.js uses to hold the index to a full scan, pin the crediting rules and
+  // drive a pass with an injected scanner. agent-sessions.js: the tests age fixtures by the window.
+  'src/rule-usage.js': ['analyzeRuleUsage', 'countRuleUsage', 'createRuleIndex', 'creditsFor', 'probesFor', 'ruleKey', 'trackedRule'],
+  'src/agent-sessions.js': ['WINDOW_MS'],
   // 2026-10-14: agent-gates.js left this list, and agent-guidance.js, derived-guidance.js
   // and history-adapters.js shrank, when the census learned to follow a require through a
   // path.join. scripts/check-codex-runtime.js and scripts/vscode-acceptance/ load the STAGED
@@ -141,7 +147,8 @@ const TEST_ONLY = {
   'src/codex-mcp-config.js': ['inspectCodexMcpTool'],
   // classifyInvocation came off 2026-10-13: src/permission-summary.js
   // overBroadShellGrants calls it for a wildcard head that has no invocation at all.
-  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'BASH_RESERVED', 'POWERSHELL_RESERVED', 'isLearnableTool', 'splitCommandSegments', 'tokenizeCommand', 'toolInvocation'],
+  // splitCommandSegments came off 2026-10-16: src/rule-usage.js splits each counted call with it.
+  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'BASH_RESERVED', 'POWERSHELL_RESERVED', 'isLearnableTool', 'tokenizeCommand', 'toolInvocation'],
   // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
   // consumer when the managed-requirements parser was rewritten on 2026-09-24:
   // production now asks enterprisePolicyAssessment, which answers with the degraded

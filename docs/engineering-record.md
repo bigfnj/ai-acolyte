@@ -33,6 +33,120 @@ is unmeasurable at the process level.
 
 ---
 
+## Rule use and agent sessions, from AgentFlow (2026-10-16)
+
+**SHIPPED** in 1.7.0. These are the two of AgentFlow's features (desktop-ai-companion) that the
+maintainer chose to bring in. The others were assessed and declined; see the last paragraph.
+
+### Rule use (`src/rule-usage.js`)
+
+The Saved permissions card counts how often each Claude allow rule covered a call, and offers
+the rules with no use found for review through the shared picker (filter `no-use`). Each removal
+is still confirmed one at a time.
+
+**A full pass over all history, against the current rules; not a counter in the Auto Learn scan.**
+Auto Learn's state is partitioned per workspace, and it filters observations to the open folder
+(`autoLearnConfig`'s `workspaceRoot`), while the allow list is global. A counter kept there would
+have seen one project's calls, and a rule used daily elsewhere would have read as unused. That is
+the one wrong answer this feature must not give, because its answer is "consider deleting this".
+A pass also judges each rule as it is now, so a freshly folded rule is credited with the calls
+it covers, and no first-seen date is needed.
+
+**Measured on the development box (2026-10-16):**
+- **History:** 893 transcripts, 1,880,002,028 bytes, 81,838 finished calls since 2026-08-07.
+- **Cost:** the pass takes 10.6 s.
+- **Matching:** naive matching was 29.9 s for 239,100 segments against about 254 rules each.
+  The index (tool and first word) removes almost all of that.
+- **Index exactness:** across 37,833 probes sampled from the real corpus, the index disagreed with
+  a full `coversPermission` scan 0 times. `test/rule-usage.test.js` holds it to a full scan on a
+  corpus that includes `timeout 5 rg` (Claude's strip) and `xargs`.
+- **Result for the user's 526-rule list:** 261 used, 257 with no use found, 8 not tracked. The
+  most used was `Bash(cd *)`, at 34,624 calls.
+
+**Crediting rules:**
+- Only finished calls count.
+- Each call credits every allow rule that covers one of its probes, at most once per call.
+- **Any segment counts.** A rule that covered one segment of a compound command is credited even
+  when another segment prompted. This is the conservative direction for a list of deletion
+  candidates.
+- **A deny or ask rule takes the credit** for any probe it covers, whether the user's or the
+  managed policy's (`remote-settings.json`).
+- **Codex is not counted:** it obeys its own rules files.
+- **Not tracked:** Skill rules, and file rules with a path specifier. A file observation carries no
+  path by design, so only a bare `Edit` or `Write` can be credited.
+
+**Wording.** The card says "no use FOUND", never "unused". Sessions that keep no transcript
+(`claude -p --no-session-persistence`, which ai-platform uses, and the SDK) are invisible, and so
+is history Claude has already cleaned up. The hover says both.
+
+**Privacy.** Results are stored in `~/.claude/wildcarding/rule-usage.json`, keyed by a hash of the
+normalized rule. No rule text, command or path is stored.
+
+**Its own thread, not the Auto Learn queue.**
+- The pass runs as `countOffThread`, the pattern of `src/claude-strip-model.js`. On the Auto Learn
+  queue its ~10 s would have held every scan, apply and undo.
+- That runner also drains each job at teardown, because a manager job may sit between two policy
+  writes. This pass writes nothing on its thread, so `deactivate()` terminates it.
+
+**A timer starts it, not the push.**
+- It first looks two minutes after activation, then every fifteen minutes.
+- It counts when no result exists, when the result is over a day old, or when the list has
+  changed. Counts are never closer than ten minutes apart.
+- A push that started passes would have put a thread behind every dashboard test, with a late
+  second push landing under whatever that test asserted next.
+
+### Agent sessions (`src/agent-sessions.js`)
+
+**What the card shows.** It lists the Claude and Codex sessions that wrote a transcript in the last
+fifteen minutes: the agent, the app, the folder name, the mode when recorded, the last activity
+and the active subagents.
+
+**How it reads them.**
+- **From transcripts only,** so it sees every app and needs nothing switched on.
+- **The app** comes from an allowlist of `entrypoint` / `originator` values; an unlisted value
+  reads "other".
+- **The project is the folder name only.** Nothing is persisted.
+- **One look costs 68-88 ms** on the box, as async stats plus a short read of each active file.
+
+**No "waiting" column (DECLINED, measured).** A transcript cannot say whether a panel waits on a
+prompt. Inferring it from a stalled call is about 0.4% precise outside Claude's default mode
+(AgentFlow's BlockedDetector measurement), and the box runs auto mode.
+
+**The mode is opportunistic.** Measured on this session: its last `permissionMode` record was
+13 MB from the end, and the VS Code panel's prompts since carry none. So the card reads back up to
+4 MB and keeps a mode an earlier read found.
+
+**Redraw rules.**
+- A look pushes on a change, and on the minute tick while any session is listed.
+- The ages are drawn by those pushes, not by a timer in the webview. The tests run that script
+  in-process, where an interval would keep the runner alive.
+
+### Evidence
+
+- **Tests:** `test/rule-usage.test.js` and `test/agent-sessions.test.js`, plus dashboard and picker
+  tests.
+- **Mutants:** twelve were run and all twelve were killed. They covered the stripped-form index,
+  deny/ask, any-segment crediting, the capped multi-pass read, per-file dedupe, Skill tracking, the
+  subagent rollup, mode carry-forward, folder-name privacy, both payload fields and the filter.
+
+### AgentFlow features not brought in (DECLINED, 2026-10-16, the maintainer's choice)
+
+**Pressing the approve button.** It needs VS Code's unauthenticated debug port, which lets any
+local process drive the editor. It presses any recognised card whatever the ask rules or the
+managed policy say, which conflicts with this extension never bypassing policy. And it depends on
+the panel's markup (AgentFlow's BUG-006/007/008).
+
+**Session-limit reading and pause & resume.** The usage percentage exists only inside the panel. No
+hook carries it, and the status line does not run in the panel. Claude Code's own
+`quota_auto_resume_*` notifications suggest a native resume.
+
+**On-screen prompt and panel states.** These need the debug port too. Claude Code 2.1.301
+publishes no command to read them.
+
+**The `PermissionRequest` hook.** A hook that answers from the rules approved 0 of 1,076 dialogs
+(branch `feature/permission-request-hook`). The work login's managed policy also sets
+`allowManagedHooksOnly`, under which user hooks do not run.
+
 ## Codex compresses idle rollouts to `.jsonl.zst` (2026-10-16)
 
 **FIXED** in 1.6.8. The dashboard read "scan degraded" again three days after the archived-thread fix.
@@ -146,9 +260,9 @@ files.
 
 **The rule.** A workspace or folder value may make each key stricter than the user's own setting,
 never looser.
-- **Where.** `vscode-extension/extension.js:1268#tightenOnlySetting` applies it, over the table at
-  `vscode-extension/extension.js:1236#TIGHTEN_ONLY`. `autoLearnConfig` reads the mode, threshold
-  and scope through it, and `vscode-extension/extension.js:3523#localDrainEnabled` reads the drain.
+- **Where.** `vscode-extension/extension.js:1272#tightenOnlySetting` applies it, over the table at
+  `vscode-extension/extension.js:1240#TIGHTEN_ONLY`. `autoLearnConfig` reads the mode, threshold
+  and scope through it, and `vscode-extension/extension.js:3654#localDrainEnabled` reads the drain.
 - **The user tier** is `inspect().globalValue`. When it is unset or invalid, the manifest default
   is the bar.
 - **The effective value** is the strictest of three things: the user tier, every workspace and
@@ -176,17 +290,17 @@ channel, never a notification:
 
 When the user set nothing, the line ends "(user setting: recommend, the default)". It is written
 once per distinct line per activation: `looserSettingsNoted` is cleared in activate, as
-`warnedOnce` is (`vscode-extension/extension.js:2805#looserSettingsNoted`). That Set is not
+`warnedOnce` is (`vscode-extension/extension.js:2926#looserSettingsNoted`). That Set is not
 decoration. With it removed, two scans in one window printed the line 10 times, because
 `autoLearnConfig` runs on every scan and every refresh.
 
-**The mode toggle** (`vscode-extension/extension.js:1996#cycleAutoLearnMode`, the Cycle mode
+**The mode toggle** (`vscode-extension/extension.js:2000#cycleAutoLearnMode`, the Cycle mode
 command).
 - **A step above the user's own mode** writes user settings, so raising is always the user's own
   setting. Its auto-safe confirm says "in your user settings, for every workspace that does not
   lower it".
 - **The removal.** A raise also removes a folder or workspace value below the new mode
-  (`vscode-extension/extension.js:2020#removed`). Such a value can only equal the old user
+  (`vscode-extension/extension.js:2024#removed`). Such a value can only equal the old user
   setting, or the step would not have been a raise. Left in place, it would still cap the mode in
   this window, and the toast would report a mode the window did not get.
 - **Any other step** writes as before: the folder tier, else the workspace tier when one holds a
@@ -258,9 +372,9 @@ exit codes; it exports only `main` now, and its tests take `check` and `defaultB
 `src/claude-strip-model.js:170#checkOffThread` runs `check` on a `new Worker` of the module itself,
 the minimal form of the src/spawn-thread.js pattern.
 
-**When it runs.** `vscode-extension/extension.js:2674#scheduleStripModelCheck` arms an unref'd 30 s
+**When it runs.** `vscode-extension/extension.js:2795#scheduleStripModelCheck` arms an unref'd 30 s
 timer on activation; deactivate clears it and terminates a scan in flight.
-`vscode-extension/extension.js:2687#checkClaudeStripModel` finds the newest binary with
+`vscode-extension/extension.js:2808#checkClaudeStripModel` finds the newest binary with
 `defaultBinary`, stats it, and compares a key of path, size and mtimeMs with the one in
 `context.globalState`. An unchanged key does nothing. A new key runs the scan on the worker, then
 stores the key with a summary: `same`, `drift`, `undecided` (the list could not be located) or
@@ -268,7 +382,7 @@ stores the key with a summary: `same`, `drift`, `undecided` (the list could not 
 re-read on every start. A lost thread (deactivate, or a worker that could not start) stores
 nothing, so the next start tries again. It never edits `CLAUDE_SAFE_ENV_VARS` or any setting.
 
-**What it says.** `vscode-extension/extension.js:2719#reportStripModel`. The same list is one
+**What it says.** `vscode-extension/extension.js:2840#reportStripModel`. The same list is one
 output line ("Claude Code 2.1.299: strip model unchanged (39 names, case-exact)"). Drift (names
 added or dropped, or `lookupCase` `folded`) is one warning per binary that names the version and the
 names, plus output lines. Its Show details button opens the output channel. A list that cannot be
@@ -318,23 +432,23 @@ names retired gates after its verdict (`memory/recall.py:1550#_lint_retired`). `
 is the planner both front ends run (`src/gates-manage.js:107#planGateChanges`). The CLI and a
 dashboard panel with Apply, Revert and a filter are the two front ends, and the card shows a
 retired count. A change a reload cut short is recorded and reported on the next activation
-(`vscode-extension/extension.js:6233#reportInterruptedGateChanges`).
+(`vscode-extension/extension.js:6534#reportInterruptedGateChanges`).
 
 **Adaptations.**
 
 | Rampage | AI Acolyte, and why |
 |---|---|
 | Data under `~/.claude/rampage/`, override `RAMPAGE_SNAPSHOT_DIR` | `~/.claude/wildcarding/`: `gate-snapshots/`, `gates-edit.lock`, `pending-gates.<pid>.json` (`memory/recall.py:1481#_snapshot_root`, `memory/recall.py:2007#_gate_lock_path`). It is the extension's Claude-side state directory: the policy lock, the learner's state and backups, and the recall model already live there, and the store being edited is Claude Code's. `~/.ai-acolyte/` holds Codex-profile state and the Codex backup catalog. The override is `AI_ACOLYTE_GATE_SNAPSHOT_DIR`. |
-| Settings read with `get()` | `gates.enabled` through `userSetting` (`vscode-extension/extension.js:6087#gatesSwitch`); `memory.dir` through memoryReport's `cfg()`, `inspect().globalValue` (wave-f15); `memory.recallScript` through `recallScriptPath`. A workspace value of any of them is ignored. |
-| No pin: recall.py picks the store | Every step pins the compile store, the one compileGates already pinned (`vscode-extension/extension.js:5923#gateCompileEnv`), and the list's own `store` is named outright for the edit and the compile, so a store that changes under an open panel can only be refused. compileGates now takes its environment from the same helper. |
+| Settings read with `get()` | `gates.enabled` through `userSetting` (`vscode-extension/extension.js:6388#gatesSwitch`); `memory.dir` through memoryReport's `cfg()`, `inspect().globalValue` (wave-f15); `memory.recallScript` through `recallScriptPath`. A workspace value of any of them is ignored. |
+| No pin: recall.py picks the store | Every step pins the compile store, the one compileGates already pinned (`vscode-extension/extension.js:6224#gateCompileEnv`), and the list's own `store` is named outright for the edit and the compile, so a store that changes under an open panel can only be refused. compileGates now takes its environment from the same helper. |
 | `--gates-list` entries: `scope`, `active` | `scope`, `state` (`active`, `retired`, or `excluded`: scope global with an `agents:` line that cannot be read, so neither active nor retired), `agents`, `problem` (`memory/recall.py:1489#_gate_entry`). gates-manage.sh holds the list's active gates to the compiler's own per-agent output. |
 | One instruction file | Per agent. A retire is per memory and rewrites the scope value only, so `agents:` survives a retire and a restore byte for byte (fixtures: a flow list, a CRLF block list before the scope, `agents:` after a lone CR, an unknown agent). The plan carries each agent's gates before and after, and the modal says what CLAUDE.md and AGENTS.md each load (`src/gates-manage.js:222#describePlan`): a Codex-only retire reads "CLAUDE.md: not changed by this", and CLAUDE.md is not rewritten. An excluded gate may be retired (it changes no file) and is not restorable (it is scope: global already). |
 | The card's own `frontmatterScope` | memoryLint.js `gateEntryOf` (`vscode-extension/memoryLint.js:45#gateEntryOf`), built on wave-h2's `frontmatter` and `gateAgents`; `gateOf` now reads through it, so there is no third parser. fullReport lists `gateRetired`, in compile order, for the card. test/gate-agents.test.js holds it to `_gate_entry` over the 480 generated memories (243 active, 81 retired, 20 retired with an unreadable `agents:`, 75 excluded, 61 none, measured 2026-10-14). |
 | `rampage gates list\|retire\|restore` | `wildcard-perms --gates list [--json]` and `--gates retire\|restore [--] <memory>...` (`bin/wildcard-perms:983#gatesChange`), beside `on\|off\|status\|refresh`, in `--help` and its census. Every word after `retire` or `restore` is a name, never a verb (`bin/wildcard-perms:92#takesNames`): the dispatch finds verbs anywhere in argv, so `--gates retire --seed` ran `--seed`. A dashed name goes after `--`. |
 | Legacy ai-acolyte block branches | Dropped. The UI and the CLI name CLAUDE.md and AGENTS.md. |
-| Failure advice: `rampage gates refresh`, `gates off`, `rampage recall --gates-compile` | The CLI names `wildcard-perms --gates refresh` / `--gates off` and the recall.py it runs, in backticks (the commands carry quoted paths). The panel names its own **Compile and install** (`vscode-extension/extension.js:6510#runGateFinish`), which finishes every case, because the extension ships no CLI on PATH. |
-| A second compile 2 s later by the corpus watcher, "harmless by construction" | One change, one compile. The memories the edit rewrites are marked before it starts and stamped (mtimeMs, size) when it ends, and `gatesCorpusBump` skips an event for one while it still has that stamp (`vscode-extension/extension.js:5944#isOwnGateEdit`). A later edit moves the stamp and compiles as before. The compile is recall.py's atomic replace (G1) and the install `setGatesAll`'s single read (G2); the compiled-file watcher's ensureGates then finds the install current. |
-| The edit untracked, so a reload cannot kill it | It is tracked and bounded like every child (the execFile censuses in test/extension-lifecycle-async.test.js now count five sites), and it is the one child deactivate lets finish (`vscode-extension/extension.js:6032#finishingChildren`): rampage measured a kill 30 ms after the snapshot line leaving 18 memories retired and nothing put back. |
+| Failure advice: `rampage gates refresh`, `gates off`, `rampage recall --gates-compile` | The CLI names `wildcard-perms --gates refresh` / `--gates off` and the recall.py it runs, in backticks (the commands carry quoted paths). The panel names its own **Compile and install** (`vscode-extension/extension.js:6811#runGateFinish`), which finishes every case, because the extension ships no CLI on PATH. |
+| A second compile 2 s later by the corpus watcher, "harmless by construction" | One change, one compile. The memories the edit rewrites are marked before it starts and stamped (mtimeMs, size) when it ends, and `gatesCorpusBump` skips an event for one while it still has that stamp (`vscode-extension/extension.js:6245#isOwnGateEdit`). A later edit moves the stamp and compiles as before. The compile is recall.py's atomic replace (G1) and the install `setGatesAll`'s single read (G2); the compiled-file watcher's ensureGates then finds the install current. |
+| The edit untracked, so a reload cannot kill it | It is tracked and bounded like every child (the execFile censuses in test/extension-lifecycle-async.test.js now count five sites), and it is the one child deactivate lets finish (`vscode-extension/extension.js:6333#finishingChildren`): rampage measured a kill 30 ms after the snapshot line leaving 18 memories retired and nothing put back. |
 | `--lint` note "not compiled" | "kept in the store and left out of the compile by choice": scripts/verify-release.ps1 fails its standing-order check on "not compiled". |
 | CI runs recall-py.sh and gates-stale.sh | Neither is in this repo's CI (the brief assumed they were). gates-manage.sh got its own job, `gates-manage` in .github/workflows/test.yml, on rampage's pins (Python 3.11, numpy 2.4.6, onnxruntime 1.30.0) with `CI=true` turning a missing interpreter into a failure. It has not run on GitHub: nothing was pushed. |
 
@@ -488,11 +602,11 @@ none compiled for claude" for the removal. `--lint` prints "N gate memories comp
 codex Y" and reports a gate left out, with the reason, as a finding that keeps `clean:` from
 printing; the compile names it on stderr, which `--gates refresh` passes through. The dashboard
 card reads "Claude 13 · Codex 14" in its text and badge once the agents differ, judges ON and
-PARTIAL over the agents that have gates (`vscode-extension/extension.js:4071#wanted`), and names a
+PARTIAL over the agents that have gates (`vscode-extension/extension.js:4202#wanted`), and names a
 left-out gate memory. Its count now comes from the status rows, which removed `compiledGateCount`
 and one read of the compiled file per push; `readCompiled` became test-only. `ensureGates` treats
-a gateless agent with no block as settled (`vscode-extension/extension.js:3946#wants`), and the toggle
-counts that install as complete (`vscode-extension/extension.js:3992#installed`).
+a gateless agent with no block as settled (`vscode-extension/extension.js:4077#wants`), and the toggle
+counts that install as complete (`vscode-extension/extension.js:4123#installed`).
 `scripts/verify-release.ps1` compares `CLAUDE.md` with Claude's section
 (`scripts/verify-release.ps1:221#GetBytes`); its extraction was run alone under PowerShell 5.1 and 7
 against a per-agent compile with non-ASCII text, never through the release script.
@@ -560,8 +674,8 @@ that kills them.
 | G6: `src/agent-gates.js` said gates need `type: feedback` + `scope: global` (backlog gap 3) | **FIXED**, `659be23` | The header now says selection is on `scope: global` alone, that `type:` plays no part, and that only one store compiles. Comment only, so no test. |
 | G4: the managed-block writer matched markers as substrings, rewrote non-UTF-8 files, swept bare `\n` only, kept one backup slot and replaced symlinks | **PORTED**, `edec1fa` (rampage `7139659`), patched into `src/agent-guidance.js` in place | Not imported, because `derived-guidance.js` and `codex-memory-gates.js` build their blocks with this module's `createManagedBlock`. They inherit the new marker, fence and CRLF rules, and the lock at the real path, through `withInstructionLock`. **What changed:** (a) Markers count only as whole lines, after a byte-order mark on line 1 (`src/agent-guidance.js:153#markerLineAt`). A pair wholly inside a closed code fence is an example (`src/agent-guidance.js:175#fencedSpans`). The range starts at the last begin line before the first end line. (b) Removal counts `\r\n` and `\n` as one terminator each and keeps the user's own bytes. Only the install's own blank line goes, and a file holding only a BOM takes the block straight after it. (c) The file is read as bytes. A file that does not round-trip through UTF-8, or holds a NUL, is refused with nothing written or backed up (`src/agent-guidance.js:392#readInstructionFile`). (d) Two backups from the raw bytes: `<name>` is written once and never overwritten, and `<name>-prev` holds the file before the latest change. (e) A symlinked file is written through to its target and locked there (`src/agent-guidance.js:416#writablePath`), and a link to a missing file is refused. **Adaptations:** the rolling slot is per block and per file, `CLAUDE.md.pre-gates-prev`, where rampage's is per file (`*.rampage-prev`). An INACTIVE Codex file that is not UTF-8 and holds no block blocks nothing (`src/agent-guidance.js:445#blocksCleanup`). Without that, a UTF-16 `AGENTS.md` shadowed by a nonempty override stopped guidance and gates being installed in the override at all. **inPlaceFallback, decided:** this repo's `writeFileAtomicSync` stays. The unattended writers pass `inPlaceFallback: false`: `ensureGates` and `ensureGuidance` (activation, the compiled-file watcher, the corpus recompile) and `--gates refresh` (`bin/wildcard-perms:1156#inPlaceFallback`). Their update is redone by the next activation, recompile or session. An in-place write truncates and refills CLAUDE.md or AGENTS.md while any new session may be loading it, and the 2026-10-14 audit measured it running on every write once a holder kept the file open 0.9 s or more. The interactive toggles and the CLI's on/off keep the fallback, because a person sees the result. **Tests**, test/agent-guidance.test.js, ported: "a lock that cannot be created for a sharing reason is a busy row", "not UTF-8 text is refused byte for byte", the two stand-in symlink tests, "the first-ever backup is kept for good", "removal between CRLF lines", "an editor saves as CRLF", "only the install's own blank line goes", "a byte-order mark is not user text", "a marker quoted in the user's prose", "a begin line left on its own", "inside a closed code fence", "a fence can hide only a pair it encloses". New: the BOM-and-CRLF `AGENTS.md` round trip through `setGuidanceAll` (on, status, off, an editor-saved copy, a block at the very top); "an inactive Codex file that is not UTF-8 and holds no block blocks nothing"; "inPlaceFallback: false leaves a held instruction file untouched". Also new: an activation test with a held CLAUDE.md (test/extension-activation.test.js), and a CLI refresh test against a held CLAUDE.md (test/cli-gates.test.js). Twenty mutations of the two modules, two of the extension's calls and one of the CLI's call, each killed. With `src/agent-guidance.js` reverted whole, 12 of these tests fail. Four pass on the old file by design: "removal between CRLF lines" (the old arithmetic agrees on that input), the fence-encloses control, and the inactive UTF-16 case all guard the new code's edges; the sharing-lock row rides on G5's policy-lock change and fails when isContended answers EEXIST alone. **Skipped:** "a real symbolic link survives the write". It needs the symlink privilege, which Windows reserves for an elevated or Developer Mode session, and the stand-ins cover the path. Also skipped: the legacy, `escape` and `requireBlock` cases. "a string target backs up beside the file" is not ported either, see the residual below. |
 | G5: a sharing error creating a lock crashed the writer; a `null` lock was never reclaimable; a live pid was honoured forever | **PORTED, SCOPED**, `5c9c4e0` (rampage `7139659`) | (a) EPERM, EACCES and EBUSY creating the lock are a busy lock (`src/policy-lock.js:34#isContended`), as EEXIST was. The codes are src/permissions.js RETRYABLE_RENAME_CODES, the one shared set, looked up lazily on the failure path, because test/rename-retry-policy.test.js forbids a second spelling of it (a literal Set failed that census on the first full run). A code other than EEXIST is named in the message and kept as `cause`. A sharing code from the metadata write, after this process created the lock, is still its own failure. (b) The lock is read through `Object(JSON.parse(...))`. (c) Reclaiming a lock whose pid answers, or cannot be probed, once it passes the stale window is an **opt-in**, `reclaimLiveWhenStale` (`src/policy-lock.js:65#reclaimLiveWhenStale`). Only `withInstructionLock` (30 s) passes it. The drain hook, `withPolicyLock` and Auto Learn share `POLICY_LOCK_PATH` with a ten-minute window. A scan that outlasts that window is still a live writer of settings.json, so they never reclaim a live holder. (d) `POLICY_LOCK_PATH` and `POLICY_LOCK_BUSY_MESSAGE` stay exported; rampage deleted both. The CLI's `withPolicyLock` prints the busy error's own message, so a permanent EACCES no longer reads as "Auto Learn is mid-scan". **Tests**, test/policy-lock.test.js: rampage's four (the live pid and the EPERM probe under the opt-in; non-object JSON; sharing codes busy and named; a metadata-write EACCES stays EACCES). Added: "without the opt-in, a live-pid holder is never reclaimed, however old its lock is". It also pins that only `src/agent-guidance.js` passes the opt-in. Added in test/agent-guidance.test.js: "an instruction lock older than its window is reclaimed even when its pid answers". Each fails under its mutation, and three fail with the whole file reverted. The metadata-write and no-opt-in tests are controls and pass on the old code. |
-| G7: `--gates refresh` printed advice to run itself, and swallowed a successful compile's stderr; `ensureGates` dropped every error | **PORTED**, `59d4655` (rampage `7139659`) | **What changed in refresh:** when the install is refused, refresh says what happened (`bin/wildcard-perms:1161#refused`). It prints "compile failed, and nothing was installed (...)", with the reason when the compile was not empty, or "the compile found no scope:global gate blocks, so there is nothing to install". It no longer prints the refusal's "run `recall.py --gates-compile`" / "`--gates refresh`" advice. "Installing whatever was last compiled" is printed only when something was. A successful compile's stderr is passed through (`bin/wildcard-perms:1144#compile.stderr`). The comment that said `--gates status` reports the staleness a failed compile leaves now says it cannot, and that `recall.py --lint` does. Refusal rows carry `refusal` and a bare `reason` beside `error` for this. AI Acolyte's `resolvedLaunch` spawn is kept. **Extension:** `ensureGates` writes each failed target's error to the output channel (`vscode-extension/extension.js:3957#failed`). That is the shared channel, named "Acolyte"; no channel is named "AI Acolyte". **Tests:** test/cli-gates.test.js "CLI --gates refresh says what happened, never advises refresh, and passes compile warnings through" (a compile that cannot run, and a stand-in python that warns and compiles nothing); test/extension-activation.test.js requires one log line for the held gates target. Each fails with its fix reverted. |
-| New: a `scope: global` gate in any store but the compile store was ignored in silence (backlog gap 1) | **FIXED by reporting**, `a9a2dbf` | The maintainer's decision: such gates are still never compiled; they are now reported. `recall.py --lint` names each other `~/.claude/projects/*/memory` store by folder name, with its count of gate memories that are not installed, and any store it could not read (`memory/recall.py:1205#_other_store_gates`). "Not installed" means the block's text is not one the compile store compiles, so a copied store is not reported for gates it shares. The section counts toward `clean:`. It avoids the phrase "not compiled", which verify-release.ps1's standing-order check fails on. One selection rule, `_gate_body` (`memory/recall.py:1186#_gate_body`), serves the compiler and the census, and the compiler's output is unchanged. The dashboard's gates card shows "N gates in other memory stores are not installed: <folder> (n)" from `otherStoreGates` (`vscode-extension/memoryLint.js:522#otherStoreGates`). It is called by `gatesCardData` with memoryReport's `dir` (the store compileGates pins) and that store's `gateBodies` (`vscode-extension/extension.js:4117#otherStores`). It is not part of memoryReport, whose syscall budget is pinned by test. **Measured** in one process, which is indicative only and not this file's fresh-process protocol: 4 other stores of 50 files cost 207 ms cold and 12.5 ms min / 15.7 ms p50 warm, one stat per file. So the answer is held for a minute per compile store and gate set (`vscode-extension/memoryLint.js:510#CENSUS_MAX_AGE_MS`), and a census reads a file only when its mtime or size changed. **Which store compiles is unchanged:** memory.dir when set, else the largest. **Tests:** test/recall-py.sh covers an other-store gate reported by folder and count and not compiled; compile bytes identical with and without that store; no section once no other store holds a gate; `RECALL_MEMORY_DIR` deciding the compile store; an unreadable store named. test/memory-lint-watchers.test.js has the same census in JS, the memory.dir pin, an unreadable store, the per-file memo, the one-store budget (one listing of `~/.claude/projects`) and the minute's cache. test/dashboard-view.test.js covers the card line, singular, hidden and unknown, and checks the census is asked about the compile store. Fifteen mutations, each killed. The `== primary` skip in the Python census is not separately falsifiable: the dedup already zeroes the compile store. The JS one is caught by the one-store budget. |
+| G7: `--gates refresh` printed advice to run itself, and swallowed a successful compile's stderr; `ensureGates` dropped every error | **PORTED**, `59d4655` (rampage `7139659`) | **What changed in refresh:** when the install is refused, refresh says what happened (`bin/wildcard-perms:1161#refused`). It prints "compile failed, and nothing was installed (...)", with the reason when the compile was not empty, or "the compile found no scope:global gate blocks, so there is nothing to install". It no longer prints the refusal's "run `recall.py --gates-compile`" / "`--gates refresh`" advice. "Installing whatever was last compiled" is printed only when something was. A successful compile's stderr is passed through (`bin/wildcard-perms:1144#compile.stderr`). The comment that said `--gates status` reports the staleness a failed compile leaves now says it cannot, and that `recall.py --lint` does. Refusal rows carry `refusal` and a bare `reason` beside `error` for this. AI Acolyte's `resolvedLaunch` spawn is kept. **Extension:** `ensureGates` writes each failed target's error to the output channel (`vscode-extension/extension.js:4088#failed`). That is the shared channel, named "Acolyte"; no channel is named "AI Acolyte". **Tests:** test/cli-gates.test.js "CLI --gates refresh says what happened, never advises refresh, and passes compile warnings through" (a compile that cannot run, and a stand-in python that warns and compiles nothing); test/extension-activation.test.js requires one log line for the held gates target. Each fails with its fix reverted. |
+| New: a `scope: global` gate in any store but the compile store was ignored in silence (backlog gap 1) | **FIXED by reporting**, `a9a2dbf` | The maintainer's decision: such gates are still never compiled; they are now reported. `recall.py --lint` names each other `~/.claude/projects/*/memory` store by folder name, with its count of gate memories that are not installed, and any store it could not read (`memory/recall.py:1205#_other_store_gates`). "Not installed" means the block's text is not one the compile store compiles, so a copied store is not reported for gates it shares. The section counts toward `clean:`. It avoids the phrase "not compiled", which verify-release.ps1's standing-order check fails on. One selection rule, `_gate_body` (`memory/recall.py:1186#_gate_body`), serves the compiler and the census, and the compiler's output is unchanged. The dashboard's gates card shows "N gates in other memory stores are not installed: <folder> (n)" from `otherStoreGates` (`vscode-extension/memoryLint.js:522#otherStoreGates`). It is called by `gatesCardData` with memoryReport's `dir` (the store compileGates pins) and that store's `gateBodies` (`vscode-extension/extension.js:4248#otherStores`). It is not part of memoryReport, whose syscall budget is pinned by test. **Measured** in one process, which is indicative only and not this file's fresh-process protocol: 4 other stores of 50 files cost 207 ms cold and 12.5 ms min / 15.7 ms p50 warm, one stat per file. So the answer is held for a minute per compile store and gate set (`vscode-extension/memoryLint.js:510#CENSUS_MAX_AGE_MS`), and a census reads a file only when its mtime or size changed. **Which store compiles is unchanged:** memory.dir when set, else the largest. **Tests:** test/recall-py.sh covers an other-store gate reported by folder and count and not compiled; compile bytes identical with and without that store; no section once no other store holds a gate; `RECALL_MEMORY_DIR` deciding the compile store; an unreadable store named. test/memory-lint-watchers.test.js has the same census in JS, the memory.dir pin, an unreadable store, the per-file memo, the one-store budget (one listing of `~/.claude/projects`) and the minute's cache. test/dashboard-view.test.js covers the card line, singular, hidden and unknown, and checks the census is asked about the compile store. Fifteen mutations, each killed. The `== primary` skip in the Python census is not separately falsifiable: the dedup already zeroes the compile store. The JS one is caught by the one-store budget. |
 | G8: rampage stops pinning `RECALL_MEMORY_DIR` for the compile | **NOT PORTED** | It conflicts with wave-f15 (S2 of the final pre-tag audit): `memory.dir` is machine-scoped, and the extension pins the compile store from it, so a repository cannot choose the corpus that becomes the user's standing orders. Kept as it is. Also not ported: rampage's legacy migration, `src/targets.js`, `src/fs-atomic.js`, the `rampage.*` settings and the model home. Seen in the same recall.py diff and out of this scope: the 200-line `MEMORY.md` cap in `--lint`, the `--selftest` reference tolerance, `_load_session` and the two-file model dir check. |
 
 **Residuals, not changed here:**
@@ -582,7 +696,7 @@ with the files restored afterwards.
 | Finding | Disposition | Evidence |
 |---|---|---|
 | The card counted what Review hides | **FIXED**, `1c09538` | **Reproduced** read-only against a copy of the reported state, through the extension's own functions: `countAutoLearnCandidates` gave safe 2 and review 0, and `reviewableCandidates` gave 0 candidates and 23 covered. The two safe families were `Bash(git status *)` and `PowerShell(git status *)`. Each was auto-safe, over the threshold, and owed only `claude`, and `claudePermissionDecision` answered `allow` for both, because an allow rule already in settings.json covers them. `safe` was counted from every pending auto-safe family, while `review` came from `reviewableCandidates`, whose own comment (`vscode-extension/autoLearnUi.js:309#reviewableCandidates`) calls it the single definition of what Review shows. **What applying one does**, measured with the real manager on a temp home (allow list `Bash(git *)`, three `git status` runs): a non-reviewed `apply` leaves settings.json byte-identical, writes one claims record `{ managed: false, coveredBy: "Bash(git *)" }`, marks the key applied, and reports `changedTargets: ['claude']`. It changes no prompt, so the card must not offer it as work. **What changed:** `safe` is counted from `reviewable.candidates` (`vscode-extension/extension.js:1496#safe`), so a covered auto-safe family is counted in `covered` alone. The row's "N safe to apply" rank is removed. `safe` is now a subset of `review`, so the rank could not fire, and when it could, it promised work no button on the card performs. The SAFE tile, the manual scan toast ("N safe, M review") and the Review button label read the corrected counts. Nothing in the extension auto-applies from `counts.safe`; auto-safe mode applies inside the manager's scan. **Pinned by** "a covered auto-safe family is not counted safe to apply, and an uncovered one still is" (test/dashboard-view.test.js), through the real payload. With the old count it reads `{ safe: 2, review: 0, covered: 4, observe: 1 }`, the reported shape. Reverting the row's rank alone is not falsifiable with real data, which is why it was removed. **Updated:** the `safe` leg of "a degraded scan qualifies the review count instead of replacing it" pinned "2 safe to apply" for a `review: 0, safe: 2` payload that can no longer occur. It now pins `review: 2, safe: 2` as "2 to review · scan degraded". **Residual, not changed:** Apply safe (palette only) still applies covered auto-safe families, and because the claims file changes, its toast reads "applied N command families in Claude" although no prompt changes. The manager folds `claude-claims` into the `claude` target, so the extension cannot tell the two apart without a manager change. |
-| Review gave no visible feedback | **FIXED**, `1c09538` | Review's prerequisite was `runAutoLearnScan(false, true)`, and it returned on a null. That null is silent in three cases: another scan holds the latch (no message at all), the background failure backoff is armed, and the worker throws (console.error only). Nothing showed while the scan ran. When nothing was reviewable, the answer was a non-modal toast, which is easy to miss and is not shown at all under Do Not Disturb. `applyAutoLearnSafe` had the same `null` then `return`. **What changed** (vscode-extension/extension.js): `runAutoLearnScan` publishes its outcome as `autoLearnScanInFlight` (`vscode-extension/extension.js:119#autoLearnScanInFlight`), a promise of `{ result }` or `{ error }` that is set with the busy latch, cleared beside it by identity, and emptied with it by `activate()`. Its new `userInitiated` leg skips the backoff, shows a failure with `showErrorMessage`, and leaves the application report to its caller. `scanBeforeUserAction` (`vscode-extension/extension.js:1755#scanBeforeUserAction`) is the prerequisite for both buttons. It holds a status-bar message from the click until the scan settles. A scan already in flight is awaited and never duplicated, and its failure is shown. The empty Review is a modal, `{ modal: true, detail }`: the existing wording, the covered and observing counts in the detail, and the review scan's own application folded in. "Show covered" opens a read-only QuickPick, with no checkboxes and nothing applied, listing each hidden family with the allow rules `claudePermissionDecision` matched (`vscode-extension/autoLearnUi.js:341#coveredFamilyItems`). "Show blocked" stays, as the second button where it applies. Background scans are unchanged: silent, logged, and backed off. **Pinned by** these tests in test/extension-lifecycle-async.test.js. Each fails with its fix reverted, and each in-test MUTATION note names the assertion that fails: "Review clicked while a scan is running waits for it, then answers, on one worker"; "Review during the background failure backoff still scans and answers"; "a Review whose own scan fails says so"; "a Review waiting on a scan that then fails says so"; "an empty Review is a modal with the covered count, and Show covered lists them read-only"; "Apply safe clicked while a scan is running waits for it, then applies". The control, "a background scan that fails stays silent and keeps its backoff", passes on the old code and fails when the debounced rescan is made user-initiated. **Updated:** test/extension-managed-blocked.test.js pinned the old toast's argument list; it now asserts the modal, and that Show blocked is still the action. Two stubs, there and in test/codex-workspace-scope.test.js, returned nothing from `setStatusBarMessage`; the real API returns a Disposable, and Review now disposes it. |
+| Review gave no visible feedback | **FIXED**, `1c09538` | Review's prerequisite was `runAutoLearnScan(false, true)`, and it returned on a null. That null is silent in three cases: another scan holds the latch (no message at all), the background failure backoff is armed, and the worker throws (console.error only). Nothing showed while the scan ran. When nothing was reviewable, the answer was a non-modal toast, which is easy to miss and is not shown at all under Do Not Disturb. `applyAutoLearnSafe` had the same `null` then `return`. **What changed** (vscode-extension/extension.js): `runAutoLearnScan` publishes its outcome as `autoLearnScanInFlight` (`vscode-extension/extension.js:123#autoLearnScanInFlight`), a promise of `{ result }` or `{ error }` that is set with the busy latch, cleared beside it by identity, and emptied with it by `activate()`. Its new `userInitiated` leg skips the backoff, shows a failure with `showErrorMessage`, and leaves the application report to its caller. `scanBeforeUserAction` (`vscode-extension/extension.js:1759#scanBeforeUserAction`) is the prerequisite for both buttons. It holds a status-bar message from the click until the scan settles. A scan already in flight is awaited and never duplicated, and its failure is shown. The empty Review is a modal, `{ modal: true, detail }`: the existing wording, the covered and observing counts in the detail, and the review scan's own application folded in. "Show covered" opens a read-only QuickPick, with no checkboxes and nothing applied, listing each hidden family with the allow rules `claudePermissionDecision` matched (`vscode-extension/autoLearnUi.js:341#coveredFamilyItems`). "Show blocked" stays, as the second button where it applies. Background scans are unchanged: silent, logged, and backed off. **Pinned by** these tests in test/extension-lifecycle-async.test.js. Each fails with its fix reverted, and each in-test MUTATION note names the assertion that fails: "Review clicked while a scan is running waits for it, then answers, on one worker"; "Review during the background failure backoff still scans and answers"; "a Review whose own scan fails says so"; "a Review waiting on a scan that then fails says so"; "an empty Review is a modal with the covered count, and Show covered lists them read-only"; "Apply safe clicked while a scan is running waits for it, then applies". The control, "a background scan that fails stays silent and keeps its backoff", passes on the old code and fails when the debounced rescan is made user-initiated. **Updated:** test/extension-managed-blocked.test.js pinned the old toast's argument list; it now asserts the modal, and that Show blocked is still the action. Two stubs, there and in test/codex-workspace-scope.test.js, returned nothing from `setStatusBarMessage`; the real API returns a Disposable, and Review now disposes it. |
 
 ## The final pre-tag audit (2026-10-14)
 
@@ -1417,7 +1531,7 @@ because the cursor needs `size`, which `Dirent` cannot supply. That stat costs *
 **Two more of their findings are already solved here**, worth recording so nobody re-proposes
 them: scans run off the extension host in a worker thread, via
 `runAutoLearnWorker('scan', { mode: cfg.mode, threshold: cfg.threshold })` at
-`vscode-extension/extension.js:1679#runAutoLearnWorker`, which is the fix their pane still needs. And the
+`vscode-extension/extension.js:1683#runAutoLearnWorker`, which is the fix their pane still needs. And the
 watcher-plus-reconciliation-sweep architecture their backlog defers to is what this repo
 already runs.
 
@@ -2297,7 +2411,7 @@ holds the full text.
 
 Two further traps for that refactor, both real:
 - **Key on file BYTES, not the parsed allow list.** The unchanged path is where
-  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3363-3365#rides`);
+  "a deny rule added by hand first reaches the backup" (`vscode-extension/extension.js:3494-3496#rides`);
   a key on the allow list makes a deny-only edit a hit, and that rule never gets
   backed up. Two byte sequences can also parse equal.
 - **Keep `backupPolicy` on the unchanged path.** It is the only thing that
@@ -2901,7 +3015,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:5142#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:5334#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which

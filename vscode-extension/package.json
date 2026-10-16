@@ -46,6 +46,10 @@
         "title": "AI Acolyte: View / remove permissions"
       },
       {
+        "command": "permission-wildcarding.countRuleUse",
+        "title": "AI Acolyte: Count how often each saved Claude rule is used"
+      },
+      {
         "command": "permission-wildcarding.restorePermissions",
         "title": "AI Acolyte: Restore permissions",
         "icon": "$(history)"

@@ -17,14 +17,25 @@ folder is not asked about at all.
 **Permission tools** starts collapsed. View/remove opens one searchable list for Claude
 and Codex; restore and project import ask which agent to manage. Codex hook and native MCP configuration
 remain specific to Codex. Other collapsible rows include **Auto Learn**, **Project-local**,
-**Shell-style guidance**, **Memory gates**, **Memory**, and **Saved permissions**. That last
-row combines Claude allow entries and local Codex allow rules, labels each agent, and
-alternates agents in a 12-entry preview. Claude entries retain one-click removal;
+**Shell-style guidance**, **Memory gates**, **Memory**, **Agent sessions**, and **Saved
+permissions**.
+
+**Saved permissions** combines Claude allow entries and local Codex allow rules, labels each
+agent, and alternates agents in a 12-entry preview. Claude entries keep one-click removal, and
 Codex entries open their existing rule review. The overflow link searches both agents.
+
+**Rule use.** A line under the list says how often each Claude allow rule covered a call in
+your transcripts, counted daily in the background. Its **review** link lists the rules with no
+use found. Such a rule may still be used by a session that keeps no transcript, so each removal
+stays a confirmed choice.
+
+**Agent sessions** lists the Claude and Codex sessions that wrote a transcript in the last 15
+minutes. For each it shows the app, the folder name, the permission mode when it is recorded,
+the last activity, and the subagents that are working.
 A separate **Codex memory** row provides native
 memory search, diagnostics and gate controls.
 
-Version **1.6.8** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.7.0** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -159,7 +170,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4457#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4608#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -222,10 +233,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4406#showWarningMessage`).
+`vscode-extension/extension.js:4557#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4226#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4357#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -288,12 +299,12 @@ works under a managed policy.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:644#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:648#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:910#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:914#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -306,7 +317,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:721#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:725#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -321,7 +332,7 @@ the model asset and the venv, and never runs Python.
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1063#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1067#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -459,7 +470,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 27 commands under AI Acolyte in the
+The manifest registers 33 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -467,6 +478,7 @@ dashboard title-bar buttons.
 | --- | --- |
 | Optimize permissions (Claude + Codex) | Generalize Claude permissions, then review supported wider Codex prefixes |
 | View / remove permissions | Search Claude and Codex permissions together; inspect or remove a selected entry |
+| Count how often each saved Claude rule is used | Recount, over all Claude transcripts, how often each allow rule covered a call; the Saved permissions card shows the result |
 | Restore permissions | Choose an agent, then open its existing recovery action |
 | Import project permissions | Choose an agent, then use Claude local promotion or reviewed Codex import |
 | Wildcard Claude permissions | Run only the Claude generalization pass |

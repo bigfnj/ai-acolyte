@@ -8,7 +8,8 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
+**Version 1.8.1 groups the dashboard rows** under Activity, Memory & instructions and Permissions,
+with Agent sessions first. **Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
 Inspect memory sources, a gates line and the Claude Code version, and Codex memory gains the CPU model
 line, four figures and an issues line. **Version 1.7.2 renames the Memory row Claude memory**, to match Codex memory beside it.
 **Version 1.7.1 lays each Agent sessions row out on two lines**, so a long folder name is no
@@ -66,7 +67,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v180.vsix
+code --install-extension ai-acolyte-v181.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

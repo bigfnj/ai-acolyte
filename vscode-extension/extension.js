@@ -1530,7 +1530,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:6289#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:6299#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1787,7 +1787,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:6322#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:6332#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -5083,6 +5083,10 @@ class WildcardingViewProvider {
              margin-bottom: 12px; }
   .hero button.run { margin-bottom: 0; }
 
+  /* Group labels between the rows (1.8.1, the user's layout): what the rows under each are about,
+     muted so they organise the panel without competing with the rows' own names. */
+  .rowgroup { margin: 14px 2px 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+              text-transform: uppercase; color: var(--vscode-descriptionForeground); }
   .row { border-top: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
   .row:last-of-type { border-bottom: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.25)); }
   .rowhead { display: flex; align-items: center; gap: 8px; padding: 8px 2px;
@@ -5133,18 +5137,16 @@ class WildcardingViewProvider {
     <div class="muted" id="backup"></div>
   </div>
 
+  <div class="rowgroup">Activity</div>
+
   <section class="row">
-    <button type="button" class="rowhead" id="permissionToolsToggle" data-row="permissionTools"
-            aria-controls="bodyPermissionTools" aria-expanded="false">
-      <span class="chev" aria-hidden="true">▸</span><span class="glyph" aria-hidden="true">⚙</span>
-      <span class="rowname">Permission tools</span>
-    </button>
-    <div class="rowbody" id="bodyPermissionTools" hidden>
-      <button class="restore" id="permissionsView">View / remove permissions…</button>
-      <button class="restore" id="permissionsRestore">Restore permissions…</button>
-      <button class="restore" id="permissionsImport">Import project permissions…</button>
-      <button class="restore" id="codexHook">Configure Codex after-turn learning…</button>
-      <button class="restore" id="reviewCodexMcp">Review Codex MCP approvals…</button>
+    <div class="rowhead" data-row="sessions">
+      <span class="chev">▸</span><span class="glyph">◷</span>
+      <span class="rowname">Agent sessions</span><span class="rowstate" id="stSessions"></span>
+    </div>
+    <div class="rowbody" id="bodySessions" hidden>
+      <div class="muted sub" id="sessionsSub"></div>
+      <ul id="sessionsList"></ul>
     </div>
   </section>
 
@@ -5173,63 +5175,30 @@ class WildcardingViewProvider {
     </div>
   </section>
 
-  <section class="row">
-    <div class="rowhead" data-row="sessions">
-      <span class="chev">▸</span><span class="glyph">◷</span>
-      <span class="rowname">Agent sessions</span><span class="rowstate" id="stSessions"></span>
-    </div>
-    <div class="rowbody" id="bodySessions" hidden>
-      <div class="muted sub" id="sessionsSub"></div>
-      <ul id="sessionsList"></ul>
-    </div>
-  </section>
+  <div class="rowgroup">Memory &amp; instructions</div>
 
-  <section class="row" id="localCard" style="display:none">
-    <div class="rowhead" data-row="local">
-      <span class="chev">▸</span><span class="glyph">▤</span>
-      <span class="rowname">Project-local</span><span class="rowstate" id="stLocal"></span>
+  <section class="row" id="memCard" style="display:none">
+    <div class="rowhead" data-row="memory">
+      <span class="chev">▸</span><span class="glyph">◈</span>
+      <span class="rowname">Claude memory</span><span class="rowstate" id="stMemory"></span>
     </div>
-    <div class="rowbody" id="bodyLocal" hidden>
-    <div class="card">
-    <div class="status"><span id="locdot" class="dot idle"></span><span id="loctext">Project-local approvals</span></div>
-    <div class="muted sub" id="locsub"></div>
-    <div class="stats" style="margin-top:8px">
-      <div class="stat"><div class="n" id="locpromote">–</div><div class="l">promote</div></div>
-      <div class="stat"><div class="n" id="locprune">–</div><div class="l">redundant</div></div>
-      <div class="stat"><div class="n" id="lockept">–</div><div class="l">project-only</div></div>
-    </div>
-    <button class="restore" id="drainLocal" title="Promote portable local approvals to user scope, then drop the ones user scope covers">⤴  Drain into user scope</button>
-    </div>
-    </div>
-  </section>
-
-  <section class="row" id="guidanceCard" style="display:none">
-    <div class="rowhead" data-row="guidance">
-      <span class="chev">▸</span><span class="glyph">▣</span>
-      <span class="rowname">Shell-style guidance</span><span class="rowstate" id="stGuidance"></span>
-    </div>
-    <div class="rowbody" id="bodyGuidance" hidden>
+    <div class="rowbody" id="bodyMemory" hidden>
       <div class="card">
-        <div class="status"><span id="gddot" class="dot idle"></span><span id="gdtext">Shell-style guidance</span></div>
-        <div class="muted sub" id="gdsub"></div>
-        <button class="managed-action" id="guidanceBtn">Add to ~/.claude/CLAUDE.md</button>
-      </div>
-    </div>
-  </section>
-
-  <section class="row" id="gatesCard" style="display:none">
-    <div class="rowhead" data-row="gates">
-      <span class="chev">▸</span><span class="glyph">▣</span>
-      <span class="rowname">Memory gates</span><span class="rowstate" id="stGates"></span>
-    </div>
-    <div class="rowbody" id="bodyGates" hidden>
-      <div class="card">
-        <div class="status"><span id="mgdot" class="dot idle"></span><span id="mgtext">Memory gates</span></div>
-        <div class="muted sub" id="mgsub"></div>
-        <div class="muted sub" id="mgother" hidden></div>
-        <div class="muted sub" id="mgexcluded" hidden></div>
-        <button class="managed-action" id="gatesBtn">Compile and add</button>
-        <button class="managed-action" id="manageGatesBtn" title="Retire or restore one gate at a time, in the store that compiles">Manage gates…</button>
+        <div class="status"><span id="llmDot" class="dot idle"></span><span id="llmText">CPU LLM</span></div>
+        <div class="muted sub" id="memDir"></div>
+        <div class="stats" style="margin-top:8px">
+          <div class="stat"><div class="n" id="memTok">–</div><div class="l">tok/session</div></div>
+          <div class="stat"><div class="n" id="memFiles">–</div><div class="l">files</div></div>
+          <div class="stat"><div class="n" id="memEmb">–</div><div class="l">embedded</div></div>
+          <div class="stat"><div class="n" id="memLines">–</div><div class="l" id="memLinesLabel">lines</div></div>
+        </div>
+        <div class="memissues" id="memIssues"></div>
+        <button class="restore" id="searchClaudeMemory">Search Claude memory…</button>
+        <button class="restore" id="rebuild" title="Force a full CPU re-embed of the memory dir (recall.py --rebuild)">⟳  Rebuild Claude recall index</button>
+        <button class="restore" id="inspectClaudeMemory">Inspect memory sources…</button>
+        <div class="muted sub" id="claudeMemoryGatesStatus"></div>
+        <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
+        <div class="muted sub" id="claudeCodeVersion"></div>
       </div>
     </div>
   </section>
@@ -5261,29 +5230,70 @@ class WildcardingViewProvider {
     </div>
   </section>
 
-  <section class="row" id="memCard" style="display:none">
-    <div class="rowhead" data-row="memory">
-      <span class="chev">▸</span><span class="glyph">◈</span>
-      <span class="rowname">Claude memory</span><span class="rowstate" id="stMemory"></span>
+  <section class="row" id="gatesCard" style="display:none">
+    <div class="rowhead" data-row="gates">
+      <span class="chev">▸</span><span class="glyph">▣</span>
+      <span class="rowname">Memory gates</span><span class="rowstate" id="stGates"></span>
     </div>
-    <div class="rowbody" id="bodyMemory" hidden>
+    <div class="rowbody" id="bodyGates" hidden>
       <div class="card">
-        <div class="status"><span id="llmDot" class="dot idle"></span><span id="llmText">CPU LLM</span></div>
-        <div class="muted sub" id="memDir"></div>
-        <div class="stats" style="margin-top:8px">
-          <div class="stat"><div class="n" id="memTok">–</div><div class="l">tok/session</div></div>
-          <div class="stat"><div class="n" id="memFiles">–</div><div class="l">files</div></div>
-          <div class="stat"><div class="n" id="memEmb">–</div><div class="l">embedded</div></div>
-          <div class="stat"><div class="n" id="memLines">–</div><div class="l" id="memLinesLabel">lines</div></div>
-        </div>
-        <div class="memissues" id="memIssues"></div>
-        <button class="restore" id="searchClaudeMemory">Search Claude memory…</button>
-        <button class="restore" id="rebuild" title="Force a full CPU re-embed of the memory dir (recall.py --rebuild)">⟳  Rebuild Claude recall index</button>
-        <button class="restore" id="inspectClaudeMemory">Inspect memory sources…</button>
-        <div class="muted sub" id="claudeMemoryGatesStatus"></div>
-        <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
-        <div class="muted sub" id="claudeCodeVersion"></div>
+        <div class="status"><span id="mgdot" class="dot idle"></span><span id="mgtext">Memory gates</span></div>
+        <div class="muted sub" id="mgsub"></div>
+        <div class="muted sub" id="mgother" hidden></div>
+        <div class="muted sub" id="mgexcluded" hidden></div>
+        <button class="managed-action" id="gatesBtn">Compile and add</button>
+        <button class="managed-action" id="manageGatesBtn" title="Retire or restore one gate at a time, in the store that compiles">Manage gates…</button>
       </div>
+    </div>
+  </section>
+
+  <section class="row" id="guidanceCard" style="display:none">
+    <div class="rowhead" data-row="guidance">
+      <span class="chev">▸</span><span class="glyph">▣</span>
+      <span class="rowname">Shell-style guidance</span><span class="rowstate" id="stGuidance"></span>
+    </div>
+    <div class="rowbody" id="bodyGuidance" hidden>
+      <div class="card">
+        <div class="status"><span id="gddot" class="dot idle"></span><span id="gdtext">Shell-style guidance</span></div>
+        <div class="muted sub" id="gdsub"></div>
+        <button class="managed-action" id="guidanceBtn">Add to ~/.claude/CLAUDE.md</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="rowgroup">Permissions</div>
+
+  <section class="row" id="localCard" style="display:none">
+    <div class="rowhead" data-row="local">
+      <span class="chev">▸</span><span class="glyph">▤</span>
+      <span class="rowname">Project-local</span><span class="rowstate" id="stLocal"></span>
+    </div>
+    <div class="rowbody" id="bodyLocal" hidden>
+    <div class="card">
+    <div class="status"><span id="locdot" class="dot idle"></span><span id="loctext">Project-local approvals</span></div>
+    <div class="muted sub" id="locsub"></div>
+    <div class="stats" style="margin-top:8px">
+      <div class="stat"><div class="n" id="locpromote">–</div><div class="l">promote</div></div>
+      <div class="stat"><div class="n" id="locprune">–</div><div class="l">redundant</div></div>
+      <div class="stat"><div class="n" id="lockept">–</div><div class="l">project-only</div></div>
+    </div>
+    <button class="restore" id="drainLocal" title="Promote portable local approvals to user scope, then drop the ones user scope covers">⤴  Drain into user scope</button>
+    </div>
+    </div>
+  </section>
+
+  <section class="row">
+    <button type="button" class="rowhead" id="permissionToolsToggle" data-row="permissionTools"
+            aria-controls="bodyPermissionTools" aria-expanded="false">
+      <span class="chev" aria-hidden="true">▸</span><span class="glyph" aria-hidden="true">⚙</span>
+      <span class="rowname">Permission tools</span>
+    </button>
+    <div class="rowbody" id="bodyPermissionTools" hidden>
+      <button class="restore" id="permissionsView">View / remove permissions…</button>
+      <button class="restore" id="permissionsRestore">Restore permissions…</button>
+      <button class="restore" id="permissionsImport">Import project permissions…</button>
+      <button class="restore" id="codexHook">Configure Codex after-turn learning…</button>
+      <button class="restore" id="reviewCodexMcp">Review Codex MCP approvals…</button>
     </div>
   </section>
 

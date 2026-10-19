@@ -1042,6 +1042,29 @@ async function memoryCard(t, memory) {
   };
 }
 
+// THE PANEL'S ORDER (1.8.1, the user's layout, 2026-10-19). Permissions stays on top, then three
+// labelled groups: what is happening, what the agents read, and the permission detail. Agent
+// sessions leads because the user keeps it open.
+test('the rows sit in three labelled groups, in the order the user chose', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const html = ui.view.webview.html;
+    const sequence = [...html.matchAll(/class="rowgroup">([^<]+)<|data-row="([^"]+)"/g)].map((m) => m[1] ? `[${m[1]}]` : m[2]);
+    assert.deepEqual(sequence, ['[Activity]', 'sessions', 'autoLearn',
+      '[Memory &amp; instructions]', 'memory', 'codexMemory', 'gates', 'guidance',
+      '[Permissions]', 'local', 'permissionTools', 'list'],
+    'witness:row-order -- the dashboard rows are not in the order the user chose');
+    assert.ok(html.indexOf('class="hero"') < html.indexOf('class="rowgroup"'), 'Permissions stays at the top');
+  } finally {
+    await app.dispose();
+  }
+});
+
 // FEATURE PARITY (2026-10-19, the user's request): the Claude memory and Codex memory cards share
 // one skeleton, top to bottom: the CPU LLM line, the folder, four stats, an issues line, Search,
 // Rebuild and Inspect, a gates line with its Review button, and the agent's version line.

@@ -16,9 +16,12 @@ folder is not asked about at all.
 
 **Permission tools** starts collapsed. View/remove opens one searchable list for Claude
 and Codex; restore and project import ask which agent to manage. Codex hook and native MCP configuration
-remain specific to Codex. Other collapsible rows include **Auto Learn**, **Project-local**,
-**Shell-style guidance**, **Memory gates**, **Claude memory**, **Agent sessions**, and **Saved
-permissions**.
+remain specific to Codex.
+
+Below the Permissions card the rows sit in three labelled groups:
+- **Activity:** **Agent sessions** and **Auto Learn**.
+- **Memory & instructions:** **Claude memory**, **Codex memory**, **Memory gates** and **Shell-style guidance**.
+- **Permissions:** **Project-local**, **Permission tools** and **Saved permissions**.
 
 **Saved permissions** combines Claude allow entries and local Codex allow rules, labels each
 agent, and alternates agents in a 12-entry preview. Claude entries keep one-click removal, and
@@ -36,7 +39,7 @@ the last activity, and the subagents that are working.
 Each shows the CPU model status, its folder, four figures, an issues line, **Search**, **Rebuild**
 and **Inspect memory sources**, its gates, and the agent version.
 
-Version **1.8.0** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.8.1** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance

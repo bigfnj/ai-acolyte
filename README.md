@@ -8,8 +8,9 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.7.0 shows how often each saved rule is used, and which agent sessions are
-active**: the Saved permissions card counts each Claude allow rule's use over all your
+**Version 1.7.1 lays each Agent sessions row out on two lines**, so a long folder name is no
+longer squeezed to one character wide, and the header line reads "watching Claude & Codex history". **Version 1.7.0 shows how often each saved rule is used,
+and which agent sessions are active**: the Saved permissions card counts each Claude allow rule's use over all your
 transcripts and offers the rules with no use found for review, and a new Agent sessions row
 lists the Claude and Codex sessions active in the last 15 minutes. Version 1.6.8 reads the
 Codex transcripts Codex compresses: Codex rewrites an idle rollout as
@@ -62,7 +63,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v170.vsix
+code --install-extension ai-acolyte-v171.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

@@ -2654,10 +2654,21 @@ test('the agent sessions card lists active sessions by folder name and says none
     assert.equal(panel.dom.byId.get('stSessions').textContent, '1 active');
     const rows = panel.dom.byId.get('sessionsList').children;
     assert.equal(rows.length, 1);
+    // Two lines: badge and folder name, then the details under the name. As one flex row the
+    // details squeezed the name to a character wide in a narrow sidebar (2026-10-19).
+    assert.equal(rows[0].className, 'session');
+    assert.match(ui.view.webview.html, /li\.session \{ display: grid;[^}]*\}\s*li\.session \.when \{ grid-column: 2;/,
+      'witness:sessions-layout -- the session row is no longer the two-line grid');
     assert.equal(rows[0].children[0].textContent, 'Claude');
     assert.equal(rows[0].children[1].textContent, 'alpha');
     assert.match(rows[0].children[2].textContent, /^VS Code · auto · (just now|\d+ min ago)$/);
     assert.match(panel.dom.byId.get('sessionsSub').textContent, /not whether it is waiting on you/);
+    // The header line names the agents, not the settings file, which moves to the hover (2026-10-19).
+    panel.deliver({ ...data, codexWatching: true });
+    assert.equal(panel.dom.byId.get('watching').textContent, 'watching Claude & Codex history');
+    assert.match(panel.dom.byId.get('watching').title, /settings\.json and the Claude and Codex transcripts$/);
+    panel.deliver({ ...data, codexWatching: false });
+    assert.equal(panel.dom.byId.get('watching').textContent, 'watching Claude history');
 
     // None active: the badge and the list say so rather than going blank.
     panel.deliver({ ...data, agentSessions: { sessions: [], lookedAt: Date.now(), error: null } });

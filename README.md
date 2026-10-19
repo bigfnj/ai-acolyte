@@ -8,7 +8,9 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.7.2 renames the Memory row Claude memory**, to match Codex memory beside it.
+**Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
+Inspect memory sources, a gates line and the Claude Code version, and Codex memory gains the CPU model
+line, four figures and an issues line. **Version 1.7.2 renames the Memory row Claude memory**, to match Codex memory beside it.
 **Version 1.7.1 lays each Agent sessions row out on two lines**, so a long folder name is no
 longer squeezed to one character wide, and the header line reads "watching Claude & Codex history". **Version 1.7.0 shows how often each saved rule is used,
 and which agent sessions are active**: the Saved permissions card counts each Claude allow rule's use over all your
@@ -64,7 +66,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v172.vsix
+code --install-extension ai-acolyte-v180.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -115,14 +117,14 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3001#showCodexRules`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3064#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4557#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:4627#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:4357#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:4427#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
@@ -253,6 +255,13 @@ words and get the right file back, without reciting an exact filename.
 It runs on bge-small ONNX fused with BM25, and only changed files re-embed. The card
 also lints the index: size against the budget that is actually loaded every session,
 broken links, and gates that were written but never compiled.
+
+The **Claude memory** and **Codex memory** rows work the same way, because they are
+the same tool over two agents. Each shows the CPU model, four figures and an issues line. Each
+has **Search**, **Rebuild** and **Inspect memory sources**, a gates line with **Review**, and its
+agent's version. Codex's per-session figure is its `memory_summary.md`, which a Codex session
+loads when its memory is on. The two keep separate indexes on purpose, so a search of one
+agent's memory never returns the other's.
 
 ## 7. Saved permissions (Claude Code and Codex)
 
@@ -438,7 +447,7 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:3184#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:3254#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They

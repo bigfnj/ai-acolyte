@@ -174,6 +174,10 @@
         "category": "AI Acolyte"
       },
       {
+        "command": "permission-wildcarding.searchClaudeMemory",
+        "title": "AI Acolyte: Search Claude memory"
+      },
+      {
         "command": "permission-wildcarding.searchCodexMemory",
         "title": "AI Acolyte: Search Codex native memory",
         "icon": "$(search)"
@@ -187,6 +191,10 @@
         "command": "permission-wildcarding.codexMemoryGates",
         "title": "Review Native Codex Memory Gates",
         "category": "AI Acolyte"
+      },
+      {
+        "command": "permission-wildcarding.inspectClaudeMemory",
+        "title": "AI Acolyte: Inspect Claude memory sources"
       },
       {
         "command": "permission-wildcarding.inspectCodexMemory",

@@ -17,6 +17,11 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-19 as 1.8.0.** The Claude memory and Codex memory rows have the same layout and actions,
+as the user asked. Claude memory gains Search (`recall.py --json`), Inspect memory sources, a gates line
+and the Claude Code version. Codex memory gains the CPU model line, four figures (its summary's tokens
+and lines, files, embedded passages) and an issues line. The record has it under "The two memory cards".
+
 **Released 2026-10-19 as 1.7.2.** The dashboard's Memory row is now Claude memory, to match the Codex
 memory row beside it. It was named before Codex support existed, and its row key is unchanged.
 
@@ -78,6 +83,12 @@ Both pass when their two files run alone (34 of 34), and both passed on all 8 CI
 workstation restarted after a crash. The suspects are process-spawn pressure from a full run, or an
 endpoint security filter holding a freshly spawned process. **Not yet diagnosed.** The next step is
 a timing capture of the stand-in process during a full run.
+
+**2026-10-19.** On the 1.8.0 full run, a third test from `test/codex-mcp-config.test.js` failed beside
+them: "the asynchronous layers read does not block, is bounded, hands its child over, and leaves no
+codex running". It is the same family, a stand-in Codex process under load. Its file passed 34 of
+34 alone, and the release CI passed. One 1.7.0 full run passed all three, so this is load-dependent,
+not constant.
 
 ### Memory gates: `agents:` targeting (2026-10-14; all three gaps closed)
 

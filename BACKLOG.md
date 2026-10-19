@@ -17,7 +17,9 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
-**Released 2026-10-19 as 1.8.1.** The dashboard rows sit in the user's order, in three labelled groups:
+**Released 2026-10-19 as 1.8.1.** The tag `v1.8.1` is at `82268a2`. CI is green on all 8 jobs. The published
+asset matches the local build in all 62 entries, the drives passed 15 of 15 and 6 of 6, and the live worktree
+has moved to the tag. The dashboard rows sit in the user's order, in three labelled groups:
 Activity (Agent sessions, Auto Learn), Memory & instructions (Claude memory, Codex memory, Memory gates,
 Shell-style guidance) and Permissions (Project-local, Permission tools, Saved permissions).
 

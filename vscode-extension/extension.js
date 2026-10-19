@@ -5174,7 +5174,7 @@ class WildcardingViewProvider {
   <section class="row" id="memCard" style="display:none">
     <div class="rowhead" data-row="memory">
       <span class="chev">▸</span><span class="glyph">◈</span>
-      <span class="rowname">Memory</span><span class="rowstate" id="stMemory"></span>
+      <span class="rowname">Claude memory</span><span class="rowstate" id="stMemory"></span>
     </div>
     <div class="rowbody" id="bodyMemory" hidden>
       <div class="card">

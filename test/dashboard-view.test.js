@@ -2663,6 +2663,10 @@ test('the agent sessions card lists active sessions by folder name and says none
     assert.equal(rows[0].children[1].textContent, 'alpha');
     assert.match(rows[0].children[2].textContent, /^VS Code · auto · (just now|\d+ min ago)$/);
     assert.match(panel.dom.byId.get('sessionsSub').textContent, /not whether it is waiting on you/);
+    // The two memory rows name their agents (2026-10-19). "Memory" dated from when the row could
+    // only mean Claude's, before Codex memory got a row of its own beside it.
+    assert.match(ui.view.webview.html, /<span class="rowname">Claude memory<\/span>/);
+    assert.match(ui.view.webview.html, /<span class="rowname">Codex memory<\/span>/);
     // The header line names the agents, not the settings file, which moves to the hover (2026-10-19).
     panel.deliver({ ...data, codexWatching: true });
     assert.equal(panel.dom.byId.get('watching').textContent, 'watching Claude & Codex history');

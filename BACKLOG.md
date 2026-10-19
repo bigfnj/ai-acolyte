@@ -17,6 +17,9 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-19 as 1.7.2.** The dashboard's Memory row is now Claude memory, to match the Codex
+memory row beside it. It was named before Codex support existed, and its row key is unchanged.
+
 **Released 2026-10-19 as 1.7.1.** Each Agent sessions row is laid out on two lines: the badge
 and folder name, then the details beneath. As one flex row, the details squeezed the folder name
 to one character wide in a narrow sidebar (the user's screenshot). The header line now reads "watching

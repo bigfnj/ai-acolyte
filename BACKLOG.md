@@ -17,7 +17,9 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
-**Released 2026-10-19 as 1.8.0.** The Claude memory and Codex memory rows have the same layout and actions,
+**Released 2026-10-19 as 1.8.0.** The tag `v1.8.0` is at `09219e5`. CI is green on all 8 jobs, reached
+through a stretch of GitHub API 502s and queued runners. The published asset matches the local build in all 62
+entries, the drives passed 15 of 15 and 6 of 6, and the live worktree has moved to the tag. The Claude memory and Codex memory rows have the same layout and actions,
 as the user asked. Claude memory gains Search (`recall.py --json`), Inspect memory sources, a gates line
 and the Claude Code version. Codex memory gains the CPU model line, four figures (its summary's tokens
 and lines, files, embedded passages) and an issues line. The record has it under "The two memory cards".
@@ -87,8 +89,14 @@ a timing capture of the stand-in process during a full run.
 **2026-10-19.** On the 1.8.0 full run, a third test from `test/codex-mcp-config.test.js` failed beside
 them: "the asynchronous layers read does not block, is bounded, hands its child over, and leaves no
 codex running". It is the same family, a stand-in Codex process under load. Its file passed 34 of
-34 alone, and the release CI passed. One 1.7.0 full run passed all three, so this is load-dependent,
-not constant.
+34 alone, and CI passed 1.8.0. One 1.7.0 full run passed all three, so this is load-dependent, not
+constant.
+
+**It has failed on CI too, once.** A docs-only push on 2026-10-16 (`67ff813`) failed CI on Windows Node 24
+with a fourth test from the same file: "the config worker's own kill runs System32's taskkill, not one
+planted in its cwd". Every run since has passed, so the claim that these tests always pass on CI was
+wrong. The family is spawn timing in `test/codex-mcp-config.test.js` and
+`test/dashboard-project-trust.test.js`, on any loaded Windows host.
 
 ### Memory gates: `agents:` targeting (2026-10-14; all three gaps closed)
 

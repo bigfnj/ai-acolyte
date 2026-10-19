@@ -17,6 +17,11 @@ this file warns about: five of the "seven surviving mutants" had been killed thr
 the tracker was restored claiming otherwise, and an option key listed as having no supplier had
 three. What is below is only what is still in flight, plus what that work found.
 
+**Released 2026-10-19 as 1.7.1.** Each Agent sessions row is laid out on two lines: the badge
+and folder name, then the details beneath. As one flex row, the details squeezed the folder name
+to one character wide in a narrow sidebar (the user's screenshot). The header line now reads "watching
+Claude & Codex history", with the settings path on its hover.
+
 **Released 2026-10-16 as 1.7.0.** The tag `v1.7.0` is at `0c7ad66`. CI is green on all 8 jobs. The
 published asset matches the local build in all 61 entries, apart from line endings. The installed
 drive passed 15 of 15 and the real-editor drive 6 of 6. The live worktree has moved to the tag.

@@ -1467,7 +1467,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:6142#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:6149#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1724,7 +1724,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:6175#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:6182#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -4964,8 +4964,11 @@ class WildcardingViewProvider {
   li.more { color: var(--vscode-textLink-foreground); cursor: pointer; font-size: 11px;
             padding: 6px; }
   li.more:hover { text-decoration: underline; }
-  /* Agent sessions: what the transcript says beside the folder name, muted. */
-  li .when { flex: 0 0 auto; font-size: 11px; color: var(--vscode-descriptionForeground); text-align: right; }
+  /* Agent sessions: two lines, the badge and folder name, then what the transcript says, muted,
+     under the name. One flex row let the details refuse to shrink and squeezed the name to a
+     character wide in a narrow sidebar (reported 2026-10-19). */
+  li.session { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 6px; row-gap: 2px; }
+  li.session .when { grid-column: 2; font-size: 11px; color: var(--vscode-descriptionForeground); }
   #memDir { word-break: break-all; }
   .memissues { margin: 8px 2px 6px; font-size: 11px; }
   .memlink { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
@@ -5441,6 +5444,7 @@ class WildcardingViewProvider {
     list.innerHTML = '';
     for (const s of sessions) {
       const li = document.createElement('li');
+      li.className = 'session';
       const agent = document.createElement('span');
       agent.className = 'agent';
       agent.textContent = s.agent === 'codex' ? 'Codex' : 'Claude';
@@ -5928,7 +5932,10 @@ class WildcardingViewProvider {
     // Empty string when the manifest could not be read, which renders as nothing
     // rather than as 'v' or 'undefined'.
     $('version').textContent = d.version ? 'v' + d.version : '';
-    $('watching').textContent = 'watching ' + d.settingsPath + (d.codexWatching ? ' + Codex history' : '');
+    // The agents, not the file (the user's wording, 2026-10-19). The settings file the wildcarding
+    // pass watches is on the hover, so the path is one point away rather than gone.
+    $('watching').textContent = 'watching ' + (d.codexWatching ? 'Claude & Codex history' : 'Claude history');
+    $('watching').title = 'Watching ' + d.settingsPath + ' and the Claude' + (d.codexWatching ? ' and Codex' : '') + ' transcripts';
     renderAutoLearn(d.autoLearn);
     renderSessions(d.agentSessions);
     renderLocal(d.local);

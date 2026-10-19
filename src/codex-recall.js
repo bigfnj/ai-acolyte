@@ -66,6 +66,28 @@ function cacheLocation(home, codexHome) {
   return { profileId, cachePath: path.join(home, '.ai-acolyte', 'codex', profileId, 'recall', 'index.json') };
 }
 
+// How many passages the Codex recall index holds, or null before one is built (2026-10-19, for the
+// Codex memory card's "embedded" figure, the same figure the Claude memory card shows). The cache
+// is `{ identity, windows }` (memory/codex_recall.py); each window is one embedded passage. Read
+// only, and never a reason to fail the card: anything unreadable is null, "not built".
+// The dashboard asks on every push and the cache carries a vector per passage, so the count is kept
+// against the file's identity (path, mtime, size) and the file is parsed again only when it changed.
+let indexCountMemo = null;
+function codexRecallIndexCount(options = {}) {
+  try {
+    const home = options.home || os.homedir();
+    const codexHome = options.codexHome || path.join(home, '.codex');
+    const file = cacheLocation(home, codexHome).cachePath;
+    const stat = fs.statSync(file);
+    const key = `${file}|${stat.mtimeMs}|${stat.size}`;
+    if (indexCountMemo?.key === key) return indexCountMemo.count;
+    const cache = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const count = Array.isArray(cache?.windows) ? cache.windows.length : null;
+    indexCountMemo = { key, count };
+    return count;
+  } catch { return null; }
+}
+
 function run(query, options, rebuild) {
   const home = explicitPath(options.home === undefined ? os.homedir() : options.home, 'home');
   const memory = readCodexMemory(options);
@@ -148,4 +170,4 @@ function searchCodexMemory(query, options = {}) {
 
 function rebuildCodexMemory(options = {}) { return run('', options, true); }
 
-module.exports = { searchCodexMemory, rebuildCodexMemory };
+module.exports = { searchCodexMemory, rebuildCodexMemory, codexRecallIndexCount };

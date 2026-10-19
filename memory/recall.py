@@ -754,6 +754,31 @@ def search(query, k, mode="hybrid"):
         print()
 
 
+def search_json(query, k, mode="hybrid"):
+    """search() for a program, as one JSON object on stdout (2026-10-19). The Claude memory card's
+    Search runs this and opens a result at its line, the way the Codex memory card's search
+    already does. Each result names the file it came from, which a multi-store search needs
+    (_display_keys), and the 1-based line its best excerpt sits on, or null when no line stood
+    out. An empty corpus is an empty list, not an error: the card says so in its own words."""
+    idx, lex, emb, names = _retriever(mode)
+    keys = _display_keys(MEMORY_DIRS)
+    results = []
+    for r in (rank(query, k, mode=mode, idx=idx, lex=lex, emb=emb, names=names) if names else []):
+        hit = best_line(query, r["name"], r["text"]) or ""
+        line = None
+        needle = hit.strip()
+        if needle and r["text"]:
+            for number, text in enumerate(r["text"].splitlines(), start=1):
+                if needle in text:
+                    line = number
+                    break
+        results.append({"name": r["name"], "path": keys.get(r["name"]), "description": r["desc"] or "",
+                        "score": round(float(r["score"]), 4), "line": line, "excerpt": hit})
+    json.dump({"query": query, "mode": mode, "memories": len(names), "results": results},
+              sys.stdout, ensure_ascii=False)
+    print()
+
+
 def _norm(s):
     return s.strip().lower().replace("-", "_")
 
@@ -1384,7 +1409,7 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: vscode-extension/extension.js:4049#slice cuts this stderr
+            # Kept short on purpose: vscode-extension/extension.js:4119#slice cuts this stderr
             # to 300 chars before showing it (`#slice` is checked by scripts/check-line-refs.js;
             # this said :3013 until 2026-10-13, when .py comments were first scanned). Re-measured
             # 2026-09-14 after MEMORY_DIR was normpath'd and `installed` became a real byte count:
@@ -2136,6 +2161,8 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="verify the embedder's reference cosines")
     ap.add_argument("--vector-only", action="store_true", help="rank by embedding cosine alone")
     ap.add_argument("--lexical-only", action="store_true", help="rank by BM25 alone (no model load)")
+    ap.add_argument("--json", action="store_true",
+                    help="with a query: print the results as one JSON object (file, line, excerpt)")
     args = ap.parse_args()
 
     editing = bool(args.gates_retire or args.gates_restore)
@@ -2182,11 +2209,13 @@ def main():
             print(f"  {name}  --  {idx['files'][name]['desc'][:90]}")
         return
     if not args.query:
+        if args.json:
+            ap.error("--json needs a query to answer.")
         ap.print_help(); return
     if args.vector_only and args.lexical_only:
         sys.exit("[recall] --vector-only and --lexical-only are mutually exclusive.")
     mode = "vector" if args.vector_only else "lexical" if args.lexical_only else "hybrid"
-    search(" ".join(args.query), args.k, mode)
+    (search_json if args.json else search)(" ".join(args.query), args.k, mode)
 
 
 if __name__ == "__main__":

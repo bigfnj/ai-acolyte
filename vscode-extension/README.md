@@ -32,10 +32,11 @@ stays a confirmed choice.
 **Agent sessions** lists the Claude and Codex sessions that wrote a transcript in the last 15
 minutes. For each it shows the app, the folder name, the permission mode when it is recorded,
 the last activity, and the subagents that are working.
-A separate **Codex memory** row provides native
-memory search, diagnostics and gate controls.
+**Claude memory** and **Codex memory** are two rows with the same layout and the same actions.
+Each shows the CPU model status, its folder, four figures, an issues line, **Search**, **Rebuild**
+and **Inspect memory sources**, its gates, and the agent version.
 
-Version **1.7.2** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.8.0** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -170,7 +171,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
 they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4608#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:4678#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -233,10 +234,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4557#showWarningMessage`).
+`vscode-extension/extension.js:4627#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4357#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4427#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -299,12 +300,12 @@ works under a managed policy.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:648#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:651#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:914#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:917#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -317,7 +318,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:725#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:728#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -332,7 +333,7 @@ the model asset and the venv, and never runs Python.
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1067#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1130#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -470,7 +471,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 33 commands under AI Acolyte in the
+The manifest registers 35 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -504,7 +505,9 @@ dashboard title-bar buttons.
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
+| Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |
 | Rebuild recall index | Force a full CPU bge-small re-embed |
+| Inspect Claude memory sources | List every Claude memory store, the one the card shows, its issues and gates |
 | Search Codex native memory | Search by meaning and keywords, with a visible keyword fallback |
 | Rebuild Codex Memory Recall Index | Force CPU embedding of selected native passages into the profile's private cache |
 | Inspect Codex native memory | Open source availability and diagnostic details |

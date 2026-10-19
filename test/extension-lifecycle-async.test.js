@@ -839,7 +839,8 @@ test('every child process the extension starts is handed over to be killable', (
     });
   }
   // Five since 2026-10-14: the gates panel's runRecallStep (list, edit, compile) is the fifth.
-  assert.equal(sites.length, 5, `the five known spawn sites, found ${sites.length}`);
+  // Six since 2026-10-19: the Claude memory card's Search (runClaudeMemorySearch).
+  assert.equal(sites.length, 6, `the six known spawn sites, found ${sites.length}`);
 
   const untracked = [];
   let wrapped = 0;
@@ -900,8 +901,9 @@ test('every execFile site takes its deadline from endTreeAfter, never from execF
   }
   // The four lengths the sites had as execFile timeouts, in file order: the recall
   // rebuild and the recall sync, the execpolicy check, the gate compile. Then the gates
-  // panel's recall.py steps (2026-10-14), at the gate compile's 60 s.
-  assert.deepEqual(deadlines, [180000, 180000, 30000, 60000, 60000]);
+  // panel's recall.py steps (2026-10-14), at the gate compile's 60 s. The Claude memory search
+  // (2026-10-19) sits second, after the rebuild it is written beside, at 120 s.
+  assert.deepEqual(deadlines, [180000, 120000, 180000, 30000, 60000, 60000]);
 });
 
 // memoryLint.cfg() is the single enumeration of the permissionWildcarding.memory.* keys.

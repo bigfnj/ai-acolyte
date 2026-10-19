@@ -292,7 +292,7 @@ function harness(tempHome, opts = {}) {
   // local-drain-extension.test.js already does this, for the same reason.
   //
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:63#autoLearnUi,
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:65#autoLearnUi,
   // extension.js:10#createAutoLearnWorkerRunner), so leaving them cached leaves a second
   // harness holding the first one's instances.
   const extensionDir = path.dirname(extensionPath) + path.sep;
@@ -489,6 +489,9 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['inspectCodexMemory', 'permission-wildcarding.inspectCodexMemory'],
       // The rule-use line's click when it has nothing to review (2026-10-16).
       ['countRuleUse', 'permission-wildcarding.countRuleUse'],
+      // The Claude memory card's Search and Inspect, matching the Codex card's (2026-10-19).
+      ['searchClaudeMemory', 'permission-wildcarding.searchClaudeMemory'],
+      ['inspectClaudeMemory', 'permission-wildcarding.inspectClaudeMemory'],
     ];
     for (const [type, command] of routes) {
       app.executed.length = 0;
@@ -782,7 +785,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3561#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3631#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -1038,6 +1041,93 @@ async function memoryCard(t, memory) {
     issues: body.textContent || (body.children[0] || {}).textContent || '',
   };
 }
+
+// FEATURE PARITY (2026-10-19, the user's request): the Claude memory and Codex memory cards share
+// one skeleton, top to bottom: the CPU LLM line, the folder, four stats, an issues line, Search,
+// Rebuild and Inspect, a gates line with its Review button, and the agent's version line.
+const MEMORY_SKELETON = {
+  claude: ['llmText', 'memDir', 'memTok', 'memFiles', 'memEmb', 'memLines', 'memIssues', 'searchClaudeMemory',
+    'rebuild', 'inspectClaudeMemory', 'claudeMemoryGatesStatus', 'claudeMemoryGates', 'claudeCodeVersion'],
+  codex: ['codexLlmText', 'codexMemoryDir', 'codexMemTok', 'codexMemFiles', 'codexMemEmb', 'codexMemLines', 'codexMemIssues',
+    'searchCodexMemory', 'rebuildCodexMemory', 'inspectCodexMemory', 'codexMemoryGatesStatus', 'codexMemoryGates', 'codexCliVersion'],
+};
+
+test('the Claude and Codex memory cards have the same parts, in the same order, and the same actions', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const html = ui.view.webview.html;
+    // Same parts in the same order: each card's ids appear in its section in skeleton order.
+    for (const [agent, ids] of Object.entries(MEMORY_SKELETON)) {
+      const at = ids.map((id) => html.indexOf(`id="${id}"`));
+      assert.ok(at.every((index) => index > 0), `${agent}: missing ${ids.filter((id, i) => at[i] < 0).join(', ')}`);
+      assert.deepEqual([...at].sort((a, b) => a - b), at,
+        `witness:memory-parity-order -- the ${agent} memory card's parts are out of the shared order`);
+    }
+    const panel = runPanelScript(html);
+    const data = { ...ui.posted.at(-1),
+      memory: { dir: '~/.claude/projects/p/memory', llm: 'ready', tokens: 2600, budgetTokens: 3000, files: 59,
+        indexable: 58, embedded: 58, lines: 61, maxLines: 200, over: 0, broken: 0, unresolved: 0 },
+      gates: { compiled: true, on: true, current: true, count: 13 },
+      claudeCodeVersion: '2.1.301',
+      codexMemory: { root: '~/.codex/memories', state: 'present', files: 12, issues: 0, llm: 'ready',
+        summaryTokens: 2314, summaryLines: 90, embedded: null, gates: { on: false }, cli: { note: 'Codex CLI 0.161.0.' } } };
+    panel.deliver(data);
+    const text = (id) => panel.dom.byId.get(id).textContent;
+    // The same CPU LLM wording on both, from one helper.
+    assert.equal(text('llmText'), 'CPU LLM: ready (bge-small, 384-dim)');
+    assert.equal(text('codexLlmText'), text('llmText'), 'witness:memory-parity-llm -- the two cards word the model differently');
+    // String(): fakeDom keeps a number assigned to textContent as a number; a real DOM converts it.
+    assert.deepEqual(['codexMemTok', 'codexMemFiles', 'codexMemEmb', 'codexMemLines'].map((id) => String(text(id))), ['2.3k', '12', '–', '90']);
+    assert.equal(text('codexMemIssues'), '✓ no issues in the native memory files');
+    assert.equal(text('claudeMemoryGatesStatus'), 'Memory gates: 13 installed; current.');
+    assert.equal(text('claudeCodeVersion'), 'Claude Code 2.1.301.');
+    // A Codex issue count opens the Codex report, as the Claude line opens the lint report.
+    panel.deliver({ ...data, codexMemory: { ...data.codexMemory, issues: 2 } });
+    const link = panel.dom.byId.get('codexMemIssues').children.at(-1);
+    assert.equal(link.textContent, '⚠ 2 issues — open report');
+    panel.posted.length = 0;
+    link.click({ preventDefault() {} });
+    assert.deepEqual(panel.posted, [{ type: 'inspectCodexMemory' }]);
+    // The Claude card's new buttons reach their commands.
+    for (const [id, type] of [['searchClaudeMemory', 'searchClaudeMemory'], ['inspectClaudeMemory', 'inspectClaudeMemory'],
+      ['claudeMemoryGates', 'manageGates']]) {
+      panel.posted.length = 0;
+      panel.dom.byId.get(id).click();
+      assert.deepEqual(panel.posted, [{ type }], `${id} posts ${type}`);
+    }
+  } finally {
+    await app.dispose();
+  }
+});
+
+test('the Codex memory card is given its summary size, lines, index count and model state', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const memories = path.join(env.tempHome, '.codex', 'memories');
+  fs.mkdirSync(memories, { recursive: true });
+  fs.writeFileSync(path.join(memories, 'memory_summary.md'), `v1\n${'x'.repeat(396)}\nthird\n`);
+  fs.writeFileSync(path.join(memories, 'MEMORY.md'), '# Registry\n');
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const codex = ui.posted.at(-1).codexMemory;
+    // MUTATION: drop the summary fields from codexFeatureStatus; the card then shows dashes.
+    assert.equal(codex.summaryTokens, Math.round(Buffer.byteLength(`v1\n${'x'.repeat(396)}\nthird\n`) / 4));
+    assert.equal(codex.summaryLines, 3);
+    assert.equal(codex.embedded, null, 'no index built in this home');
+    assert.ok(['ready', 'model-missing', 'venv-missing'].includes(codex.llm), `llm state: ${codex.llm}`);
+    assert.ok('claudeCodeVersion' in ui.posted.at(-1), 'the version line is fed');
+  } finally {
+    await app.dispose();
+  }
+});
 
 // The three tests below deliver a hand-built payload, which exercises the webview render
 // but never memoryCardData. This one drives the payload builder for real, because the two

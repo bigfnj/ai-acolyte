@@ -15,8 +15,21 @@ function codexFeatureStatus(options = {}) {
     if (error.code !== 'MODULE_NOT_FOUND') throw error;
     memory = require('../src/codex-memory').discoverCodexMemory(options);
   }
+  // The summary is what a Codex session loads when memory use is on (measured: docs/
+  // codex-compatibility.md, check-codex-memory-runtime.js, "enabled summary use"), so its size is
+  // the Codex card's counterpart of Claude's tok/session, and its lines of Claude's line count
+  // (2026-10-19). Tokens are bytes / 4, the estimate the Claude card uses. A summary that is
+  // absent or unreadable gives nulls, drawn as "–".
+  const summary = memory.files.find((file) => file.kind === 'summary');
+  let summaryLines = null;
+  if (summary) {
+    try { summaryLines = require('fs').readFileSync(summary.path, 'utf8').replace(/\r?\n$/, '').split(/\r?\n/).length; }
+    catch { summaryLines = null; }
+  }
   return { root: memory.root, state: memory.storageState, files: memory.files.length,
-    diagnostics: memory.diagnostics.length, featureState: memory.featureState };
+    diagnostics: memory.diagnostics.length, featureState: memory.featureState,
+    summaryTokens: summary && Number.isFinite(summary.size) ? Math.round(summary.size / 4) : null,
+    summaryLines };
 }
 
 function createCodexFeaturesUi(vscode, { readMemory, rebuildMemory, runRules, profileOptions = {}, refresh = () => {} }) {

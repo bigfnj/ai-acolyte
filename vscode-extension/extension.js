@@ -38,6 +38,8 @@ const { resolvedLaunch, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE, endProcessTr
 const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
+const { createClaudeMemoryUi } = require('./claudeMemoryUi');
+const { codexRecallIndexCount } = require('./src/codex-recall');
 const { CodexMemoryLint } = require('./codexMemoryLint');
 const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
 const { createPermissionActions } = require('./permissionActions');
@@ -150,6 +152,7 @@ let codexMemoryLint = null;
 let codexMemoryReport = null;
 let codexMemoryGatesUi = null;
 let codexFeatureUi = null;
+let claudeMemoryUi = null;
 let deactivated = false;
 // Bumped by every activate(). deactivate() captures it before awaiting the Auto
 // Learn drain so a continuation that resumes after a same-realm re-activate can
@@ -1053,6 +1056,66 @@ async function rebuildRecall() {
   );
 }
 
+// The Claude memory card's Search (claudeMemoryUi.js), run the way rebuildRecall runs recall.py:
+// the toolbox Python, the store the card shows, the CPU model when it is installed. With no model
+// it searches by keywords (--lexical-only) rather than not at all, and says so, as the Codex card's
+// search does. Never rejects: a missing piece is `{ unavailable }`, which the UI words. Tracked and
+// tree-killed after two minutes like every child here, so a teardown cannot leave it running.
+function runClaudeMemorySearch(query) {
+  return new Promise((resolve) => {
+    const { dir } = memoryReport();
+    if (!dir) { resolve({ unavailable: 'no Claude memory store (a folder with MEMORY.md) was found.' }); return; }
+    const script = recallScriptPath();
+    if (!script) { resolve({ unavailable: 'recall.py was not found. Set its path with memory.recallScript.' }); return; }
+    const st = recallStatus();
+    if (!st.venv) { resolve({ unavailable: `the DevToolbox Python was not found at ${st.py}.` }); return; }
+    const lexical = !st.model;
+    const env = { ...process.env, RECALL_MEMORY_DIR: dir, RECALL_REEXEC: '1', ...(st.modelDir ? { RECALL_MODEL_DIR: st.modelDir } : {}) };
+    const args = [script, '--json', '-k', '10', ...(lexical ? ['--lexical-only'] : []), query];
+    endTreeAfter(trackChild(execFile(st.py, args, { env, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (deactivated) { resolve({ unavailable: 'AI Acolyte is shutting down.' }); return; }
+      if (err) { resolve({ unavailable: `the search failed: ${(stderr || err.message || '').trim().slice(0, 300)}` }); return; }
+      try {
+        resolve({ ...JSON.parse(stdout), ...(lexical ? { reason: 'The CPU model is not installed; Rebuild recall index offers to download it.' } : {}) });
+      } catch { resolve({ unavailable: 'recall.py answered with something that is not JSON.' }); }
+    })), 120000);
+  });
+}
+
+// The Claude memory card's Inspect: every store found (memoryStoreDirs), the one the card shows,
+// what is wrong in it (the same counts the card draws), and its gates. Paths with the home as ~.
+function claudeMemorySources() {
+  const home = (value) => String(value || '').replace(os.homedir(), '~');
+  const conf = memoryConf();
+  const { dir, report } = memoryReport();
+  const stores = memoryStoreDirs().map((store) => {
+    let files = 0; let lines = null; let tokens = null;
+    try { files = fs.readdirSync(store).filter((name) => name.toLowerCase().endsWith('.md')).length; } catch { /* unreadable: 0 */ }
+    try {
+      const text = fs.readFileSync(path.join(store, 'MEMORY.md'), 'utf8');
+      lines = text.replace(/\r?\n$/, '').split(/\r?\n/).length;
+      tokens = Math.round(Buffer.byteLength(text, 'utf8') / 4);
+    } catch { /* no index: unknown */ }
+    return { dir: home(store), files, lines, tokens, primary: !!dir && path.resolve(store) === path.resolve(dir) };
+  });
+  const issues = [];
+  if (report) {
+    if (report.linesOver) issues.push(`MEMORY.md is ${report.lineCount} lines, past the ${conf.maxLines}-line cap Claude Code loads`);
+    if (report.bytes > conf.totalBudget) issues.push(`MEMORY.md is over its ${Math.round(conf.totalBudget / 4)}-token budget`);
+    // memoryLint's items: `over` is an index line past the per-line budget ({ line, len }), `broken`
+    // a link whose target is missing ({ line, target }). Lines are 0-based there, 1-based here.
+    for (const item of report.over || []) {
+      issues.push(`MEMORY.md line ${Number(item?.line) + 1} is ${item?.len} characters, over the per-line budget`);
+    }
+    for (const item of report.broken || []) {
+      issues.push(`MEMORY.md line ${Number(item?.line) + 1} links to ${item?.target}, which does not exist`);
+    }
+  }
+  const gates = gatesCardData();
+  return { primary: home(dir), stores, issues,
+    gates: gates?.compiled ? `${gates.count} compiled, ${gates.on ? (gates.current ? 'installed and current' : 'installed, refresh pending') : 'not installed'}` : null };
+}
+
 // Silent background sync: no progress modal, no prompts, no downloads. Fires only when
 // the script + venv + model are already present, the cache is genuinely behind the
 // corpus, and the cooldown (15 min) has expired.
@@ -1095,7 +1158,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:3132#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:3202#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1467,7 +1530,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:6149#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:6289#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1724,12 +1787,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:6182#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:6322#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2902#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2965#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -3025,6 +3088,13 @@ function activate(context) {
     refresh: () => dashboard?.refresh(),
   });
   codexFeatureUi = codexFeatures;
+  // The Claude memory card's counterparts of the Codex card's Search and Inspect (2026-10-19).
+  claudeMemoryUi = createClaudeMemoryUi(vscode, { search: runClaudeMemorySearch, sources: claudeMemorySources });
+  const claudeMemory = claudeMemoryUi;
+  context.subscriptions.push(
+    vscode.commands.registerCommand('permission-wildcarding.searchClaudeMemory', () => claudeMemory.searchMemory()),
+    vscode.commands.registerCommand('permission-wildcarding.inspectClaudeMemory', () => claudeMemory.inspectMemory()),
+  );
   const permissionActions = createPermissionActions({
     runClaude: () => runWildcarding(true),
     reviewCodex: () => codexFeatures.reviewRules('stored-widening'),
@@ -4632,6 +4702,8 @@ class WildcardingViewProvider {
         case 'rebuildCodexMemory': vscode.commands.executeCommand('permission-wildcarding.rebuildCodexMemory'); break;
         case 'codexMemoryGates': vscode.commands.executeCommand('permission-wildcarding.codexMemoryGates'); break;
         case 'inspectCodexMemory': vscode.commands.executeCommand('permission-wildcarding.inspectCodexMemory'); break;
+        case 'searchClaudeMemory': vscode.commands.executeCommand('permission-wildcarding.searchClaudeMemory'); break;
+        case 'inspectClaudeMemory': vscode.commands.executeCommand('permission-wildcarding.inspectClaudeMemory'); break;
         case 'countRuleUse': vscode.commands.executeCommand('permission-wildcarding.countRuleUse'); break;
         case 'refresh':      this.refresh(); break;
         case 'remove':       this._remove(msg.value); break;
@@ -4846,8 +4918,18 @@ class WildcardingViewProvider {
       lastRun,
       autoLearn,
       memory: memoryCardData(memory),
+      // The Claude memory card's version line, the counterpart of the Codex card's CLI line
+      // (2026-10-19). defaultBinary is a directory look, 0.8 ms on the development box.
+      claudeCodeVersion: (() => {
+        try { const found = findClaudeCodeBinary(os.homedir()); return found?.version ? found.version.join('.') : null; }
+        catch { return null; }
+      })(),
       codexMemory: {
         ...codexFeatureStatus({ home: os.homedir(), codexHome: CODEX_HOME_DIR }),
+        // The CPU model Codex search ranks with: the same Python and model as Claude's
+        // (codexRecallOptions), so the same status. And how many passages its index holds.
+        llm: recallStatus().state,
+        embedded: codexRecallIndexCount({ home: os.homedir(), codexHome: CODEX_HOME_DIR }),
         lintEnabled: memoryConf().enabled !== false,
         issues: codexMemoryReport?.diagnostics?.length || 0,
         error: codexMemoryReport?.error || codexMemoryReport?.watchError || null,
@@ -5159,9 +5241,17 @@ class WildcardingViewProvider {
     </div>
     <div class="rowbody" id="bodyCodexMemory" hidden>
       <div class="card">
+        <div class="status"><span id="codexLlmDot" class="dot idle"></span><span id="codexLlmText">CPU LLM</span></div>
         <div class="muted sub" id="codexMemoryDir"></div>
+        <div class="stats" style="margin-top:8px">
+          <div class="stat"><div class="n" id="codexMemTok">–</div><div class="l">tok/session</div></div>
+          <div class="stat"><div class="n" id="codexMemFiles">–</div><div class="l">files</div></div>
+          <div class="stat"><div class="n" id="codexMemEmb">–</div><div class="l">embedded</div></div>
+          <div class="stat"><div class="n" id="codexMemLines">–</div><div class="l">summary lines</div></div>
+        </div>
+        <div class="memissues" id="codexMemIssues"></div>
         <div class="muted sub" id="codexMemoryStatus"></div>
-        <button class="restore" id="searchCodexMemory">Search native memory…</button>
+        <button class="restore" id="searchCodexMemory">Search Codex memory…</button>
         <button class="restore" id="rebuildCodexMemory">Rebuild Codex recall index…</button>
         <button class="restore" id="inspectCodexMemory">Inspect memory sources…</button>
         <div class="muted sub" id="codexMemoryGatesStatus"></div>
@@ -5187,7 +5277,12 @@ class WildcardingViewProvider {
           <div class="stat"><div class="n" id="memLines">–</div><div class="l" id="memLinesLabel">lines</div></div>
         </div>
         <div class="memissues" id="memIssues"></div>
-        <button class="restore" id="rebuild" title="Force a full CPU re-embed of the memory dir (recall.py --rebuild)">⟳  Rebuild recall index</button>
+        <button class="restore" id="searchClaudeMemory">Search Claude memory…</button>
+        <button class="restore" id="rebuild" title="Force a full CPU re-embed of the memory dir (recall.py --rebuild)">⟳  Rebuild Claude recall index</button>
+        <button class="restore" id="inspectClaudeMemory">Inspect memory sources…</button>
+        <div class="muted sub" id="claudeMemoryGatesStatus"></div>
+        <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
+        <div class="muted sub" id="claudeCodeVersion"></div>
       </div>
     </div>
   </section>
@@ -5682,17 +5777,12 @@ class WildcardingViewProvider {
     return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
   }
 
-  function renderMemory(m) {
+  function renderMemory(m, d) {
     const card = $('memCard');
     if (!m) { card.style.display = 'none'; return; }
     card.style.display = '';
 
-    const ready = m.llm === 'ready';
-    $('llmDot').className = 'dot' + (ready ? '' : ' idle');
-    $('llmText').textContent = ready
-      ? 'CPU LLM: ready (bge-small, 384-dim)'
-      : (m.llm === 'model-missing' ? 'CPU LLM: model not found' : 'CPU LLM: venv not found');
-    $('llmText').style.fontWeight = '600';
+    llmLine('llmDot', 'llmText', m.llm);
     $('memDir').textContent = m.dir;
 
     $('memTok').textContent = fmtK(m.tokens);
@@ -5753,10 +5843,55 @@ class WildcardingViewProvider {
       el.className = 'memissues muted';
       el.textContent = '✓ index clean, all links resolve';
     }
+
+    // The gates and version lines, the counterparts of the Codex card's (2026-10-19). The gates
+    // are the compiled memory gates the Memory gates row installs; Review opens their panel.
+    const g = (d && d.gates) || {};
+    const count = g.count == null ? '?' : g.count;
+    $('claudeMemoryGatesStatus').textContent = !g.compiled ? 'Memory gates: none compiled from this memory yet.'
+      : g.partial ? 'Memory gates: ' + count + ', partially installed.'
+        : g.on ? 'Memory gates: ' + count + ' installed; ' + (g.current ? 'current.' : 'update pending.')
+          : 'Memory gates: ' + count + ' compiled, not installed.';
+    $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
+  }
+
+  // One wording for both memory cards' CPU LLM line: the Claude and Codex searches run the same
+  // model through the same Python (codexRecallOptions), so the same state reads the same.
+  function llmLine(dotId, textId, state) {
+    const ready = state === 'ready';
+    $(dotId).className = 'dot' + (ready ? '' : ' idle');
+    $(textId).textContent = ready ? 'CPU LLM: ready (bge-small, 384-dim)'
+      : (state === 'model-missing' ? 'CPU LLM: model not found' : 'CPU LLM: venv not found');
+    $(textId).style.fontWeight = '600';
   }
 
   function renderCodexMemory(m) {
     m = m || {};
+    // The same skeleton as the Claude memory card (2026-10-19): model, folder, four stats, issues.
+    llmLine('codexLlmDot', 'codexLlmText', m.llm);
+    $('codexMemTok').textContent = m.summaryTokens == null ? '–' : fmtK(m.summaryTokens);
+    $('codexMemTok').title = 'The size of memory_summary.md, which a Codex session loads when memory use is on'
+      + ' (measured; bytes / 4). Whether it is on is not inferred.';
+    $('codexMemFiles').textContent = m.files == null ? '–' : m.files;
+    $('codexMemFiles').title = 'Native memory files: the summary, the task registry, rollout summaries and memory skills';
+    $('codexMemEmb').textContent = m.embedded == null ? '–' : m.embedded;
+    $('codexMemEmb').title = m.embedded == null ? 'Codex recall index not built yet: a search or Rebuild builds it'
+      : m.embedded + ' passages embedded in the Codex recall index';
+    $('codexMemLines').textContent = m.summaryLines == null ? '–' : m.summaryLines;
+    $('codexMemLines').title = 'Lines in memory_summary.md';
+    const issuesLine = $('codexMemIssues');
+    issuesLine.innerHTML = '';
+    if (m.issues) {
+      issuesLine.className = 'memissues';
+      const a = document.createElement('a');
+      a.className = 'memlink';
+      a.textContent = '⚠ ' + m.issues + ' issue' + (m.issues === 1 ? '' : 's') + ' — open report';
+      a.addEventListener('click', (e) => { e.preventDefault(); vscode.postMessage({ type: 'inspectCodexMemory' }); });
+      issuesLine.appendChild(a);
+    } else {
+      issuesLine.className = 'memissues muted';
+      issuesLine.textContent = m.state === 'absent' ? '' : '✓ no issues in the native memory files';
+    }
     // Every count on this card read plural: a real store showed "1 issues" (2026-10-13).
     const files = m.files || 0;
     setState('stCodexMemory', m.state === 'absent' ? 'no files yet'
@@ -5941,7 +6076,7 @@ class WildcardingViewProvider {
     renderLocal(d.local);
     renderGuidance(d.guidance);
     renderGates(d.gates);
-    renderMemory(d.memory);
+    renderMemory(d.memory, d);
     renderCodexMemory(d.codexMemory);
     $('lastRun').textContent = d.lastRun ? 'Claude ' + timeAgo(d.lastRun) : '';
     $('backup').textContent = d.backupCount
@@ -6050,6 +6185,9 @@ class WildcardingViewProvider {
   $('codexMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'codexMemoryGates' }));
   $('inspectCodexMemory').addEventListener('click', () => vscode.postMessage({ type: 'inspectCodexMemory' }));
   $('rebuild').addEventListener('click', () => vscode.postMessage({ type: 'rebuildRecall' }));
+  $('searchClaudeMemory').addEventListener('click', () => vscode.postMessage({ type: 'searchClaudeMemory' }));
+  $('inspectClaudeMemory').addEventListener('click', () => vscode.postMessage({ type: 'inspectClaudeMemory' }));
+  $('claudeMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'manageGates' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));
@@ -6070,6 +6208,8 @@ async function deactivate() {
   deactivated = true;
   codexFeatureUi?.dispose();
   codexFeatureUi = null;
+  claudeMemoryUi?.dispose();
+  claudeMemoryUi = null;
   codexMemoryLint?.dispose();
   codexMemoryGatesUi?.dispose();
   codexMemoryGatesUi = null;

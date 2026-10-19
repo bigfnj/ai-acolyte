@@ -217,7 +217,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:3199-3200#memoryStoreDirs) overrides `dir` before it calls this.
+// (extension.js:3269-3270#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive
@@ -437,7 +437,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1288#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1313#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.

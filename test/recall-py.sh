@@ -377,12 +377,12 @@ echo "ok: the clean verdict tests every finding it prints, not five of eight"
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1287#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1312#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1279#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1304#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.
@@ -1090,6 +1090,30 @@ echo "$ERR" | grep -q 'RAISED' || fail "an unknown ranking mode did not raise: $
 echo "$ERR" | grep -q 'hybird' || fail "the error does not name the bad mode"
 echo "ok: an unrecognised ranking mode raises instead of scoring everything zero"
 
+
+# ---------------------------------------------------------------- --json, for the dashboard
+# The Claude memory card's Search runs a query with --json and opens a result at its line
+# (2026-10-19). A result has to name the file it came from and the line its best excerpt sits
+# on, or the card cannot open it. Mutation: always call search() (drop --json from the dispatch).
+MEMJ="$TMP/memory-json"
+mkdir -p "$MEMJ"
+printf "%s
+" "# Index" "- [Kettle](kettle.md) - how the kettle descales" > "$MEMJ/MEMORY.md"
+printf "%s
+" "---" "name: kettle" "description: how the kettle descales" "---" "" "Fill it with vinegar." "The descaling cycle runs twelve minutes." > "$MEMJ/kettle.md"
+OUT="$(RECALL_MEMORY_DIR="$MEMJ" RECALL_MEMORY_DIRS= "$PY" "$RECALL" --json --lexical-only -k 3 "descaling cycle minutes" 2>/dev/null)"
+echo "$OUT" | "$PY" -c "
+import json, os, sys
+data = json.load(sys.stdin)
+hits = [r for r in data[\"results\"] if r[\"name\"].endswith(\"kettle.md\")]
+assert hits, data
+assert os.path.basename(hits[0][\"path\"]) == \"kettle.md\", hits[0]
+assert hits[0][\"line\"] == 7, hits[0]
+assert \"twelve minutes\" in hits[0][\"excerpt\"], hits[0]
+assert data[\"mode\"] == \"lexical\", data
+" || fail "--json did not name the file and the line of its best excerpt: $OUT"
+"$PY" "$RECALL" --json >/dev/null 2>&1 && fail "--json with no query exited 0"
+echo "ok: --json names each result's file and the line of its best excerpt"
 
 # ---------------------------------------------------------------- the heavy imports stay lazy
 # numpy and onnxruntime used to be imported at module scope, and _ensure_runtime imported both

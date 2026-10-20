@@ -119,7 +119,13 @@ function fixture(t) {
     const pids = ['pids', 'stubs', 'parents'].flatMap((suffix) => recordedPids({ mark }, suffix));
     for (const pid of pids) try { process.kill(pid); } catch { /* already gone */ }
     for (const until = Date.now() + 10000; pids.some(alive) && Date.now() < until;) await new Promise((r) => setTimeout(r, 50));
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    // Retried by hand: Windows lets go of a directory a moment after the last process in it has
+    // gone, and on Node 24 rmSync gave up on that EPERM at once, maxRetries or not (measured: a
+    // full-suite run failed here 2.5 s into a test whose rmSync had 10 retries at 200 ms).
+    for (let attempt = 0; ; attempt += 1) {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); break; } catch (error) { if (attempt >= 50) throw error; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
   });
   const bin = path.join(tmp, 'bin');
   fs.mkdirSync(bin);
@@ -343,8 +349,9 @@ test('a claude that never answers is ended with its tree, and every later run st
 // MUTATION: drop the grace timer and the run never settles (the test times out).
 test('a run whose close never comes still settles, as timed out, after the deadline and the grace', { timeout: 30000 }, async (t) => {
   const f = fixture(t);
-  const cwd = path.join(f.tmp, 'cwd');
-  fs.mkdirSync(cwd);
+  // The stub and its grandchild live on here, so they stand in the temp directory itself, which
+  // nothing removes: in the fixture they held up its removal (EPERM on a loaded full run).
+  const cwd = os.tmpdir();
   const saved = { STUB_MODE: process.env.STUB_MODE, STUB_MARK: process.env.STUB_MARK };
   Object.assign(process.env, { STUB_MODE: 'hang', STUB_MARK: f.mark });
   let result;

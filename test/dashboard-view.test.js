@@ -65,7 +65,7 @@ function settle(ms = 140) {
 }
 
 // Copied from test/policy-backup.test.js rather than shared. That is a standing
-// decision in this suite (test/extension-activation.test.js:509#sharing: "Kept as its
+// decision in this suite (test/extension-activation.test.js:510#sharing: "Kept as its
 // own mock rather than sharing the one above… duplicating a mock is far cheaper
 // than breaking the activation test that already works"), and this file needs two
 // things that one does not: the provider instance, and a count of how many times

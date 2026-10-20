@@ -4539,10 +4539,35 @@ function openThreadsEnabled() {
 const THREADS_BOUNCE_MS = 2500;       // after a corpus edit or the setting; not the gates' 2000
 const THREADS_ACTIVATION_MS = 4000;   // after activation, once the host has settled
 
+// ONE COMPILE AT A TIME (2026-10-20). A compile asked for while one runs waits for it and then runs
+// once, however many asked in between: the later ask may follow an edit the running compile did not
+// read, and two compiles at once could finish in either order, the older writing last. The one
+// queued compile is quiet only if every ask it stands for was, so a person's click still hears why
+// it failed. Resolves as spawnThreadsCompile does.
+let threadsCompiling = null;   // the compile running now
+let threadsQueued = null;      // { promise, quiet }: the one that runs after it
+function compileThreads({ quiet = false } = {}) {
+  if (!threadsCompiling) {
+    threadsCompiling = spawnThreadsCompile({ quiet }).finally(() => { threadsCompiling = null; });
+    return threadsCompiling;
+  }
+  if (threadsQueued) {
+    threadsQueued.quiet = threadsQueued.quiet && quiet;
+    return threadsQueued.promise;
+  }
+  const queued = { quiet, promise: null };
+  queued.promise = threadsCompiling.then(() => {
+    threadsQueued = null;
+    return compileThreads({ quiet: queued.quiet });
+  });
+  threadsQueued = queued;
+  return queued.promise;
+}
+
 // compileGates for `--threads-compile`: the same Python, the same pinned store, the same tracked
 // and tree-killed child with a 60 s deadline. Resolves false when it could not run, having said
 // why: a modal for a person's action, the console and the output channel for an unattended one.
-function compileThreads({ quiet = false } = {}) {
+function spawnThreadsCompile({ quiet = false } = {}) {
   const say = (msg) => {
     if (!quiet) { vscode.window.showWarningMessage('ai-acolyte: ' + msg); return; }
     console.error('ai-acolyte: ' + msg);

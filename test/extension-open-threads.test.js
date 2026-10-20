@@ -74,7 +74,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const infos = [];
   const channel = [];
   const configListeners = [];
-  const state = { compileWrites, warningAnswer: undefined };
+  const state = { compileWrites, warningAnswer: undefined, hold: false, holding: [] };
   const counters = { memoryReport: 0 };
   const disposable = () => ({ dispose() {} });
   const vscode = {
@@ -135,16 +135,21 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
       const done = typeof options === 'function' ? options : callback;
       spawns.push({ args, env: (typeof options === 'object' && options?.env) || {} });
       const child = new EventEmitter();
-      setImmediate(() => {
+      // What this compile writes is what the corpus was when it was spawned, as recall.py reads it.
+      const writes = state.compileWrites;
+      const finish = () => {
         let err = null;
         if (args.includes('--threads-compile')) {
-          if (state.compileWrites === null) err = Object.assign(new Error('exit 1'), { code: 1 });
-          else fs.writeFileSync(threadsFile, state.compileWrites);
+          if (writes === null) err = Object.assign(new Error('exit 1'), { code: 1 });
+          else fs.writeFileSync(threadsFile, writes);
         }
         done(err, '', err ? '[recall] refusing to compile open threads: the test said so' : '');
         child.emit('exit', err ? 1 : 0, null);
         child.emit('close', err ? 1 : 0, null);
-      });
+      };
+      // `state.hold`: the compile runs until the test calls its finish (state.holding).
+      if (state.hold && args.includes('--threads-compile')) state.holding.push(finish);
+      else setImmediate(finish);
       return child;
     },
   };
@@ -433,6 +438,54 @@ test('a MEMORY.md save compiles only when the INDEX line could move', async (t) 
   // MUTATION: return true for MEMORY.md in threadsMayChange and the first assertion fails; drop
   // the `compiled.index !== null` check and the "healthy again" one does; return false from
   // indexHealth's branch and the 141-line one does.
+});
+
+// ONE COMPILE AT A TIME (2026-10-20). A compile slower than the debounce overlapped the next, and
+// whichever finished last won, the older included. Now a compile asked for while one runs waits
+// for it and then runs once, however many asked.
+test('a compile asked for while one runs waits for it, and the asks in between are one compile', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
+  app.held.length = 0;
+  app.state.hold = true;
+  app.state.compileWrites = ONE;
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'precondition: the first compile is running, held');
+  app.state.compileWrites = TWO;
+  for (let burst = 0; burst < 3; burst += 1) {
+    app.fireCorpus(app.store, 'a.md');
+    await app.fireTimers();
+  }
+  assert.equal(app.compiles().length, 1, 'three more bursts while it runs start no second compile');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  assert.equal(app.compiles().length, 2, 'once it finished, one more compile ran for the three');
+  assert.equal(app.state.holding.length, 1, 'and it is the one running');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  assert.ok(app.claude().includes('- **BLOCKED** Second. (b)'), 'the newer compile is the one installed');
+  assert.equal(app.compiles().length, 2, 'and nothing else ran');
+  // A person's Refresh joining a queued unattended compile still hears why it failed.
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  app.state.compileWrites = null;
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  const refreshed = app.commands.get('permission-wildcarding.toggleOpenThreads')({ refresh: true });
+  assert.equal(app.compiles().length, 3, 'precondition: one running, the burst and the Refresh queued behind it');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  app.state.holding.shift()();
+  await refreshed;
+  assert.equal(app.compiles().length, 4, 'the burst and the Refresh were one compile');
+  assert.ok(app.warnings.some((message) => /open threads compile failed/.test(message)),
+    `the queued compile spoke for the Refresh: ${JSON.stringify(app.warnings)}`);
+  // MUTATION: make compileThreads call spawnThreadsCompile directly (no queue) and the second
+  // assertion fails at 4 compiles; keep the first ask's `quiet` for the queued compile and the
+  // last assertion fails.
 });
 
 // One timer serves activation's check and the corpus bursts, so an event from another store in

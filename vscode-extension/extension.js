@@ -1220,14 +1220,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:730-738#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:756-764#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:1053-1057#conf.enabled), and test/memory-lint-watchers.test.js:460#lintMemory
+    // (memoryLint.js:1094-1098#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:965#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:991#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1563,7 +1563,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:6969#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:6965#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1820,7 +1820,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:7002#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:6998#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //

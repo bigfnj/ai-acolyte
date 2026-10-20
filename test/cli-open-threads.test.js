@@ -238,11 +238,13 @@ test('a bad sub-verb prints the usage and exits 1', (t) => {
   assert.equal(bad.stderr, 'usage: wildcard-perms --open-threads on|off|status|refresh\n');
 });
 
-// MUTATION: drop `extra` from the usage check in openThreads and `on --gates off` installs.
+// A second verb (`on --gates off`) is the dispatch chain's one-verb refusal, exit 2
+// (test/cli-gates.test.js); the stray words here are openThreads' own.
+// MUTATION: drop `extra` from the usage check in openThreads and `on --verbose` installs.
 test('an extra argument prints the usage, exits 1 and writes nothing', (t) => {
   const s = setup(t);
   const before = s.claude();
-  for (const args of [['--open-threads', 'on', '--gates', 'off'], ['--open-threads', 'refresh', 'extra']]) {
+  for (const args of [['--open-threads', 'on', '--verbose'], ['--open-threads', 'refresh', 'extra']]) {
     const bad = s.run(args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
     assert.equal(bad.stderr, 'usage: wildcard-perms --open-threads on|off|status|refresh\n', args.join(' '));

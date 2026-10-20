@@ -107,6 +107,16 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
 } else if (takesNames) {
   // Ahead of every other verb, for the reason at the top of this chain.
   gates(argv);
+} else if (VERBS.filter((verb) => optionArgs.includes(verb)).length > 1) {
+  // One verb per run. The chain below runs the first verb it finds and drops the rest without a
+  // word: `--seed --gates off` wrote settings.json and never touched the gates, and `--guidance
+  // status --open-threads status` printed guidance only, exit 0 both times. No caller in this repo
+  // passes two (installers, hooks, the extension and the smoke script each run one), so two is
+  // refused before either runs. After the `takesNames` branch, so `--gates retire --seed` still
+  // reads `--seed` as a name, never a second verb.
+  process.stderr.write('wildcard-perms: one verb at a time, got '
+    + `${VERBS.filter((verb) => optionArgs.includes(verb)).join(' ')}; nothing was run\n\n${HELP_USAGE}`);
+  process.exitCode = 2;
 } else if (argv.length && !VERBS.some((verb) => argv.includes(verb))
     && argv.some((arg) => arg.startsWith('-'))) {
   // An unrecognized flag must NEVER reach hook mode. Hook mode rewrites
@@ -756,7 +766,16 @@ function drain(args) {
 // the half of the job that has to happen in the agent's instructions.
 function guidance(args) {
   const { guidanceStatusAll, setGuidanceAll } = require('../src/agent-guidance');
-  const cmd = (args[args.indexOf('--guidance') + 1] || 'status').toLowerCase();
+  const at = args.indexOf('--guidance');
+  const cmd = (args[at + 1] || 'status').toLowerCase();
+  // `on`, `off` and `status` take nothing more, as --gates: `--guidance on now` installed the block
+  // and dropped `now` without a word. `derived`, `accept`, `decline` and `reset` keep their
+  // `--workspace <path>` and id, so the refusal is for these three only.
+  if ((cmd === 'on' || cmd === 'off' || cmd === 'status')
+      && args.some((arg, index) => index !== at && index !== at + 1)) {
+    process.stderr.write(GUIDANCE_USAGE);
+    process.exit(1);
+  }
 
   if (cmd === 'status') {
     const states = guidanceStatusAll();

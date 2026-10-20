@@ -235,11 +235,12 @@ test('CLI --gates rejects an unknown verb with usage', (t) => {
   assert.equal(claudeMd(home), '# Mine\n');
 });
 
-// Dispatch takes the first verb it finds, so whatever followed `--gates on` was dropped.
+// Whatever followed `--gates on` was dropped. A second VERB there is the dispatch chain's
+// refusal (the test after this one); this one is the stray words gates() itself refuses.
 // MUTATION: remove the extra-argument refusal in gates() and `on` installs, exit 0.
 test('CLI --gates on|off|status|refresh refuse an extra argument and write nothing', (t) => {
   const home = tempHome(t);
-  for (const args of [['--gates', 'on', '--memory-guard', 'on'], ['--gates', 'on', 'extra'],
+  for (const args of [['--gates', 'on', '--verbose'], ['--gates', 'on', 'extra'],
     ['--gates', 'refresh', '--json'], ['extra', '--gates', 'status']]) {
     const bad = runCli(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
@@ -247,6 +248,60 @@ test('CLI --gates on|off|status|refresh refuse an extra argument and write nothi
     assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
   }
   assert.equal(runCli(home, ['--gates', 'on']).status, 0, 'precondition: the same verb alone runs');
+});
+
+// The dispatch chain runs the first verb it finds, so a second one was dropped with exit 0:
+// `--seed --gates off` rewrote settings.json and left the gates alone, and `--guidance status
+// --open-threads status` printed guidance only. Two verbs are refused before either runs.
+// MUTATION: delete the one-verb branch in bin/wildcard-perms and `--seed --gates off` exits 0
+// with settings.json rewritten.
+test('CLI refuses two verbs in one run, names them, and runs neither', (t) => {
+  const home = tempHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  for (const [args, named] of [
+    [['--seed', '--gates', 'off'], '--seed --gates'],
+    [['--guidance', 'status', '--open-threads', 'status'], '--guidance --open-threads'],
+    [['--gates', 'on', '--memory-guard', 'on'], '--gates --memory-guard'],
+    [['--bypass', 'status', '--codex-hook', 'status', '--learn'], '--learn --bypass --codex-hook'],
+  ]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: one verb at a time, got ${named}; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
+    assert.equal(bad.stdout, '', `${args.join(' ')} ran a verb`);
+    assert.equal(fs.readFileSync(settingsPath, 'utf8'), '{}\n', `${args.join(' ')} wrote settings.json`);
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  // --help still wins, and after `--gates retire` a verb's spelling is a name, not a second verb.
+  assert.equal(runCli(home, ['--seed', '--gates', '--help']).status, 0);
+  assert.match(runCli(home, ['--gates', 'retire', '--seed']).stderr, /^wildcard-perms: unrecognized option --seed\n/);
+  // Witness: the first case is a real policy write when it runs alone.
+  const seed = runCli(home, ['--seed']);
+  assert.equal(seed.status, 0, seed.stderr);
+  assert.notEqual(fs.readFileSync(settingsPath, 'utf8'), '{}\n', 'precondition: --seed alone writes settings.json');
+});
+
+// `--guidance on now` installed the block and dropped `now`. The three switches take nothing
+// more, as --gates; the derived verbs keep their `--workspace <path>` and id.
+// MUTATION: delete the extra-argument refusal in guidance() and `--guidance on now` exits 0
+// with the shell-style block installed.
+test('CLI --guidance on|off|status refuse an extra argument and write nothing', (t) => {
+  const home = tempHome(t);
+  for (const args of [['--guidance', 'on', 'now'], ['--guidance', 'on', '--verbose'],
+    ['--guidance', 'status', 'extra'], ['extra', '--guidance', 'off'], ['--guidance', 'off', '--json']]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.equal(bad.stderr, 'usage: wildcard-perms --guidance on|off|status\n'
+      + '       wildcard-perms --guidance derived\n'
+      + '       wildcard-perms --guidance accept|decline|reset <id>\n', args.join(' '));
+    assert.equal(bad.stdout, '', args.join(' '));
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  const derived = runCli(home, ['--guidance', 'derived', '--workspace', home]);
+  assert.equal(derived.status, 0, `--guidance derived --workspace is not an extra argument: ${derived.stderr}`);
+  const on = runCli(home, ['--guidance', 'on']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(claudeMd(home), /BEGIN permission-wildcarding: shell style/, 'precondition: the same verb alone installs');
 });
 
 // Both managed blocks share one file, so the CLI-level guarantee is that neither switch

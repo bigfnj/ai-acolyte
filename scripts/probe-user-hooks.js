@@ -24,8 +24,10 @@
 // no user hook ran on the three events tried (PreToolUse, PostToolUse, UserPromptSubmit),
 // measured on 2026-10-19 with Claude Code 2.1.293 and 2.1.301. Those runs were made by hand and
 // left no artefact, which is how the per-event reading they replaced had gone unchallenged.
-// This script repeats them. Its author has run it only against a stub claude
-// (test/probe-user-hooks.test.js); its first run against a real client is the integrator's.
+// This script repeats them. It was run once against a real client, on 2026-10-20 with its
+// directories under os.tmpdir(): 6 of 6 canaries did not fire, and the Write landed. Its
+// directories have moved twice since (see defaultProbeBase), and that run has not been repeated
+// from where they are now. test/probe-user-hooks.test.js runs it against a stub claude.
 //
 // WHAT IT DOES NOT COVER. A hook in ~/.claude/settings.json: registering one would edit the
 // user's real settings, so the "user" case of the 2026-10-19 runs is not reproduced here. No
@@ -45,7 +47,7 @@
 // name, emptied and recreated, and the transcripts land in one project folder (the reason
 // src/memory-guard-install.js gives for its fixed probe directory). The canary logs, the
 // settings files and report.json stay in a second fixed directory, printed at the end.
-// Nothing outside those two temporary directories is written.
+// Nothing outside those two directories is written by this script.
 //
 // Exit codes: 0 every run completed (whatever it found); 1 claude could not be started;
 // 2 refused (no --run-claude) or a usage error.
@@ -163,8 +165,23 @@ const CANARY_SOURCE = `'use strict';\n// Written by scripts/probe-user-hooks.js.
 // local user could pre-create these fixed directories with a planted .claude/settings.json or
 // CLAUDE.md that `claude -p` would then load as this user. The guard's own probe moved off
 // os.tmpdir() for the same reason in 1.9.1 (src/memory-guard-install.js).
-function defaultProbeBase() {
-  return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'wildcarding');
+//
+// AND NO `.claude` SEGMENT (2026-10-20). The first per-user base was <config>/wildcarding, the
+// guard probe's. Claude Code asks before it edits a path inside a `.claude` directory (skills,
+// agents, commands and worktrees aside; an audit's reading of the client, not measured here),
+// and `-p --permission-mode acceptEdits --allowedTools Write` cannot answer that ask, so the
+// Write the tool-event cases depend on very likely stopped landing there and PreToolUse and
+// PostToolUse read "inconclusive". The guard's probe allows no tool at all, so the same base
+// costs it nothing. Here the base is the platform's per-user state directory:
+// %LOCALAPPDATA%\ai-acolyte on Windows, $XDG_STATE_HOME/ai-acolyte or ~/.local/state/ai-acolyte
+// elsewhere. AI_ACOLYTE_PROBE_BASE overrides it (the tests use it).
+const BASE_ENV = 'AI_ACOLYTE_PROBE_BASE';
+function defaultProbeBase(env = process.env, platform = process.platform, home = os.homedir()) {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  const absolute = (value) => (value && paths.isAbsolute(value) ? value : null);
+  if (env[BASE_ENV]) return path.resolve(env[BASE_ENV]);
+  if (platform === 'win32') return paths.join(absolute(env.LOCALAPPDATA) || paths.join(home, 'AppData', 'Local'), 'ai-acolyte');
+  return paths.join(absolute(env.XDG_STATE_HOME) || paths.join(home, '.local', 'state'), 'ai-acolyte');
 }
 
 function probePaths(base = defaultProbeBase()) {
@@ -317,5 +334,5 @@ function main(argv = process.argv.slice(2), io = { out: process.stdout, err: pro
 if (require.main === module) process.exitCode = main();
 
 module.exports = {
-  EVENTS, VARIANTS, parseArgs, hookCommand, canarySettings, probePaths, planRuns, judgeHook, judgeGoal,
+  EVENTS, VARIANTS, parseArgs, hookCommand, canarySettings, defaultProbeBase, probePaths, planRuns, judgeHook, judgeGoal,
 };

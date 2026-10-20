@@ -69,32 +69,47 @@ function fixture(t) {
   return { tmp, temp, claude, mark: path.join(tmp, 'calls.jsonl') };
 }
 
-// The probe as a child process, its base (CLAUDE_CONFIG_DIR, and os.tmpdir() for anything else)
-// pointed into the fixture.
-function runProbe(f, args, mode) {
+// The probe as a child process, its base (AI_ACOLYTE_PROBE_BASE, and os.tmpdir() for anything
+// else) pointed into the fixture.
+function runProbe(f, args, mode, extraEnv = {}) {
   return spawnSync(process.execPath, [SCRIPT, '--claude', f.claude, ...args], {
     cwd: ROOT, encoding: 'utf8', timeout: 90000, windowsHide: true,
-    env: { ...process.env, CLAUDE_CONFIG_DIR: f.temp, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark },
+    env: { ...process.env, AI_ACOLYTE_PROBE_BASE: f.temp, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark, ...extraEnv },
   });
 }
+const reportPath = (f) => path.join(f.temp, 'ai-acolyte-user-hook-probe-work', 'report.json');
 
 // The default base is per user, never the shared temp directory (on Linux /tmp, where another
-// local user could plant the fixed probe directory with a .claude/settings.json).
-// MUTATION: default probePaths' base back to os.tmpdir() and this fails.
-test('the probe directories default to <config>/wildcarding, never the shared temp directory', () => {
-  const saved = process.env.CLAUDE_CONFIG_DIR;
-  const config = path.join(os.tmpdir(), 'acolyte-probe-config-witness');
+// local user could plant the fixed probe directory with a .claude/settings.json), and has no
+// `.claude` segment: Claude Code asks before editing inside one, and `-p` cannot answer, so the
+// Write the tool events need would not land.
+// MUTATION: default the base back to <CLAUDE_CONFIG_DIR or ~/.claude>/wildcarding and this fails;
+// back to os.tmpdir() and it fails too.
+test('the probe directories default to a per-user state directory with no .claude segment', () => {
+  const winHome = 'C:\\Users\\u';
+  assert.equal(probe.defaultProbeBase({ LOCALAPPDATA: 'D:\\Local' }, 'win32', winHome), 'D:\\Local\\ai-acolyte');
+  assert.equal(probe.defaultProbeBase({}, 'win32', winHome), 'C:\\Users\\u\\AppData\\Local\\ai-acolyte');
+  assert.equal(probe.defaultProbeBase({ LOCALAPPDATA: 'Local' }, 'win32', winHome), 'C:\\Users\\u\\AppData\\Local\\ai-acolyte',
+    'a relative LOCALAPPDATA is not a base');
+  assert.equal(probe.defaultProbeBase({ XDG_STATE_HOME: '/s/state' }, 'linux', '/home/u'), '/s/state/ai-acolyte');
+  assert.equal(probe.defaultProbeBase({}, 'linux', '/home/u'), '/home/u/.local/state/ai-acolyte');
+  assert.equal(probe.defaultProbeBase({ XDG_STATE_HOME: 'state' }, 'darwin', '/Users/u'), '/Users/u/.local/state/ai-acolyte',
+    'a relative XDG_STATE_HOME is ignored, as the XDG spec says');
+  const override = path.join(os.tmpdir(), 'acolyte-probe-base-witness');
+  for (const platform of ['win32', 'linux']) {
+    assert.equal(probe.defaultProbeBase({ AI_ACOLYTE_PROBE_BASE: override, LOCALAPPDATA: 'D:\\Local', XDG_STATE_HOME: '/s' }, platform, '/h'), override);
+  }
+  const saved = process.env.AI_ACOLYTE_PROBE_BASE;
   try {
-    process.env.CLAUDE_CONFIG_DIR = config;
+    delete process.env.AI_ACOLYTE_PROBE_BASE;
     const paths = probe.probePaths();
-    assert.ok(paths.cwd.startsWith(path.join(config, 'wildcarding') + path.sep), paths.cwd);
-    assert.ok(paths.work.startsWith(path.join(config, 'wildcarding') + path.sep), paths.work);
-    delete process.env.CLAUDE_CONFIG_DIR;
-    const home = probe.probePaths();
-    assert.ok(home.cwd.startsWith(path.join(os.homedir(), '.claude', 'wildcarding') + path.sep), home.cwd);
-    assert.ok(!home.cwd.startsWith(os.tmpdir() + path.sep), 'the default must not be the shared temp directory');
+    for (const dir of [paths.cwd, paths.work]) {
+      assert.equal(dir.split(/[\\/]/).includes('.claude'), false, `a .claude segment in ${dir}`);
+      assert.ok(!dir.startsWith(os.tmpdir() + path.sep), `${dir} is in the shared temp directory`);
+      assert.ok(dir.startsWith(probe.defaultProbeBase() + path.sep), dir);
+    }
   } finally {
-    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+    if (saved === undefined) delete process.env.AI_ACOLYTE_PROBE_BASE; else process.env.AI_ACOLYTE_PROBE_BASE = saved;
   }
 });
 
@@ -188,7 +203,7 @@ test('against a restricted stub: /goal reads restricted, every canary silent whi
   const lines = verdictLines(run.stdout);
   assert.equal(lines.length, 6, run.stdout);
   for (const line of lines) assert.match(line, /: not fired \(Write landed: yes; claude exit 0\)$/);
-  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'wildcarding', 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
+  const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
   assert.equal(report.version, '9.9.9 (Claude Code)');
   assert.equal(report.runs.length, 8);
   assert.equal(fs.readFileSync(f.mark, 'utf8').trim().split('\n').length, 8, 'one stub call per planned run');
@@ -202,7 +217,7 @@ test('against an unrestricted stub: every canary fires and names the event Claud
   const lines = verdictLines(run.stdout);
   assert.equal(lines.length, 6, run.stdout);
   for (const line of lines) assert.match(line, /: fired \(Write landed: yes/);
-  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'wildcarding', 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
+  const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
   for (const row of report.runs.filter((r) => r.kind === 'hook')) {
     assert.deepEqual(row.fires.map((fire) => [fire.event, fire.hookEventName]), [[row.event, row.event]], row.label);
   }

@@ -338,6 +338,7 @@ const TEST_ONLY = {
     EVENTS: 'the three hook events the reproducer tries',
     VARIANTS: 'the settings sources it registers each canary in',
     canarySettings: 'the canary settings JSON, pinned per event',
+    defaultProbeBase: 'the per-platform base, pinned with no .claude segment',
     hookCommand: 'the canary command quoting',
     judgeGoal: 'reads the /goal restriction text',
     judgeHook: 'reads a canary log into fired, not fired or inconclusive',

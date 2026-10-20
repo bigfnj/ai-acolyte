@@ -29,8 +29,9 @@ memory card's guard and open-threads lines from the real webview), and 6 of 6 wi
 --review-runtime yes`. Suite at the merge: 1966 tests, 1960 pass, 0 fail, 6 skipped (masked view 0
 fail); smoke 18 of 18. The live worktree is on the other development box, so moving it is a step
 for that machine (the record's clearance section says why). 1.9.0 adds the MEMORY.md guard, the
-Open threads block and Toggle Auto Learn, makes `autoLearn.enabled` tighten-only, and fixes two
-Windows spawn races; the record has a section for each.
+Open threads block and Toggle Auto Learn, makes `autoLearn.enabled` tighten-only, and fixes one
+Windows spawn race (a tree kill its caller started now also reads as ended, a contract rather than
+a visible fault; corrected 2026-10-20 from "two races"); the record has a section for each.
 
 **Cleared 2026-10-13 for 1.6.2.** Every entry open on that morning was re-verified against
 the tree and given a disposition; they are recorded in `docs/engineering-record.md` under

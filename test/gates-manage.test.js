@@ -120,6 +120,12 @@ test('planGateChanges retires a gate left out for its agents: (it changes no age
   // A restore of it is no change: it is scope: global already, and still loads nowhere.
   assert.match(planGateChanges(AGENT_GATES, { restore: ['e_unknown'] }).error,
     /^e_unknown\.md is already scope: global; it loads for no agent because its agents: line cannot be read \(`agents:` names an agent this compiler does not know: gemini\), and a restore cannot change that: fix the line in the memory$/);
+  // The refusal quotes the memory's own text, so its control characters come out as ? (2026-10-20):
+  // both front ends print it. MUTATION: quote gate.problem raw and this fails on the ESC.
+  const esc = String.fromCharCode(27);
+  const hostile = [gate('e_esc.md', 'excluded', { problem: `names ${esc}]0;T${String.fromCharCode(7)}` })];
+  assert.equal(planGateChanges(hostile, { restore: ['e_esc'] }).error.includes(esc), false);
+  assert.match(planGateChanges(hostile, { restore: ['e_esc'] }).error, /\(names \?\]0;T\?\)/);
   // A retired gate whose agents: cannot be read is restored, and the plan says it loads nowhere.
   const broken = [...GATES, gate('z_broken.md', 'retired', { agents: [], problem: 'more than one `agents:` line' })];
   const restored = planGateChanges(broken, { restore: ['z_broken'] });

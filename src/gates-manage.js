@@ -128,7 +128,7 @@ function planGateChanges(gates, { retire = [], restore = [] } = {}) {
         problems.push(`${name} is already active`);
       } else if (verb === 'restore' && gate.state === 'excluded') {
         problems.push(`${name} is already scope: global; it loads for no agent because its agents: line cannot be read `
-          + `(${gate.problem}), and a restore cannot change that: fix the line in the memory`);
+          + `(${markHidden(gate.problem)}), and a restore cannot change that: fix the line in the memory`);
       }
     }
   }

@@ -10,6 +10,21 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Cleared 2026-10-20 for 1.9.2.** A second full audit, of what 1.9.1 changed, filed 22 findings
+(one MED, none HIGH). 21 are FIXED with mutation-tested commits and one is ACCEPTED-RECORDED;
+every row and the evidence are in `docs/engineering-record.md` under "The 1.9.2 audit clearance:
+the second pass (2026-10-20)". The MED finding was a false sentence in the 1.9.1 notes and README
+(that 1.9.0's probe passed `--strict-mcp-config`); both release bodies and the README are corrected.
+
+**Released 2026-10-20 as 1.9.2.** The tag `v1.9.2` is at `c362e77`, the `--no-ff` merge of
+`release/1.9.2`. CI is green on all 8 jobs on the integration (run 39433523576), the release commit
+(39433997268) and the merge (39434463316). The published `ai-acolyte-v192.vsix` (release.yml run
+39434481542) matches the local build in all 66 entries apart from line endings. Against the
+installed 1.9.2: `drive-installed.js` 17 of 17 (guard copy at revision 4) and `drive-vscode.js` 4 of
+4, 6 of 6 and 6 of 6 in the same three groups. Suite on the integration: 2048 tests, 2042 pass, 0
+fail, 6 skipped (masked view 0 fail); smoke 18 of 18. `scripts/verify-release.ps1` waits for the
+owner's next VS Code reload.
+
 **Cleared 2026-10-20 for 1.9.1.** The six entries open at 1.9.0 and the 65 findings of the full
 audit run after it were each taken to a disposition: FIXED with a mutation-tested commit,
 DECLINED-MEASURED with its number, CLOSED-VERIFIED, or ACCEPTED-RECORDED. All 70 rows, the
@@ -120,7 +135,25 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-Nothing open (2026-10-20, after 1.9.1). A new entry carries its evidence and its date.
+### Seeds for the third audit pass (2026-10-20, noticed while fixing the second)
+
+Each was seen by a 1.9.2 fix package outside its brief and is unverified as a finding until the
+third pass reads it.
+
+- **Gate names printed to a terminal keep invisible format characters.** `UNSAFE_FOR_TERMINAL` in
+  `src/gates-manage.js` passes zero-width characters, the soft hyphen, U+FEFF and the tag block, and
+  its twin in `vscode-extension/extension.js` lacks the tag block and U+00AD. Thread text strips
+  them since 1.9.2.
+- **Variation selectors stay in thread text** (U+FE00-U+FE0F, U+E0100-U+E01EF), as do U+2065,
+  U+034F, U+180E and the Hangul fillers. Several are on the kept axis of `test/threads-compile.sh`.
+- **Five verbs ignore a stray word:** `--bypass on extra`, `--seed extra`, `--drain extra`,
+  `--codex-workspace-rules status extra` and `--guidance accept <id> extra`.
+- **The child-process census reads `vscode-extension/extension.js` only.** A spawn inside `src/`
+  reaches `trackChild` by the `options.track` convention, and no test lists those spawns.
+- **The probe's confirmation says "Ends after 60 s at most".** With the 2 s close grace, the answer
+  can come about 62 s after the start.
+- **A stray process in the probe's directory makes its cleanup fail in silence.** An empty leftover
+  is reused and a non-empty one is refused next time.
 
 ---
 

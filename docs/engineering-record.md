@@ -3779,3 +3779,74 @@ release; it is the owner's step at the next reload.
   running. Caught because the failing line named WSL; the rerun names Git Bash by full path.
 - *The development box runs Node 24 only.* A test that passes here can be cancelled on Node 20 or
   22 when it waits on an unref'd timer, so CI's older runtimes are the only check of that class.
+
+## The 1.9.2 audit clearance: the second pass (2026-10-20)
+
+The maintainer's instruction was to audit again after each release and to keep going until a pass
+finds nothing new. The second pass audited what 1.9.1 changed (`e9994db..8aab0ed`, 58 files) with
+three read-only lenses: regressions, functions that cannot run and calls that go nowhere; leaks,
+dead code and optimisation; documentation claims, security and findings worth surfacing. It filed
+22 distinct findings, one of them MED and none HIGH. Four fix packages took them to dispositions on
+their own branches, merged `--no-ff` into `release/1.9.2` in this order: WP-B `fix/threads-192`, WP-C
+`fix/cli-strip-192`, WP-A `fix/guard-probe-192`, WP-D `fix/scripts-docs-192`. Each FIXED row names
+the commit whose message carries the mutation that made its test fail; each package's runner
+restored every mutated file and checked it by sha256.
+
+| id | Finding | Disposition |
+|---|---|---|
+| S1 [MED] | README 1.9.1 paragraph and both release notes said 1.9.0's probe passed --strict-mcp-config; no release did (the flag lived 26 minutes inside fix/guard-audit); 1.9.0's real false "not restricted" was any exit 0 | **FIXED**: both GitHub release bodies corrected 2026-10-20 (integrator) and README.md's 1.9.1 paragraph in WP-D bac4379; the true fix is "any exit 0 read as allowed" (src/memory-guard-install.js, the positive-evidence check) |
+| S2 [LOW] | guard folds `MEMORY.md.` / trailing space to the index, then reads the literal name (ENOENT): a compacting Write blocked, a growing Edit allowed | **FIXED** WP-A cc78a6b (case fold only, GUARD_REVISION 4; the fold restored failed 2 tests incl. "a trailing-dot or trailing-space spelling of the index fails open") |
+| S3 [LOW] | probe-user-hooks.js base moved under `.claude/`, a sensitive path to Claude Code, so its Write cases likely stop landing | **FIXED** WP-D d4b410a (per-user state base, no .claude segment, AI_ACOLYTE_PROBE_BASE override; 3 mutations) |
+| S4 [LOW] | npmShimLaunch never matches Claude Code's own npm shim (direct-exe template), so the probe always runs through cmd.exe; the record's accepted row rests on a false premise | **ACCEPTED-RECORDED** (integrator's decision, in the owner's review table): npmShimLaunch is not taught the direct-exe template, which would change the Codex launch paths too; the record row's premise corrected (WP-D 4b4f4c9) and re-confirmed (93af048) after WP-A's trackChild fix |
+| S5 [LOW] | README: probe dir "used only when it is empty and yours": the owner check is POSIX-only | **FIXED** WP-A 3d605e9 (README: the owner check exists only where process.getuid does) |
+| S6 [LOW] | README: "a 60 second deadline that ends the whole process tree": Windows only | **FIXED** WP-A 3d605e9 (README: the whole tree on Windows, the child alone on POSIX) |
+| S7 [NOTE] | --guidance refuses no extra arguments and wins dispatch first (= R2) | **FIXED** WP-C 27c20ed (= R2; --guidance on, off and status refuse stray words) |
+| S8 [NOTE] | _THREAD_STRIP keeps invisible format characters (soft hyphen, zero-width, word joiners, BOM, tag block) | **FIXED** WP-C 119a946 + 58cdc21 (both twins; strip and kept axes in test/threads-compile.sh; 9 mutations) |
+| S9 [NOTE] | Claude Code 2.1.293 already asks a person before writing the guard's fail-open spellings: record it with the client version | **FIXED** WP-D 4b4f4c9 (dated record note: Claude Code 2.1.293's own manual-approval checks, read from its binary; junction targets stay uncovered) |
+| L1 [LOW] | palette probe child never reaches trackChild, so deactivate cannot end it (= R7) | **FIXED** WP-A ed95579 (options.track; 2 mutations, "deactivate ends a ... probe that is still running") |
+| L2 [LOW] | a compile queued behind a running one still spawns after the switch goes off (= R5) | **FIXED** WP-B d0715ba (spawnThreadsCompile asks the switch; mutation failed "the queued compile spawned nothing after the switch went off") |
+| L2b [LOW] | refreshOpenThreads installs after its compile without re-checking the switch: a queued Refresh installs the block while off (found by WP-B) | **FIXED** WP-B d0715ba (refreshOpenThreads re-checks the switch after its compile; mutation failed "the Refresh that waited on it installed nothing") |
+| L3 [LOW] | probe-user-hooks.js runs claude with spawnSync+timeout through cmd.exe: orphan, then the next run's rmSync crashes | **FIXED** WP-D 48b3217 + 1716d30 (async run, tree-kill deadline, 2 s grace that also releases the pipes, exit 3 for a busy directory; 6 mutations) |
+| L4 [LOW] | no DevToolbox venv: every MEMORY.md burst logs "venv not found" forever (indexEventMayChange true while nothing is compiled) | **FIXED** WP-B 821312f (threadsCompileTools: nothing armed or spawned without the toolbox, the reason logged once per activation; 12 mutations with R3) |
+| L5 [NOTE] | extension.js memoryStoreDir fallback serves only stale test stubs | **FIXED** WP-B 01b82e8 (the fallback removed; 23 stubs export memoryStoreDir; test/memory-lint-stubs.test.js census; 3 mutations) |
+| L6 [NOTE] | probeUserHooks refreshes the dashboard for nothing | **FIXED** WP-A 24d94f6 (refresh dropped; mutation failed "the hooks probe pushes nothing to the dashboard") |
+| L7 [NOTE] | taskkill-tree-order.js: unbounded pid-file wait, temp dir left on failure | **FIXED** WP-D 9e05f21 (LEAF_WAIT_MS deadline, try/finally; 2 mutations) |
+| R1 [LOW] | Repair is a dead end when a foreign guard command sits beside ours with its node gone | **FIXED** WP-A fc1501f (no Repair beside a foreign guard; 2 mutations) |
+| R2 [LOW] | only --gates/--open-threads/--memory-guard refuse extras; a second verb after --guidance, --seed, --learn or --drain is dropped | **FIXED** WP-C 27c20ed (one verb per run, exit 2 naming them; no legitimate two-verb caller in the tree; 2 mutations) |
+| R3 [LOW] | "Refresh open threads" stays forever with an unreadable target or with no venv | **FIXED** WP-B 821312f (Refresh needs a compile that can run, and judges readable targets only; the card names a skipped file) |
+| R4 [LOW] | the probe settles only on 'close': a held pipe hangs it, probingUserHooks stays true, the CLI hangs | **FIXED** WP-A 6521912 + 9fb4256 (settles 2 s after the deadline and destroys its pipe ends; 2 mutations) |
+| R6 [NOTE] | recall.py --selftest, --list, --rebuild (no query) drop query flags; --list and --selftest drop a query | **FIXED** WP-C a0c6ffd (--selftest, --list and a bare --rebuild refuse what they would drop; 4 mutations) |
+
+**The MED finding was the integrator's own.** The 1.9.1 README paragraph, its release notes and the
+correction added to the 1.9.0 notes all said 1.9.0's probe passed `--strict-mcp-config`. None did:
+v1.9.0 ran `claude -p "/goal probe"` and read any exit 0 as "not restricted" (finding S3 of the first
+pass). The flag existed only inside `fix/guard-audit`, added in `897cc9d` and removed in `f6160d9`
+26 minutes later. The integrator wrote the sentence from that branch's history without checking it
+against the tag. Both GitHub release bodies were corrected the day the audit found it, and the README
+in WP-D's `bac4379`.
+
+**Evidence for the release.** The tag `v1.9.2` is at `c362e77`, the `--no-ff` merge of
+`release/1.9.2`. The full battery on the integration (`93af048`): 2048 tests, 2042 pass, 0 fail, 0
+cancelled, 6 skipped (the masked view 2024 pass, 0 fail, 24 skipped); smoke 18 of 18;
+`recall-py.sh`, `gates-manage.sh`, `gates-stale.sh` and `threads-compile.sh` ALL PASS; 307 of 307
+line references anchored. CI 8 of 8 on the integration (run 39433523576), on the release commit
+`cb93d3b` (39433997268) and on the merge (39434463316). The published `ai-acolyte-v192.vsix`
+(release.yml run 39434481542) matches the local build in all 66 entries apart from line endings.
+Against the installed 1.9.2 (VS Code 1.142.0): `drive-installed.js` 17 of 17, its guard check
+running the packaged copy at revision 4, and `drive-vscode.js` 4 of 4, 6 of 6 with
+`--review-runtime yes --dashboard-ui yes`, and 6 of 6 with `--mcp-only yes --review-runtime yes`.
+`scripts/verify-release.ps1` waits for the owner's next VS Code reload, as for 1.9.1.
+
+**Merging.** Every conflict between the packages was in line-number digits (nine hunks in all, across two merges),
+taken from the integration side and then repointed by `fix-refs-after-merge.sh`, which traces each
+move through the merge's diff and refuses anything that is not digits-only. WP-A could not edit this
+file, so ten of its references here were broken on its branch; the repoint after its merge fixed
+them with the rest (17 fixed, 0 ambiguous).
+
+**Seeds for the third pass,** noticed by the fix packages outside their briefs: gate names printed
+to a terminal pass invisible format characters (`UNSAFE_FOR_TERMINAL` in `src/gates-manage.js`, and
+a twin in extension.js without the tag block); variation selectors are kept in thread text; five
+verbs still ignore a stray word (`--bypass on extra` and similar); the child-process census reads
+extension.js only, so a spawn in `src/` is listed by no test; the probe's confirmation says "60 s at
+most" where the answer can come about 62 s after the start; a stray process in the probe's
+directory makes its cleanup fail in silence.

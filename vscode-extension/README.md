@@ -503,7 +503,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 36 commands under AI Acolyte in the
+The manifest registers 37 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 

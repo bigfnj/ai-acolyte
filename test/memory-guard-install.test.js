@@ -600,11 +600,14 @@ test('a child that survives the deadline\'s kill does not keep the probe\'s proc
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const record = path.join(dir, 'survivor.json');
   const stub = path.join(dir, 'claude-stub.js');
-  fs.writeFileSync(stub, `process.chdir(${JSON.stringify(os.tmpdir())});\n`
+  // The SIGTERM handler first, and the record after it: the record is the stand-in saying it is
+  // ready, and the 2 s deadline leaves a loaded machine time to get there.
+  fs.writeFileSync(stub, "process.on('SIGTERM', () => {});\n"
+    + `process.chdir(${JSON.stringify(os.tmpdir())});\n`
     + `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid }));\n`
-    + "process.on('SIGTERM', () => {});\nsetTimeout(() => {}, 60 * 1000);\n");
+    + 'setTimeout(() => {}, 60 * 1000);\n');
   const src = path.resolve(__dirname, '..', 'src');
-  const options = { home: f.home, env: {}, claudeExecutable: 'claude-stand-in', timeoutMs: 1000 };
+  const options = { home: f.home, env: {}, claudeExecutable: 'claude-stand-in', timeoutMs: 2000 };
   const driver = spawn(process.execPath, ['-e', [
     `const execResolve = require(${JSON.stringify(path.join(src, 'exec-resolve.js'))});`,
     `execResolve.npmShimLaunch = (name, args) => ({ file: process.execPath, args: [${JSON.stringify(stub)}, ...args], options: {} });`,
@@ -631,7 +634,7 @@ test('a child that survives the deadline\'s kill does not keep the probe\'s proc
     const started = Date.now();
     for (let i = 0; i < 400 && !exited; i += 1) await wait(50);
     assert.ok(survivor(), `precondition: the stand-in claude started. ${stderr}`);
-    assert.equal(exited, true, `the probe's process was still running ${Date.now() - started} ms after it started, against a 1 s deadline`);
+    assert.equal(exited, true, `the probe's process was still running ${Date.now() - started} ms after it started, against a 2 s deadline`);
     const probe = JSON.parse(stdout);
     assert.equal(probe.survived, true, 'WITNESS: the stand-in claude outlived the deadline\'s kill');
     assert.equal(probe.result, 'unknown');

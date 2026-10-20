@@ -98,7 +98,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v194.vsix
+code --install-extension ai-acolyte-v195.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

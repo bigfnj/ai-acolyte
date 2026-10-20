@@ -47,6 +47,7 @@ test('the guard requires fs and path and nothing else, so its copy runs outside 
 const GUARD_SHAS = {
   1: '46d6616be7b3bb8f9d31c406e376bc363ac6aafe4588e3878cf59d3a04fc6012',
   2: 'f337571b7e2ec599f0dfcaea7849bea771b24725b215e51b7b9725233136780a',
+  3: 'dc9d953cfb58067db51541d50e9ff83b44ad0a2c4df0af6b1e0708e1bbc3a13b',
 };
 test('the guard source is pinned to its GUARD_REVISION, so a change without a bump fails', () => {
   const text = fs.readFileSync(GUARD, 'utf8').replace(/\r\n/g, '\n');
@@ -315,7 +316,20 @@ test('only <config>/projects/<slug>/memory/MEMORY.md is the index', (t) => {
   const reads = [];
   const readFile = (file) => { reads.push(file); throw Object.assign(new Error('no'), { code: 'ENOENT' }); };
   assert.equal(isIndexPath(f.index, { env, readFile }), true);
-  assert.equal(isIndexPath(path.join(f.memory, 'memory.md'), { env, readFile }), false, 'the basename is exact');
+  // The basename is matched the way the platform's file system opens it (audit 2026-10-20): on
+  // Windows `memory.md` IS the index, and so is `MEMORY.md.` (Win32 drops trailing dots and
+  // spaces); on POSIX they are other files.
+  // MUTATION: compare the basename exactly again and the win32 cases read false.
+  for (const alias of ['memory.md', 'Memory.MD', 'MEMORY.md.', 'MEMORY.md ', 'memory.md. .']) {
+    assert.equal(isIndexPath(path.join(f.memory, alias), { env, readFile, platform: 'win32' }), true, `win32: ${JSON.stringify(alias)}`);
+    assert.equal(isIndexPath(path.join(f.memory, alias), { env, readFile, platform: 'linux' }), false, `linux: ${JSON.stringify(alias)}`);
+  }
+  assert.equal(isIndexPath(path.join(path.dirname(f.memory), 'MEMORY.', 'memory.md'), { env, readFile, platform: 'win32' }), true,
+    'the memory directory\'s own name folds the same way');
+  assert.equal(isIndexPath(path.join(f.memory, 'MEMORY.md.bak'), { env, readFile, platform: 'win32' }), false);
+  assert.equal(isIndexPath(path.join(f.memory, 'MEMORY.mdx'), { env, readFile, platform: 'win32' }), false);
+  assert.equal(isIndexPath(path.join(f.memory, process.platform === 'win32' ? 'other.md' : 'memory.md'), { env, readFile }), false,
+    'the running platform: another name is another file');
   assert.equal(isIndexPath(path.join(f.memory, 'other.md'), { env, readFile }), false);
   assert.equal(isIndexPath(path.join(f.config, 'projects', 'memory', 'MEMORY.md'), { env, readFile }), false, 'a slug is required');
   assert.equal(isIndexPath(path.join(f.root, 'repo', 'memory', 'MEMORY.md'), { env, readFile }), false);

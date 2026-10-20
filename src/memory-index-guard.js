@@ -40,7 +40,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const GUARD_REVISION = 2;
+const GUARD_REVISION = 3;
 
 // Shared with the lint: memory/recall.py LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN and
 // LINT_ENTRY_WARN, and the extension's memory.totalBudget / memory.lineBudget defaults. A test
@@ -303,16 +303,24 @@ function autoMemoryDirectory(config, env, platform, readFile) {
   return path.isAbsolute(target) ? target : null;
 }
 
-// Basename first, exactly `MEMORY.md`, so every other file in the session exits here with no
-// read at all. Then the parent must be `<config>/projects/<slug>/memory`, or the configured
-// autoMemoryDirectory.
+// A name as the file system reads it. On Windows a name is matched without case, and Win32 drops
+// the trailing dots and spaces of the last component, so `memory.md` and `MEMORY.md.` open the
+// index itself. Other aliases (an 8.3 short name, a `::$DATA` stream, a `\\?\` or UNC spelling,
+// a junction) are not resolved here: they fail open, as docs/engineering-record.md records.
+function nameOf(name, platform) {
+  return platform === 'win32' ? name.replace(/[. ]+$/, '').toLowerCase() : name;
+}
+
+// Basename first, `MEMORY.md` as the file system reads that name, so every other file in the
+// session exits here with no read at all. Then the parent must be
+// `<config>/projects/<slug>/memory`, or the configured autoMemoryDirectory.
 function isIndexPath(filePath, { env = process.env, platform = process.platform, readFile } = {}) {
   if (typeof filePath !== 'string' || !filePath) return false;
-  if (path.basename(filePath) !== INDEX_NAME) return false;
+  if (nameOf(path.basename(filePath), platform) !== nameOf(INDEX_NAME, platform)) return false;
   const parent = path.dirname(path.resolve(filePath));
   const config = configDirectory(env, platform);
   if (config) {
-    const memoryName = platform === 'win32' ? path.basename(parent).toLowerCase() : path.basename(parent);
+    const memoryName = nameOf(path.basename(parent), platform);
     const projects = path.dirname(path.dirname(parent));
     if (memoryName === 'memory' && comparable(projects, platform) === comparable(path.join(config, 'projects'), platform)) {
       return true;

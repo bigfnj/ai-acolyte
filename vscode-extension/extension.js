@@ -5486,10 +5486,6 @@ class WildcardingViewProvider {
           background: var(--vscode-button-secondaryBackground, transparent);
           color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); }
   button.restore:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
-  .listhead { display: flex; justify-content: space-between; align-items: baseline;
-              margin: 2px 2px 6px; cursor: pointer; user-select: none; }
-  .listhead:hover .h { color: var(--vscode-textLink-foreground); }
-  .listhead .h { font-weight: 600; }
   ul { list-style: none; margin: 0; padding: 0; }
   li { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 4px; }
   li:hover { background: var(--vscode-list-hoverBackground); }

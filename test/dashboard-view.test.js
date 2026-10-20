@@ -890,6 +890,45 @@ test('the panel template contains no backtick that would end it early', () => {
   assert.deepEqual(offenders, [], 'no backticks between the template delimiters');
 });
 
+// THE CSS CENSUS (2026-10-20). `.listhead` and its two descendant rules outlived their markup by
+// weeks (d6b9e6e removed the last element carrying the class), because nothing compares a style
+// sheet with the page it styles. Every class and id a selector names in each <style> block must
+// occur in the same file outside that block: in the markup, or in the script or code that sets it.
+// A token is a whole word there (`[\w$-]` on neither side), so `listhead` inside `listheader`
+// does not count. Short names (`.h`, `.x`) match almost anywhere; the census cannot clear those
+// and does not pretend to, but a dead rule with a distinctive name, the shape `.listhead` had, fails.
+// MUTATION: add `.zzunusedcensus { color: red; }` to the dashboard's <style>. This fails naming
+// it. Confirmed 2026-10-20.
+test('every class and id the panels\' style sheets name is used outside them', () => {
+  const dir = path.dirname(require.resolve('../vscode-extension/extension'));
+  const files = fs.readdirSync(dir).filter((name) => name.endsWith('.js')).map((name) => path.join(dir, name));
+  let blocks = 0;
+  let selectorsSeen = 0;
+  const unused = [];
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    for (const match of source.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+      blocks += 1;
+      const outside = source.slice(0, match.index) + '\n' + source.slice(match.index + match[0].length);
+      const css = match[1].replace(/\/\*[\s\S]*?\*\//g, ' ');
+      const names = new Set();
+      for (const rule of css.matchAll(/([^{}]+)\{/g)) {
+        const selector = rule[1].trim();
+        if (!selector || selector.startsWith('@')) continue;
+        selectorsSeen += 1;
+        for (const token of selector.matchAll(/([.#])(-?[_a-zA-Z][\w-]*)/g)) names.add(token[2]);
+      }
+      for (const name of names) {
+        const word = new RegExp(`(?<![\\w$-])${name.replace(/[$-]/g, '\\$&')}(?![\\w$-])`);
+        if (!word.test(outside)) unused.push(`${path.basename(file)}: ${name}`);
+      }
+    }
+  }
+  assert.ok(blocks >= 2, `precondition: only ${blocks} <style> block(s) found; the dashboard and the gates panel have one each`);
+  assert.ok(selectorsSeen > 50, `precondition: only ${selectorsSeen} selectors were read; the CSS scan has stopped matching`);
+  assert.deepEqual(unused, [], 'a style sheet names a class or id that nothing outside it uses');
+});
+
 // The Memory card used two different definitions of "issue": the badge counted
 // over + broken + unresolved, the body counted over + broken. With only unresolved
 // [[links]] present it read "3 to fix" directly above "index clean, all links

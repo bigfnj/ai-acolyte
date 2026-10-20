@@ -172,8 +172,8 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 ### Review and policy output
 
-The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
-they post four of the message arms the webview host handles; the switch is at
+The Auto Learn card carries **Scan now**, **Review (N)**, **Undo**, **Why prompt?** and
+**Turn on** / **Turn off**, and they post five of the message arms the webview host handles; the switch is at
 `vscode-extension/extension.js:4678#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
@@ -263,7 +263,15 @@ watcher-driven scan waits out, so a burst of transcript writes coalesces into on
 `permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
 `permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
 how long one worker operation may run before the extension stops waiting). The full list of
-all 18 settings is at the end of this file.
+all 19 settings is at the end of this file.
+
+**AI Acolyte: Toggle Auto Learn**, and the card's **Turn on** / **Turn off** button, switch
+`autoLearn.enabled` in your user settings. Off stops the extension's background scans; **Scan
+now** still scans when you ask. Codex's after-turn Stop hook and `wildcard-perms --learn` are
+separate and do not read the setting, so turning Auto Learn off here does not stop either. When
+a workspace or folder setting holds Auto Learn off, turning it on first asks, in a modal that
+names the settings file, before it removes that value: the file may be a `.vscode/settings.json`
+the repository commits. Dismissing it changes nothing.
 
 `autoLearn.codexExecutable` is **machine-scoped**: set it in user settings. The extension
 runs that program without asking (`--version` for the dashboard's version line, `app-server`
@@ -458,7 +466,10 @@ whose org was prompting them.
 
 ## Auto Learn card
 
-Four buttons: **Scan now**, **Review (N)**, **Undo**, **Why prompt?**
+Five buttons: **Scan now**, **Review (N)**, **Undo**, **Why prompt?**, **Turn on** / **Turn off**
+
+**Turn on** / **Turn off** is the Toggle Auto Learn command, and its label follows the state.
+While Auto Learn is off, the collapsed row reads "disabled · Turn on".
 
 **Review** shows a live count of candidates the picker will actually offer —
 candidates an existing allow rule already covers are excluded from the count, since
@@ -474,7 +485,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 35 commands under AI Acolyte in the
+The manifest registers 36 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -497,6 +508,7 @@ dashboard title-bar buttons.
 | Auto Learn - Undo last application | Release this claimant's grants through the claims registry |
 | Auto Learn - Cycle mode | `observe` → `recommend` → `auto-safe`. A step above your user setting is saved in user settings; any other step is saved where the mode already lives |
 | Auto Learn - Why did this prompt? | Diagnose one command against user settings and org policy |
+| Toggle Auto Learn | Turn the extension's background scans off or on, in user settings. Turning on asks before it removes a workspace or folder value that holds Auto Learn off. Codex's after-turn Stop hook and `wildcard-perms --learn` are separate |
 | Auto Learn - Show families blocked by managed policy | Families whose prompt no user rule can stop, with the rule |
 | Derived guidance - review mitigations for prompts no rule can stop | Accept / decline each measured mitigation by id |
 | Drain project-local approvals into user scope | Promote, verify, then prune `.claude/settings.local.json` |
@@ -528,17 +540,18 @@ value, so a repository's `.vscode/settings.json` cannot switch the deadline off.
 `PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` (milliseconds, `0` disables) still applies; once
 set, the setting wins. An edit applies to the next scan, with no reload.
 
-Four keys are **tighten-only**: `autoLearn.mode`, `autoLearn.successThreshold`,
-`autoLearn.codexScope` and `localDrain.enabled`. Each decides whether the extension writes your
-global files unattended, so a workspace or folder value may make it stricter than your user
-setting but never looser. A repository's `.vscode/settings.json` can put one project in
-`observe`, but it cannot switch you to `auto-safe`. A value that would loosen one is ignored, and
+Five keys are **tighten-only**: `autoLearn.enabled`, `autoLearn.mode`,
+`autoLearn.successThreshold`, `autoLearn.codexScope` and `localDrain.enabled`. Each decides
+whether the extension writes your global files unattended, so a workspace or folder value may make
+it stricter than your user setting but never looser. A repository's `.vscode/settings.json` can
+put one project in `observe` or turn Auto Learn off there, but it cannot switch you to `auto-safe`
+or turn Auto Learn back on. A value that would loosen one is ignored, and
 the Acolyte output channel says so once per window. With no user setting, the default is the bar.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `backupMirrorPath` | `""` | Off-tree copy of the allow/deny backup. Empty means `~/.permission-wildcarding/allow-list.latest.json`; point it at another volume to survive more than a `~/.claude` reset. Machine-scoped: a workspace value is ignored |
-| `autoLearn.enabled` | `true` | Scan history at all |
+| `autoLearn.enabled` | `true` | The extension's background scans of history. **Toggle Auto Learn** and the card's button switch it in user settings. A workspace may only make it stricter: it can turn Auto Learn off, never on when your user setting has it off |
 | `autoLearn.mode` | `"recommend"` | `observe` / `recommend` / `auto-safe`. A workspace may only make it stricter: a workspace or folder value can lower the mode, and one above your user setting is ignored |
 | `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies. A workspace may only make it stricter: it can raise the threshold, never lower it below your user setting |
 | `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |

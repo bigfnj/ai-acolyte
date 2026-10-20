@@ -473,6 +473,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['autoLearnReview', 'permission-wildcarding.autoLearnReview'],
       ['autoLearnUndo', 'permission-wildcarding.autoLearnUndo'],
       ['autoLearnWhy', 'permission-wildcarding.autoLearnWhy'],
+      // The Auto Learn card's Turn on / Turn off (2026-10-19).
+      ['toggleAutoLearn', 'permission-wildcarding.toggleAutoLearn'],
       ['rebuildRecall', 'permission-wildcarding.rebuildRecall'],
       ['lintMemory', 'permission-wildcarding.lintMemory'],
       ['drainLocal', 'permission-wildcarding.drainLocal'],
@@ -2998,6 +3000,48 @@ test('Codex evidence rebuild and uncertain legacy counts remain visible beside a
     const complete = renderDashboard(app.provider, data);
     assert.doesNotMatch(complete.node('alsub').textContent, /rebuilding|older runs excluded|could not be dated/);
     assert.equal(complete.stAutoLearn, '3 to review');
+  } finally {
+    await app.dispose();
+  }
+});
+
+// The Auto Learn switch (2026-10-19). The owner asked why the card said "disabled" with nothing to
+// turn it on: the button sits in the card's row, its label follows the state, and the collapsed
+// row says how to turn it on without tinting a choice as trouble. The command is covered in
+// test/auto-learn-toggle.test.js.
+test('the Auto Learn card carries a Turn on / Turn off button that posts the toggle', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.equal(data.autoLearn.enabled, false, 'precondition: this harness has Auto Learn off');
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver(data);
+    const toggle = panel.dom.byId.get('alToggle');
+    // MUTATION: render 'Turn off' whatever the state. This fails. Confirmed 2026-10-19.
+    assert.equal(toggle.textContent, 'Turn on');
+    // MUTATION: put back setState('stAutoLearn', 'disabled'), or tint it 'warn'. Each fails.
+    // Confirmed 2026-10-19.
+    const row = panel.dom.byId.get('stAutoLearn');
+    assert.equal(row.textContent, 'disabled · Turn on');
+    assert.equal(row.className, 'rowstate', 'off is a choice, not a warning');
+
+    // MUTATION: drop the alToggle click listener. Nothing is posted and this fails, as does the
+    // sender census in "every dashboard message reaches its command". Confirmed 2026-10-19.
+    panel.posted.length = 0;
+    toggle.click();
+    assert.deepEqual(panel.posted, [{ type: 'toggleAutoLearn' }]);
+    app.executed.length = 0;
+    ui.on.message(panel.posted[0]);
+    assert.deepEqual(app.executed, ['permission-wildcarding.toggleAutoLearn']);
+
+    panel.deliver({ ...data, autoLearn: { ...data.autoLearn, enabled: true } });
+    assert.equal(toggle.textContent, 'Turn off');
+    assert.doesNotMatch(row.textContent, /disabled/);
   } finally {
     await app.dispose();
   }

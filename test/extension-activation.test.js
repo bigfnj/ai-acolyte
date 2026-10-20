@@ -476,8 +476,8 @@ test('extension activates with mocked VS Code and deactivates without live polic
     await commands.get('permission-wildcarding.autoLearnReview')();
     await commands.get('permission-wildcarding.autoLearnApplySafe')();
     assert.deepEqual(warnings.slice(-2), [
-      'Auto Learn is disabled in settings. Enable it before reviewing candidates.',
-      'Auto Learn is disabled in settings. Enable it before applying policy.',
+      'Auto Learn is off. Turn it on with "AI Acolyte: Toggle Auto Learn" or the Auto Learn card before reviewing candidates.',
+      'Auto Learn is off. Turn it on with "AI Acolyte: Toggle Auto Learn" or the Auto Learn card before applying policy.',
     ]);
     await extension.deactivate();
   } finally {

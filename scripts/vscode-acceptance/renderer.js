@@ -659,7 +659,7 @@ async function main() {
     assert.equal(path.dirname(path.resolve(fixture.ackPath)), path.dirname(options.progress));
     const before = await autoLearnReady(fixture.expectedBeforeButtons);
     if (fixture.action === 'scan') {
-      assert.equal(before.autoLearn.badge, 'disabled', 'first Scan and rescan must run with background learning disabled');
+      assert.equal(before.autoLearn.badge, 'disabled · Turn on', 'first Scan and rescan must run with background learning disabled');
       assert.equal(before.autoLearn.buttons.alReview.enabled, false, 'Review must stay disabled during the manual scans');
     }
     const id = fixture.action === 'scan' ? 'alScan' : 'alUndo';

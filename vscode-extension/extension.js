@@ -1289,8 +1289,12 @@ function userSetting(key, fallback) {
 // workspace's .claude/settings.local.json into user scope. A repository's .vscode/settings.json
 // could set all four, so it could opt the user into unattended writes the user had not chosen.
 //
+// `autoLearn.enabled` joined them on 2026-10-19 with the Toggle Auto Learn command: off stops the
+// background scans, so it decides whether an auto-safe apply can happen unattended at all.
+//
 // The maintainer's decision: a workspace may make each one STRICTER, never looser. A lower mode,
-// a higher threshold, Codex export off and the drain off all take effect per workspace or folder.
+// a higher threshold, Codex export off, Auto Learn off and the drain off all take effect per
+// workspace or folder.
 // A value that would loosen the user's own setting is ignored, with one output line, and the
 // user tier stands (the manifest default when the user set nothing). They stay window-scoped,
 // not machine-scoped, because a stricter per-project choice is worth keeping. The census that
@@ -1322,6 +1326,14 @@ const TIGHTEN_ONLY = {
   },
   'localDrain.enabled': {
     fallback: true, rule: 'a workspace may only turn the automatic drain off',
+    normalize: (value) => (typeof value === 'boolean' ? value : undefined),
+    strictness: (value) => (value ? 0 : 1),
+  },
+  // The fifth key (2026-10-19). Off stops the extension's background scans, and with them every
+  // unattended auto-safe apply, so a repository must not be able to switch them back on for a
+  // user who turned Auto Learn off. A workspace may still turn it off.
+  'autoLearn.enabled': {
+    fallback: true, rule: 'a workspace may only turn Auto Learn off',
     normalize: (value) => (typeof value === 'boolean' ? value : undefined),
     strictness: (value) => (value ? 0 : 1),
   },
@@ -1366,8 +1378,8 @@ function noteLooserSettingIgnored(line) {
 // Cross-agent Auto Learn keeps transcript text in memory only. Persistent state
 // contains normalized prefixes, counters, reason labels, hashes, and cursors.
 //
-// mode, successThreshold and codexScope are tighten-only (above): a workspace or
-// folder value may make each stricter than the user's setting, never looser.
+// enabled, mode, successThreshold and codexScope are tighten-only (above): a workspace
+// or folder value may make each stricter than the user's setting, never looser.
 function autoLearnConfig() {
   const cfg = vscode.workspace.getConfiguration('permissionWildcarding');
   const mode = tightenOnlySetting(cfg, 'autoLearn.mode').value;
@@ -1392,7 +1404,7 @@ function autoLearnConfig() {
     scopeWarning = WORKSPACE_SCOPE_WITHDRAWN_NOTE;
   }
   return {
-    enabled: cfg.get('autoLearn.enabled', true),
+    enabled: tightenOnlySetting(cfg, 'autoLearn.enabled').value,
     mode,
     threshold: tightenOnlySetting(cfg, 'autoLearn.successThreshold').value,
     intervalMinutes: Math.max(1, Number(cfg.get('autoLearn.intervalMinutes', 5)) || 5),
@@ -1840,7 +1852,7 @@ async function scanBeforeUserAction(purpose) {
 async function applyAutoLearnSafe() {
   const cfg = autoLearnConfig();
   if (!cfg.enabled) {
-    vscode.window.showWarningMessage('Auto Learn is disabled in settings. Enable it before applying policy.');
+    vscode.window.showWarningMessage(`Auto Learn is off. ${AUTO_LEARN_TURN_ON} before applying policy.`);
     return;
   }
   if (cfg.mode === 'observe') {
@@ -1887,7 +1899,7 @@ async function showCoveredAutoLearnFamilies(covered, settings) {
 async function reviewAutoLearnCandidates() {
   const cfg = autoLearnConfig();
   if (!cfg.enabled) {
-    vscode.window.showWarningMessage('Auto Learn is disabled in settings. Enable it before reviewing candidates.');
+    vscode.window.showWarningMessage(`Auto Learn is off. ${AUTO_LEARN_TURN_ON} before reviewing candidates.`);
     return;
   }
   if (cfg.mode === 'observe') {
@@ -2099,6 +2111,80 @@ async function cycleAutoLearnMode() {
     + (raising ? ' A workspace may only lower the mode, so raising it is a user setting.' : '')
     + (removed.length ? ` The ${removed.join(' and ')} setting that capped it here was removed.` : ''));
   scheduleAutoLearn(50);
+  dashboard?.refresh();
+}
+
+// What a message says to turn Auto Learn on. It quotes the manifest's title, and
+// test/auto-learn-toggle.test.js fails if the two drift apart.
+const AUTO_LEARN_TURN_ON = 'Turn it on with "AI Acolyte: Toggle Auto Learn" or the Auto Learn card';
+
+// The file a workspace or folder setting lives in, named in full by a modal that edits it. A
+// single-folder window keeps both tiers in the folder's .vscode/settings.json, which a repository
+// may commit; a multi-root window keeps its workspace tier in the .code-workspace file.
+function workspaceSettingsFile(tier) {
+  const workspaceFile = vscode.workspace.workspaceFile;
+  if (tier === 'workspace' && workspaceFile) {
+    return workspaceFile.scheme && workspaceFile.scheme !== 'file'
+      ? "this untitled workspace's settings" : workspaceFile.fsPath;
+  }
+  const folders = vscode.workspace.workspaceFolders || [];
+  return folders.length === 1 ? path.join(folders[0].uri.fsPath, '.vscode', 'settings.json')
+    : "the folder's .vscode/settings.json";
+}
+
+// The Auto Learn switch (2026-10-19): the Toggle Auto Learn command and the card's Turn on /
+// Turn off button. Until then autoLearn.enabled could only be changed in Settings, and the card
+// said "disabled" with nothing to click. It flips the EFFECTIVE value, which is tighten-only
+// (TIGHTEN_ONLY): a workspace or folder may turn Auto Learn off, never on.
+// - Off writes false to user settings, so it holds in every window.
+// - On writes true to user settings. A workspace or folder `false` would still keep it off in this
+//   window, so, as in cycleAutoLearnMode's raise, it is removed. Not silently: that file may be a
+//   .vscode/settings.json the repository commits, so a modal names it first, and a dismissal
+//   writes nothing at all.
+// The setting reaches the extension's own scans only. Codex's after-turn Stop hook
+// (src/codex-stop-hook.js) and the CLI's --learn read no VS Code setting, and the toast says so.
+async function toggleAutoLearn() {
+  if (deactivated) return;
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  const spec = TIGHTEN_ONLY['autoLearn.enabled'];
+  const next = !tightenOnlySetting(config, 'autoLearn.enabled').value;
+  const inspected = (typeof config.inspect === 'function' && config.inspect('autoLearn.enabled')) || {};
+  const { Global, Workspace, WorkspaceFolder } = vscode.ConfigurationTarget;
+  // Turning on: every folder or workspace `false` that would still hold it off here.
+  const caps = !next ? [] : [[WorkspaceFolder, inspected.workspaceFolderValue, 'folder'],
+    [Workspace, inspected.workspaceValue, 'workspace']]
+    .filter(([, raw]) => spec.normalize(raw) === false)
+    .map(([target, , tier]) => ({ target, file: workspaceSettingsFile(tier) }));
+  const files = [...new Set(caps.map((cap) => cap.file))].join(' and ');
+  if (caps.length) {
+    const answer = await vscode.window.showWarningMessage('Turn on Auto Learn in this window?', {
+      modal: true,
+      detail: `${files} turns Auto Learn off here, and a workspace setting may only turn it off. `
+        + 'Turning it on saves true in your user settings and removes permissionWildcarding.autoLearn.enabled '
+        + `from ${files}. If the repository commits that file, the removal is a change to it.`,
+    }, 'Remove and turn on');
+    if (answer !== 'Remove and turn on' || deactivated) return;
+  }
+  try {
+    // User settings first, so a failed write has changed nothing.
+    await config.update('autoLearn.enabled', next, Global);
+    for (const cap of caps) await config.update('autoLearn.enabled', undefined, cap.target);
+  } catch (error) {
+    vscode.window.showErrorMessage(`AI Acolyte: Auto Learn was not switched: ${error.message}`);
+    return;
+  }
+  if (deactivated) return;
+  // In VS Code the configuration listener does this as well. Done here too, as cycleAutoLearnMode
+  // does, so the switch does not wait on an event: off disarms the periodic scan, on re-arms it
+  // and scans soon.
+  resetAutoLearnTimer();
+  if (next) scheduleAutoLearn(50);
+  const separate = " Codex's after-turn Stop hook and the CLI's --learn are separate: neither reads this setting.";
+  vscode.window.showInformationMessage(next
+    ? "Auto Learn is on, saved in your user settings. The extension's background scans of Claude Code and Codex history start again."
+      + (caps.length ? ` The setting in ${files} that turned it off here was removed.` : '') + separate
+    : "Auto Learn is off, saved in your user settings. The extension's background scans stop; Scan now still scans when you ask."
+      + separate + ' To remove the hook, run "AI Acolyte: Configure Codex after-turn learning".');
   dashboard?.refresh();
 }
 
@@ -3074,6 +3160,7 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.autoLearnUndo', () => undoAutoLearn()),
     vscode.commands.registerCommand('permission-wildcarding.autoLearnCycleMode', () => cycleAutoLearnMode()),
     vscode.commands.registerCommand('permission-wildcarding.autoLearnWhy', () => explainAutoLearnPrompt()),
+    vscode.commands.registerCommand('permission-wildcarding.toggleAutoLearn', () => toggleAutoLearn()),
     vscode.commands.registerCommand('permission-wildcarding.autoLearnShowBlocked', () => showAutoLearnBlocked()),
     vscode.commands.registerCommand('permission-wildcarding.derivedGuidance', () => showDerivedGuidance())
   );
@@ -4684,6 +4771,7 @@ class WildcardingViewProvider {
         case 'autoLearnReview': vscode.commands.executeCommand('permission-wildcarding.autoLearnReview'); break;
         case 'autoLearnUndo': vscode.commands.executeCommand('permission-wildcarding.autoLearnUndo'); break;
         case 'autoLearnWhy': vscode.commands.executeCommand('permission-wildcarding.autoLearnWhy'); break;
+        case 'toggleAutoLearn': vscode.commands.executeCommand('permission-wildcarding.toggleAutoLearn'); break;
         case 'rebuildRecall': vscode.commands.executeCommand('permission-wildcarding.rebuildRecall'); break;
         case 'lintMemory':   vscode.commands.executeCommand('permission-wildcarding.lintMemory'); break;
         case 'drainLocal':   vscode.commands.executeCommand('permission-wildcarding.drainLocal'); break;
@@ -5170,6 +5258,7 @@ class WildcardingViewProvider {
           <button class="restore" id="alReview">Review</button>
           <button class="restore" id="alUndo">Undo</button>
           <button class="restore" id="alWhy">Why prompt?</button>
+          <button class="restore" id="alToggle">Turn off</button>
         </div>
       </div>
     </div>
@@ -5371,7 +5460,8 @@ class WildcardingViewProvider {
   function renderRowStates(d) {
     const a = d.autoLearn || {};
     const counts = a.counts || {};
-    if (!a.enabled) setState('stAutoLearn', 'disabled');
+    // Off is a choice, not trouble, so no tint; the phrase names the card's button that undoes it.
+    if (!a.enabled) setState('stAutoLearn', 'disabled · Turn on');
     else if (a.busy) setState('stAutoLearn', 'scanning…');
     else if (a.error) setState('stAutoLearn', 'error', 'hot');
     else {
@@ -5663,6 +5753,8 @@ class WildcardingViewProvider {
     for (const id of ['alScan', 'alWhy']) $(id).disabled = !!a.busy;
     $('alReview').disabled = !active || !!a.busy || a.mode === 'observe';
     $('alReview').textContent = (counts.review > 0) ? 'Review (' + counts.review + ')' : 'Review';
+    // The switch (2026-10-19). Never disabled: turning off during a scan is fine, the scan finishes.
+    $('alToggle').textContent = active ? 'Turn off' : 'Turn on';
 
     // What the last scan could not read. Never collapsed into a.error, which is
     // the message of an exception that ESCAPED — a scan that returned while
@@ -6175,6 +6267,7 @@ class WildcardingViewProvider {
   $('alReview').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnReview' }));
   $('alUndo').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnUndo' }));
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
+  $('alToggle').addEventListener('click', () => vscode.postMessage({ type: 'toggleAutoLearn' }));
   $('permissionsView').addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions' }));
   $('deadApprovals').addEventListener('click', () => {
     if (oneOffShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'dead' } });

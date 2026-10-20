@@ -181,10 +181,11 @@ async function windowOver(t, tiers = {}, { local = null, answers = [] } = {}) {
 test('with nothing set, Auto Learn and the drain keep their defaults and nothing is logged', async (t) => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vscode-extension', 'package.json'), 'utf8'));
   const properties = manifest.contributes.configuration.properties;
-  // The fallbacks tightenOnlySetting uses are the manifest's own defaults, and the four keys
+  // The fallbacks tightenOnlySetting uses are the manifest's own defaults, and the five keys
   // stay window-scoped: a workspace must still be able to make each one stricter.
+  // autoLearn.enabled joined the first four on 2026-10-19 (test/auto-learn-toggle.test.js).
   for (const [key, fallback] of [['autoLearn.mode', 'recommend'], ['autoLearn.successThreshold', 3],
-    ['autoLearn.codexScope', 'user'], ['localDrain.enabled', true]]) {
+    ['autoLearn.codexScope', 'user'], ['localDrain.enabled', true], ['autoLearn.enabled', true]]) {
     const setting = properties[`permissionWildcarding.${key}`];
     assert.equal(setting.default, fallback, `precondition: ${key} still defaults to ${fallback}`);
     assert.equal(setting.scope, undefined, `${key} must stay window-scoped, or a workspace can no longer tighten it`);

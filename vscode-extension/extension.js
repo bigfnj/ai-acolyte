@@ -4825,8 +4825,9 @@ function ensureOpenThreads(announce = false) {
 // so it can never settle, and counting it kept Refresh up after every click (2026-10-20); the
 // card's line names it instead. And with no compile possible (`blocked`, threadsCompileTools)
 // Refresh could only fail, and install the last compile, which ensure already does unattended.
+// threadsSettled is asked of readable states only: threadsNeedRefresh filters them first.
 function threadsSettled(state) {
-  return state.readable && state.compile === 'whole'
+  return state.compile === 'whole'
     && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
 }
 function threadsNeedRefresh(states, blocked = threadsCompileTools().blocked) {

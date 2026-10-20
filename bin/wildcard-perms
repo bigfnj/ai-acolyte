@@ -1107,6 +1107,13 @@ function gates(args) {
 
   if (cmd === 'list') { gatesList(args.slice(at + 2)); return; }
   if (cmd === 'retire' || cmd === 'restore') { gatesChange(cmd, args.slice(at + 2)); return; }
+  // The other four take nothing more, as --memory-guard (2026-10-20): `--gates off --memory-guard
+  // on` turned the gates off and dropped the rest without a word, since dispatch takes the first
+  // verb it finds. Refused before refresh's compile, so a refused run starts no Python.
+  if (args.some((arg, index) => index !== at && index !== at + 1)) {
+    process.stderr.write(GATES_USAGE);
+    process.exit(1);
+  }
 
   if (cmd === 'status') {
     writeGatesStatus(gatesStatusAll());
@@ -1243,7 +1250,9 @@ function openThreads(args) {
   const at = args.indexOf('--open-threads');
   const cmd = String(args[at + 1] || 'status').toLowerCase();
   const label = `wildcard-perms --open-threads ${cmd}`;
-  if (!['on', 'off', 'status', 'refresh'].includes(cmd)) {
+  // An extra argument is a usage error, as for --gates and --memory-guard: it was dropped.
+  const extra = args.some((arg, index) => index !== at && index !== at + 1);
+  if (extra || !['on', 'off', 'status', 'refresh'].includes(cmd)) {
     process.stderr.write(OPEN_THREADS_USAGE);
     process.exitCode = 1;
     return;

@@ -2688,7 +2688,19 @@ def main():
             _lint_retired(texts)
         return
     if args.gates_compile:
+        # Alone as well, beside its own --gates-allow-empty (2026-10-20). Without a list here,
+        # `--gates-compile --rebuild` compiled and dropped the rebuild, and `--json`, `-k` or a
+        # query were dropped without a word, the half-done run the lists above refuse.
+        mixed = [flag for flag, on in (("--selftest", args.selftest), ("--rebuild", args.rebuild),
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--gates-compile runs on its own (--gates-allow-empty aside), not with "
+                     f"{', '.join(mixed)}.")
         compile_gates(allow_empty=args.gates_allow_empty); return
+    if args.gates_allow_empty:
+        # It qualifies the compile and nothing else, so alone it was dropped in silence too.
+        ap.error("--gates-allow-empty applies only to --gates-compile.")
     if args.selftest:
         selftest(); return
     if args.rebuild:

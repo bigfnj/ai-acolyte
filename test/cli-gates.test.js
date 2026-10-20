@@ -235,6 +235,20 @@ test('CLI --gates rejects an unknown verb with usage', (t) => {
   assert.equal(claudeMd(home), '# Mine\n');
 });
 
+// Dispatch takes the first verb it finds, so whatever followed `--gates on` was dropped.
+// MUTATION: remove the extra-argument refusal in gates() and `on` installs, exit 0.
+test('CLI --gates on|off|status|refresh refuse an extra argument and write nothing', (t) => {
+  const home = tempHome(t);
+  for (const args of [['--gates', 'on', '--memory-guard', 'on'], ['--gates', 'on', 'extra'],
+    ['--gates', 'refresh', '--json'], ['extra', '--gates', 'status']]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.match(bad.stderr, /usage: wildcard-perms --gates on\|off\|status\|refresh/, args.join(' '));
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  assert.equal(runCli(home, ['--gates', 'on']).status, 0, 'precondition: the same verb alone runs');
+});
+
 // Both managed blocks share one file, so the CLI-level guarantee is that neither switch
 // can disturb the other. This is the same property agent-gates.test.js asserts on the pure
 // functions, checked here through the two real subcommands.

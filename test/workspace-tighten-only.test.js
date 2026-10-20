@@ -21,7 +21,7 @@
 // activation's drain left in settings.json, and the output channel are the observables.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:505#sharing).
+// (test/extension-activation.test.js:509#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

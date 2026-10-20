@@ -16,7 +16,7 @@
 // modal, with its detail, because the file the toggle edits is named there.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:505#sharing).
+// (test/extension-activation.test.js:509#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

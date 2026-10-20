@@ -136,12 +136,12 @@ matrix and dated evidence are in
 
 Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3201#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:5346#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:5347#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:5146#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:5147#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
@@ -384,11 +384,11 @@ or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `sta
 installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
 registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
 (`src/claude-hook-config.js:62#memoryGuardDefinition`); on Windows, when `PATH` has none,
-`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:114#resolveNodeExecutable`). If
+`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:121#resolveNodeExecutable`). If
 that node later disappears the status reads `on (needs repair)`, and turning the guard on again
 (the card's **Repair** button) re-points the hook at the node found then. Where `CLAUDE_CONFIG_DIR` is set, every
 `~/.claude` path in this section is that directory instead, as it is for Claude Code
-(`src/memory-guard-install.js:71#configDirFor`). The copy outlives upgrades and is replaced
+(`src/memory-guard-install.js:78#configDirFor`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
 `~/.claude/backups/settings.json.pre-memory-guard`; when there was no `settings.json` then, a
 `settings.json.pre-memory-guard.absent` marker beside it says so, and no later change takes a
@@ -402,7 +402,7 @@ node "<copy>"`), turning the guard on refuses, and that hook is never touched.
 [watch the cause](#design-principle-watch-the-cause-do-not-hook-the-event)), so the guard is
 installed and inert. The card, the toggle and `--memory-guard status` say so whenever a local file
 shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`, or
-`disableAllHooks` in your own settings (`src/memory-guard-install.js:191#hookPolicy`), and
+`disableAllHooks` in your own settings (`src/memory-guard-install.js:198#hookPolicy`), and
 `--memory-guard status` names the file on a `source:` line. A policy delivered from a server may
 leave no local trace, so where nothing is found they say they cannot tell, and the probe asks
 Claude Code: **AI Acolyte: Check whether Claude Code runs user hooks** in the extension (it asks
@@ -419,7 +419,7 @@ open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`). It never passes `-
 flag makes `/goal` run under a policy that blocks user hooks, so the probe would read "not
 restricted" while hooks stay blocked. An existing directory there is used only when it is a
 plain, empty directory, and on Linux and macOS only when you own it; Windows has no owner check
-there (`src/memory-guard-install.js:382#getuid`). Anything else is refused and Claude Code is
+there (`src/memory-guard-install.js:389#getuid`). Anything else is refused and Claude Code is
 not run. The answer reads Claude Code's own text: "restricted" is
 its refusal message, "not restricted" needs the goal's word in the answer, and anything else,
 a reworded message included, is "unknown". Where hooks are allowed, the probe is one short real

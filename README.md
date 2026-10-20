@@ -8,6 +8,12 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.4 fixes what a fourth audit found**: a run with words but no verb is refused rather
+than treated as a hook event (`wildcard-perms gates status` used to rewrite settings.json),
+`--learn` checks its subcommand before it saves `--mode`, the hidden-character set is Unicode's
+Default_Ignorable_Code_Point (17.0) with a test that fails on any unplaced format character, and
+`recall.py` prints memory text and file names escaped in its search, `--list`, `--lint` and
+compile output.
 **Version 1.9.3 fixes what a third audit found**: every CLI verb refuses an option or a word it
 does not read before anything runs (`--drain --dryrun` used to run a real drain), memory gate
 bodies lose invisible characters when they compile and `recall.py --lint` names the gate, memory
@@ -88,7 +94,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v193.vsix
+code --install-extension ai-acolyte-v194.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

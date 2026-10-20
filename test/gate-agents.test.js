@@ -72,10 +72,26 @@ test('the documented agents: forms, and the readings that must not fall back to 
   // A CRLF file reads like its LF twin, as Python's universal newlines make it.
   assert.equal(agentsOf(memory('scope: global\r\nagents: [codex]\r\n').replace(/\n/g, '\r\n')), 'codex');
   assert.match(gateOf(memory('scope: global\nagents: [gemini]\n')).problem, /does not know: gemini/);
+  // The body is what recall.py compiles (the fourth pass), so the other-store census counts a gate
+  // that differs from this store's only by a hidden character, or a U+001C at its end, as the same.
+  const plain = gateOf(memory('scope: global\n')).body;
+  assert.equal(plain, '- a rule');
+  assert.equal(gateOf(memory('scope: global\n').replace('- a rule', `- a${ch(0x200b)} rule${ch(0x1c)}`)).body, plain);
 
   // MUTATION: in gateAgents, `continue` on every line of a block list that is not an item
   // (or drop the comment skip) and the two cases flagged above read as every agent.
 });
+
+// The gate block's text (the fourth pass), which the other-store census compares between stores,
+// so memoryLint.js gateOf's body must be recall.py _gate's: the hidden set removed (a ZWSP, a tag
+// word, a Hangul filler, U+E0080 padding, a selector after an ASCII letter), universal newlines,
+// and Python's strip, whose edge set is not trim()'s; the warning sign's own selector kept.
+const cp = (...points) => String.fromCodePoint(...points);
+const GATE_BODIES = ['- a rule', `- Do X.${cp(0x200b)}`, `${cp(0xfeff)}- a BOM first`, `- trailing ${cp(0x1c)}`,
+  `- NEL${cp(0x85)}`, '- CRLF\r\n- inside\r\n', '- a lone\rCR', `- tag${Array.from('run', (c) => cp(0xe0000 + c.codePointAt(0))).join('')}`,
+  `- warn ${cp(0x26a0, 0xfe0f)} ok`, `- a${cp(0xfe0f)}b`, `${cp(0x2028)}- after LS`, `${cp(0x3000)}- ideographic${cp(0x3000)}`,
+  '\t- tab\t', `${cp(0x200b)} - a space after a ZWSP`, `- pad${cp(0xe0080 + 0x72, 0xe0080 + 0x6d)}`, `- hangul${cp(0x3164)}`,
+  `- VT${cp(0x0b)}inside${cp(0x2029)}too`];
 
 // Every slot recall.py's readers pass through, each filled from a set holding characters the
 // two regex engines treat alike AND characters they treat differently (rampage's generator for
@@ -112,7 +128,10 @@ function generated(seed, total) {
     const order = pick([0, 1]);
     const close = pick(['\n---\n', '\r\n---\r\n']);
     const body = order ? `${scope}${agents}` : `${agents}${scope}`;
-    files[`gen_${String(i).padStart(3, '0')}.md`] = `${lead}${open}${above}${body.replace(/\n$/, '')}${close}${GATE}`;
+    // The block's text by the file's index, so the stream of picks above, and the agents readings
+    // it was tuned to, is the one it always was.
+    const block = `<!-- gate -->\n${GATE_BODIES[i % GATE_BODIES.length]}\n<!-- /gate -->\n`;
+    files[`gen_${String(i).padStart(3, '0')}.md`] = `${lead}${open}${above}${body.replace(/\n$/, '')}${close}${block}`;
   }
   return files;
 }
@@ -139,12 +158,13 @@ import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("recall", sys.argv[1])
 recall = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recall)
-out = {}
+out, bodies = {}, {}
 for name in sorted(os.listdir(sys.argv[2])):
     text = open(os.path.join(sys.argv[2], name), encoding="utf-8", errors="replace").read()
     gate = recall._gate(text)
     out[name] = None if gate is None else (" ".join(gate[1]) if gate[2] is None else "PROBLEM")
-print(json.dumps(out))
+    bodies[name] = None if gate is None else gate[0]
+print(json.dumps({"agents": out, "bodies": bodies}))
 `;
 
 test('gateOf agrees with recall.py _gate file by file over generated frontmatter', (t) => {
@@ -165,9 +185,24 @@ test('gateOf agrees with recall.py _gate file by file over generated frontmatter
     windowsHide: true,
   });
   assert.equal(run.status, 0, run.stderr);
-  const python = JSON.parse(run.stdout);
+  const { agents: python, bodies } = JSON.parse(run.stdout);
   const names = Object.keys(files);
   assert.equal(Object.keys(python).length, names.length);
+
+  // The body the census compares, for every gate either reader finds (the fourth pass). Non-
+  // degenerate: the block text as JavaScript's own trim() would leave it differs from Python's
+  // on a fair share of the gates, and every block text is reached as a gate.
+  const textOf = (name) => fs.readFileSync(path.join(dir, name), 'utf8');
+  const wrongBodies = names.filter((name) => (gateOf(textOf(name))?.body ?? null) !== bodies[name])
+    .map((name) => `${name}: python ${JSON.stringify(bodies[name])}, js ${JSON.stringify(gateOf(textOf(name))?.body ?? null)}`);
+  assert.deepEqual(wrongBodies, [], 'gateOf and recall.py _gate compile these gate blocks differently');
+  const gates = names.filter((name) => bodies[name] !== null);
+  const trimmed = (name) => /<!-- gate -->([\s\S]*?)<!-- \/gate -->/.exec(textOf(name))[1].trim();
+  const bodyDiffers = gates.filter((name) => trimmed(name) !== bodies[name]);
+  assert.ok(bodyDiffers.length >= 60, `only ${bodyDiffers.length} of ${gates.length} gates separate Python's body from trim()'s`);
+  const reached = new Set(gates.map((name) => Number(name.slice(4, 7)) % GATE_BODIES.length));
+  assert.equal(reached.size, GATE_BODIES.length, `only ${reached.size} of ${GATE_BODIES.length} block texts were read as a gate`);
+  t.diagnostic(`${gates.length} gates, every body alike; ${bodyDiffers.length} differ from a trim() of the block`);
 
   // Non-degenerate: every outcome is common, and a JavaScript-rules reading differs from
   // Python's on a fair share of the files.
@@ -185,7 +220,9 @@ test('gateOf agrees with recall.py _gate file by file over generated frontmatter
   assert.deepEqual(wrong, [], 'gateOf and recall.py read these files differently');
 
   // MUTATION: in memoryLint.js gateAgents, strip with JavaScript's trim() instead of pyStrip,
-  // or split lines on /\r?\n/ without the universal-newline pass, and files here disagree.
+  // or split lines on /\r?\n/ without the universal-newline pass, and files here disagree. In
+  // gateEntryOf, take m[1].trim() as the body (the 1.9.3 reading), strip with the thread set, or
+  // trim before the strip, and wrongBodies names the files.
 });
 
 // Retire and restore (2026-10-14, ported from rampage e5c0ee7). The dashboard card's "N retired"

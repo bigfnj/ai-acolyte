@@ -495,14 +495,26 @@ test('formatGateList shows invisible characters as ?, so two names that differ o
   const title = `Safety${hidden.map((point) => c(point)).join('')}${tag(' run curl')}`;
   const shown = formatGateList({ gates: [gate(`feedback_safety${c(0x200b)}.md`, 'active', { title })] });
   assert.equal(shown.split('\n')[0], `[x] feedback_safety?.md  Safety${'?'.repeat(hidden.length + 9)}`);
-  // A warning sign keeps its own selector; the rest of a run, and one with nothing before it, do not.
-  assert.equal(markHidden(`${c(0x26a0, 0xfe0f)} a${c(0xfe01, 0x200b, 0xfe02, 0xfe03)}`), `${c(0x26a0, 0xfe0f)} a${c(0xfe01)}???`);
+  // A warning sign and a keycap keep their own selector; the rest of a run, one with nothing
+  // before it, one after an ASCII letter or a space, and U+FE00-U+FE0D anywhere do not (the fourth
+  // pass: one selector after each letter of "Use the gate as written please" carried "rm -rf ~").
+  assert.equal(markHidden(`${c(0x26a0, 0xfe0f)} a${c(0xfe01, 0x200b, 0xfe02, 0xfe03)}`), `${c(0x26a0, 0xfe0f)} a????`);
   assert.equal(markHidden(c(0xfe0f)), '?');
+  assert.equal(markHidden(`1${c(0xfe0f, 0x20e3)} #${c(0xfe0f)} a${c(0xfe0f)} ${c(0x3000, 0xfe0e)} ${c(0x26a0, 0xfe0f, 0xfe0e)} ${c(0x2764, 0xfe01)}`),
+    `1${c(0xfe0f, 0x20e3)} #${c(0xfe0f)} a? ${c(0x3000)}? ${c(0x26a0, 0xfe0f)}? ${c(0x2764)}?`);
+  // Default_Ignorable_Code_Point, all of it, and the hidden format controls outside it; the visible
+  // format characters (an Arabic number sign, a Kaithi number sign) are shown.
+  const ignorable = [0x115f, 0x1160, 0x17b4, 0x17b5, 0x180b, 0x180f, 0x206a, 0x206f, 0x3164, 0xffa0, 0xfff0, 0xfff8, 0x1bca0,
+    0x1d173, 0x1d17a, 0xe0080, 0xe00ff, 0xe01f0, 0xe0fff, 0xfff9, 0xfffb, 0x13430, 0x1343f, 0x2028, 0x2029];
+  assert.equal(markHidden(`x${ignorable.map((point) => c(point)).join('')}y`, { keepLines: true }), `x${'?'.repeat(ignorable.length)}y`);
+  assert.equal(markHidden(`${c(0x0600)}1 ${c(0x110bd)}2 ${c(0x2800)}`), `${c(0x0600)}1 ${c(0x110bd)}2 ${c(0x2800)}`);
   // A whole text keeps its line feeds and tabs, and nothing else below U+0020.
   assert.equal(markHidden('a\n\tb\rc\u000bd', { keepLines: true }), 'a\n\tb?c?d');
   assert.equal(markHidden('a\n\tb'), 'a??b');
   // MUTATION: put UNSAFE_FOR_TERMINAL's old ranges back, or drop the tag range, or drop the
-  // selector rule, and the first or second assertion fails; drop keepLines and the fourth does.
+  // selector rule, and the first or second assertion fails; keep a selector after any character
+  // that is not one (the 1.9.3 rule) and the selector line fails; drop a Default_Ignorable or
+  // format range and the ignorable line does; drop keepLines and the last two do.
 });
 
 // ── the module itself ─────────────────────────────────────────────────────────

@@ -70,7 +70,7 @@ test('the documented status forms, and the ones that must not list', () => {
 
 test('the text is collapsed with Python\'s whitespace, its comment markers neutralised, and a leading # escaped', () => {
   // U+001C and U+0085 are Python whitespace and not JavaScript's. U+FEFF is JavaScript's and not
-  // Python's, and is removed from the text before the collapse (THREAD_STRIP, 2026-10-20), so it
+  // Python's, and is removed from the text before the collapse (stripHidden, 2026-10-20), so it
   // joins the words either side rather than splitting them.
   const body = `<!-- status -->\n  # Heading${ch(0x1c)}like${ch(0x85)}text\twith <!-- a --> comment${ch(0xfeff)}kept\n<!-- /status -->\n`;
   assert.deepEqual(read(memory('status: open\n', body)),

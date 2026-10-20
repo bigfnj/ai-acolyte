@@ -25,6 +25,9 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 // see which names this file uses.
 const GUARD_MODULE = require.resolve('./memory-index-guard.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
 const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
+// The hidden set (src/gates-manage.js isHidden), found the same way: stripHidden below.
+const GATES_MANAGE_MODULE = require.resolve('./gates-manage.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
+const { isHidden } = require(GATES_MANAGE_MODULE);
 const LINES_TARGET = GUARD_BUDGETS.lines;
 const ENTRIES_CEILING = GUARD_BUDGETS.entries;
 
@@ -52,7 +55,9 @@ function escapeRe(s) {
 // block, with gateAgents' reading of `agents:`. `state` is "active", "excluded" (scope: global,
 // `agents:` unreadable, so left out for every agent) or "retired"; for a retired gate `agents`
 // is who a restore returns it to. The ONE reading of scope and agents here, so the card's
-// retired count and its gate count cannot disagree about a file (2026-10-14).
+// retired count and its gate count cannot disagree about a file (2026-10-14). `body` is what
+// recall.py _gate compiles (the fourth pass): universal newlines, the gate strip, then Python's
+// strip, whose edge set is not trim()'s (U+001C-U+001F and NEL, but not U+FEFF).
 function gateEntryOf(raw) {
   const scope = frontmatter(raw, 'scope');
   if (scope !== 'global' && scope !== 'retired') return null;
@@ -60,7 +65,7 @@ function gateEntryOf(raw) {
   if (!m) return null;
   const { agents, problem } = gateAgents(raw);
   const state = scope === 'retired' ? 'retired' : problem === null ? 'active' : 'excluded';
-  return { scope, state, body: m[1].trim(), agents, problem };
+  return { scope, state, body: pyStrip(stripHidden(m[1].replace(/\r\n?/g, '\n'), { gate: true })), agents, problem };
 }
 
 // The gate a memory is, or null: recall.py's _gate. `scope: global` in the frontmatter plus a
@@ -255,27 +260,20 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, the bidi controls and
-// the invisible format characters (U+00AD, U+034F, U+180E, U+200B-U+200D, U+2060-U+2065, U+FEFF,
-// the tag block U+E0000-U+E007F, the variation selectors U+E0100-U+E01EF), removed before anything
-// else. Code points, as recall.py writes them; stripHidden walks the text with Array.from, one code
-// point at a time, so a tag character is one entry here.
-const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
-const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
-  ...span(0x86, 0xa0), 0x00ad, 0x034f, 0x061c, 0x180e, ...span(0x200b, 0x2010), ...span(0x202a, 0x202f),
-  ...span(0x2060, 0x206a), 0xfeff, ...span(0xe0000, 0xe0080), ...span(0xe0100, 0xe01f0)]);
-
-// recall.py _strip_hidden: THREAD_STRIP removed, then each variation selector U+FE00-U+FE0F that
-// does not directly follow a kept character which is not one itself, so a single emoji
-// presentation selector stays and a run goes.
-const isSelector = (cp) => cp >= 0xfe00 && cp <= 0xfe0f;
-function stripHidden(raw) {
+// recall.py _strip_hidden (2026-10-20): the hidden set removed before anything else, one code point
+// at a time (Array.from), so a tag character is one step. The set and the selector rule are
+// src/gates-manage.js isHidden's, recall.py's ranges written once for this file and the displays
+// both. `gate` false is recall.py _THREAD_STRIP, which keeps Python's whitespace for the collapse
+// that follows; `gate` true is _GATE_STRIP, a gate body's, which removes it too (the fourth pass:
+// a body that differs only by a ZWSP is one gate to the census, as it is to recall.py).
+function stripHidden(raw, { gate = false } = {}) {
   const out = [];
+  let last = null;   // the last code point kept
   for (const ch of Array.from(raw)) {
     const cp = ch.codePointAt(0);
-    if (THREAD_STRIP.has(cp)) continue;
-    if (isSelector(cp) && (!out.length || isSelector(out[out.length - 1].codePointAt(0)))) continue;
+    if (isHidden(cp, last) && (gate || !PY_SPACE.includes(ch))) continue;
     out.push(ch);
+    last = cp;
   }
   return out.join('');
 }
@@ -620,7 +618,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1495#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1497#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.

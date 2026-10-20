@@ -42,9 +42,16 @@ Such a name, or a `status:` value, that holds a control character is printed as 
 (`'\x1b]0;T\x07'`), never as the character.
 
 A gate block compiles without its hidden characters (the controls other than the line feed and the
-tab, the bidi controls, the invisible format characters, the tag block and runs of variation
-selectors), and `--lint` names each gate memory that held any, with how many. `--gates-list` keeps
+tab, U+2028 and U+2029, every Default_Ignorable_Code_Point character of Unicode 17.0, the
+interlinear annotation and Egyptian hieroglyph format controls, and a text or emoji presentation
+selector that does not directly follow a digit, `#`, `*` or a character outside ASCII that is not
+whitespace), and `--lint` names each gate memory that held any, with how many. `--gates-list` keeps
 the text as written, so the gates panel can show where they are.
+
+Search results, `--list`, `--lint` and the compiles print memory text the same way: a description,
+a best-matching line or an index line shows each of those hidden characters (and a line feed) as
+its Python escape and the rest as written, and a memory's file name or stem that holds any, or any
+other character Python does not call printable, is printed as `ascii()` of it. `--json` is JSON.
 
 Ranked output is `score  file  cos N  lex N  description  > best-matching line`.
 

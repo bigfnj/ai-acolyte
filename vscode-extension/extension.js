@@ -1227,14 +1227,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:759-767#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:775-783#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:1094-1098#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
+    // (memoryLint.js:1110-1114#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:994#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:1010#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two

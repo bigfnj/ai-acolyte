@@ -415,12 +415,12 @@ echo "ok: line widths are code points, and comment markers in code are not comme
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1465#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1494#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1457#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1486#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.

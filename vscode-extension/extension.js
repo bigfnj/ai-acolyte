@@ -3372,13 +3372,23 @@ function activate(context) {
 
   // The initial build of both memory-store watcher sets. Every later rebuild comes through
   // the reconcile subscriber above.
+  //
+  // A RE-ACTIVATE BUILDS ITS OWN (2026-10-20). The two maps are module-level, and VS Code drains a
+  // predecessor's subscriptions only after its deactivate settles, which a pending Auto Learn
+  // drain can hold past a same-realm activate. The successor's reconcile then found the
+  // predecessor's live watchers and built none, and the predecessor's disposer emptied both maps
+  // afterwards: no *.md watcher, so no gate or threads recompile, until a reconcile 5 minutes
+  // later. So whatever is in the maps is disposed here before the build, and a predecessor's
+  // disposer is a no-op once a successor has activated.
   try {
+    disposeMemoryWatchers();
     reconcileMemoryWatchers();
     // ONE disposer for both sets, not one subscription per watcher. The sets churn as
     // stores come and go, and pushing each watcher would grow context.subscriptions for the
     // life of the window with entries that reconcileMemoryWatchers has already disposed --
     // the same leak shape the folder-change watchers were fixed for.
-    context.subscriptions.push({ dispose: () => disposeMemoryWatchers() });
+    const generation = activationGeneration;
+    context.subscriptions.push({ dispose: () => { if (generation === activationGeneration) disposeMemoryWatchers(); } });
   } catch (err) {
     console.error('ai-acolyte: memory-store watchers failed —', err);
   }

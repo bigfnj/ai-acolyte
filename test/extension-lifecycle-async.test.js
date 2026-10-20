@@ -1063,6 +1063,34 @@ test('a reconcile after teardown builds nothing, and the disposer drains what is
   }
 });
 
+// A RE-ACTIVATE DURING A PENDING DRAIN KEEPS ITS MEMORY WATCHERS (2026-10-20). The two watcher maps
+// are module-level. The successor's first reconcile found the predecessor's watchers still live
+// (VS Code drains the old subscriptions only once the old deactivate settles) and built none, and
+// then the predecessor's disposer emptied both maps: no *.md watcher, so no gate or open-threads
+// recompile, until the linter's 5-minute reconcile.
+test('a re-activate during the drain keeps live memory watchers after the old subscriptions drain', TEST_TIMEOUT, async (t) => {
+  const home = tempHome(t);
+  const corpus = memoryCorpus(t);
+  const app = harness(home, { settings: { 'autoLearn.enabled': true }, memoryDir: corpus });
+  try {
+    // A completed scan, so a runner exists and deactivate really awaits a drain.
+    await app.commands.get('permission-wildcarding.autoLearnScan')();
+    const predecessor = app.watcherIn(corpus, '*.md');
+    const teardown = app.extension.deactivate();
+    app.reactivate();
+    await teardown;
+    app.disposeSubscriptions();
+    const live = app.watcherIn(corpus, '*.md');
+    assert.notEqual(live, predecessor, 'the successor built its own *.md watcher');
+    assert.equal(predecessor.disposed, true, 'and the predecessor\'s was released, not leaked');
+    assert.ok(app.watcherIn(corpus, 'MEMORY.md'), 'the Memory card\'s watcher too');
+    // MUTATION: drop `disposeMemoryWatchers()` before the build in activate and watcherIn
+    // finds no live *.md watcher; drop the generation check from the disposer and the same.
+  } finally {
+    await app.dispose();
+  }
+});
+
 test('the local-settings watchers have exactly one drain disposer, and it is the live one',
   TEST_TIMEOUT, async (t) => {
     // registerLocalWatchers registered TWO disposers, byte for byte identical and

@@ -4115,3 +4115,49 @@ layout depends on, `test/packaged-copies-fresh.test.js` fails while either copy
 to delete them or run `npm run package`. Absent copies pass, so CI and clean worktrees are unaffected.
 Measured: it failed on that 1.8.1 copy (16 stale files listed), passed with no copies and with fresh
 ones, and failed naming the file for one stale `src/permissions.js` and for one stale `recall.py`.
+
+## Codex 0.162/0.163 sessions: approvals the card and Auto Learn did not show (1.9.6, 2026-10-20)
+
+**The report.** "A full active Codex session with multiple approvals ... doesn't seem to be captured or
+reflected in our plugin." Diagnosed read-only on the live-hook box, then reproduced on copies in an
+isolated home. The session was a multi-agent one in the Codex VS Code extension (0.162.0-alpha.17.2),
+beside the desktop app (0.163.0-alpha.10.2): 65 rollouts that day, 10 of them working threads (one
+session, its six spawned workers, three desktop sessions) and 52 guardian approval reviews. Auto Learn
+read every file and kept up with it (each cursor at the file's size), so nothing was missed by reading.
+Three defects shaped what the reading produced.
+
+**1. The Agent sessions card showed the wrong threads.** It took activity from the mtime, which a
+Codex append on Windows does not move: the four threads writing that minute read the minute they
+started, while their ctime matched their last record to the second. And it listed every rollout, so
+two guardian reviews were the Codex "sessions". Now a rollout is a candidate when its mtime or ctime
+is in the window, its activity is its last record's `timestamp` (the mtime when none has one), a
+guardian thread is never a session, and a spawned worker counts toward its session's `subagents`
+(one whose session is idle is listed itself). On the real history the card read one Codex session,
+active now, with 3 workers, where it read two guardian threads.
+
+**2. Cells of several commands earned no evidence.** All shell work ran in code-mode `exec` cells, and
+a nested result is now printed as JSON with its `exit_code`. Success was credited only to a cell with
+one call site, so a `Promise.allSettled` of literal commands, every one at exit 0, read `unknown`:
+1,081 of 1,989 commands that day, and most approved escalations. `customExecRunsSucceeded` credits
+them when the printed results account for every run (every site an extracted literal; one site, any
+number of runs; several, nothing before the last site that can repeat or skip one, and one result per
+site), all at exit 0. Measured on the same rollouts: credited commands 567 -> 1,378, escalated ones
+110 -> 298; 893 credited cells, none with a nonzero exit code or a rejection in its output.
+
+**3. A guardian rejection counted against the command.** The refusal check matched 0.161.0's exact
+"rejected by user"; guardian writes its reason in the same place, and 19 rejections read `failed`, 9
+of them in cells that had printed earlier results before dying. Any `CreateProcess Rejected(...)` is
+now a refusal, bare or as the last part after printed output, and withheld; a printed nonzero result
+in such a cell still fails it.
+
+**Evidence revision 5** re-reads already-scanned Codex history once, as revision 4 did for 0.161.0.
+The real manager over an isolated copy of the ten working rollouts: 974 -> 1,730 Codex observations,
+17 -> 21 candidates at the threshold (`Get-Content` 190 -> 551 successes, `Set-Content` 26 -> 125,
+`git` 20 -> 68; `python` failures 91 -> 78, the rejections no longer counted).
+
+**What stays unknown, on purpose (ACCEPTED-RECORDED).** A command built at run time (290 cells that
+day: template literals, concatenation, variables) yields no observation, because the source cannot say
+what ran; a cell with a branch, loop or callback before its last site, or whose printed results do not
+match its sites, credits nothing; a process still running when its cell returned credits nothing until
+a terminal result is joined. Each would need Codex to record the executed command and its outcome
+itself, which these builds do not (no `exec_command_end` for a nested call).

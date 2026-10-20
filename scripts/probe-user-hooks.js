@@ -309,6 +309,5 @@ function main(argv = process.argv.slice(2), io = { out: process.stdout, err: pro
 if (require.main === module) process.exitCode = main();
 
 module.exports = {
-  EVENTS, VARIANTS, OPT_IN, GOAL_PROMPT, WRITE_PROMPT, RESTRICTED_TEXT, CANARY_SOURCE,
-  parseArgs, hookCommand, canarySettings, probePaths, planRuns, judgeHook, judgeGoal, main,
+  EVENTS, VARIANTS, parseArgs, hookCommand, canarySettings, probePaths, planRuns, judgeHook, judgeGoal,
 };

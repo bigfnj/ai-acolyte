@@ -10,6 +10,21 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Released 2026-10-20 as 1.9.5.** The tag `v1.9.5` is at `cd81845`, the `--no-ff` merge of
+`release/1.9.5` (built on the other box's `6d91a92`). The MEMORY.md entry count is a count, never a
+budget: guard revision 5, no editor diagnostic or colour, no `LINT_ENTRY_WARN` (the owner's call; the
+record has it under "The MEMORY.md entry count"). CI is green on all 8 jobs on the release commit
+`d786745` (run 39485740247), on `b36cec9` (39486981392) and on the merge (39487511913). The published
+`ai-acolyte-v195.vsix` (release.yml run 39487984863) matches the local build in all 66 entries apart
+from line endings; the keep-three rule pruned the v1.9.2 release. Suite on the release branch: 2074
+tests, 2068 pass, 0 fail, 6 skipped (masked view 2050 pass, 0 fail, 24 skipped); the first full run
+had one failure, a Codex version read that came back null under load, gone on the rerun and absent
+when the likely file ran alone twice. Smoke 18 of 18 with settings.json unchanged (457 allow, 13
+deny); every bash harness ALL PASS; installers 37 of 37 under Windows PowerShell 5.1; 307 of 307 line
+references. `drive-installed.js` 17 of 17 staged and installed; `drive-vscode.js` 4 of 4, 6 of 6 and
+6 of 6, the MCP group after `b36cec9` made the drive's root under the temp directory's real path (it
+failed on this box's 8.3 `TEMP`). The live worktree is on `v1.9.5` and the hook exits 0.
+
 **Cleared 2026-10-20 for 1.9.4.** A fourth full audit, of what 1.9.2 and 1.9.3 changed, with a
 stricter bar (a reproduction or a trace), filed 22 rows, none above LOW, and verified the eight
 seeds this file held (rows K1, K2, K5, X1, H2, H4, H5 and H6): 19 FIXED and 3 CLOSED-VERIFIED. The

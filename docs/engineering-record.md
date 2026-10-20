@@ -3648,3 +3648,122 @@ holds the guard-installed bytes; nothing here detects or rewrites it. On POSIX t
 the child alone (endProcessTree has no group to signal without `detached`); an npm `claude` there
 is one process. The open-threads module's `wildcard-perms --open-threads refresh` error string
 (src/agent-open-threads.js) is another owner's and is not in the census.
+
+## The 1.9.1 audit clearance (2026-10-20)
+
+After 1.9.0 shipped, the maintainer asked for a full audit of main (regressions, dead code, leaks,
+functions that cannot run, calls that go nowhere, optimisation, findings worth surfacing) and for
+`BACKLOG.md` to be cleared to empty. Four read-only audits of `8324b6d` and `e9994db` filed 70
+rows, five of them duplicates (D3, I5, F4, F5 and B1), so 65 distinct findings; B1 to B6 are the six
+entries BACKLOG.md held open at 1.9.0. Four fix packages took them to dispositions on their own
+branches, merged `--no-ff` into `release/1.9.1` in this order: WP4 `docs/audit-1.9.1`, WP1
+`fix/threads-audit`, WP3 `fix/parity-dead-code`, WP2 `fix/guard-audit`. WP1's and WP2's tables,
+with their reasoning, are the two sections above; WP3's and WP4's dispositions are recorded only
+here and in their commit messages. Each FIXED row names a commit whose message carries the
+mutation that made its test fail.
+
+| id | Finding | Disposition |
+|---|---|---|
+| R1 [MED] | Turn off open threads cannot turn it off unless settled; can install instead | **FIXED** WP1 1fa38b7 (off always, Refresh separate; 2 mutations) |
+| R2 [LOW] | scheduled threads compile runs after switch-off | **FIXED** WP1 1a8137e (timer re-checks setting; off cancels; 2 mutations) |
+| R3 [LOW] | toggleOpenThreads ignores the compile result | **FIXED** WP1 de4d94c (result kept, message says last compile installed) |
+| R4 [LOW] | guard message/modal/README: "already past", "always pass" false; comment advice wrong | **FIXED** WP2 b27dce8 (ends past budget and worse; comment advice; BUDGETS in modal; GUARD_REVISION 2) |
+| R5 [LOW] | node gone: card says turn on again, button turns off | **FIXED** WP2 fba86d8 (node gone -> needs repair, Repair button) |
+| R6 [LOW] | smoke regex lowercase vs uppercased CLI label | **FIXED** WP2 f64b98b (uppercase labels; test reads smoke.sh pattern) |
+| R7 [LOW] | JS/Python parity drift (entries split, interior CR) | **FIXED** WP3 c4fd8b9 (entries over \r?\n; CR stripped; parity bodies; 4 mutations) |
+| R8 [NOTE] | stale comments: memoryLint _FENCE refs, gatesCorpusWatchers comment | **FIXED** WP3 41d1c35 + WP1 dcb7be4 (comments) |
+| R9 [NOTE] | memory lint off hides guard/threads controls | **ACCEPTED-RECORDED** WP1 b90437b (documented: palette command and setting still reach it) |
+| R10 [NOTE] | --memory-guard status exit 0 on unsupported | **FIXED** WP2 88b19ed (exit 1 for unsupported) |
+| L1 [MED] | memoryReport() for .dir on hot paths | **FIXED** WP1 1056d40 (memoryStoreDir at 5 sites; 0 reports over 20 events; 3 mutations) |
+| L2 [MED] | threads compile execFile on host thread, outside the spawn gate | **FIXED** WP1 932e82b (threads compile off-thread; compileGates left on host: harness reasons) |
+| L3 [MED] | MEMORY.md-triggered compile cannot change anything while healthy | **FIXED** WP1 34a347c (MEMORY.md events gated by indexEventMayChange; 3 mutations) |
+| L4 [LOW] | every window compiles every burst | **ACCEPTED-RECORDED** (integrator's decision, in the owner's review table): an mtime skip can lose an edit, and after L5 and L10 each window's compile runs off the host thread and at most one writes; reasoned under "Open threads after 1.9.0", finding 11 |
+| L5 [LOW] | overlapping compiles, older wins | **FIXED** WP1 01ac35f (one in flight, one queued; 2 mutations) |
+| L6 [LOW] | watchers lost across overlapping re-activate | **FIXED** WP1 22b98c2 (activate disposes before build; stale disposer no-op; 2 mutations) |
+| L7 [LOW] | rule-usage hashes allow list twice per push | **DECLINED-MEASURED** WP3 95cd0ea (1.89 min / 3.16 p50 ms warm n=30, record names the cold measure that would reopen) |
+| L8 [NOTE] | per-push status reads; revisionOf(PACKAGED_GUARD) once | **FIXED** WP2 02b03b4 (packaged revision read once) |
+| L9 [NOTE] | record row "fullReport re-reads" has stale numbers | **ACCEPTED-RECORDED** WP3 9b4197b (dated note with warm figures, conclusion kept, cold re-measure named) |
+| L10 [NOTE] | recall.py rewrites unchanged compiled file | **FIXED** WP1 3018410 (identical compile writes nothing; file id and mtime unchanged) |
+| L11 [NOTE] | spawn gate wall clock | **FIXED** WP3 65d3dd5 (process.hrtime.bigint; stepped-clock takeover test) |
+| D1 [LOW] | extension README "all 19 settings" (20) | **FIXED** WP4 611ea36 (20 settings; readme-settings test, 7 mutations) |
+| D2 [LOW] | release notes "timed out after 30 s" (probe timer 5 s) | **FIXED**: the v1.9.0 notes replaced 2026-10-20 with WP4's corrected body ("the probe's own 5 s timer"), its guard sentences in WP2's wording |
+| D3 [LOW] | "shrinking edits always pass" false (dup of R4) | **FIXED** WP2 b27dce8 (= R4) |
+| D4 [MED] | README exit-2 path / "one short turn" never observed | **FIXED** WP2 9aa78dc + f6160d9 (observed/not-observed statement; real-home restricted measurements) |
+| D5 [LOW] | allowManagedHooksOnly claim has no artefact; "any event" overgeneralised | **FIXED** WP4 771aa9e (scripts/probe-user-hooks.js + test, 8 mutations; claims narrowed to 3 events; run once 2026-10-20: 6/6 not fired) |
+| D6 [LOW] | stale record statements (3255, 3435, 3140) | **FIXED** WP4 4b93947 (dated superseded notes) |
+| D7 [LOW] | TREE_ENDING counted as a product race | **FIXED** WP4 97cebb1 + integrator 0e6059e (one race; notes edited) |
+| D8 [NOTE] | README §6 "(<memory file>)", "by name" | **FIXED** WP1 b90437b |
+| D9 [NOTE] | README node fallback %ProgramFiles%\nodejs | **FIXED** WP2 9aa78dc |
+| D10 [LOW] | backup when settings.json absent at first on | **FIXED** WP2 2ebf9c8 (absent marker; no later snapshot) |
+| D11 [LOW] | release notes "one-line status block", "until a memory declares a status" | **FIXED**: the same edit (the block may span lines and is collapsed and cut at 240 characters; a closed status installs nothing) |
+| D12 [NOTE] | ext README lineBudget wording; label list omits unreadable | **FIXED** WP4 611ea36 (lineBudget) + WP2 9aa78dc (label list) |
+| D13 [NOTE] | a comment in memoryLint.js cited a range of recall.py that had drifted off GATE_BEGIN | **FIXED** WP3 41d1c35 (the citation repointed, anchored on GATE_BEGIN) |
+| D14 [LOW] | parity test skips recall.py half on CI; entries diverge | **FIXED** WP3 c4fd8b9 (parity step in gates-manage CI job, ACOLYTE_REQUIRE_PYTHON=1) |
+| S1 [MED] | probe fixed dir in shared tmp | **FIXED** WP2 a92dbd6 (<config>/wildcarding, non-recursive, refusal on planted dir) + integrator 36a66ed (same for probe-user-hooks.js) |
+| S2 [LOW-MED] | probe unbounded run; npm claude.cmd child survives | **FIXED** WP2 897cc9d + f6160d9 (--tools "" --no-session-persistence, npmShimLaunch, deadline tree kill; --strict-mcp-config removed: it made /goal misreport) |
+| S3 [LOW] | probe false "not restricted" | **FIXED** WP2 8ad2bfe (positive evidence required) |
+| S4 [NOTE] | Windows basename case; 8.3/ADS/UNC/junction fail open | **FIXED**/ACCEPTED WP2 abf0b10 (win32 case + trailing dot/space folded, GUARD_REVISION 3; 8.3/ADS/UNC/junction fail open, recorded) |
+| S5 [LOW] | control/bidi chars survive in thread text/stem | **FIXED** WP1 3018410 (C0/C1/DEL/bidi stripped in text, stem, INDEX path; 4 mutations) |
+| S6 [MED] | INDEX line names no file | **FIXED** WP1 3018410 (INDEX line names the index, home-relative) |
+| S7 [none] | Auto Learn tighten-only: no bypass (verified negative) | **CLOSED-VERIFIED** (auditor) |
+| S8 [NOTE] | wrapper around our copy counted as ours | **FIXED** WP2 4a0c73a (ours = node + our copy only; wrapper is foreign) |
+| I1 [LOW] | MultiEdit test cannot fail | **FIXED** WP2 8ff4ae5 (unique old_strings; growing MultiEdit exits 2) |
+| I2 [LOW] | CLAUDE_CONFIG_DIR half-supported | **FIXED** WP2 c9dfd65 (configDirFor: settings, copy, backup, remote-settings follow CLAUDE_CONFIG_DIR) |
+| I3 [NOTE] | open threads on by default, not said in README | **FIXED** WP1 b90437b (README: on by default) |
+| I4 [NOTE] | prose --> refused (deliberate) | **ACCEPTED-RECORDED** (record ~3279-3280, D's decision) |
+| I5 [LOW] | probe CLI-only (dup of F3) | **FIXED** WP2 e24489f (= F3) |
+| I6 [NOTE] | spawn-timing harness not in tree | **FIXED** WP4 bf74856 (scripts/measure/ capture, summary, two observation experiments; test, 7 mutations) |
+| F1 [MED] | hookEventAllowed dead + disproved; docs hookBlocked | **FIXED** WP3 b246622 (removed with fields, test, TEST_ONLY; docs to measured rule) |
+| F2 [LOW] | assessPolicy().capabilities dead | **FIXED** WP3 929a86a (removed) |
+| F3 [MED] | VSIX UI names CLI verbs it does not ship | **FIXED** WP2 e24489f (palette command probeUserHooks; extension policy line; census test) + WP1 1fa38b7 (threads refreshHint) |
+| F4 [LOW] | smoke regex (dup of R6) | **FIXED** WP2 f64b98b (= R6) |
+| F5 [LOW] | measures differ (dup of R7) | **FIXED** WP3 c4fd8b9 (= R7) |
+| F6 [LOW] | budgets restated (INDEX_BUDGETS, modal) | **FIXED** WP3 a963752 (INDEX_BUDGETS from GUARD_BUDGETS) + WP2 b27dce8 (modal from BUDGETS) |
+| F7 [NOTE] | hookPolicy fields/foreign unread | **FIXED** WP2 b72ece2 (status prints source: lines; foreign field dropped) |
+| F8 [NOTE] | duplicate fence helpers | **FIXED** WP3 0f184a6 (helpers named for their rule and twin; memory-index-guard.js left as is to avoid a revision bump) |
+| F9 [LOW] | dead CSS .listhead | **FIXED** WP3 d1a60ce (removed; CSS census) |
+| F10 [NOTE] | stale prose (record 3254, dead-exports comment) | **FIXED** WP4 4b93947 (record) + WP3 41d1c35 (dead-exports comment) |
+| F11 [NOTE] | recall.py mixed refusal omits --json etc.; --gates/--open-threads ignore extra args | **FIXED** WP3 944e617 (recall.py: a query's flags refused beside a mode that runs alone) + integrator b458ed1 (`--gates` (on, off, status, refresh) and `--open-threads` refuse an extra argument; 2 mutations) |
+| G1 | dead-exports TEST_ONLY needs reasons | **FIXED** WP3 ae73398 ({name: reason} map; blank reason fails) |
+| G2 | routes census sender->arm; panelScript slice | **FIXED** WP3 418d826 (own script slice; sender -> arm) |
+| G3 | weak line-ref anchors | **FIXED** WP3 2d540af (weak-anchor report on every run) |
+| G4 | parity fixtures lack lone CR/U+2028/\f; INDEX_BUDGETS/modal unpinned | **FIXED** WP3 c4fd8b9 + a963752 + WP2 b27dce8 |
+| B1 (BACKLOG) | hookEventAllowed per-event | **FIXED** WP3 b246622 (= F1) |
+| B2 (BACKLOG) | README command count unpinned | **FIXED** 62b7f05 (test + 2 mutations) |
+| B3 (BACKLOG) | editor gauge no entry-count rule | **FIXED** WP3 01bdff3 (gauge 16-entry ceiling, diagnostic, 4 mutations) |
+| B4 (BACKLOG) | release-version.test.js failed once under masked full run | **DECLINED-MEASURED**: 50 runs in a row, 850 tests, 0 failures (2026-10-20, no load); diagnostic + control test 1f9a14f (mutation fired) |
+| B5 (BACKLOG) | synthetic click on Claude memory row head did not land | **DECLINED-MEASURED**: probe 4/4 moves, head point (141,360) vs Auto Learn (190,362), in-frame hit matches, hovered false: harness coordinate model after scrollIntoView; card verified via DOM (38483a7); rebuilding the coordinate model is out of proportion |
+| B6 (BACKLOG) | guard does not replay quote normalisation | **ACCEPTED-RECORDED** WP2 (fail open; Claude Code's normalisation is not statable from its bytecode) |
+
+**Found by the integrator while releasing, all closed:**
+
+| Item | Disposition |
+|---|---|
+| CI's Node 20 and 22 jobs cancelled 16 tests (run 39413648790, on all four of them) where Node 24 and the development box passed | **FIXED**, `dd8543c`. `threadsWindow` in `test/extension-open-threads.test.js` unrefs every real timer its `setTimeout` stub passes through, and one test waited 600 ms through it. With nothing else holding the loop, Node 20 and 22 ended the file with that promise pending ("Promise resolution is still pending but the event loop has already resolved") and cancelled it and the 15 tests after it; each job read fail 0, cancelled 16. The wait now uses `node:timers/promises`. There is no Node 20 or 22 on this box, so the re-run on that commit (39414614295, 8 of 8) was the check. |
+| `drive-installed.js` still drove the 1.9.0 toggle and failed 16 of 17 against the installed 1.9.1 | **FIXED**, `a5d0be9`. It drives the card's Refresh, then off, on and off. Mutation: Refresh made a no-op in a copy of the installed extension (`--subject`) failed exactly that check, "refresh: nothing was compiled". |
+| WP3's residual: `--gates-compile` had no refusal list, so `--gates-compile --json` or `--rebuild` was dropped in silence | **FIXED**, `b458ed1`. It runs alone, `--gates-allow-empty` aside, and `--gates-allow-empty` without it is refused. Every caller in the tree sends one of those two shapes. Two mutations, each failing `test/gates-manage.sh` on its own line. |
+| WP2's residual: a 1.9.0 backup taken by `off` after an `on` with no settings.json holds the guard-installed bytes | **ACCEPTED-RECORDED** (integrator's decision, in the owner's review table). It needs that exact sequence on 1.9.0, which was the latest release for about two hours and has one known install, this box, whose settings.json existed. The product only writes that backup (`src/memory-guard-install.js`, `backupPathFor`) and never reads it; it is there for a restore by hand. |
+| WP2's residual: on POSIX the probe's deadline ends the child alone | **ACCEPTED-RECORDED**, the class already recorded for the execFile sites ("execFile's own `timeout` orphaned the program under a launcher", POSIX): no process group without `detached`, and an npm `claude` there is one process. |
+| The palette probe through a `claude.cmd` that is not npm's shape can outlive a host that dies outright | **ACCEPTED-RECORDED**, the class recorded under "On Windows an npm `codex.cmd` outlived an extension host that died outright": a native `claude.exe` and npm's shim (run as `node <script>` by `npmShimLaunch`) are the host's direct children and die with it; only cmd.exe's grandchild can break away, and only when the host dies rather than deactivates, inside the probe's 60 s. |
+
+**Evidence for the release.** The tag `v1.9.1` is at `8aab0ed`, the `--no-ff` merge of
+`release/1.9.1`. The full battery at `b458ed1`: 2028 tests, 2022 pass, 0 fail, 0 cancelled, 6
+skipped (the masked view 2004 pass, 0 fail, 24 skipped); smoke 18 of 18; `recall-py.sh`,
+`gates-manage.sh`, `gates-stale.sh` and `threads-compile.sh` ALL PASS; 304 of 304 line references
+anchored. CI 8 of 8 on `b458ed1` (run 39416456795) and on the merge (39416832500); the Python job's
+`memory-guard-parity` step ran 4 tests with none skipped under `ACOLYTE_REQUIRE_PYTHON=1`. The
+published `ai-acolyte-v191.vsix` (release.yml run 39416884826) matches the local build in all 66
+entries apart from line endings. Against the installed 1.9.1 (VS Code 1.142.0): `drive-installed.js`
+17 of 17, `drive-vscode.js` 4 of 4, 6 of 6 with `--review-runtime yes --dashboard-ui yes`, and 6 of
+6 with `--mcp-only yes --review-runtime yes`. Not run: `scripts/verify-release.ps1`, which is
+written for after a VS Code reload, and a reload would have ended the agent session cutting the
+release; it is the owner's step at the next reload.
+
+**Two measurement hazards from this release, for anyone repeating it:**
+
+- *A bare `bash` from Python is WSL's on this box.* A mutation runner that called
+  `subprocess.run(["bash", ...])` got `C:\Windows\System32\bash.exe`, which failed to start
+  (`execvpe(/bin/bash) failed`) and exited 1, so two mutants read as killed without the harness
+  running. Caught because the failing line named WSL; the rerun names Git Bash by full path.
+- *The development box runs Node 24 only.* A test that passes here can be cancelled on Node 20 or
+  22 when it waits on an unref'd timer, so CI's older runtimes are the only check of that class.

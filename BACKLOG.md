@@ -10,6 +10,24 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Cleared 2026-10-20 for 1.9.1.** The six entries open at 1.9.0 and the 65 findings of the full
+audit run after it were each taken to a disposition: FIXED with a mutation-tested commit,
+DECLINED-MEASURED with its number, CLOSED-VERIFIED, or ACCEPTED-RECORDED. All 70 rows, the
+integrator's own six and the evidence are in `docs/engineering-record.md` under "The 1.9.1 audit
+clearance (2026-10-20)", where B1 to B6 are the six entries this file held.
+
+**Released 2026-10-20 as 1.9.1.** The tag `v1.9.1` is at `8aab0ed`, the `--no-ff` merge of
+`release/1.9.1`. CI is green on all 8 jobs on the merge (run 39416832500) and on the release
+branch (39416456795); the first branch run (39413648790) failed on Node 20 and 22 alone, 16 tests
+cancelled by a test's wait on an unref'd timer, fixed in `dd8543c`. The published
+`ai-acolyte-v191.vsix` (release.yml run 39416884826) matches the local build in all 66 entries
+apart from line endings. Against the installed 1.9.1: `drive-installed.js` 17 of 17 (its
+open-threads check now drives Refresh, off, on and off) and `drive-vscode.js` 4 of 4, 6 of 6 and
+6 of 6 in the same three groups as 1.9.0. Suite at `b458ed1`: 2028 tests, 2022 pass, 0 fail, 6
+skipped (masked view 0 fail); smoke 18 of 18. `scripts/verify-release.ps1` was not run, because
+it follows a VS Code reload; it is the owner's step. The v1.9.0 release notes were corrected the
+same day (the probe's 5 s timer, one spawn race, the status block, the guard's rule).
+
 **Cleared 2026-10-20 for 1.9.0.** All five entries open on 2026-10-19 were re-verified against the
 tree and closed: the spawn-timing family FIXED, the worker-runner cancellation DECLINED-MEASURED,
 the `agents:` entry and its rampage-drain note CLOSED-VERIFIED, the workspace-tighten entry
@@ -102,27 +120,7 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Found while building 1.9.0 (2026-10-20)
-
-Each was seen during the 1.9.0 build or integration and is unresolved at the release.
-
-- **`hookEventAllowed` answers per event, and that model is disproved.** `src/managed-policy.js`
-  decides user-hook availability event by event, but on 2026-10-19 Claude Code 2.1.293 and 2.1.301
-  ran no user hook of any event while hooks were restricted (the record's MEMORY.md guard
-  section). It has no production caller. Change it to the measured rule or retire it.
-- **The README's command count is not pinned.** `vscode-extension/README.md` said 36 and then 37
-  while the manifest registered 37 and then 38; two merges each moved it, and no test noticed.
-- **The editor gauge has no entry-count rule.** The guard and `recall.py --lint` hold resident
-  `- ` entries to 16; `vscode-extension/memoryLint.js` does not count them.
-- **`test/release-version.test.js` failed once under a full masked run.** "a same-version VSIX
-  left over..." printed nothing from its checker in one of agent D's masked runs and passed on the
-  rerun and 3 of 3 alone. Not one of the spawn-timing family. Unreproduced.
-- **A synthetic click on the Claude memory row head did not land in the real-editor drive.** The
-  hover settled on the Auto Learn row instead. The dashboard group now reads the card's lines from
-  the DOM rather than expanding the row; why the click missed is not known.
-- **The guard does not replay Claude Code's quote normalisation.** An `Edit` whose `old_string`
-  Claude Code would match only after normalising quotes reads as "not found" to the guard, which
-  lets it through (fail open).
+Nothing open (2026-10-20, after 1.9.1). A new entry carries its evidence and its date.
 
 ---
 

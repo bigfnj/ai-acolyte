@@ -131,12 +131,12 @@ matrix and dated evidence are in
 
 Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3201#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:5343#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:5346#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:5143#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:5146#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured

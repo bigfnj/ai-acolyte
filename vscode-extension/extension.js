@@ -1570,7 +1570,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:7084#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:7089#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1827,7 +1827,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:7117#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:7122#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //

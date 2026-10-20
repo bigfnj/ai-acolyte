@@ -353,7 +353,18 @@ const RESTRICTED = "/goal can't run while hooks are restricted (disableAllHooks 
 test('the probe reads Claude Code\'s refusal text, and anything else as accepted or unknown', () => {
   assert.equal(classifyProbe({ status: 1, stdout: RESTRICTED, stderr: '' }).result, 'restricted');
   assert.equal(classifyProbe({ status: 0, stdout: '', stderr: RESTRICTED.replace("'", '\u2019') }).result, 'restricted');
-  assert.equal(classifyProbe({ status: 0, stdout: 'Goal set: probe', stderr: '' }).result, 'not restricted');
+  assert.equal(classifyProbe({ status: 0, stdout: 'Goal set: reply with the word acolyte-probe-ok and stop', stderr: '' }).result,
+    'not restricted');
+  assert.equal(classifyProbe({ status: 0, stdout: 'acolyte-probe-ok', stderr: '' }).result, 'not restricted');
+  // Accepted needs positive evidence (audit 2026-10-20): an exit 0 without the goal's word is
+  // unknown, never "not restricted".
+  // MUTATION: drop the PROBE_WORD test from classifyProbe and the first three below read as
+  // "not restricted".
+  for (const answer of ['Unknown skill: goal', 'Goal set: probe', '', '/goal is only available in trusted workspaces. Restart, '
+    + 'accept the trust dialog, and try again.', 'Unknown command: /goal acolyte-probe-ok']) {
+    assert.equal(classifyProbe({ status: 0, stdout: answer, stderr: '' }).result, 'unknown', JSON.stringify(answer));
+  }
+  assert.equal(classifyProbe({ status: 1, stdout: 'acolyte-probe-ok', stderr: '' }).result, 'unknown', 'and it needs exit 0');
   assert.equal(classifyProbe({ status: 0, stdout: 'Unknown command: /goal', stderr: '' }).result, 'unknown');
   assert.equal(classifyProbe({ status: 1, stdout: '', stderr: 'Invalid API key' }).result, 'unknown');
   assert.match(classifyProbe({ error: Object.assign(new Error('x'), { code: 'ENOENT' }) }).detail, /claude was not found on PATH/);
@@ -413,8 +424,13 @@ test('the probe runs the bounded /goal command once, in an empty directory of it
   fs.mkdirSync(probe.directory);
   await memoryGuardProbe(options);
   assert.equal(stub.record().cwd, seen.cwd, 'an empty leftover of our own is used');
-  const accepted = stubClaude(t, 'Goal set.', 0);
+  const accepted = stubClaude(t, 'Goal set: reply with the word acolyte-probe-ok and stop\nacolyte-probe-ok', 0);
   assert.equal((await memoryGuardProbe({ ...options, claudeExecutable: accepted.executable })).result, 'not restricted');
+  // An exit 0 that is not an acceptance, through the whole probe: unknown.
+  const unknownSkill = stubClaude(t, 'Unknown skill: goal', 0);
+  const unknown = await memoryGuardProbe({ ...options, claudeExecutable: unknownSkill.executable });
+  assert.equal(unknown.result, 'unknown');
+  assert.match(unknown.detail, /neither refused nor accepted \/goal: Unknown skill: goal/);
   assert.equal((await memoryGuardProbe({ ...options, claudeExecutable: path.join(stub.dir, 'missing-claude') })).result, 'unknown');
 });
 

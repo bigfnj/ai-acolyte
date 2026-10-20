@@ -39,7 +39,8 @@ const REVISION_RE = /^const GUARD_REVISION = (\d+);/m;
 // limit, so none is passed: an undocumented flag is one more way for the probe to break, and the
 // 60 s ceiling, which ends the whole process tree, is the bound on time. A Claude Code that does
 // not know one of these flags answers with an error, and that reads as unknown.
-const PROBE_GOAL = 'reply with the word acolyte-probe-ok and stop';
+const PROBE_WORD = 'acolyte-probe-ok';
+const PROBE_GOAL = `reply with the word ${PROBE_WORD} and stop`;
 const PROBE_PROMPT = `/goal ${PROBE_GOAL}`;
 const PROBE_ARGS = Object.freeze(['-p', PROBE_PROMPT, '--tools', '', '--strict-mcp-config', '--no-session-persistence']);
 const PROBE_COMMAND = `claude -p "${PROBE_PROMPT}" --tools "" --strict-mcp-config --no-session-persistence`;
@@ -309,7 +310,12 @@ function classifyProbe(run) {
         : run.error.message;
     return { result: 'unknown', detail: `The probe could not run: ${why}.` };
   }
-  if (run && run.status === 0 && !/unknown (slash )?command/i.test(output)) {
+  // POSITIVE EVIDENCE ONLY (2026-10-20). Any exit 0 used to read as accepted, so "Unknown skill:
+  // goal", a trust prompt or a reworded error read as "not restricted". Now the answer must carry
+  // the goal's own word, which only an accepted /goal produces: Claude Code echoes the condition
+  // ("Goal set: <condition>", read from the 2.1.293 binary) and the model's reply to it says the
+  // word. The refusal, the trust-gate message and an unknown-command answer do not contain it.
+  if (run && run.status === 0 && output.includes(PROBE_WORD) && !/unknown (skill|slash command|command)/i.test(output)) {
     return { result: 'not restricted', detail: 'Claude Code accepted /goal, so hooks are not restricted by policy here.' };
   }
   const first = output.trim().split(/\r?\n/)[0] || `exit ${run ? run.status : '?'}`;

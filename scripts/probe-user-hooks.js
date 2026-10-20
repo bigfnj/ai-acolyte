@@ -252,8 +252,10 @@ function freshDirectory(dir) {
 // uncaught throw. Now, as src/memory-guard-install.js memoryGuardProbe does it, the run is async
 // and the deadline calls endProcessTree (src/exec-resolve.js), which ends cmd.exe and everything
 // under it. A run settles on 'close' or, should 'close' never come (a process that survived the
-// kill still holding a pipe), KILL_GRACE_MS after the kill. Resolves, never rejects, with
-// { status } or { error }, plus stdout and stderr.
+// kill still holding a pipe: on POSIX any grandchild, since the deadline ends the child alone;
+// on Windows one whose parent had already exited, so taskkill /T cannot find it), KILL_GRACE_MS
+// after the kill, letting go of the pipes so the probe can still exit. Resolves, never rejects,
+// with { status } or { error }, plus stdout and stderr.
 const KILL_GRACE_MS = 2000;
 const OUTPUT_CAP = 4 * 1024 * 1024;
 function runClaude(options, args, cwd, endTree) {
@@ -286,10 +288,17 @@ function runClaude(options, args, cwd, endTree) {
       child[stream].on('data', (chunk) => { if (out[stream].length < OUTPUT_CAP) out[stream] += chunk; });
     }
     let killed = false;
+    // Settling is not enough when 'close' never comes: the pipes a survivor holds keep this
+    // process's loop alive, so the probe would print its report and never exit. They are let go.
+    const abandon = () => {
+      for (const stream of [child.stdin, child.stdout, child.stderr]) try { stream.destroy(); } catch { /* gone */ }
+      try { child.unref(); } catch { /* gone */ }
+      settle({ error: timedOut() });
+    };
     deadline = setTimeout(() => {
       killed = true;
       Promise.resolve(end(child)).catch(() => {}).then(() => {
-        grace = setTimeout(() => settle({ error: timedOut() }), KILL_GRACE_MS);
+        grace = setTimeout(abandon, KILL_GRACE_MS);
       });
     }, options.timeoutMs);
     // A program that cannot start emits 'error' then 'close'; one already running that fails a

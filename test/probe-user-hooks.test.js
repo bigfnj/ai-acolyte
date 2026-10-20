@@ -28,6 +28,21 @@ if (args[0] === '--version') { process.stdout.write('9.9.9 (Claude Code)\\n'); p
 // as claude.exe under cmd.exe does. linger: answers and exits 0, leaving a detached grandchild
 // running in the directory. Grandchildren's pids go to STUB_MARK.pids and a hanging stub's own to
 // STUB_MARK.stubs, so the test can check and clean up.
+// escape: never answers, and leaves a process holding the output pipes whose own parent has
+// exited, so a tree kill from the top cannot find it (on POSIX nothing would). It runs in the home
+// directory: not the probe's, so only the pipes are at stake, and not the fixture's, whose removal
+// it held up on Windows after it was killed (measured: EPERM until the test process ended).
+// Its pid goes to .pids.
+if (mode === 'escape') {
+  const inner = "const g = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], "
+    + "{ detached: true, stdio: 'inherit', cwd: process.argv[2], windowsHide: true }); "
+    + "require('fs').appendFileSync(process.argv[1], g.pid + ' '); process.exit(0);";
+  require('child_process').spawn(process.execPath, ['-e', inner, process.env.STUB_MARK + '.pids', require('os').homedir()],
+    { stdio: 'inherit', windowsHide: true });
+  fs.appendFileSync(process.env.STUB_MARK + '.stubs', process.pid + ' ');
+  setInterval(() => {}, 1000);
+  return;
+}
 if (mode === 'hang' || mode === 'linger') {
   const pids = process.env.STUB_MARK + '.pids';
   const linger = mode === 'linger';
@@ -80,11 +95,12 @@ const alive = (pid) => {
 function fixture(t) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-probe-hooks-'));
   const mark = path.join(tmp, 'calls.jsonl');
-  t.after(() => {
-    // Anything a stub left running holds its directory on Windows, so it goes first.
-    for (const pid of ['pids', 'stubs', 'parents'].flatMap((suffix) => recordedPids({ mark }, suffix))) {
-      try { process.kill(pid); } catch { /* already gone */ }
-    }
+  t.after(async () => {
+    // Anything a stub left running holds its directory on Windows, so it goes first, and the
+    // directory only once it is gone: a kill returns before the process has let go.
+    const pids = ['pids', 'stubs', 'parents'].flatMap((suffix) => recordedPids({ mark }, suffix));
+    for (const pid of pids) try { process.kill(pid); } catch { /* already gone */ }
+    for (const until = Date.now() + 10000; pids.some(alive) && Date.now() < until;) await new Promise((r) => setTimeout(r, 50));
     fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   const bin = path.join(tmp, 'bin');
@@ -107,9 +123,9 @@ function fixture(t) {
 
 // The probe as a child process, its base (AI_ACOLYTE_PROBE_BASE, and os.tmpdir() for anything
 // else) pointed into the fixture.
-function runProbe(f, args, mode, extraEnv = {}) {
+function runProbe(f, args, mode, extraEnv = {}, timeout = 90000) {
   return spawnSync(process.execPath, [SCRIPT, '--claude', f.claude, ...args], {
-    cwd: ROOT, encoding: 'utf8', timeout: 90000, windowsHide: true,
+    cwd: ROOT, encoding: 'utf8', timeout, windowsHide: true,
     env: { ...process.env, AI_ACOLYTE_PROBE_BASE: f.temp, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark, ...extraEnv },
   });
 }
@@ -324,6 +340,23 @@ test('a run whose close never comes still settles, as timed out, after the deadl
   assert.equal(result.status, null);
   assert.ok(Date.now() - started >= 500, 'settled before the deadline');
   assert.ok(recordedPids(f, 'stubs').some(alive), 'the stand-in tree kill ended the stub, so this did not test the grace');
+});
+
+// Settling is not finishing: a survivor's pipes kept the probe's own loop alive, so it printed
+// its report and never exited. On Ubuntu that is every timed-out run with a grandchild.
+// MUTATION: settle on the grace without letting go of the pipes and the probe never exits.
+test('a process the tree kill cannot reach does not keep the probe from finishing', (t) => {
+  const f = fixture(t);
+  const run = runProbe(f, ['--run-claude', '--variants', 'settings-flag', '--events', 'UserPromptSubmit', '--timeout-seconds', '1'],
+    'escape', {}, 30000);
+  assert.notEqual(run.signal, 'SIGTERM', 'the probe was still running at 30 s');
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /^\/goal x: unknown \(claude did not finish: ETIMEDOUT\)/m);
+  assert.match(run.stdout, /^settings-flag UserPromptSubmit: inconclusive \(claude did not finish: ETIMEDOUT\)/m);
+  assert.match(run.stdout, /^report: /m);
+  const survivors = recordedPids(f);
+  assert.equal(survivors.length, 2, `expected one survivor per run, got ${survivors.join(' ')}`);
+  assert.ok(survivors.every(alive), 'a survivor was ended after all, so this did not reach the grace');
 });
 
 // A directory the probe cannot empty is a message and exit 3, not an uncaught throw. Two ways in:

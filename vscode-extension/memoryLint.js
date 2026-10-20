@@ -256,18 +256,34 @@ function statusBlock(text) {
 }
 
 // recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, the bidi controls and
-// the invisible format characters (U+00AD, U+200B-U+200D, U+2060-U+2064, U+FEFF, the tag block
-// U+E0000-U+E007F), removed before anything else. Code points, as recall.py writes them; threadText
-// walks the text with Array.from, one code point at a time, so a tag character is one entry here.
+// the invisible format characters (U+00AD, U+034F, U+180E, U+200B-U+200D, U+2060-U+2065, U+FEFF,
+// the tag block U+E0000-U+E007F, the variation selectors U+E0100-U+E01EF), removed before anything
+// else. Code points, as recall.py writes them; stripHidden walks the text with Array.from, one code
+// point at a time, so a tag character is one entry here.
 const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
 const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
-  ...span(0x86, 0xa0), 0x00ad, 0x061c, ...span(0x200b, 0x2010), ...span(0x202a, 0x202f),
-  ...span(0x2060, 0x2065), ...span(0x2066, 0x206a), 0xfeff, ...span(0xe0000, 0xe0080)]);
+  ...span(0x86, 0xa0), 0x00ad, 0x034f, 0x061c, 0x180e, ...span(0x200b, 0x2010), ...span(0x202a, 0x202f),
+  ...span(0x2060, 0x206a), 0xfeff, ...span(0xe0000, 0xe0080), ...span(0xe0100, 0xe01f0)]);
 
-// recall.py _thread_text: THREAD_STRIP removed, Python's str.split() whitespace collapsed, comment
+// recall.py _strip_hidden: THREAD_STRIP removed, then each variation selector U+FE00-U+FE0F that
+// does not directly follow a kept character which is not one itself, so a single emoji
+// presentation selector stays and a run goes.
+const isSelector = (cp) => cp >= 0xfe00 && cp <= 0xfe0f;
+function stripHidden(raw) {
+  const out = [];
+  for (const ch of Array.from(raw)) {
+    const cp = ch.codePointAt(0);
+    if (THREAD_STRIP.has(cp)) continue;
+    if (isSelector(cp) && (!out.length || isSelector(out[out.length - 1].codePointAt(0)))) continue;
+    out.push(ch);
+  }
+  return out.join('');
+}
+
+// recall.py _thread_text: stripHidden, Python's str.split() whitespace collapsed, comment
 // markers neutralised, a leading `#` escaped. Uncapped, as Python's is.
 function threadText(raw) {
-  const kept = Array.from(raw).filter((ch) => !THREAD_STRIP.has(ch.codePointAt(0))).join('');
+  const kept = stripHidden(raw);
   const text = kept.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
     .split('<!--').join('&lt;!--').split('-->').join('--&gt;');
   return text.startsWith('#') ? String.fromCharCode(92) + text : text;
@@ -604,7 +620,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1466#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1495#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.

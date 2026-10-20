@@ -49,9 +49,11 @@
 // settings files and report.json stay in a second fixed directory, printed at the end.
 // Nothing outside those two directories is written by this script.
 //
-// Exit codes: 0 every run completed (whatever it found); 1 claude could not be started;
-// 2 refused (no --run-claude) or a usage error; 3 a probe directory could not be emptied (a
-// process still running in it, on Windows), named in the message.
+// Exit codes: 0 every run completed (whatever it found; when the probe directory cannot be emptied
+// after the last run, a warning names it, report.json records it as `cleanup`, and the exit is
+// still 0); 1 claude could not be started; 2 refused (no --run-claude) or a usage error; 3 a probe
+// directory could not be emptied before a run (a process still running in it, on Windows), named
+// in the message.
 
 const fs = require('fs');
 const os = require('os');
@@ -295,10 +297,14 @@ function runClaude(options, args, cwd, endTree) {
       try { child.unref(); } catch { /* gone */ }
       settle({ error: timedOut() });
     };
+    // The grace counts from the kill's end, since taskkill /T can take seconds. A run that settled
+    // while the kill was still running ('close' usually comes before taskkill returns) arms none:
+    // settle has already cleared a handle that was still null, so a timer armed now would never be
+    // cleared, and would keep the probe alive for KILL_GRACE_MS after its last run (audit of 1.9.2).
     deadline = setTimeout(() => {
       killed = true;
       Promise.resolve(end(child)).catch(() => {}).then(() => {
-        grace = setTimeout(abandon, KILL_GRACE_MS);
+        if (!settled) grace = setTimeout(abandon, KILL_GRACE_MS);
       });
     }, options.timeoutMs);
     // A program that cannot start emits 'error' then 'close'; one already running that fails a
@@ -340,8 +346,9 @@ function judgeGoal(run) {
   return 'unknown';
 }
 
-// A directory that cannot be emptied ends the probe with exit 3 and a message naming it, and the
-// report as far as it got is written when the work directory still takes it.
+// A directory that cannot be emptied before a run ends the probe with exit 3 and a message naming
+// it, and the report as far as it got is written when the work directory still takes it. After
+// the last run it is a warning (executeRuns).
 async function execute(options, runs, paths, io) {
   const report = { at: new Date().toISOString(), platform: process.platform, claude: options.claude, runs: [] };
   try {
@@ -387,7 +394,17 @@ async function executeRuns(options, runs, paths, io, report) {
     }
     report.runs.push(row);
   }
-  freshDirectory(paths.cwd);
+  // Every run has completed and its verdict is printed, so a directory that cannot be emptied now
+  // (a process the last run left in it) is a warning, not a stop: the report is still written and
+  // named, records it as `cleanup`, and the exit stays 0. The next probe meets the same directory
+  // before its first run, and stops there with exit 3 if the process is still in it.
+  try {
+    freshDirectory(paths.cwd);
+  } catch (error) {
+    if (!error || !error.probeDirectory) throw error;
+    io.err.write(`probe-user-hooks: warning: every run completed, but ${error.message}.\n`);
+    report.cleanup = error.message;
+  }
   fs.writeFileSync(paths.report, `${JSON.stringify(report, null, 2)}\n`);
   io.out.write(`report: ${paths.report}\n`);
   return 0;

@@ -236,15 +236,22 @@ test('CLI --gates rejects an unknown verb with usage', (t) => {
 });
 
 // Whatever followed `--gates on` was dropped. A second VERB there is the dispatch chain's
-// refusal (the test after this one); this one is the stray words gates() itself refuses.
+// refusal (the test after this one), and so is an option the verb does not take (exit 2, named);
+// this one is the stray words gates() itself refuses.
 // MUTATION: remove the extra-argument refusal in gates() and `on` installs, exit 0.
 test('CLI --gates on|off|status|refresh refuse an extra argument and write nothing', (t) => {
   const home = tempHome(t);
-  for (const args of [['--gates', 'on', '--verbose'], ['--gates', 'on', 'extra'],
-    ['--gates', 'refresh', '--json'], ['extra', '--gates', 'status']]) {
+  for (const args of [['--gates', 'on', 'extra'], ['extra', '--gates', 'status']]) {
     const bad = runCli(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
     assert.match(bad.stderr, /usage: wildcard-perms --gates on\|off\|status\|refresh/, args.join(' '));
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  for (const [args, option] of [[['--gates', 'on', '--verbose'], '--verbose'], [['--gates', 'refresh', '--json'], '--json']]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: unrecognized option ${option} for --gates; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
     assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
   }
   assert.equal(runCli(home, ['--gates', 'on']).status, 0, 'precondition: the same verb alone runs');
@@ -287,14 +294,21 @@ test('CLI refuses two verbs in one run, names them, and runs neither', (t) => {
 // with the shell-style block installed.
 test('CLI --guidance on|off|status refuse an extra argument and write nothing', (t) => {
   const home = tempHome(t);
-  for (const args of [['--guidance', 'on', 'now'], ['--guidance', 'on', '--verbose'],
-    ['--guidance', 'status', 'extra'], ['extra', '--guidance', 'off'], ['--guidance', 'off', '--json']]) {
+  for (const args of [['--guidance', 'on', 'now'], ['--guidance', 'status', 'extra'], ['extra', '--guidance', 'off']]) {
     const bad = runCli(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
     assert.equal(bad.stderr, 'usage: wildcard-perms --guidance on|off|status\n'
       + '       wildcard-perms --guidance derived\n'
       + '       wildcard-perms --guidance accept|decline|reset <id>\n', args.join(' '));
     assert.equal(bad.stdout, '', args.join(' '));
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  // An option the switches do not take is the dispatch chain's refusal, exit 2, naming it.
+  for (const [args, option] of [[['--guidance', 'on', '--verbose'], '--verbose'], [['--guidance', 'off', '--json'], '--json']]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: unrecognized option ${option} for --guidance; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
     assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
   }
   const derived = runCli(home, ['--guidance', 'derived', '--workspace', home]);
@@ -577,6 +591,8 @@ function storeRecall(args) {
     if (process.env.ACOLYTE_STUB_EDIT === 'warn') {
       process.stderr.write('[recall] could not prune old snapshot 20200101T000000Z-retire (PermissionError: denied); it is kept.\n');
     }
+    // A warning that carries terminal control, as a memory's own text can (2026-10-20).
+    if (process.env.ACOLYTE_STUB_EDIT === 'warn-esc') process.stderr.write(`[recall] edit ${String.fromCharCode(27)}]0;PWNED${String.fromCharCode(7)}\r\n`);
     // os.EOL: a real Python's print() writes CRLF on Windows.
     process.stdout.write(`${out.join(os.EOL)}${os.EOL}`);
     process.exit(0);
@@ -607,6 +623,7 @@ function storeRecall(args) {
     }
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
+    if (process.env.ACOLYTE_STUB_COMPILE === 'warn-esc') process.stderr.write(`[recall] compile ${String.fromCharCode(27)}[2J${String.fromCharCode(155)}31m\r\n`);
     process.stdout.write(`compiled ${gates.length} gate(s)${os.EOL}`);
     process.exit(0);
   }
@@ -906,6 +923,32 @@ test('CLI --gates retire or restore that is refused changes nothing and exits 1'
   // check and the last case lists the gates first (calls() is not empty).
 });
 
+test('CLI --gates passes memory text to the terminal with its control characters shown as ?', (t) => {
+  // The third audit pass (2026-10-20): an `agents:` line holding ESC ] 0 ; ... BEL ESC [ 2 J retitled and
+  // cleared the terminal through the restore refusal, and recall.py's stderr was passed on raw.
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const s = storeHome(t, { ...MEMORIES, 'feedback_evil.md': { scope: 'global', gate: 'Evil gate.', agents: `[claude, ${ESC}]0;PWNED${BEL}${ESC}[2J]` } });
+  const raw = (text) => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(text);
+
+  const refused = s.run(['--gates', 'restore', 'feedback_evil']);
+  assert.equal(refused.status, 1);
+  assert.equal(raw(refused.stderr), false, JSON.stringify(refused.stderr));
+  assert.match(refused.stderr, /cannot be read \(`agents:` names an agent this compiler does not know: \?\]0;pwned\?\?\[2j\), and a restore/);
+
+  const retired = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_EDIT: 'warn-esc', ACOLYTE_STUB_COMPILE: 'warn-esc' });
+  assert.equal(retired.status, 0, retired.stderr);
+  assert.equal(raw(retired.stderr), false, JSON.stringify(retired.stderr));
+  assert.ok(retired.stderr.includes('[recall] edit ?]0;PWNED?\n'), JSON.stringify(retired.stderr));
+  assert.ok(retired.stderr.includes('[recall] compile ?[2J?31m\n'), JSON.stringify(retired.stderr));
+
+  const refresh = s.run(['--gates', 'refresh'], { ACOLYTE_STUB_COMPILE: 'warn-esc' });
+  assert.equal(raw(refresh.stderr), false, JSON.stringify(refresh.stderr));
+  assert.ok(refresh.stderr.includes('[recall] compile ?[2J?31m\n'), JSON.stringify(refresh.stderr));
+  // MUTATIONS: make terminalText return its input and every assertion on raw() fails; drop it from
+  // refuse(), from the edit's or the compile's passthrough, or from refresh's, and that case fails alone.
+});
+
 test('CLI --gates retire whose compile fails after the edit says the memories changed, names the snapshot, and exits 1', (t) => {
   const s = storeHome(t, MEMORIES);
   s.run(['--gates', 'refresh']);
@@ -1141,6 +1184,49 @@ test('CLI --gates retire takes a dashed name only after "--", and never reads a 
   // MUTATIONS: emit the spaced `--gates-retire -dash.md` in gateSteps and the retire exits 1 on
   // the stand-in's argparse usage error, as the real recall.py did; drop the `takesNames` branch
   // in the dispatch chain and `--gates retire --seed` runs --seed (exit 0, settings.json rewritten).
+});
+
+// What stands BEFORE `--gates retire|restore` is not a name, so it is held to the rules of every
+// other verb: `--bypass on --gates retire x` retired x and dropped the bypass, exit 0, and `--seed
+// --gates retire` printed the gates usage. A verb there is a second verb, a dashed word an
+// unrecognized option, a bare word a usage error, as `extra --gates status` is.
+// MUTATION: replace the lead check in the `takesNames` branch with a bare `gates(argv)` and
+// `--bypass on --gates retire feedback_gadget` retires the gate, exit 0.
+test('CLI --gates retire|restore refuse a verb or a word before --gates, and run nothing', (t) => {
+  const s = storeHome(t, MEMORIES);
+  const settingsPath = path.join(s.home, '.claude', 'settings.json');
+  const settings = fs.readFileSync(settingsPath, 'utf8');
+  for (const [args, named] of [
+    [['--bypass', 'on', '--gates', 'retire', 'feedback_gadget'], '--gates --bypass'],
+    [['--seed', '--gates', 'retire'], '--seed --gates'],
+    [['--learn', 'status', '--gates', 'restore', 'feedback_old_rule'], '--learn --gates'],
+  ]) {
+    const bad = s.run(args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: one verb at a time, got ${named}; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
+    assert.equal(bad.stdout, '', `${args.join(' ')} ran a verb`);
+  }
+  const option = s.run(['--verbose', '--gates', 'retire', 'feedback_gadget']);
+  assert.equal(option.status, 2, option.stderr);
+  assert.ok(option.stderr.startsWith('wildcard-perms: unrecognized option --verbose for --gates; nothing was run\n\n'),
+    option.stderr);
+  const word = s.run(['extra', '--gates', 'restore', 'feedback_old_rule']);
+  assert.equal(word.status, 1, word.stderr);
+  assert.equal(word.stderr, 'usage: wildcard-perms --gates on|off|status|refresh\n'
+    + '       wildcard-perms --gates list [--json]\n'
+    + '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n');
+  assert.deepEqual(s.calls(), [], 'no refused run reached recall.py');
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), settings, 'no verb wrote settings.json');
+  assert.match(s.memory('feedback_gadget.md'), /scope: global/);
+  assert.match(s.memory('feedback_old_rule.md'), /scope: retired/);
+
+  // After the verb a verb's spelling is still a name, refused as an option and never dispatched,
+  // and the same retire alone runs.
+  assert.match(s.run(['--gates', 'retire', '--bypass']).stderr, /^wildcard-perms: unrecognized option --bypass\n/);
+  const retire = s.run(['--gates', 'retire', 'feedback_gadget']);
+  assert.equal(retire.status, 0, retire.stderr);
+  assert.match(s.memory('feedback_gadget.md'), /scope: retired/, 'precondition: the retire alone runs');
 });
 
 test('CLI --gates retire of a name that starts with a space retires it as spelled, never its twin', (t) => {

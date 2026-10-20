@@ -67,6 +67,24 @@ if (prompt === '/goal x') {
   process.stdout.write("/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy)\\n");
   process.exit(1);
 }
+// stuck-last: answers as a restricted client, and a hook run (with one variant and one event, the
+// last run) also leaves its directory impossible to empty: a detached sleeper standing in it on
+// Windows (its pid to .pids, written here: the sleeper's own start can come after the test's
+// cleanup has read the file), a subdirectory nobody may write to on POSIX (its path to .held).
+if (mode === 'stuck-last') {
+  if (process.platform === 'win32') {
+    const sleeper = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
+      { cwd: process.cwd(), stdio: 'ignore', detached: true, windowsHide: true });
+    fs.appendFileSync(process.env.STUB_MARK + '.pids', sleeper.pid + ' ');
+    sleeper.unref();
+  } else {
+    const held = path.join(process.cwd(), 'held');
+    fs.mkdirSync(held);
+    fs.writeFileSync(path.join(held, 'file'), 'x');
+    fs.chmodSync(held, 0o555);
+    fs.appendFileSync(process.env.STUB_MARK + '.held', held + '\\n');
+  }
+}
 const at = args.indexOf('--settings');
 const file = at >= 0 ? args[at + 1] : path.join(process.cwd(), '.claude', 'settings.local.json');
 const hooks = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')).hooks || {}) : {};
@@ -101,7 +119,13 @@ function fixture(t) {
     const pids = ['pids', 'stubs', 'parents'].flatMap((suffix) => recordedPids({ mark }, suffix));
     for (const pid of pids) try { process.kill(pid); } catch { /* already gone */ }
     for (const until = Date.now() + 10000; pids.some(alive) && Date.now() < until;) await new Promise((r) => setTimeout(r, 50));
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    // Retried by hand: Windows lets go of a directory a moment after the last process in it has
+    // gone, and on Node 24 rmSync gave up on that EPERM at once, maxRetries or not (measured: a
+    // full-suite run failed here 2.5 s into a test whose rmSync had 10 retries at 200 ms).
+    for (let attempt = 0; ; attempt += 1) {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); break; } catch (error) { if (attempt >= 50) throw error; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
   });
   const bin = path.join(tmp, 'bin');
   fs.mkdirSync(bin);
@@ -325,8 +349,9 @@ test('a claude that never answers is ended with its tree, and every later run st
 // MUTATION: drop the grace timer and the run never settles (the test times out).
 test('a run whose close never comes still settles, as timed out, after the deadline and the grace', { timeout: 30000 }, async (t) => {
   const f = fixture(t);
-  const cwd = path.join(f.tmp, 'cwd');
-  fs.mkdirSync(cwd);
+  // The stub and its grandchild live on here, so they stand in the temp directory itself, which
+  // nothing removes: in the fixture they held up its removal (EPERM on a loaded full run).
+  const cwd = os.tmpdir();
   const saved = { STUB_MODE: process.env.STUB_MODE, STUB_MARK: process.env.STUB_MARK };
   Object.assign(process.env, { STUB_MODE: 'hang', STUB_MARK: f.mark });
   let result;
@@ -340,6 +365,34 @@ test('a run whose close never comes still settles, as timed out, after the deadl
   assert.equal(result.status, null);
   assert.ok(Date.now() - started >= 500, 'settled before the deadline');
   assert.ok(recordedPids(f, 'stubs').some(alive), 'the stand-in tree kill ended the stub, so this did not test the grace');
+});
+
+// A run that settles on 'close' while its tree kill is still running arms no grace. The kill here
+// is a stand-in that ends the child and returns only after its 'close', the order the real
+// taskkill /T usually gives on Windows. The grace used to be armed when the kill returned, after
+// settle had cleared a handle that was still null, so nothing cleared it and the probe's process
+// lived on for KILL_GRACE_MS after its last run (audit of 1.9.2: 6 of 6 with a .cmd shim). In a
+// driver process, whose loop must be empty once the run has settled; the stand-in claude stands
+// in the temp directory itself, which nothing here removes.
+// MUTATION: arm the grace without asking `settled` and the driver is still running 1 s after the
+// run settled.
+test('a run that closes while its tree kill is still running leaves no timer behind', () => {
+  const driver = [
+    `const probe = require(${JSON.stringify(SCRIPT)});`,
+    'let ended = false;',
+    "const end = (child) => new Promise((resolve) => { child.once('close', () => setImmediate(() => { ended = true; resolve(); })); child.kill(); });",
+    `probe.runClaude({ claude: process.execPath, timeoutMs: 300 }, ['-e', 'setInterval(() => {}, 1000)'], ${JSON.stringify(os.tmpdir())}, end)`,
+    '  .then((result) => {',
+    "    process.stdout.write(JSON.stringify({ code: result.error && result.error.code, endedBeforeSettle: ended }) + '\\n');",
+    "    setTimeout(() => { process.stdout.write('STILL RUNNING\\n'); process.exit(9); }, 1000).unref();",
+    '  });',
+  ].join('\n');
+  const run = spawnSync(process.execPath, ['-e', driver], { cwd: ROOT, encoding: 'utf8', timeout: 20000, windowsHide: true });
+  const answer = JSON.parse(run.stdout.split(/\r?\n/)[0] || 'null');
+  assert.equal(answer && answer.code, 'ETIMEDOUT', `${run.stdout}\n${run.stderr}`);
+  assert.equal(answer.endedBeforeSettle, false, 'WITNESS: the run settled before the stand-in kill returned');
+  assert.doesNotMatch(run.stdout, /STILL RUNNING/, 'a timer armed after the run settled kept the probe alive');
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
 });
 
 // Settling is not finishing: a survivor's pipes kept the probe's own loop alive, so it printed
@@ -384,4 +437,34 @@ test('a process left running in the probe directory stops the next run with exit
   const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
   assert.match(report.stopped, /could not empty and recreate/);
   assert.equal(report.runs.length, 2, 'the version and goal rows, then the stop');
+});
+
+// A directory that cannot be emptied AFTER the last run is a warning: every run completed and its
+// verdict is printed, so the exit stays 0 and the report is still written and named. It used to
+// be the same stop as a failure before a run: exit 3, "Stopping." and no "report:" line, while
+// the header said 0 meant every run completed (audit of 1.9.2).
+// MUTATION: call the closing freshDirectory bare again and the probe exits 3 with no report line.
+test('a probe directory that cannot be emptied after the last run is a warning, and the report is still named', {
+  skip: typeof process.getuid === 'function' && process.getuid() === 0 && 'root may write where the stub forbids it',
+}, (t) => {
+  const f = fixture(t);
+  try {
+    const run = runProbe(f, ['--run-claude', '--variants', 'settings-flag', '--events', 'UserPromptSubmit'], 'stuck-last');
+    assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+    assert.match(run.stdout, /^\/goal x: restricted\./m);
+    assert.deepEqual(verdictLines(run.stdout), ['settings-flag UserPromptSubmit: not fired (Write landed: yes; claude exit 0)']);
+    assert.match(run.stderr,
+      /^probe-user-hooks: warning: every run completed, but could not empty and recreate .*ai-acolyte-user-hook-probe \((EBUSY|EPERM|ENOTEMPTY|EACCES)\)\. A process may still be running in it/m);
+    assert.doesNotMatch(run.stderr, /Stopping/);
+    assert.doesNotMatch(run.stderr, /^\s+at /m, 'a stack trace');
+    assert.match(run.stdout, /^report: .*report\.json$/m);
+    const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
+    assert.equal(report.runs.length, 3, 'the version, goal and hook rows');
+    assert.match(report.cleanup, /could not empty and recreate/);
+    assert.equal(report.stopped, undefined);
+  } finally {
+    // POSIX: the subdirectory the stub locked, opened again so the fixture can be removed.
+    const held = `${f.mark}.held`;
+    if (fs.existsSync(held)) for (const dir of fs.readFileSync(held, 'utf8').split('\n').filter(Boolean)) fs.chmodSync(dir, 0o755);
+  }
 });

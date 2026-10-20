@@ -44,7 +44,7 @@ while the install is not current and a compile can run (with no DevToolbox venv 
 instead). The whole card is hidden while `memory.enabled` is off; the
 open threads keep running, and the palette command still reaches them.
 
-Version **1.9.2** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.9.3** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -179,7 +179,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo**, **Why prompt?** and
 **Turn on** / **Turn off**, and they post five of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:5397#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:5398#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -242,10 +242,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:5346#showWarningMessage`).
+`vscode-extension/extension.js:5347#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:5146#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:5147#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -390,6 +390,9 @@ gate memories of the store that compiles, retires or restores the ones you unche
 `~/.claude/wildcarding/gate-snapshots`), compiles once, and installs the result only while
 `gates.enabled` is on. **Compile and install** in the same panel compiles and installs what the
 memories hold, which is how a change whose compile or install failed is finished.
+A gate's name, title or text that holds hidden characters (controls, bidi controls, zero-width
+and other invisible format characters, tag characters, runs of variation selectors) shows each
+one as `?`, and the row is tagged; the compile removes them from the text.
 `memory.dir`, `gates.enabled` and `guidance.enabled` are **machine-scoped** for the same reason
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`

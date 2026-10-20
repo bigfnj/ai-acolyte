@@ -900,7 +900,10 @@ def _gate_agents(text):
         return GATE_AGENTS, None
     unknown = [n for n in names if n.lower() not in GATE_AGENTS]
     if unknown:
-        return (), "`agents:` names an agent this compiler does not know: " + ", ".join(unknown)
+        # Each name through _shown (2026-10-20): it is the memory's own text, and this string is
+        # printed to a terminal by --lint and by the compile's stderr, where an ESC in a name
+        # retitled or cleared the terminal.
+        return (), "`agents:` names an agent this compiler does not know: " + ", ".join(map(_shown, unknown))
     wanted = {n.lower() for n in names}
     return tuple(a for a in GATE_AGENTS if a in wanted), None
 
@@ -1181,6 +1184,17 @@ def lint():
             print(f"    {name[:-3]}  ({problem})")
         print()
 
+    # A compiled gate whose block holds characters the compile removes (_gate, 2026-10-20): the
+    # memory carries text nobody reading it can see, and CLAUDE.md and AGENTS.md get the rest. A
+    # finding with a fix, which is to take them out of the memory.
+    gate_hidden = [(s, n) for s in sorted(gateable) for n in [_gate_hidden(texts[s])] if n]
+    if gate_hidden:
+        print("  gate memory whose block holds hidden characters -- removed when it compiles, so the "
+              "instruction files get only the text a person reading it sees:")
+        for s, n in gate_hidden:
+            print(f"    {s}  ({n} hidden character{'' if n == 1 else 's'})")
+        print()
+
     # Gate memories in the OTHER stores, which never compile (see _other_store_gates). Worded
     # without the phrase "not compiled" on purpose: scripts/verify-release.ps1 fails its
     # "every standing order is compiled" check on that phrase, and a gate the user keeps in a
@@ -1265,7 +1279,7 @@ def lint():
         print(f"  `status:` value that is neither listed ({', '.join(THREAD_STATUSES)}) nor closed "
               f"({', '.join(THREAD_CLOSED)}) -- left out of the open threads:")
         for stem, value in thread_findings["unknown"]:
-            print(f"    {stem}  ({value or 'empty'})")
+            print(f"    {stem}  ({_shown(value) if value else 'empty'})")
         print()
     if thread_findings["no-block"]:
         print(f"  listed `status:` with no {STATUS_BEGIN} ... {STATUS_END} block outside code "
@@ -1312,7 +1326,7 @@ def lint():
     # what they test: the line target is part of "within budget", and "comments close" is new.
     if not (over_budget or over_ceiling or over_lines or over or broken or comment_defects or unresolved
             or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
-            or other_gates or other_unreadable or gate_excluded or thread_problems):
+            or other_gates or other_unreadable or gate_excluded or gate_hidden or thread_problems):
         print("  clean: index within budget, links resolve, comments close, every standing order compiled.\n")
     return texts
 
@@ -1351,14 +1365,29 @@ def _gate(text):
     frontmatter plus a paired GATE_BLOCK, and _gate_agents' reading of `agents:`. The one
     selection rule, shared by the compiler, --lint, and --lint's census of the OTHER stores
     (through _gate_body), so no report can count a memory the compiler would skip, or skip one
-    it would take. `problem` set means the compiler leaves the gate out for every agent."""
+    it would take. `problem` set means the compiler leaves the gate out for every agent.
+
+    The body has _GATE_STRIP's characters and runs of variation selectors removed before it is
+    trimmed (_strip_hidden, 2026-10-20), so what compiles is what a person reading the memory
+    sees; _gate_hidden counts what went, for --lint. --gates-list keeps the text as written
+    (_gate_entry), so the gates panel can show where the hidden characters are."""
     if _fm(text, "scope") != "global":
         return None
     m = GATE_BLOCK.search(text)
     if not m:
         return None
     agents, problem = _gate_agents(text)
-    return m.group(1).strip(), agents, problem
+    return _strip_hidden(m.group(1), _GATE_STRIP).strip(), agents, problem
+
+
+def _gate_hidden(text):
+    """How many characters the compile removes from a memory's gate block (_gate's strip): 0 for
+    none, and for a memory the compile does not take (no gate, or its `agents:` unreadable)."""
+    gate = _gate(text)
+    if gate is None or gate[2] is not None:
+        return 0
+    block = GATE_BLOCK.search(text).group(1)
+    return len(block) - len(_strip_hidden(block, _GATE_STRIP))
 
 
 def _gate_body(text):
@@ -1747,21 +1776,55 @@ def _status_block(text):
 # format characters, which a person reading the file cannot see and a model reading it still does:
 # the soft hyphen U+00AD, the zero-width space, non-joiner and joiner U+200B-U+200D, the word joiner
 # and invisible operators U+2060-U+2064, U+FEFF, and the tag block U+E0000-U+E007F, whose
-# characters spell out ASCII text that renders as nothing. Code points, not escapes, so no writer
-# can turn them into the characters themselves. memoryLint.js THREAD_STRIP is the same set, held to
-# it by test/threads-compile.sh.
+# characters spell out ASCII text that renders as nothing. Then (2026-10-20, the third pass) the
+# combining grapheme joiner U+034F, the Mongolian vowel separator U+180E and the unassigned U+2065,
+# each one hidden bit, and the variation selectors: U+E0100-U+E01EF always, and U+FE00-U+FE0F
+# unless one directly follows a character that is not a selector (_strip_hidden), which keeps the
+# single emoji presentation selector in a warning sign and removes a run, since a run of selectors
+# carries about a byte each and shows as nothing. Code points, not escapes, so no writer can turn
+# them into the characters themselves. memoryLint.js THREAD_STRIP and stripHidden are the same set
+# and rule, held to them by test/threads-compile.sh, and the gate bodies get them too (_GATE_STRIP).
 _THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
-                               *range(0x86, 0xA0), 0x00AD, 0x061C, *range(0x200B, 0x2010),
-                               *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A),
-                               0xFEFF, *range(0xE0000, 0xE0080)])
+                               *range(0x86, 0xA0), 0x00AD, 0x034F, 0x061C, 0x180E, *range(0x200B, 0x2010),
+                               *range(0x202A, 0x202F), *range(0x2060, 0x206A),
+                               0xFEFF, *range(0xE0000, 0xE0080), *range(0xE0100, 0xE01F0)])
+
+# The gate bodies' set (2026-10-20): a gate is a standing order installed into every session's
+# CLAUDE.md and AGENTS.md unattended, so its body loses what thread text loses. A body is
+# multi-line markdown and is not collapsed, so the line feed and the tab stay, and the controls
+# thread text leaves to str.split() go here instead: VT, FF, CR (text mode has already made every
+# line end a line feed), U+001C-U+001F and NEL.
+_GATE_STRIP = dict.fromkeys([*_THREAD_STRIP, 0x0B, 0x0C, 0x0D, *range(0x1C, 0x20), 0x85])
+
+
+def _strip_hidden(text, table=_THREAD_STRIP):
+    """`text` with `table`'s characters removed, then every variation selector U+FE00-U+FE0F that
+    does not directly follow a kept character which is not one itself: the first selector after
+    a character stays, the rest of a run go, and so does one at the start. Judged against what is
+    kept, so a removed character between two selectors cannot make a run look like two singles.
+    memoryLint.js stripHidden is the same walk."""
+    out = []
+    for ch in text.translate(table):
+        if 0xFE00 <= ord(ch) <= 0xFE0F and (not out or 0xFE00 <= ord(out[-1]) <= 0xFE0F):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _shown(name):
+    """A name from a memory, as a terminal may be shown it: unchanged when every character of it
+    is printable, else ascii() of it, so an ESC, a BEL or a bidi control arrives as an escape and
+    not as the character (2026-10-20). For an `agents:` name, which a problem string carries to
+    --lint, to the compile's stderr, to --gates-list and from there to `wildcard-perms`."""
+    return name if name.isprintable() else ascii(name)
 
 
 def _thread_text(raw):
-    """One line of thread text: control and bidi characters removed (_THREAD_STRIP), whitespace
+    """One line of thread text: control and bidi characters removed (_strip_hidden), whitespace
     collapsed, every `<!--` and `-->` neutralised (Claude Code strips HTML comments, so a stray one
     would swallow the lines after it), and a leading `#` escaped. Not capped: _cap does that, so
     --lint can say how long it was."""
-    text = " ".join(raw.translate(_THREAD_STRIP).split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    text = " ".join(_strip_hidden(raw).split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
     return BACKSLASH + text if text.startswith("#") else text
 
 
@@ -1884,7 +1947,7 @@ def _compile_threads_text(texts=None):
     could not tell from a torn one."""
     threads, findings, _ = _collect_threads(texts)
     health = _index_health()
-    clean = lambda s: (" ".join(s.translate(_THREAD_STRIP).split())
+    clean = lambda s: (" ".join(_strip_hidden(s).split())
                        .replace("<!--", "&lt;!--").replace("-->", "--&gt;"))
     lines = []
     if health:

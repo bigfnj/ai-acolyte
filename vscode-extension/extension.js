@@ -55,7 +55,7 @@ const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const {
-  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe,
+  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe, PROBE_LONGEST_MS,
 } = require('./src/memory-guard-install');
 const { BUDGETS: GUARD_BUDGETS } = require('./src/memory-index-guard');
 const {
@@ -1227,14 +1227,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:759-767#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:775-783#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:1094-1098#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
+    // (memoryLint.js:1110-1114#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:994#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:1010#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1570,7 +1570,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:7089#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:7090#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1827,7 +1827,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:7122#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:7123#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -3796,7 +3796,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:493-502#NEGATIVE — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:525-534#NEGATIVE — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -3960,7 +3960,7 @@ function localDrainEnabled() {
 // promoting them into user scope from a parent window is the same trust problem the
 // gate below exists for. A Claude session running in a subfolder is covered anyway:
 // the CLI hook drains each session's own cwd on every tool call
-// (bin/wildcard-perms:537-546#hookCwd, `hookCwd(input)`).
+// (bin/wildcard-perms:563-572#hookCwd, `hookCwd(input)`).
 //
 // A folder on another file system (a virtual workspace, or a non-file scheme mixed
 // into a multi-root workspace) has an fsPath that names no file on this disk, so
@@ -4565,7 +4565,7 @@ async function probeUserHooks() {
       modal: true,
       detail: 'Runs claude -p "/goal ..." once, with no built-in tools and no saved session, in an empty '
         + 'directory of its own, and reads Claude Code\'s own answer. Where hooks are restricted it refuses at once; '
-        + 'where they are allowed this is one short real Claude Code turn. Ends after 60 s at most.',
+        + `where they are allowed this is one short real Claude Code turn. Ends after ${PROBE_LONGEST_MS / 1000} s at most.`,
     },
     'Check');
   if (choice !== 'Check' || deactivated) return;
@@ -4825,8 +4825,9 @@ function ensureOpenThreads(announce = false) {
 // so it can never settle, and counting it kept Refresh up after every click (2026-10-20); the
 // card's line names it instead. And with no compile possible (`blocked`, threadsCompileTools)
 // Refresh could only fail, and install the last compile, which ensure already does unattended.
+// threadsSettled is asked of readable states only: threadsNeedRefresh filters them first.
 function threadsSettled(state) {
-  return state.readable && state.compile === 'whole'
+  return state.compile === 'whole'
     && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
 }
 function threadsNeedRefresh(states, blocked = threadsCompileTools().blocked) {
@@ -7147,7 +7148,7 @@ async function deactivate() {
 // through textContent.
 
 const {
-  parseGatesList, planGateChanges, gateSteps, describePlan, parseEditOutput, changedButFailed,
+  parseGatesList, planGateChanges, gateSteps, describePlan, parseEditOutput, changedButFailed, markHidden,
 } = require('./src/gates-manage');
 const { GATES_BEGIN, GATES_END } = require('./src/agent-gates');
 
@@ -7367,19 +7368,14 @@ function loadedGateCounts() {
 // invisible character can show as another one: `feedback_` + U+202E + `elur_ytefas` + U+202C +
 // `.md` reads as `feedback_safety_rule.md`. Every such character becomes `?` wherever this file
 // SHOWS memory text (the page, the modal, a toast); the real name still goes into every message
-// and every recall.py argument. Rampage's ranges, as code points, so no invisible character sits
-// in this source.
-const HIDDEN_RANGES = [[0x00, 0x08], [0x09, 0x0a], [0x0b, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c],
-  [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x2064], [0x2066, 0x206f], [0xfeff, 0xfeff]];
-const hiddenPattern = (keepLines) => new RegExp(`[${HIDDEN_RANGES
-  .filter(([from]) => !(keepLines && from === 0x09))
-  .map(([from, to]) => `${String.fromCharCode(from)}-${String.fromCharCode(to)}`).join('')}]`, 'g');
-const HIDDEN_IN_NAME = hiddenPattern(false);
-const HIDDEN_IN_TEXT = hiddenPattern(true);
-const forDisplay = (text) => String(text ?? '').replace(HIDDEN_IN_NAME, '?');
+// and every recall.py argument. The set is src/gates-manage.js markHidden's, the one the terminal
+// gets (2026-10-20): it walks code points, so the tag block and the supplementary variation
+// selectors are one character each. Rampage's regex built its ranges with String.fromCharCode and
+// no `u` flag, which turns U+E0000 into U+0000 and would have marked all of ASCII.
+const forDisplay = (text) => markHidden(String(text ?? ''));
 // A whole message keeps its line breaks and tabs, and a Windows Python writes them to stderr as
 // CRLF, so those become plain line breaks first rather than a `?` at the end of every line.
-const forDisplayText = (text) => String(text ?? '').replace(/\r\n?/g, '\n').replace(HIDDEN_IN_TEXT, '?');
+const forDisplayText = (text) => markHidden(String(text ?? '').replace(/\r\n?/g, '\n'), { keepLines: true });
 
 // List, and show the result in `panel`. Only the fields the page renders are sent, each made safe
 // to show here, plus the real file name the page posts back.
@@ -7406,6 +7402,9 @@ async function postGateList(panel) {
       problem: gate.problem === null ? '' : forDisplay(gate.problem),
       title: forDisplay(String(gate.title || '').trim()),
       text: forDisplayText(gate.text || ''),
+      // The text as written holds hidden characters, each shown as `?` (2026-10-20): recall.py
+      // removes them when it compiles, and --lint names the memory.
+      hiddenText: forDisplayText(gate.text || '') !== String(gate.text || '').replace(/\r\n?/g, '\n'),
       description: forDisplay(gate.description || ''),
     })) : null,
   });
@@ -7997,6 +7996,7 @@ function gatesPanelHtml() {
         ? 'left out for every agent: ' + gate.problem : 'agents: unreadable: ' + gate.problem));
     }
     if (label !== file) head.appendChild(el('span', 'tag', 'hidden characters in the name'));
+    if (gate.hiddenText) head.appendChild(el('span', 'tag', 'hidden characters in the text, shown as ?'));
     const pending = el('span', 'tag pending');
     pending.id = id + '-pending';
     head.appendChild(pending);

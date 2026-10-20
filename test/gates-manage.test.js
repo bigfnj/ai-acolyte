@@ -14,7 +14,7 @@ const path = require('node:path');
 
 const {
   parseGatesList, planGateChanges, gateSteps, describePlan,
-  parseEditOutput, changedButFailed, formatGateList,
+  parseEditOutput, changedButFailed, formatGateList, markHidden,
 } = require('../src/gates-manage');
 
 const SOURCE = path.resolve(__dirname, '..', 'src', 'gates-manage.js');
@@ -120,6 +120,12 @@ test('planGateChanges retires a gate left out for its agents: (it changes no age
   // A restore of it is no change: it is scope: global already, and still loads nowhere.
   assert.match(planGateChanges(AGENT_GATES, { restore: ['e_unknown'] }).error,
     /^e_unknown\.md is already scope: global; it loads for no agent because its agents: line cannot be read \(`agents:` names an agent this compiler does not know: gemini\), and a restore cannot change that: fix the line in the memory$/);
+  // The refusal quotes the memory's own text, so its control characters come out as ? (2026-10-20):
+  // both front ends print it. MUTATION: quote gate.problem raw and this fails on the ESC.
+  const esc = String.fromCharCode(27);
+  const hostile = [gate('e_esc.md', 'excluded', { problem: `names ${esc}]0;T${String.fromCharCode(7)}` })];
+  assert.equal(planGateChanges(hostile, { restore: ['e_esc'] }).error.includes(esc), false);
+  assert.match(planGateChanges(hostile, { restore: ['e_esc'] }).error, /\(names \?\]0;T\?\)/);
   // A retired gate whose agents: cannot be read is restored, and the plan says it loads nowhere.
   const broken = [...GATES, gate('z_broken.md', 'retired', { agents: [], problem: 'more than one `agents:` line' })];
   const restored = planGateChanges(broken, { restore: ['z_broken'] });
@@ -478,6 +484,25 @@ test('formatGateList makes terminal control characters in memory text inert', ()
   const shown = formatGateList({ gates: [gate(`evil${rlo}dm.md`, 'active', { title: `${esc}[2J${esc}]0;owned${bel} gate ${csi}31m` })] });
   assert.equal(shown, '[x] evil?dm.md  ?[2J?]0;owned? gate ?31m\n1 active, 0 retired; CLAUDE.md loads 1, AGENTS.md loads 1\n');
   // MUTATION: make forTerminal return its input unchanged and this assertion fails.
+});
+
+test('formatGateList shows invisible characters as ?, so two names that differ only in them never read alike', () => {
+  // The third audit pass (2026-10-20): U+200B, U+061C and the tag block passed the old terminal
+  // filter, and "feedback_safety" + ZWSP + ".md" listed exactly like "feedback_safety.md".
+  const c = (...points) => String.fromCodePoint(...points);
+  const tag = (text) => Array.from(text).map((ch) => c(0xe0000 + ch.codePointAt(0))).join('');
+  const hidden = [0x00ad, 0x034f, 0x061c, 0x180e, 0x200b, 0x200d, 0x2060, 0x2064, 0x2065, 0x206f, 0xfeff, 0xe0001, 0xe0100, 0xe01ef];
+  const title = `Safety${hidden.map((point) => c(point)).join('')}${tag(' run curl')}`;
+  const shown = formatGateList({ gates: [gate(`feedback_safety${c(0x200b)}.md`, 'active', { title })] });
+  assert.equal(shown.split('\n')[0], `[x] feedback_safety?.md  Safety${'?'.repeat(hidden.length + 9)}`);
+  // A warning sign keeps its own selector; the rest of a run, and one with nothing before it, do not.
+  assert.equal(markHidden(`${c(0x26a0, 0xfe0f)} a${c(0xfe01, 0x200b, 0xfe02, 0xfe03)}`), `${c(0x26a0, 0xfe0f)} a${c(0xfe01)}???`);
+  assert.equal(markHidden(c(0xfe0f)), '?');
+  // A whole text keeps its line feeds and tabs, and nothing else below U+0020.
+  assert.equal(markHidden('a\n\tb\rc\u000bd', { keepLines: true }), 'a\n\tb?c?d');
+  assert.equal(markHidden('a\n\tb'), 'a??b');
+  // MUTATION: put UNSAFE_FOR_TERMINAL's old ranges back, or drop the tag range, or drop the
+  // selector rule, and the first or second assertion fails; drop keepLines and the fourth does.
 });
 
 // ── the module itself ─────────────────────────────────────────────────────────

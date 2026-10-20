@@ -353,11 +353,11 @@ or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `sta
 installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
 registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
 (`src/claude-hook-config.js:62#memoryGuardDefinition`); on Windows, when `PATH` has none,
-`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:103#resolveNodeExecutable`). If
+`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:113#resolveNodeExecutable`). If
 that node later disappears the status reads `on (needs repair)`, and turning the guard on again
 (the card's **Repair** button) re-points the hook at the node found then. Where `CLAUDE_CONFIG_DIR` is set, every
 `~/.claude` path in this section is that directory instead, as it is for Claude Code
-(`src/memory-guard-install.js:60#configDirFor`). The copy outlives upgrades and is replaced
+(`src/memory-guard-install.js:70#configDirFor`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
 `~/.claude/backups/settings.json.pre-memory-guard`; when there was no `settings.json` then, a
 `settings.json.pre-memory-guard.absent` marker beside it says so, and no later change takes a
@@ -371,7 +371,7 @@ node "<copy>"`), turning the guard on refuses, and that hook is never touched.
 [watch the cause](#design-principle-watch-the-cause-do-not-hook-the-event)), so the guard is
 installed and inert. The card, the toggle and `--memory-guard status` say so whenever a local file
 shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`, or
-`disableAllHooks` in your own settings (`src/memory-guard-install.js:180#hookPolicy`), and
+`disableAllHooks` in your own settings (`src/memory-guard-install.js:190#hookPolicy`), and
 `--memory-guard status` names the file on a `source:` line. A policy delivered from a server may
 leave no local trace, so where nothing is found they say they cannot tell, and the probe asks
 Claude Code: **AI Acolyte: Check whether Claude Code runs user hooks** in the extension (it asks

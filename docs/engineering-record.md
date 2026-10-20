@@ -4062,3 +4062,34 @@ makes its root under `fs.realpathSync.native(os.tmpdir())`. Measured the same da
 `TEMP`: the MCP group 6 of 6 (it was 1 of 2), the default group 4 of 4 and the dashboard group 6 of
 6, unchanged. With a long-form `TEMP` the unfixed drive already passed 6 of 6, so the product was
 never at fault. The other box has no 8.3 name, which is why it never saw this.
+
+## verify-release on the release-session box, after 1.9.5 (2026-10-20)
+
+Run from main at `4adbbd8`, with v1.9.5 installed from the release asset and VS Code reloaded,
+under Windows PowerShell 5.1: PASS 30, FAIL 4, INFO 7 on the second run. None of the four is a
+product defect. Each is recorded here rather than fixed, by the owner's decision to stop the audit
+loop after the fourth pass.
+
+- **"claude: blocks are disjoint, not nested", and its codex twin.** The check in
+  `scripts/verify-release.ps1` passes only when the shell-style block comes first, and this box's
+  order is gates first, because the gates were installed before guidance was turned on. Measured:
+  in CLAUDE.md the gates block spans characters 10147-23694, shell style 23745-25568 and open
+  threads 25618-26700; AGENTS.md has the same order. The blocks are disjoint; the check asserts an
+  order, not disjointness.
+- **"PostToolUse hook still registered".** It fails on a box with the memory features only, where
+  `install.ps1` never ran and the one hook is the MEMORY.md guard's PreToolUse. The check assumes
+  the full install.
+- **"installed extension.js matches the repo source".** It compares raw sha256, and the release
+  VSIX is built on Linux with LF while this checkout has CRLF (8130 lines). The two files are
+  identical once CRLF is normalised, and the main checkout's own build matches the published v1.9.5
+  asset in all 66 entries.
+
+**The first run also failed the suite, from a stale generated copy.** It failed
+`test/extension-codex-archive.test.js` "a real scan reads the archive, watches it, and logs each
+Codex reason once" every time (3 of 3 alone). This checkout held a gitignored
+`vscode-extension/src/` generated on 2026-09-29, with 38 files where `src/` has 48, and that test
+loads the extension's `./src/` requires from it, so it tested old modules. A clean worktree of
+`4adbbd8` passed it 2 of 2, and after `npm run package` resynced the copy the full suite passed
+under verify-release. Any checkout that packaged long ago runs such tests against stale code; CI and
+fresh worktrees have no copy and are unaffected. Not changed here: the harnesses that already map
+the extension's `./src/` requires to the root `src/` show the fix, if the owner wants it.

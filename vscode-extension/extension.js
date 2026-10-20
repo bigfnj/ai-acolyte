@@ -3293,8 +3293,9 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.toggleMemoryGuard', () => toggleMemoryGuard()),
     // Retire or restore one memory gate at a time, from the card's Manage gates… or the palette.
     vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates()),
-    // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card.
-    vscode.commands.registerCommand('permission-wildcarding.toggleOpenThreads', () => toggleOpenThreads())
+    // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card;
+    // the card's Refresh button passes `{ refresh: true }`.
+    vscode.commands.registerCommand('permission-wildcarding.toggleOpenThreads', (request) => toggleOpenThreads(request))
   );
   try {
     registerLocalWatchers(context);
@@ -4593,7 +4594,7 @@ function ensureOpenThreads(announce = false) {
     const wants = (state) => want && state.wanted;
     if (states.every((state) => (want ? state.compile === 'whole' : true) && state.on === wants(state)
         && (wants(state) ? state.current : !state.shadowedPaths?.length))) return;
-    const results = setOpenThreadsAll(want, { inPlaceFallback: false });
+    const results = setOpenThreadsAll(want, { inPlaceFallback: false, refreshHint: THREADS_REFRESH_HINT });
     const failed = results.filter((result) => result.error);
     if (failed.length) {
       const channel = sharedChannel();
@@ -4619,42 +4620,75 @@ function ensureOpenThreads(announce = false) {
   }
 }
 
-// `permission-wildcarding.toggleOpenThreads`: the user-tier setting, as toggleGates writes
-// gates.enabled. On (or a stale install) compiles and installs; a settled install is turned off,
-// after a confirmation, which removes the block from every agent.
-async function toggleOpenThreads() {
-  const config = vscode.workspace.getConfiguration('permissionWildcarding');
-  const enabled = !!openThreadsEnabled();
-  const states = openThreadsStatusAll();
-  const settled = (state) => state.readable && state.compile === 'whole'
+// One agent's install is what the setting and the compile ask for: the compile is whole, and the
+// block is in, and current, exactly when that compile wants one. threadsNeedRefresh is the one
+// predicate the toggle's modal and the card's Refresh button read, so the button offers what the
+// command would do.
+function threadsSettled(state) {
+  return state.readable && state.compile === 'whole'
     && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
-  const next = !(enabled && states.length && states.every(settled));
-  if (!next) {
+}
+function threadsNeedRefresh(states) {
+  return states.length > 0 && !states.every(threadsSettled);
+}
+
+// What the extension says where src/agent-open-threads.js would name the CLI's refresh, which a
+// VSIX install does not have.
+const THREADS_REFRESH_HINT = 'click Refresh open threads on the Claude memory card, or run '
+  + 'AI Acolyte: Toggle open threads and choose Refresh';
+
+// `permission-wildcarding.toggleOpenThreads`: the user-tier setting, as toggleGates writes
+// gates.enabled. While it is on, a click turns it off, after a confirmation, whatever state the
+// install is in: an off switch that can install instead is not one (2026-10-20). When the install
+// is not current the same modal also offers Refresh, which compiles and installs and leaves the
+// setting on. While it is off, a click turns it on, compiles and installs. `{ refresh: true }`
+// is the card's Refresh button, the same refresh without the modal.
+async function toggleOpenThreads(request = null) {
+  const enabled = !!openThreadsEnabled();
+  if (request?.refresh === true) {
+    if (enabled) await refreshOpenThreads();
+    else vscode.window.showInformationMessage('ai-acolyte: open threads are off; Turn on open threads compiles and installs them.');
+    return;
+  }
+  if (enabled) {
+    const states = openThreadsStatusAll();
+    const stale = threadsNeedRefresh(states);
     const files = states.filter((state) => state.on).map((state) => state.path.replace(os.homedir(), '~')).join(', ');
     const choice = await vscode.window.showWarningMessage('Turn off open threads?', {
       modal: true,
       detail: (files ? `Removes the managed block from ${files}. ` : '')
         + 'The memories keep their status; nothing is compiled or installed while this is off, and '
-        + 'MEMORY.md\'s health is no longer reported to new sessions. Sets openThreads.enabled to false.',
-    }, 'Turn off');
+        + 'MEMORY.md\'s health is no longer reported to new sessions. Sets openThreads.enabled to false.'
+        + (stale ? ' The install is not current: Refresh compiles and installs it instead, and leaves this on.' : ''),
+    }, 'Turn off', ...(stale ? ['Refresh'] : []));
+    if (choice === 'Refresh') { await refreshOpenThreads(); return; }
     if (choice !== 'Turn off') return;
   }
+  const next = !enabled;
   try {
-    await config.update('openThreads.enabled', next, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration('permissionWildcarding')
+      .update('openThreads.enabled', next, vscode.ConfigurationTarget.Global);
   } catch (err) {
     vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
     return;
   }
   if (deactivated) return;
-  // The setting's own listener has just armed a recompile; this one covers it, so it is dropped
-  // rather than run a second time two seconds later.
-  if (next) {
-    clearTimeout(threadsBounce);
-    threadsBounce = null;
-    await compileThreads();
-  }
+  if (next) { await refreshOpenThreads(); return; }
+  reportThreadsInstall(setOpenThreadsAll(false), false);
+}
+
+// Compile, then install what is compiled, for a person's click: the toggle turning it on, and
+// Refresh. The setting's own listener may just have armed a recompile; this one covers it, so it
+// is dropped rather than run a second time two seconds later.
+async function refreshOpenThreads() {
+  clearTimeout(threadsBounce);
+  threadsBounce = null;
+  await compileThreads();
   if (deactivated) return;
-  const results = setOpenThreadsAll(next);
+  reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true);
+}
+
+function reportThreadsInstall(results, next) {
   const refused = results.length === 1 && results[0].refusal ? results[0] : null;
   const failed = results.filter((result) => result.error);
   if (refused && !refused.error) {
@@ -4705,6 +4739,8 @@ function threadsCardData(precomputed = null) {
       index: states.find((state) => state.index)?.index || null,
       installed: states.filter((state) => state.on).map((state) => state.agent),
       current: states.every((state) => (state.wanted ? state.on && state.current : !state.on)),
+      // Whether the card offers Refresh: the toggle's own predicate.
+      refresh: threadsNeedRefresh(states),
       reason: first.reason,
       declared,
       listed,
@@ -5149,6 +5185,7 @@ class WildcardingViewProvider {
         case 'toggleMemoryGuard': vscode.commands.executeCommand('permission-wildcarding.toggleMemoryGuard'); break;
         case 'manageGates': vscode.commands.executeCommand('permission-wildcarding.manageGates'); break;
         case 'toggleOpenThreads': vscode.commands.executeCommand('permission-wildcarding.toggleOpenThreads'); break;
+        case 'refreshOpenThreads': vscode.commands.executeCommand('permission-wildcarding.toggleOpenThreads', { refresh: true }); break;
         // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
         // c09daab (the shared Saved permissions picker replaced that button), and the
         // two synthetic test rows posting it directly were all that kept it alive. The
@@ -5666,6 +5703,7 @@ class WildcardingViewProvider {
         <div class="muted sub" id="claudeMemoryThreadsStatus"></div>
         <div class="sub" id="claudeMemoryThreadsIndex" hidden></div>
         <button class="managed-action" id="claudeMemoryThreads" title="The open-threads block: every memory whose status: is still open, in CLAUDE.md and AGENTS.md">Turn on open threads</button>
+        <button class="managed-action" id="claudeMemoryThreadsRefresh" hidden title="Compile the open threads and install them, leaving the setting on">Refresh open threads</button>
         <div class="muted sub" id="claudeCodeVersion"></div>
       </div>
     </div>
@@ -6373,7 +6411,10 @@ class WildcardingViewProvider {
     index.hidden = !(t && t.enabled && t.index);
     index.textContent = t && t.index ? '⚠ INDEX: ' + t.index : '';
     index.style.color = 'var(--vscode-charts-yellow, #d29922)';
+    // While on, the toggle turns it off whatever the install's state; Refresh is offered beside it
+    // exactly when threadsNeedRefresh says the install is not current, the command's own test.
     $('claudeMemoryThreads').textContent = t && t.enabled ? 'Turn off open threads' : 'Turn on open threads';
+    $('claudeMemoryThreadsRefresh').hidden = !(t && t.enabled && t.refresh);
   }
 
   // One wording for both memory cards' CPU LLM line: the Claude and Codex searches run the same
@@ -6712,6 +6753,7 @@ class WildcardingViewProvider {
   $('claudeMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'manageGates' }));
   $('memoryGuardBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleMemoryGuard' }));
   $('claudeMemoryThreads').addEventListener('click', () => vscode.postMessage({ type: 'toggleOpenThreads' }));
+  $('claudeMemoryThreadsRefresh').addEventListener('click', () => vscode.postMessage({ type: 'refreshOpenThreads' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));

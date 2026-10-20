@@ -70,6 +70,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const held = [];       // the threads' timers: { ms, fn, cleared }
   const commands = new Map();
   const warnings = [];
+  const modals = [];     // each warning with the buttons it offered
   const infos = [];
   const channel = [];
   const configListeners = [];
@@ -89,7 +90,11 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
       registerWebviewViewProvider() { return disposable(); }, onDidChangeActiveTextEditor() { return disposable(); },
       withProgress(options, task) { return task({ report() {} }); },
       setStatusBarMessage() { return disposable(); }, showErrorMessage(message) { warnings.push(String(message)); },
-      showWarningMessage(message) { warnings.push(String(message)); return Promise.resolve(state.warningAnswer); },
+      showWarningMessage(message, ...rest) {
+        warnings.push(String(message));
+        modals.push({ message: String(message), items: rest.filter((item) => typeof item === 'string') });
+        return Promise.resolve(state.warningAnswer);
+      },
       showInformationMessage(message) { infos.push(String(message)); return Promise.resolve(undefined); },
     },
     workspace: {
@@ -195,7 +200,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const settle = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
   const live = () => held.filter((entry) => !entry.cleared && !entry.fired);
   return {
-    ...box, extension, watchers, spawns, held, commands, warnings, infos, channel, state, tiers, close, settle, live,
+    ...box, extension, watchers, spawns, held, commands, warnings, modals, infos, channel, state, tiers, close, settle, live,
     claude: () => fs.readFileSync(box.claudeMd, 'utf8'),
     codex: () => fs.readFileSync(box.agentsMd, 'utf8'),
     compiles: () => spawns.filter((spawn) => spawn.args.includes('--threads-compile')),
@@ -420,6 +425,84 @@ test('the toggle turns a settled install off after asking, and back on with a co
   assert.ok(app.claude().includes('- **BLOCKED** Second. (b)'), 'and installs the fresh compile');
   // MUTATION: write the setting at ConfigurationTarget.Workspace and the tier check fails; skip
   // compileThreads on the way on and the old compile is what installs.
+});
+
+// AN OFF SWITCH THAT CAN INSTALL IS NOT ONE (2026-10-20). The toggle used to turn the feature off
+// only when every install was settled, which needs a whole compile, so with nothing compiled, no
+// venv, or an unreadable instruction file the card's "Turn off" ran the ON path: a compile and an
+// install. Now, while on, the click is always the off path behind its modal, and Refresh is a
+// separate choice offered only when the install is not current.
+test('while on, the toggle turns it off in any install state, and offers Refresh beside it only when stale', async (t) => {
+  const app = await threadsWindow(t, { compileWrites: null });
+  const toggle = () => app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.equal(fs.existsSync(app.threadsFile), false, 'precondition: nothing is compiled');
+  await toggle();
+  assert.deepEqual(app.modals.map((modal) => [modal.message, modal.items]), [['Turn off open threads?', ['Turn off', 'Refresh']]],
+    'the modal asks to turn it off, and offers Refresh because the install is not current');
+  assert.equal(app.tiers['openThreads.enabled'], undefined, 'a cancelled modal changes nothing');
+  app.state.warningAnswer = 'Turn off';
+  await toggle();
+  await app.settle();
+  assert.equal(app.tiers['openThreads.enabled']?.globalValue, false, 'the setting went off');
+  assert.equal(app.tiers['openThreads.enabled'].updatedAt, 1, 'at the user tier');
+  assert.deepEqual(app.compiles(), [], 'turning it off compiled nothing');
+  assert.equal(app.claude(), '# Mine\n', 'and wrote nothing into CLAUDE.md');
+  assert.equal(app.codex(), '# Codex mine\n');
+  // MUTATION: restore `next = !(enabled && states.length && states.every(settled))` and the
+  // click runs the ON path: the setting stays on and a compile is spawned.
+});
+
+test('Refresh, from the modal or the card, compiles and installs and leaves the setting on', async (t) => {
+  const app = await threadsWindow(t, { compileWrites: ONE });
+  const toggle = (request) => app.commands.get('permission-wildcarding.toggleOpenThreads')(request);
+  app.state.warningAnswer = 'Refresh';
+  await toggle();
+  await app.settle();
+  assert.equal(app.compiles().length, 1, 'Refresh compiled');
+  assert.ok(installedIn(app.claude()) && installedIn(app.codex()), 'and installed the result');
+  assert.equal(app.tiers['openThreads.enabled'], undefined, 'without touching the setting');
+  // Now settled: the modal offers Turn off alone.
+  app.state.warningAnswer = undefined;
+  await toggle();
+  assert.deepEqual(app.modals.at(-1).items, ['Turn off'], 'a current install is offered no Refresh');
+  // The card's button: no modal, the same refresh.
+  const before = app.modals.length;
+  app.state.compileWrites = TWO;
+  await toggle({ refresh: true });
+  await app.settle();
+  assert.equal(app.modals.length, before, 'the card\'s Refresh asks nothing');
+  assert.equal(app.compiles().length, 2);
+  assert.ok(app.claude().includes('- **BLOCKED** Second. (b)'), 'and installs the fresh compile');
+  // While off it does nothing but say so.
+  app.state.warningAnswer = 'Turn off';
+  await toggle();
+  await toggle({ refresh: true });
+  await app.settle();
+  assert.equal(app.compiles().length, 2, 'a Refresh while off compiles nothing');
+  assert.equal(installedIn(app.claude()), false);
+  // MUTATION: drop the `choice === 'Refresh'` branch and the first compile never happens; drop
+  // the `enabled` check on the refresh request and the last compile count is 3.
+});
+
+// A VSIX SHIPS NO bin/ (2026-10-20). A refused compile's error named `wildcard-perms --open-threads
+// refresh`, which an extension user does not have; the extension names its own way instead.
+test('a refused compile tells an extension user how the extension recompiles, never the CLI', async (t) => {
+  const torn = ONE.replace('The owner decides.', 'Edited by hand.');
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, torn) });
+  const logged = app.channel.filter((line) => /open threads: all /.test(line));
+  assert.equal(logged.length, 1, `activation's install logged the refusal: ${JSON.stringify(app.channel)}`);
+  assert.match(logged[0], /does not match the sha in its own header.*Refresh open threads on the Claude memory card/);
+  assert.doesNotMatch(logged[0], /wildcard-perms/);
+  app.state.compileWrites = null;
+  app.state.warningAnswer = 'Refresh';
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  await app.settle();
+  const said = app.warnings.filter((message) => /does not match the sha/.test(message));
+  assert.equal(said.length, 1, `the Refresh reported the refusal: ${JSON.stringify(app.warnings)}`);
+  assert.match(said[0], /AI Acolyte: Toggle open threads and choose Refresh/);
+  assert.doesNotMatch(said[0], /wildcard-perms/);
+  // MUTATION: drop `refreshHint` from ensureOpenThreads' setOpenThreadsAll call and the logged
+  // line names wildcard-perms; drop it from refreshOpenThreads' and the reported one does.
 });
 
 test('a settings edit takes effect without a reload: off removes the block, on recompiles and installs', async (t) => {

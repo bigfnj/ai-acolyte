@@ -13,7 +13,7 @@
 // test/check-claude-strip-model.test.js.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:509#sharing).
+// (test/extension-activation.test.js:510#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

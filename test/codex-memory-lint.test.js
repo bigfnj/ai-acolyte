@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const { CodexMemoryLint } = require('../vscode-extension/codexMemoryLint');
 const { readCodexMemory } = require('../src/codex-memory');
 
@@ -55,7 +56,7 @@ function harness(t, options = {}) {
   const lint = new CodexMemoryLint(vscode, { codexHome, enabled: () => enabled, debounceMs: 25, reconcileMs: 1000,
     readMemory: async (request) => { reads.push(request); return worker(request); },
     onRefresh: (report) => reports.push(report), ...options.constructorOptions });
-  t.after(() => { lint.dispose(); fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
+  t.after(() => { lint.dispose(); return removeDir(root); });
   function write(relative, text) {
     const file = path.join(memoryRoot, ...relative.split('/')); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); return file;
   }

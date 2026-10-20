@@ -12,7 +12,7 @@
 // activation) are held for the test to fire; every other timer runs, unref'd.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:509#sharing).
+// (test/extension-activation.test.js:510#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -20,6 +20,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDirSync } = require('./helpers/remove-dir');
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 
@@ -45,7 +46,6 @@ const memory = (status, text = 'Synthetic.') => `---\nname: m\ndescription: synt
 // off the host thread really runs `box.python`, which the test then has to make a program.
 async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites = ONE, realThreads = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-window-'));
-  t.after(() => { try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
   const claude = path.join(home, '.claude');
   const store = path.join(claude, 'projects', 'p', 'memory');
   const other = path.join(claude, 'projects', 'q', 'memory');
@@ -216,6 +216,13 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     }
   };
   t.after(close);
+  // After close, never before it (2026-10-20): node:test runs t.after hooks in the order they were
+  // registered, and the removal used to be registered first, so it ran while the extension was
+  // still active and global.setTimeout was still this harness's stub. With removeDir's awaited
+  // fs.promises.rm in place of a synchronous rmSync, CI's Node 20 on Windows kept this file's
+  // process alive after its last test (runs 39458585848 to 39477929287, bisected); Node 22 and 24
+  // did not. So this file removes synchronously (removeDirSync, test/helpers/remove-dir.js).
+  t.after(() => { try { removeDirSync(home); } catch {} });
   try { extension.activate({ subscriptions: [] }); } catch (error) { await close(); throw error; }
   const settle = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
   const live = () => held.filter((entry) => !entry.cleared && !entry.fired);
@@ -523,7 +530,6 @@ test('a compile asked for while one runs waits for it, and the asks in between a
 // did the work, and the recorded host execFile proves the host thread did not.
 test('the compile is spawned from a worker thread, never the host thread, and still lands', { timeout: 120000 }, async (t) => {
   const standIn = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-standin-'));
-  t.after(() => { try { fs.rmSync(standIn, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
   const marks = path.join(standIn, 'ran.log');
   const script = path.join(standIn, 'recall-standin.js');
   fs.writeFileSync(script, `const fs = require('fs'); const path = require('path');
@@ -539,6 +545,9 @@ fs.writeFileSync(path.join(process.env.USERPROFILE, '.claude', 'open-threads.gen
       try { fs.linkSync(process.execPath, box.python); } catch { fs.copyFileSync(process.execPath, box.python); }
     },
   });
+  // Registered after threadsWindow's own hooks, so the stand-in's directory goes once the harness
+  // has torn down (see threadsWindow).
+  t.after(() => { try { removeDirSync(standIn); } catch {} });
   await app.fireTimers();
   const { setTimeout: wait } = require('node:timers/promises');
   // Endpoint scanning can hold the first run of a fresh copy of an executable for seconds.

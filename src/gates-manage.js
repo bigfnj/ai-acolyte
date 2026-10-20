@@ -327,35 +327,54 @@ function changedButFailed({ stage, detail, snapshot, retired = [], restored = []
 // are, because a program reading it has to see the real file name.
 //
 // THE HIDDEN SET (2026-10-20), one for every place memory text is SHOWN: the terminal here and in
-// bin/wildcard-perms, and the gates panel's page, modal and toasts (extension.js forDisplay). The
-// C0 controls (a whole text keeps its line feeds and tabs), DEL and the C1 controls, the soft
-// hyphen U+00AD, U+034F, the bidi controls U+061C, U+200E, U+200F, U+202A-U+202E and
-// U+2066-U+2069, U+180E, the zero-width characters U+200B-U+200D, U+2060-U+206F, U+FEFF, the tag
-// block U+E0000-U+E007F and the variation selectors U+E0100-U+E01EF, and a selector U+FE00-U+FE0F
-// that does not directly follow a shown character which is not one, so the one in a warning sign
-// shows and a run does not. Where recall.py REMOVES text it compiles (_THREAD_STRIP, _GATE_STRIP,
-// _strip_hidden), a display MARKS: every character it removes is in this set, which
-// test/threads-compile.sh checks code point by code point. Two lines that differ only in hidden
-// characters therefore never read alike. Code points, so no hidden character sits in this source.
-const HIDDEN_RANGES = [[0x00, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x34f, 0x34f], [0x61c, 0x61c], [0x180e, 0x180e],
-  [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x206f], [0xfeff, 0xfeff], [0xe0000, 0xe007f], [0xe0100, 0xe01ef]];
-const isSelector = (cp) => cp >= 0xfe00 && cp <= 0xfe0f;
+// bin/wildcard-perms, and the gates panel's page, modal and toasts (extension.js forDisplay), and
+// the set vscode-extension/memoryLint.js stripHidden removes. It is recall.py's (_GATE_STRIP and
+// _strip_hidden, where the reasons are written down), range for range: Default_Ignorable_Code_Point
+// of Unicode 17.0 (DEFAULT_IGNORABLE), the interlinear annotation and Egyptian hieroglyph format
+// controls (HIDDEN_FORMAT), and C0 but the tab and the line feed, DEL, C1, U+2028 and U+2029
+// (HIDDEN_CONTROLS); the text and emoji presentation selectors U+FE0E and U+FE0F only where they do
+// not directly follow a base that can take one. Where recall.py REMOVES text it compiles, a display
+// MARKS exactly the same characters, which test/threads-compile.sh checks both ways over every code
+// point. Two lines that differ only in hidden characters therefore never read alike. Code points,
+// so no hidden character sits in this source.
+const DEFAULT_IGNORABLE = [[0x00ad, 0x00ad], [0x034f, 0x034f], [0x061c, 0x061c], [0x115f, 0x1160], [0x17b4, 0x17b5],
+  [0x180b, 0x180f], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f],
+  [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff0, 0xfff8], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe0fff]];
+const HIDDEN_FORMAT = [[0xfff9, 0xfffb], [0x13430, 0x1343f]];
+const HIDDEN_CONTROLS = [[0x00, 0x08], [0x0b, 0x1f], [0x7f, 0x9f], [0x2028, 0x2029]];
+const HIDDEN_RANGES = [...HIDDEN_CONTROLS, ...DEFAULT_IGNORABLE, ...HIDDEN_FORMAT];
+const isPresentationSelector = (cp) => cp === 0xfe0e || cp === 0xfe0f;
+// recall.py _selector_base: a digit, `#` or `*`, or a code point outside ASCII that is neither
+// Python's whitespace (these, above U+007F) nor a presentation selector.
+const KEYCAP_BASES = Array.from('0123456789#*', (ch) => ch.codePointAt(0));
+const WIDE_SPACE = [0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009,
+  0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000];
+const selectorBase = (cp) => cp !== null
+  && (KEYCAP_BASES.includes(cp) || (cp > 0x7f && !WIDE_SPACE.includes(cp) && !isPresentationSelector(cp)));
 
-// `text` with every hidden character as `?`, one per code point. `keepLines` keeps the line feed
-// and the tab, for a whole message or a gate's text; a caller turns CRLF into a line feed first.
+// Whether code point `cp` is hidden, `last` being the last code point kept before it (null at the
+// start): every caller walks text one code point at a time and keeps what this does not call
+// hidden, so the selector rule is judged against what is kept, as recall.py judges it.
+function isHidden(cp, last) {
+  if (isPresentationSelector(cp)) return !selectorBase(last);
+  return HIDDEN_RANGES.some(([from, to]) => cp >= from && cp <= to);
+}
+
+// `text` with every hidden character as `?`, one per code point. A line feed and a tab are `?`
+// too, unless `keepLines`, for a whole message or a gate's text; a caller turns CRLF into a line
+// feed first. Either way a line feed or a tab is what a selector after it follows, as in a gate
+// body, so one rule decides a selector whatever `keepLines` says.
 function markHidden(text, { keepLines = false } = {}) {
   let out = '';
-  let last = null;   // the last code point shown as itself
+  let last = null;   // the last code point not in the hidden set
   for (const ch of Array.from(String(text))) {
     const cp = ch.codePointAt(0);
-    const hidden = !(keepLines && (cp === 0x0a || cp === 0x09))
-      && (HIDDEN_RANGES.some(([from, to]) => cp >= from && cp <= to) || (isSelector(cp) && (last === null || isSelector(last))));
-    if (hidden) {
+    if (isHidden(cp, last)) {
       out += '?';
-    } else {
-      out += ch;
-      last = cp;
+      continue;
     }
+    out += !keepLines && (cp === 0x0a || cp === 0x09) ? '?' : ch;
+    last = cp;
   }
   return out;
 }
@@ -389,5 +408,5 @@ function formatGateList({ gates }) {
 
 module.exports = {
   parseGatesList, planGateChanges, gateSteps, describePlan,
-  parseEditOutput, changedButFailed, formatGateList, markHidden,
+  parseEditOutput, changedButFailed, formatGateList, markHidden, isHidden,
 };

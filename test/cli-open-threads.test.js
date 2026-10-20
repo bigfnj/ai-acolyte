@@ -19,6 +19,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 
 const CLI = path.resolve(__dirname, '..', 'bin', 'wildcard-perms');
 const BEGIN = '<!-- BEGIN permission-wildcarding: open threads (managed) -->';
@@ -57,7 +58,7 @@ const AMBIENT = ['TOOLBOX_PYTHON', 'CODEX_TOOLBOX', 'RECALL_MEMORY_DIR', 'RECALL
 
 function setup(t, { codex = true, compiledText = null } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-cli-threads-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  t.after(() => removeDir(home));
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   // An allow list the hook's wildcarding pass would rewrite, so a fall-through to hook mode
   // shows up as a changed settings.json.

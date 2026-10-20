@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -20,7 +21,7 @@ const PARENT = "const c = require('child_process').spawn(process.execPath, ['-e'
 
 function capture(t, extraEnv) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-spawn-capture-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  t.after(() => removeDir(dir));
   // cwd is the capture directory too, so a preload that wrote with an empty CAPTURE_DIR (a
   // relative path) would leave its file where the second test looks.
   const run = spawnSync(process.execPath, ['-e', PARENT], {
@@ -88,7 +89,7 @@ test('the summary counts that one spawn and its child start', (t) => {
 const TREE_ORDER = path.join(ROOT, 'scripts', 'measure', 'taskkill-tree-order.js');
 function treeOrder(t, args, extraEnv = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-tree-order-'));
-  t.after(() => fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  t.after(() => removeDir(temp));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(comspec|temp|tmp)$/i.test(key)));
   Object.assign(env, { ComSpec: process.env.ComSpec, TEMP: temp, TMP: temp }, extraEnv);
   const run = spawnSync(process.execPath, [TREE_ORDER, ...args], { encoding: 'utf8', timeout: 25000, windowsHide: true, env });

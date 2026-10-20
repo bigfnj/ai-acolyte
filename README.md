@@ -8,6 +8,12 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.4 fixes what a fourth audit found**: a run with words but no verb is refused rather
+than treated as a hook event (`wildcard-perms gates status` used to rewrite settings.json),
+`--learn` checks its subcommand before it saves `--mode`, the hidden-character set is Unicode's
+Default_Ignorable_Code_Point (17.0) with a test that fails on any unplaced format character, and
+`recall.py` prints memory text and file names escaped in its search, `--list`, `--lint` and
+compile output.
 **Version 1.9.3 fixes what a third audit found**: every CLI verb refuses an option or a word it
 does not read before anything runs (`--drain --dryrun` used to run a real drain), memory gate
 bodies lose invisible characters when they compile and `recall.py --lint` names the gate, memory
@@ -18,8 +24,8 @@ used to be dropped without a word), the hook probe is ended by a window reload a
 about 2 s after its deadline, the MEMORY.md guard no longer judges a trailing-dot spelling of the
 index against an empty file, open threads offer Refresh only where a compile can run, and thread
 text loses invisible format characters as well as control and bidi ones.
-**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer reads any exit 0
-as hooks being allowed, **AI Acolyte: Check whether Claude Code
+**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer reads an exit 0
+without an unknown-command message as hooks being allowed, **AI Acolyte: Check whether Claude Code
 runs user hooks** asks on demand, open threads compile off the extension host and a healthy
 MEMORY.md's saves no longer start a compile, Turn off open threads works in every state, and the
 INDEX line names the index it measured.
@@ -88,7 +94,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v193.vsix
+code --install-extension ai-acolyte-v194.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -253,7 +259,8 @@ the first on the next compile.
 
 A gate compiles as a person reading it sees it. Hidden characters in its block are removed on the
 way into `CLAUDE.md` and `AGENTS.md`, the same set thread text loses (section 6), plus the vertical
-tab, form feed, carriage return, U+001C-U+001F and NEL; line breaks and tabs stay. `recall.py
+tab, form feed, carriage return, U+001C-U+001F, NEL and the line and paragraph separators U+2028
+and U+2029; line feeds and tabs stay. `recall.py
 --lint` names each gate memory that held any, with how many. The memory itself is not changed:
 the gates panel shows each hidden character in its text as `?`, and `wildcard-perms --gates
 list` does the same in names and titles.
@@ -297,12 +304,15 @@ Waiting on the owner's choice between the two layouts.
 
 Each open memory is one line of the block, `- **AWAITING** <text> (<file stem>)`, the stem being
 the memory's file name without `.md`. Lines are sorted by status (open, awaiting, blocked,
-deferred) and then by stem. The text is the status block's, on one line, with control characters,
-bidirectional controls and invisible format characters (the soft hyphen, U+034F, U+180E, the
-zero-width space, joiners and invisible operators U+200B-U+200D and U+2060-U+2065, U+FEFF, the tag
-block U+E0000-U+E007F and the variation selectors U+E0100-U+E01EF) removed, and of a run of
-variation selectors U+FE00-U+FE0F only the first after a character kept, so the one in a warning
-sign stays; cut at 240 characters. At most ten are listed, and one more line
+deferred) and then by stem. The text is the status block's, on one line, with control characters
+removed, and every character Unicode 17.0 calls default-ignorable (its Default_Ignorable_Code_Point
+property: the soft hyphen, the zero-width and bidirectional controls, the Hangul fillers, the
+variation selectors and all of U+E0000-U+E0FFF, the tag characters among them), and the
+interlinear annotation and Egyptian hieroglyph format controls U+FFF9-U+FFFB and U+13430-U+1343F.
+The format characters a reader sees, such as the Arabic number sign, stay. So does one text or
+emoji presentation selector (U+FE0E, U+FE0F) directly after a digit, `#`, `*` or a character
+outside ASCII that is not whitespace, so the one in a warning sign or a keycap stays and one after
+an ASCII letter goes. Cut at 240 characters. At most ten are listed, and one more line
 counts the rest and points at `recall "status"`. `done`, `closed`, `live`,
 `shelved`, `deleted`, `dropped` and `shipped` close a thread: the memory stays, and its line
 leaves the block on the next compile. Any other value, two `status:` lines, or a listed status
@@ -429,7 +439,8 @@ Windows the deadline ends the whole process tree (`taskkill /T`, so a `claude` u
 launcher's `cmd.exe` goes too); on Linux and macOS it ends the child alone, which is not started
 as a process group leader (`src/exec-resolve.js:311#endProcessTree`). Two seconds after the
 deadline the probe answers "unknown" even if a process outside that tree still holds its output
-open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`). It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
+open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`), or up to about five when such a process
+also keeps the probe's directory, which the answer then names. It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
 flag makes `/goal` run under a policy that blocks user hooks, so the probe would read "not
 restricted" while hooks stay blocked. An existing directory there is used only when it is a
 plain, empty directory, and on Linux and macOS only when you own it; Windows has no owner check

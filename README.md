@@ -8,6 +8,11 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.6 reads the newest Codex builds' sessions**: on Codex 0.162 and 0.163, a code-mode
+cell that runs several commands is credited when every printed result exited 0, so Auto Learn
+learns from approved escalations again; a command the guardian reviewer rejected is no longer
+counted as a failure; and the Agent sessions card shows a Codex session while it works, with its
+spawned workers counted, instead of the reviewer's own threads.
 **Version 1.9.5 makes the number of `MEMORY.md` entries a count, never a warning**: the 16-entry
 ceiling the editor began warning about in 1.9.1 was never measured, and an index that gives every
 memory its own line could not get under it. It is gone from the Problems panel, the status bar
@@ -98,7 +103,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v195.vsix
+code --install-extension ai-acolyte-v196.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -158,8 +163,8 @@ workspaces. Computed policy remains read-only. This feature is included in the
 Version 1.6.0 also adds **Restore Codex rules**
 (`vscode-extension/extension.js:5147#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
-(`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
-evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
+(`src/auto-learn-manager.js:1431#codexBackupPath`). Codex derived guidance has separate policy and run
+evidence (`src/auto-learn-manager.js:1866#derivedFor`); observed runs are not reported as measured
 approval prompts. Actual restore and guidance controls now pass in a staged VS Code
 host, with deliberate no-op controls that fail the intended checks. The detailed
 development evidence and supported boundaries remain in the compatibility document.

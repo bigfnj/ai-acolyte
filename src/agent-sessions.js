@@ -7,8 +7,9 @@
 //
 // WHAT A TRANSCRIPT CAN SAY, AND WHAT IT CANNOT. It names the agent, the app (Claude's
 // `entrypoint`, Codex's `session_meta.originator`), the folder the session works in, the
-// permission mode (Claude's `permissionMode`, Codex's `turn_context.approval_policy`) and, by its
-// modification time, when the session last did something. It cannot say whether a panel is
+// permission mode (Claude's `permissionMode`, Codex's `turn_context.approval_policy`) and when
+// the session last did something: a Claude transcript's modification time, a Codex rollout's last
+// record time (codexCandidates says why). It cannot say whether a panel is
 // working at this moment or is waiting on a permission prompt: that is the panel's own state,
 // which an extension cannot read (Claude Code publishes no command for it, measured on 2.1.301),
 // and inferring "waiting" from a stalled call is right about 0.4% of the time outside Claude's
@@ -129,16 +130,34 @@ function claudeMeta(file, size) {
   return meta;
 }
 
+// A Codex thread that is not a session of its own (measured 2026-10-20 on 0.162.0-alpha.17.2 and
+// 0.163.0-alpha.10.2, this box): its head's `source` is `{subagent: ...}`. A multi-agent session's
+// workers carry `{subagent: {thread_spawn: {parent_thread_id}}}` and count toward that session;
+// the approval reviewer writes a short `{subagent: {other: "guardian"}}` thread per request (52 of
+// one day's 65 rollouts), and the card listed those as the sessions while the real ones were missing.
+const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function codexMeta(file, size) {
-  const meta = { app: null, project: null, mode: null };
+  const meta = { app: null, project: null, mode: null, lastRecordMs: null, subagent: false, parent: null };
   const head = headRecord(file, size);
   if (head && head.type === 'session_meta' && head.payload && typeof head.payload === 'object') {
     if (typeof head.payload.originator === 'string') meta.app = CODEX_APPS.get(head.payload.originator) || 'other';
     meta.project = folderName(head.payload.cwd);
+    const source = head.payload.source;
+    if (source && typeof source === 'object' && source.subagent) {
+      meta.subagent = true;
+      const parent = source.subagent.thread_spawn?.parent_thread_id;
+      if (typeof parent === 'string' && THREAD_ID.test(parent)) meta.parent = parent.toLowerCase();
+    }
   }
   for (const record of recordsFromEnd(file, size, BACK_MAX_BYTES)) {
+    if (meta.lastRecordMs === null && typeof record?.timestamp === 'string') {
+      const at = Date.parse(record.timestamp);
+      if (Number.isFinite(at)) meta.lastRecordMs = at;
+    }
     const policy = record?.type === 'turn_context' ? record.payload?.approval_policy : undefined;
-    if (typeof policy === 'string') { meta.mode = CODEX_POLICY.test(policy) ? policy : 'other'; break; }
+    if (meta.mode === null && typeof policy === 'string') meta.mode = CODEX_POLICY.test(policy) ? policy : 'other';
+    if (meta.mode !== null && meta.lastRecordMs !== null) break;
   }
   return meta;
 }
@@ -150,7 +169,7 @@ async function entries(dir) {
 async function mtime(file) {
   try {
     const stat = await fs.promises.stat(file);
-    return stat.isFile() ? { mtimeMs: stat.mtimeMs, size: stat.size } : null;
+    return stat.isFile() ? { mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size } : null;
   } catch { return null; }
 }
 
@@ -190,6 +209,12 @@ async function claudeCandidates(root, since, now) {
 
 // Codex: every plain rollout under `sessions/` (a session keeps writing into the date folder it
 // started in, so a long one is not in today's). A compressed `.jsonl.zst` is idle by definition.
+//
+// NOT BY ITS MODIFICATION TIME ALONE (2026-10-20). On this box Codex 0.162/0.163 appends to a
+// rollout without moving its mtime: four sessions writing that minute all read the minute they
+// started, while their change time matched their last record to the second. So a file is a
+// candidate when either time is in the window, and the caller takes its activity from the last
+// record's own `timestamp` (codexMeta), falling back to the mtime only when no record carries one.
 async function codexCandidates(root, since) {
   const out = [];
   const pending = [root];
@@ -200,9 +225,9 @@ async function codexCandidates(root, since) {
       if (entry.isDirectory()) { pending.push(full); continue; }
       if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
       const stat = await mtime(full);
-      if (!stat || stat.mtimeMs < since) continue;
+      if (!stat || Math.max(stat.mtimeMs, stat.ctimeMs || 0) < since) continue;
       const id = (/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(entry.name) || [])[1] || entry.name;
-      out.push({ id, file: full, size: stat.size, lastActiveMs: stat.mtimeMs, subagents: 0 });
+      out.push({ id, file: full, size: stat.size, mtimeMs: stat.mtimeMs, lastActiveMs: stat.mtimeMs, subagents: 0 });
     }
   }
   return out;
@@ -216,7 +241,7 @@ async function discoverSessions(options = {}) {
   const cache = options.cache instanceof Map ? options.cache : new Map();
   const sessions = [];
   const seen = new Set();
-  const describe = (agent, record, read) => {
+  const metaFor = (record, read) => {
     let meta = { app: null, project: null, mode: null };
     if (record.file) {
       seen.add(record.file);
@@ -226,17 +251,43 @@ async function discoverSessions(options = {}) {
         try { meta = read(record.file, record.size); } catch { /* unreadable now; the next look retries */ }
         // A field this read did not reach keeps the value an earlier read found: the mode does not
         // vanish because the last 4 MB happened to hold no prompt.
-        if (hit) for (const key of ['app', 'project', 'mode']) if (meta[key] === null) meta = { ...meta, [key]: hit.meta[key] };
+        if (hit) for (const key of ['app', 'project', 'mode', 'lastRecordMs']) {
+          if (meta[key] === null && hit.meta[key] !== undefined) meta = { ...meta, [key]: hit.meta[key] };
+        }
         cache.set(record.file, { size: record.size, meta });
       }
     }
-    sessions.push({
-      agent, id: String(record.id).slice(0, 8), app: meta.app, project: meta.project, mode: meta.mode,
-      lastActiveAt: Math.round(record.lastActiveMs), subagents: record.subagents,
-    });
+    return meta;
   };
-  if (options.claudeRoot) for (const record of await claudeCandidates(options.claudeRoot, since, now)) describe('claude', record, claudeMeta);
-  if (options.codexRoot) for (const record of await codexCandidates(options.codexRoot, since)) describe('codex', record, codexMeta);
+  const push = (agent, record, meta) => sessions.push({
+    agent, id: String(record.id).slice(0, 8), app: meta.app, project: meta.project, mode: meta.mode,
+    lastActiveAt: Math.round(record.lastActiveMs), subagents: record.subagents,
+  });
+  if (options.claudeRoot) {
+    for (const record of await claudeCandidates(options.claudeRoot, since, now)) push('claude', record, metaFor(record, claudeMeta));
+  }
+  if (options.codexRoot) {
+    const rows = [];
+    for (const candidate of await codexCandidates(options.codexRoot, since)) {
+      const meta = metaFor(candidate, codexMeta);
+      const lastActiveMs = Number.isFinite(meta.lastRecordMs) ? Math.min(meta.lastRecordMs, now) : candidate.mtimeMs;
+      if (lastActiveMs >= since) rows.push({ record: { ...candidate, lastActiveMs }, meta });
+    }
+    // A spawned worker counts toward the session that spawned it, as a Claude subagent does; one
+    // whose session is not in the window is listed on its own, so active work is never hidden. A
+    // guardian review is never a session.
+    const sessionsById = new Map(rows.filter((row) => !row.meta.subagent).map((row) => [String(row.record.id).toLowerCase(), row]));
+    const listed = [...sessionsById.values()];
+    for (const row of rows) {
+      if (!row.meta.subagent) continue;
+      const parent = row.meta.parent ? sessionsById.get(row.meta.parent) : null;
+      if (parent) {
+        parent.record.lastActiveMs = Math.max(parent.record.lastActiveMs, row.record.lastActiveMs);
+        if (now - row.record.lastActiveMs <= SUBAGENT_ACTIVE_MS) parent.record.subagents += 1;
+      } else if (row.meta.parent) listed.push(row);
+    }
+    for (const row of listed) push('codex', row.record, row.meta);
+  }
   // A session that left the window leaves the cache with it, so the cache never outgrows the
   // window's handful of files.
   for (const key of [...cache.keys()]) if (!seen.has(key)) cache.delete(key);

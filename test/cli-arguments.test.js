@@ -15,7 +15,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -68,8 +68,8 @@ function tree(home) {
 }
 
 const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n'
-  + '       wildcard-perms --guidance derived\n'
-  + '       wildcard-perms --guidance accept|decline|reset <id>\n';
+  + '       wildcard-perms --guidance derived [--workspace <path>]\n'
+  + '       wildcard-perms --guidance accept|decline|reset <id> [--workspace <path>]\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n'
   + '       wildcard-perms --gates list [--json]\n'
   + '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';
@@ -196,4 +196,175 @@ test('a word the verb never reads is refused with its usage, exit 1, and nothing
   assert.equal(on.status, 0, on.stderr);
   assert.equal(JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')).permissions.defaultMode,
     'bypassPermissions', 'precondition: --bypass on alone writes');
+});
+
+// 1.9.4. A run with bare words and no verb reached hook mode: `gates status` (the dashes
+// forgotten) and `extra` printed "+3 -4 → 3 entries", rewrote settings.json and settings.local.json
+// and exited 0, and on a terminal blocked on stdin. Hook mode is an empty argv only.
+// MUTATION: put back `&& argv.some((arg) => arg.startsWith('-'))` on the no-verb branch of the
+// dispatch chain and `gates status` exits 0 with the home rewritten.
+test('bare words with no verb are refused, exit 2, naming them, and hook mode never runs', async (t) => {
+  const home = tempHome(t);
+  const before = tree(home);
+  for (const args of [['gates', 'status'], ['extra'], ['status'], ['learn', 'scan'], ['']]) {
+    const bad = run(home, args);
+    assert.equal(bad.status, 2, `${JSON.stringify(args)}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: unrecognized argument ${args.join(' ')}: no verb given, `
+      + 'and hook mode takes no arguments; nothing was run\n\n'), `${JSON.stringify(args)}: ${bad.stderr.slice(0, 300)}`);
+    assert.match(bad.stderr, /^usage: wildcard-perms --help \| --version$/m, 'followed by the full usage');
+    assert.equal(bad.stdout, '', JSON.stringify(args));
+    assert.deepEqual(tree(home), before, `${JSON.stringify(args)} wrote into the home`);
+  }
+  // A dashed word beside them is still named as the unrecognized option, as before.
+  const mixed = run(home, ['gates', '--status']);
+  assert.equal(mixed.status, 2, mixed.stderr);
+  assert.equal(mixed.stderr.split('\n')[0], 'wildcard-perms: unrecognized option --status');
+  // --help and --version still answer beside a bare word.
+  assert.match(run(home, ['gates', '--help']).stdout, /^usage: wildcard-perms --help \| --version$/m);
+  assert.equal(run(home, ['extra', '--version']).stdout, `${require('../package.json').version}\n`);
+  assert.deepEqual(tree(home), before, 'help, version and the mixed refusal wrote nothing');
+
+  // On a terminal nothing closes stdin: the refusal must exit without reading it. The payload is
+  // larger than a pipe buffer, so its write completes only if something read it.
+  const root = path.parse(home).root;
+  const child = spawn(process.execPath, [CLI, 'gates', 'status'], {
+    cwd: os.tmpdir(), windowsHide: true,
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
+      CODEX_HOME: path.join(home, '.codex'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+      TOOLBOX_PYTHON: path.join(home, 'no-such-python'),
+    },
+  });
+  let drained = false;
+  child.stdin.on('error', () => {});
+  child.stdin.write(JSON.stringify({ cwd: home, tool_name: 'Bash', pad: 'x'.repeat(8 * 1024 * 1024) }),
+    (error) => { if (!error) drained = true; });
+  let timedOut = false;
+  const code = await new Promise((resolve) => {
+    const timer = setTimeout(() => { timedOut = true; child.stdin.destroy(); child.kill('SIGKILL'); }, 10000);
+    child.on('close', (exit) => { clearTimeout(timer); resolve(exit); });
+  });
+  assert.equal(timedOut, false, 'gates status waited on an open stdin, as hook mode does');
+  assert.equal(code, 2);
+  assert.equal(drained, false, 'stdin was read, so the words reached hook mode');
+  assert.deepEqual(tree(home), before, 'and the home is untouched');
+
+  // Witness: an empty argv is hook mode, and with this event it rewrites the policy.
+  const hook = run(home, []);
+  assert.equal(hook.status, 0, hook.stderr);
+  assert.match(hook.stderr, /^wildcard-perms: \+3 -4 → 3 entries$/m);
+  assert.notDeepEqual(tree(home), before, 'precondition: hook mode writes');
+});
+
+// 1.9.4. learn() saved --mode and --threshold (setMode) before it checked the subcommand, so a
+// missing or mistyped one wrote the state and then printed the usage: `--learn sacn --mode
+// auto-safe` left Auto Learn in auto-safe, which the Codex Stop hook then scans in.
+// MUTATION: make learn()'s subcommand check `if (false)` and `--learn sacn --mode auto-safe`
+// writes the state file before the usage.
+test('a --learn with a missing or mistyped subcommand prints its usage before --mode or --threshold is saved', (t) => {
+  const home = tempHome(t);
+  const before = tree(home);
+  for (const args of [
+    ['--learn', 'sacn', '--mode', 'auto-safe'],
+    ['--learn', '--mode', 'auto-safe'],
+    ['--learn', '--threshold', '1'],
+    ['--learn', 'scan-all', '--threshold', '2', '--mode', 'observe'],
+    ['--learn', '--workspace', home, '--mode', 'observe'],
+  ]) {
+    const bad = run(home, args);
+    assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.equal(bad.stderr, LEARN_USAGE, args.join(' '));
+    assert.equal(bad.stdout, '', args.join(' '));
+    assert.deepEqual(tree(home), before, `${args.join(' ')} wrote into the home`);
+  }
+
+  // Witness: with a subcommand the same options are saved.
+  const ok = run(home, ['--learn', 'status', '--mode', 'auto-safe', '--threshold', '2', '--workspace', home,
+    '--codex-scope', 'off', '--codex-executable', path.join(home, 'no-codex')]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(JSON.parse(ok.stdout).mode, 'auto-safe', 'precondition: --learn status --mode saves the mode');
+  assert.equal(JSON.parse(ok.stdout).threshold, 2, 'precondition: and the threshold');
+  assert.notDeepEqual(tree(home), before, 'precondition: the state file was written');
+});
+
+// The table dispatch refuses from: bin/wildcard-perms verbOptions(), read out of the source and
+// run, so the test holds whatever the file holds.
+function verbOptionsOfCli() {
+  const source = fs.readFileSync(CLI, 'utf8').replace(/\r\n/g, '\n');
+  const start = source.indexOf('\nfunction verbOptions() {\n');
+  assert.notEqual(start, -1, 'verbOptions() not found in bin/wildcard-perms');
+  const end = source.indexOf('\n}\n', start);
+  return new Function(`${source.slice(start, end + 2)}\nreturn verbOptions();`)();
+}
+
+// 1.9.4. Since 1.9.3 refuses any option a verb does not take, the usage is the only map of the
+// ones it does, and GUIDANCE_USAGE left out `[--workspace <path>]` for derived, accept, decline
+// and reset. Each usage line in --help must name exactly the options verbOptions() gives that
+// verb (and that line's subcommands): an option added to the table without the usage fails here,
+// and so does a usage that names one the dispatch would refuse.
+// MUTATIONS: drop `[--workspace <path>]` from the --guidance derived usage line; add a '--force'
+// flag to --drain in verbOptions(). Each fails here, naming the line.
+test('every verb\'s usage names exactly the options its verbOptions entry accepts', (t) => {
+  const home = tempHome(t);
+  const help = run(home, ['--help']);
+  assert.equal(help.status, 0, help.stderr);
+  const table = verbOptionsOfCli();
+  const seen = new Map();
+  for (const line of help.stdout.split('\n')) {
+    const match = /^(?:usage: | +)wildcard-perms (--[a-z-]+)(?: (.*))?$/.exec(line);
+    if (!match || !table[match[1]]) continue;
+    const [, verb, rest = ''] = match;
+    const entry = table[verb];
+    const head = rest.split(' ')[0];
+    const subs = head && !/^[[<-]/.test(head) ? head.split('|') : [];
+    if (!seen.has(verb)) seen.set(verb, new Set());
+    for (const sub of subs) seen.get(verb).add(sub);
+    const specs = (subs.length ? subs : [null]).map((sub) => {
+      const spec = { ...entry, ...((sub !== null && entry.subs && entry.subs[sub]) || {}) };
+      return [...(spec.values || []), ...(spec.flags || [])].sort();
+    });
+    assert.ok(specs.every((spec) => JSON.stringify(spec) === JSON.stringify(specs[0])),
+      `${line.trim()}: its subcommands take different options, so one line cannot document them`);
+    const named = [...new Set(rest.match(/--[a-z][a-z-]*/g) || [])].sort();
+    assert.deepEqual(named, specs[0], `${line.trim()}: names ${named.join(' ') || 'nothing'}, the verb takes ${specs[0].join(' ') || 'nothing'}`);
+  }
+  for (const [verb, entry] of Object.entries(table)) {
+    assert.ok(seen.has(verb), `${verb} has no usage line in --help`);
+    for (const sub of Object.keys(entry.subs || {})) {
+      assert.ok(seen.get(verb).has(sub), `${verb} ${sub} takes its own options but no usage line names it`);
+    }
+  }
+  // Witness: the table is the real one, with the options K4 was about.
+  assert.deepEqual(table['--guidance'].subs.derived.values, ['--workspace']);
+  assert.ok(seen.size >= 10, `only ${seen.size} verbs found in --help`);
+});
+
+// 1.9.4. codexWorkspaceRules called learnOption outside any try, so `--codex-workspace-rules
+// status --workspace` (no value) printed an uncaught stack trace. Every value option of every verb
+// is here, so the next one read outside a try is caught too.
+// MUTATION: take codexWorkspaceRules' learnOption out of its try and the first case prints
+// "at learnOption" instead of the usage.
+test('a value option with no value is named, with the usage where the verb has one, never a stack trace', (t) => {
+  const home = tempHome(t);
+  const before = tree(home);
+  const RULES_USAGE = 'usage: wildcard-perms --codex-workspace-rules status|remove [--workspace <path>]\n';
+  for (const [args, said] of [
+    [['--codex-workspace-rules', 'status', '--workspace'],
+      `wildcard-perms --codex-workspace-rules: --workspace requires a value\n${RULES_USAGE}`],
+    [['--codex-workspace-rules', 'remove', '--workspace'],
+      `wildcard-perms --codex-workspace-rules: --workspace requires a value\n${RULES_USAGE}`],
+    [['--drain', '--workspace'], `wildcard-perms --drain: --workspace requires a value\n${DRAIN_USAGE}`],
+    [['--guidance', 'derived', '--workspace'], 'wildcard-perms --guidance derived: --workspace requires a value\n'],
+    [['--guidance', 'accept', 'batch-file-edits', '--workspace'],
+      'wildcard-perms --guidance accept: --workspace requires a value\n'],
+    ...['--mode', '--workspace', '--codex-scope', '--threshold', '--codex-executable'].map((option) =>
+      [['--learn', 'status', option], `wildcard-perms --learn status: ${option} requires a value\n`]),
+  ]) {
+    const bad = run(home, args);
+    assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.equal(bad.stderr, said, args.join(' '));
+    assert.equal(bad.stdout, '', args.join(' '));
+    assert.deepEqual(tree(home), before, `${args.join(' ')} wrote into the home`);
+  }
 });

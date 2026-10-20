@@ -31,7 +31,8 @@ const os  = require('os');
 
 const SETTINGS  = path.join(os.homedir(), '.claude', 'settings.json');
 const PACK_PATH = path.join(__dirname, '..', 'patterns', 'starter-pack.json');
-const LEARN_USAGE = 'usage: wildcard-perms --learn scan|status|apply|undo|hits ' +
+const LEARN_ACTIONS = ['scan', 'status', 'apply', 'undo', 'hits'];
+const LEARN_USAGE = `usage: wildcard-perms --learn ${LEARN_ACTIONS.join('|')} ` +
   '[--mode observe|recommend|auto-safe] [--workspace <path>] ' +
   '[--codex-scope user|off] [--threshold <count>] ' +
   '[--codex-executable <path>]\n';
@@ -59,8 +60,8 @@ const WORKSPACE_RULES_USAGE =
   'usage: wildcard-perms --codex-workspace-rules status|remove [--workspace <path>]\n';
 const DRAIN_USAGE = 'usage: wildcard-perms --drain [--workspace <path>] [--dry-run]\n';
 const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
-  '       wildcard-perms --guidance derived\n' +
-  '       wildcard-perms --guidance accept|decline|reset <id>\n';
+  '       wildcard-perms --guidance derived [--workspace <path>]\n' +
+  '       wildcard-perms --guidance accept|decline|reset <id> [--workspace <path>]\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n' +
   '       wildcard-perms --gates list [--json]\n' +
   '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';
@@ -136,16 +137,21 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   // exit 0, and `--seed --dry-run` merged the starter pack. Each verb's options are its parser's
   // own (verbOptions, at the end of this file). `argv.length` first, so hook mode pays nothing.
   unrecognizedOptions(verbArguments(argv).unknown, verbArguments(argv).verb);
-} else if (argv.length && !VERBS.some((verb) => argv.includes(verb))
-    && argv.some((arg) => arg.startsWith('-'))) {
+} else if (argv.length && !VERBS.some((verb) => argv.includes(verb))) {
   // An unrecognized flag must NEVER reach hook mode. Hook mode rewrites
   // settings.json, so `--gate` (a typo for `--gates`) silently rewrote the
   // user's permission policy and exited 0 — and on a TTY, where nothing ever
   // closes stdin, it instead hung forever waiting for an event that was never
   // coming. There was also no `--help` at all, so the single most likely first
   // command anyone types was itself a policy write.
-  process.stderr.write('wildcard-perms: unrecognized option '
-    + `${argv.filter((arg) => arg.startsWith('-')).join(' ')}\n\n${HELP_USAGE}`);
+  // Nor may a bare word (1.9.4): `wildcard-perms gates status`, the dashes forgotten, and
+  // `wildcard-perms extra` rewrote settings.json and exited 0, or hung on a terminal. Hook mode is
+  // an empty argv only; every installer registers the path with no arguments.
+  const dashed = argv.filter((arg) => arg.startsWith('-'));
+  process.stderr.write(dashed.length
+    ? `wildcard-perms: unrecognized option ${dashed.join(' ')}\n\n${HELP_USAGE}`
+    : `wildcard-perms: unrecognized argument ${argv.join(' ')}: no verb given, and hook mode `
+      + `takes no arguments; nothing was run\n\n${HELP_USAGE}`);
   process.exitCode = 2;
 } else if (argv.includes('--learn')) {
   learn(argv);
@@ -357,6 +363,13 @@ function learn(args) {
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
   const index = args.indexOf('--learn');
   const action = String(args[index + 1] || 'status').toLowerCase();
+  // Before the setMode below, which saves the state: `--learn sacn --mode auto-safe` and `--learn
+  // --threshold 1` (no subcommand) wrote the mode or threshold, then printed this usage.
+  if (!LEARN_ACTIONS.includes(action)) {
+    process.stderr.write(LEARN_USAGE);
+    process.exitCode = 1;
+    return;
+  }
 
   try {
     const modeValue = learnOption(args, '--mode', null);
@@ -409,6 +422,7 @@ function learn(args) {
     else if (action === 'undo') result = manager.undo();
     else if (action === 'hits') result = manager.rebuildManagedHits();
     else {
+      // Reached only if LEARN_ACTIONS names an action this chain lacks.
       process.stderr.write(LEARN_USAGE);
       process.exitCode = 1;
       return;
@@ -1646,7 +1660,15 @@ function codexWorkspaceRules(args) {
     process.exitCode = 1;
     return;
   }
-  const root = path.resolve(learnOption(args, '--workspace', process.cwd()));
+  // As drain() does: `--workspace` with no value threw out of learnOption as a stack trace.
+  let root;
+  try {
+    root = path.resolve(learnOption(args, '--workspace', process.cwd()));
+  } catch (err) {
+    process.stderr.write(`wildcard-perms --codex-workspace-rules: ${err.message}\n${WORKSPACE_RULES_USAGE}`);
+    process.exitCode = 1;
+    return;
+  }
   const target = path.join(root, '.codex', 'rules', 'permission-wildcarding.rules');
 
   let text = null;

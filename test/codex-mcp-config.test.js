@@ -322,7 +322,7 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-async-'));
   // Retried: the app-server stood in `home`, and a .cmd stand-in's hidden console host keeps
   // that cwd for a while after it dies, which rmSync does not retry. A bare rmSync here failed
-  // the test's hook with EPERM in 1 of 5 loaded full runs (2026-10-20).
+  // the test's hook with EPERM once, in the third loaded full run of 2026-10-20's first pass.
   t.after(() => waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000));
   const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
   fs.mkdirSync(codexHome, { recursive: true });
@@ -342,8 +342,8 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   // the loaded runs captured that day, took 162-569 ms for this file's workers (n=9) and up to
   // 1,080 ms for a node child (n=81). The 1.8.0 full run failed this test once (which line was not recorded). The
   // witness is an order instead: the call returned before the codex it asks had even started.
-  // That codex is two more process starts away (the worker's, then cmd.exe's), so only a call
-  // that waited could see its pid file. MUTATION: route readCodexConfigLayersAsync through the
+  // That codex is further process starts away (the worker's, then the stand-in's), so only a
+  // call that waited could see its pid file. MUTATION: route readCodexConfigLayersAsync through the
   // synchronous nativeRpc (spawnSync), handing `track` a stand-in object. The call returns after
   // the worker's 25 s default deadline and this fails ("it returned after 31308 ms"). Confirmed
   // 2026-10-20. Blocking the thread for 7 s after spawn() is NOT a usable mutation: it started

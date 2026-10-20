@@ -3925,6 +3925,10 @@ test('"Check whether Claude Code runs user hooks" asks first, runs the probe und
     const asked = app.shown.find((entry) => entry.message === 'Ask Claude Code whether it runs user hooks?');
     assert.ok(asked && asked.options.modal, 'it asks before it runs Claude Code');
     assert.match(asked.options.detail, /one short real Claude Code turn/);
+    // The time it states is the probe's own longest (audit of 1.9.2: it said 60 s, and the close
+    // grace alone made the answer come later). MUTATION: put "Ends after 60 s at most." back.
+    const { PROBE_LONGEST_MS } = require('../src/memory-guard-install');
+    assert.ok(asked.options.detail.endsWith(` Ends after ${PROBE_LONGEST_MS / 1000} s at most.`), asked.options.detail);
     assert.equal(stub.ran(), null, 'dismissed: claude never ran');
 
     app.answer('Check');

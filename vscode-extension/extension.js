@@ -55,7 +55,7 @@ const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const {
-  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe,
+  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe, PROBE_LONGEST_MS,
 } = require('./src/memory-guard-install');
 const { BUDGETS: GUARD_BUDGETS } = require('./src/memory-index-guard');
 const {
@@ -4565,7 +4565,7 @@ async function probeUserHooks() {
       modal: true,
       detail: 'Runs claude -p "/goal ..." once, with no built-in tools and no saved session, in an empty '
         + 'directory of its own, and reads Claude Code\'s own answer. Where hooks are restricted it refuses at once; '
-        + 'where they are allowed this is one short real Claude Code turn. Ends after 60 s at most.',
+        + `where they are allowed this is one short real Claude Code turn. Ends after ${PROBE_LONGEST_MS / 1000} s at most.`,
     },
     'Check');
   if (choice !== 'Check' || deactivated) return;

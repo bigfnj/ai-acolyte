@@ -374,6 +374,16 @@ test('the probe reads Claude Code\'s refusal text, and anything else as accepted
   assert.match(classifyProbe({ error: Object.assign(new Error('x'), { code: 'ETIMEDOUT' }), status: null }).detail, /no answer within 60 s/);
 });
 
+// The longest a probe takes, which the extension's confirmation states: the 60 s deadline, the 2 s
+// close grace, and the directory removal's five retries at 200 ms linear backoff (3 s; measured
+// on Windows, a probe whose stub answered at once and whose removal failed every try answered
+// 3.16 s after it started). A change to any part has to be seen here.
+// MUTATION: leave the close grace out of PROBE_LONGEST_MS and this reads 63000.
+test('the probe\'s stated longest is its deadline, its close grace and its removal retries', () => {
+  const { PROBE_LONGEST_MS } = require('../src/memory-guard-install');
+  assert.equal(PROBE_LONGEST_MS, 60000 + 2000 + (200 + 400 + 600 + 800 + 1000));
+});
+
 // A stub `claude` that records how it was run (and its pid) and answers, or sleeps first.
 function stubClaude(t, answer, exitCode, sleepMs = 0) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-stub-'));

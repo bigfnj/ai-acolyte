@@ -59,6 +59,11 @@ const PROBE_OUTPUT_CAP = 4 * 1024 * 1024;
 const PROBE_CLOSE_GRACE_MS = 2000;
 const PROBE_RM_RETRIES = 5;             // the removal's retries, as scripts/probe-user-hooks.js's
 const PROBE_RM_RETRY_DELAY_MS = 200;
+// The longest a probe takes to answer: the deadline, the close grace, then the directory's removal,
+// whose retries wait 200, 400, 600, 800 and 1000 ms (Node's linear backoff). The extension's
+// confirmation states it; it said "60 s at most", which the grace alone made false (audit of 1.9.2).
+const PROBE_LONGEST_MS = PROBE_TIMEOUT_MS + PROBE_CLOSE_GRACE_MS
+  + PROBE_RM_RETRY_DELAY_MS * ((PROBE_RM_RETRIES * (PROBE_RM_RETRIES + 1)) / 2);
 const RESTRICTED_TEXT = /can['\u2019]t run while hooks are restricted/i;
 
 function resolveHome(options) {
@@ -477,5 +482,5 @@ function memoryGuardProbe(options = {}) {
 
 module.exports = {
   resolveNodeExecutable, memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy,
-  memoryGuardProbe, classifyProbe, guardRevision,
+  memoryGuardProbe, classifyProbe, guardRevision, PROBE_LONGEST_MS,
 };

@@ -64,8 +64,8 @@ const TEST_DIR = path.join(ROOT, 'test') + path.sep;
 //
 // 2026-10-14: pickPrimaryDir, and extension.js's activate and deactivate, left this list
 // for TEST_ONLY, because the census now follows a require through a path.join and so sees
-// the tests that load them that way. fastLint is still reached only through a loader that
-// takes the module path as an argument.
+// the tests that load them that way. fastLint stayed, then reached only through a loader
+// that takes the module path as an argument.
 //
 // 2026-10-19: memoryLint.js's fastLint left this list for TEST_ONLY. test/memory-line-cap.test.js
 // still reaches it through loadLint(), which no scan can follow, and

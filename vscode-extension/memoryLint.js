@@ -32,7 +32,7 @@ const ENTRIES_CEILING = GUARD_BUDGETS.entries;
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:266-268#GATE_BEGIN), and the pattern
+// recall.py's gate markers (recall.py:268-269#GATE_BEGIN), and the pattern
 // _compile_gates_text actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one
@@ -196,9 +196,9 @@ function gateAgents(text) {
 const THREAD_STATUSES = ['open', 'awaiting', 'blocked', 'deferred'];
 const THREAD_CLOSED = ['done', 'closed', 'live', 'shelved', 'deleted', 'dropped', 'shipped'];
 const STATUS_BEGIN = '<!-- status -->';
-// recall.py's _STATUS_MARK, _FENCE_OPEN and _FENCE_CLOSE under fullmatch. A line here never holds
-// a newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not (it also stops at
-// a carriage return, U+2028 and U+2029, which a Python line can hold).
+// recall.py's _STATUS_MARK, _STATUS_FENCE_OPEN and _STATUS_FENCE_CLOSE under fullmatch. A line
+// here never holds a newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not
+// (it also stops at a carriage return, U+2028 and U+2029, which a Python line can hold).
 const STATUS_MARK = /^ {0,3}(<!-- \/?status -->)[ \t]*$/;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;

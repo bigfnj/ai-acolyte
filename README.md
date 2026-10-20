@@ -352,7 +352,10 @@ Turn it on with **AI Acolyte: Toggle MEMORY.md guard**, the button on the **Clau
 or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `status` says what is
 installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
 registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
-(`src/claude-hook-config.js:56#memoryGuardDefinition`). Where `CLAUDE_CONFIG_DIR` is set, every
+(`src/claude-hook-config.js:56#memoryGuardDefinition`); on Windows, when `PATH` has none,
+`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:96#resolveNodeExecutable`). If
+that node later disappears the status reads `on (needs repair)`, and turning the guard on again
+(the card's **Repair** button) re-points the hook at the node found then. Where `CLAUDE_CONFIG_DIR` is set, every
 `~/.claude` path in this section is that directory instead, as it is for Claude Code
 (`src/memory-guard-install.js:46#configDirFor`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
@@ -368,15 +371,30 @@ node "<copy>"`), turning the guard on refuses, and that hook is never touched.
 [watch the cause](#design-principle-watch-the-cause-do-not-hook-the-event)), so the guard is
 installed and inert. The card, the toggle and `--memory-guard status` say so whenever a local file
 shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`, or
-`disableAllHooks` in your own settings (`src/memory-guard-install.js:124#hookPolicy`). A policy
-delivered from a server may leave no local trace, so where nothing is found they say they cannot
-tell, and `wildcard-perms --memory-guard probe` asks Claude Code. The probe runs
-`claude -p "/goal probe"` once in an empty temporary directory and reads Claude Code's own refusal
-text, so a reworded message reads as unknown. Where hooks are allowed, that is one short real
-Claude Code turn. Claude Code records even the refusal as a session, so the probe always uses the
-same directory name and leaves a single transcript folder under `~/.claude/projects`. Measured on
-the development box on 2026-10-19 with Claude Code 2.1.301, the probe answered "restricted" in
-about 5 seconds. The lint keeps reporting the same measures either way.
+`disableAllHooks` in your own settings (`src/memory-guard-install.js:124#hookPolicy`), and
+`--memory-guard status` names the file on a `source:` line. A policy delivered from a server may
+leave no local trace, so where nothing is found they say they cannot tell, and the probe asks
+Claude Code: **AI Acolyte: Check whether Claude Code runs user hooks** in the extension (it asks
+first), or `wildcard-perms --memory-guard probe`. The probe runs
+`claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --strict-mcp-config --no-session-persistence`
+once, in an empty directory of its own, `~/.claude/wildcarding/ai-acolyte-memory-guard-probe`.
+The goal is inert and the run has no built-in tools, no MCP servers and no saved session; `claude
+--help` lists no turn limit, so the bound on time is a 60 second deadline that ends the whole
+process tree. An existing directory there is used only when it is empty and yours; anything else
+is refused and Claude Code is not run. The answer reads Claude Code's own text: "restricted" is
+its refusal message, "not restricted" needs the goal's word in the answer, and anything else,
+a reworded message included, is "unknown". Where hooks are allowed, the probe is one short real
+Claude Code turn. Claude Code still creates one project folder for the directory under
+`~/.claude/projects` (holding an empty `memory/`, and no transcript), and the fixed name keeps it
+to one. The lint keeps reporting the same measures either way.
+
+**What has been observed, and what has not.** On 2026-10-19, under a managed policy that set
+`allowManagedHooksOnly`, the 1.9.0 probe answered "restricted" in about 5 seconds (Claude Code
+2.1.301). On 2026-10-20 the development box carried no such policy locally, and the bounded
+probe above answered "not restricted" in 4.3 seconds (Claude Code 2.1.293), the first time that
+answer was seen. The guard's refusal itself, a real Claude Code session running the hook, the
+hook exiting 2 and Claude Code handing its message to the model, has not been observed end to
+end: every test drives the hook directly, the way Claude Code is documented to run it.
 
 The editor gauge and `recall.py --lint` count lines, line widths and broken comments exactly as
 the guard does, and `recall.py --lint` also holds the entry count to 16;

@@ -322,8 +322,12 @@ comment). Deleting whole lines passes unless it breaks an HTML comment or a code
 broken comment the fix is to close or remove the whole comment. It uses those fixed budgets; the `memory.*` settings tune
 this gauge, not the hook. Turn it on with **Toggle MEMORY.md guard**, which asks first. Where a
 managed policy sets `allowManagedHooksOnly` or `disableAllHooks`, Claude Code runs no user hook,
-so the guard is installed and inert there, and the card says so. The root README section "The
-MEMORY.md guard" has the rule, the install and the policy caveat.
+so the guard is installed and inert there, and the card says so. Where no local file shows a
+policy, **Check whether Claude Code runs user hooks** asks the installed Claude Code once (it
+asks you first, because where hooks are allowed that is one short real Claude Code turn). The
+guard's refusal inside a real Claude Code session has not been observed end to end: the tests
+drive the hook directly. The root README section "The MEMORY.md guard" has the rule, the install,
+the probe and what has been observed.
 
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
@@ -359,10 +363,11 @@ the model asset and the venv, and never runs Python.
 - **⟳ Rebuild recall index** — the one button. It runs `recall.py --rebuild` in the
   DevToolbox venv to force a full CPU re-embed (model + corpus pinned via env so the
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
-- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`
-  or `foreign`, followed every time by whether Claude Code will run it here. The button turns the
-  guard on (after a confirmation naming the hook and the `node` it runs), repairs it, or turns it
-  off.
+- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`,
+  `foreign` or `unreadable`, followed every time by whether Claude Code will run it here. The
+  button turns the guard on (after a confirmation naming the hook and the `node` it runs), repairs
+  it, or turns it off. A hook whose `node` is gone reads `on (needs repair)`, and **Repair**
+  re-points it at the `node` found now (on Windows, `%ProgramFiles%\nodejs` when `PATH` has none).
 
 Python does run unattended in two other places, both gated on your having opted in.
 `autoSyncRecallIfStale` (`extension.js:1135#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not

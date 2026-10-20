@@ -8,6 +8,11 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.2 fixes what a second audit found**: the CLI runs one verb at a time (a second verb
+used to be dropped without a word), the hook probe is ended by a window reload and always answers
+about 2 s after its deadline, the MEMORY.md guard no longer judges a trailing-dot spelling of the
+index against an empty file, open threads offer Refresh only where a compile can run, and thread
+text loses invisible format characters as well as control and bidi ones.
 **Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer reads any exit 0
 as hooks being allowed, **AI Acolyte: Check whether Claude Code
 runs user hooks** asks on demand, open threads compile off the extension host and a healthy
@@ -78,7 +83,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v191.vsix
+code --install-extension ai-acolyte-v192.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

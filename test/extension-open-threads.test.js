@@ -412,7 +412,11 @@ test('twenty corpus events and their compile read no memory report, and the comp
   const cards = app.watchers.filter((w) => w.pattern?.pattern === 'MEMORY.md' && w.pattern.base?.fsPath === app.store && !w.disposed);
   assert.ok(cards.length, 'precondition: the card watches the store\'s MEMORY.md');
   for (const card of cards) for (const fn of card.handlers.change) fn({ fsPath: path.join(app.store, 'MEMORY.md') });
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  // node:timers/promises, not the global: threadsWindow's setTimeout unrefs every real timer, so a
+  // wait through it holds nothing open, and Node 20 and 22 ended the file's event loop here with
+  // this promise pending, cancelling the test and every one after it (CI, 2026-10-20). The same
+  // test passed on Node 24, on the development box and in CI, so only the older runtimes show it.
+  await require('node:timers/promises').setTimeout(600);
   assert.equal(app.counters.memoryReport - before, 0, 'no memoryReport() on the events, the burst, the compile or the sync check');
   // MUTATION: put `memoryReport().dir` back in gateCompileEnv, in threadsBurstCompiles, or in
   // autoSyncRecallIfStale, and the count is 1.

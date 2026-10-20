@@ -1660,7 +1660,15 @@ function codexWorkspaceRules(args) {
     process.exitCode = 1;
     return;
   }
-  const root = path.resolve(learnOption(args, '--workspace', process.cwd()));
+  // As drain() does: `--workspace` with no value threw out of learnOption as a stack trace.
+  let root;
+  try {
+    root = path.resolve(learnOption(args, '--workspace', process.cwd()));
+  } catch (err) {
+    process.stderr.write(`wildcard-perms --codex-workspace-rules: ${err.message}\n${WORKSPACE_RULES_USAGE}`);
+    process.exitCode = 1;
+    return;
+  }
   const target = path.join(root, '.codex', 'rules', 'permission-wildcarding.rules');
 
   let text = null;

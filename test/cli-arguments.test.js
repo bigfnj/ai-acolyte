@@ -287,3 +287,32 @@ test('a --learn with a missing or mistyped subcommand prints its usage before --
   assert.equal(JSON.parse(ok.stdout).threshold, 2, 'precondition: and the threshold');
   assert.notDeepEqual(tree(home), before, 'precondition: the state file was written');
 });
+
+// 1.9.4. codexWorkspaceRules called learnOption outside any try, so `--codex-workspace-rules
+// status --workspace` (no value) printed an uncaught stack trace. Every value option of every verb
+// is here, so the next one read outside a try is caught too.
+// MUTATION: take codexWorkspaceRules' learnOption out of its try and the first case prints
+// "at learnOption" instead of the usage.
+test('a value option with no value is named, with the usage where the verb has one, never a stack trace', (t) => {
+  const home = tempHome(t);
+  const before = tree(home);
+  const RULES_USAGE = 'usage: wildcard-perms --codex-workspace-rules status|remove [--workspace <path>]\n';
+  for (const [args, said] of [
+    [['--codex-workspace-rules', 'status', '--workspace'],
+      `wildcard-perms --codex-workspace-rules: --workspace requires a value\n${RULES_USAGE}`],
+    [['--codex-workspace-rules', 'remove', '--workspace'],
+      `wildcard-perms --codex-workspace-rules: --workspace requires a value\n${RULES_USAGE}`],
+    [['--drain', '--workspace'], `wildcard-perms --drain: --workspace requires a value\n${DRAIN_USAGE}`],
+    [['--guidance', 'derived', '--workspace'], 'wildcard-perms --guidance derived: --workspace requires a value\n'],
+    [['--guidance', 'accept', 'batch-file-edits', '--workspace'],
+      'wildcard-perms --guidance accept: --workspace requires a value\n'],
+    ...['--mode', '--workspace', '--codex-scope', '--threshold', '--codex-executable'].map((option) =>
+      [['--learn', 'status', option], `wildcard-perms --learn status: ${option} requires a value\n`]),
+  ]) {
+    const bad = run(home, args);
+    assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.equal(bad.stderr, said, args.join(' '));
+    assert.equal(bad.stdout, '', args.join(' '));
+    assert.deepEqual(tree(home), before, `${args.join(' ')} wrote into the home`);
+  }
+});

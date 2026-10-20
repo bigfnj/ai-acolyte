@@ -11,8 +11,9 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 Anything measured says so and names the date. Anything unverified says that too.
 
 **Cleared 2026-10-20 for 1.9.3.** A third full audit, of what 1.9.2 changed, filed 23 rows, none
-above LOW, and verified the six seeds this file held: 20 FIXED with mutation-tested commits, one
-DECLINED-MEASURED and two ACCEPTED-RECORDED. The six seeds are rows T2, T4, C3, P6, P4 and P2.
+above LOW, and verified the six seeds this file held: 21 FIXED (15 by mutation-tested commits, 5 corrections to
+published text, and H1 a cleanup whose revert is an equivalent mutant), one DECLINED-MEASURED and one
+ACCEPTED-RECORDED (corrected 2026-10-20 by the fourth pass, from "20 FIXED ... two ACCEPTED-RECORDED"). The six seeds are rows T2, T4, C3, P6, P4 and P2.
 Every row and the evidence are in `docs/engineering-record.md` under "The 1.9.3 audit clearance:
 the third pass (2026-10-20)".
 

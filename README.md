@@ -18,8 +18,8 @@ used to be dropped without a word), the hook probe is ended by a window reload a
 about 2 s after its deadline, the MEMORY.md guard no longer judges a trailing-dot spelling of the
 index against an empty file, open threads offer Refresh only where a compile can run, and thread
 text loses invisible format characters as well as control and bidi ones.
-**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer reads any exit 0
-as hooks being allowed, **AI Acolyte: Check whether Claude Code
+**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer reads an exit 0
+without an unknown-command message as hooks being allowed, **AI Acolyte: Check whether Claude Code
 runs user hooks** asks on demand, open threads compile off the extension host and a healthy
 MEMORY.md's saves no longer start a compile, Turn off open threads works in every state, and the
 INDEX line names the index it measured.
@@ -429,7 +429,8 @@ Windows the deadline ends the whole process tree (`taskkill /T`, so a `claude` u
 launcher's `cmd.exe` goes too); on Linux and macOS it ends the child alone, which is not started
 as a process group leader (`src/exec-resolve.js:311#endProcessTree`). Two seconds after the
 deadline the probe answers "unknown" even if a process outside that tree still holds its output
-open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`). It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
+open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`), or up to about five when such a process
+also keeps the probe's directory, which the answer then names. It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
 flag makes `/goal` run under a policy that blocks user hooks, so the probe would read "not
 restricted" while hooks stay blocked. An existing directory there is used only when it is a
 plain, empty directory, and on Linux and macOS only when you own it; Windows has no owner check

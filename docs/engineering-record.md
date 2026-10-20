@@ -3860,13 +3860,14 @@ and verified the six seeds BACKLOG.md held open from the second pass. It filed 2
 LOW. Three fix packages took the code findings to dispositions on their own branches, merged
 `--no-ff` into `release/1.9.3` in this order: WP-X `fix/cli-args-193`, WP-W `fix/probe-tidy-193`,
 WP-Y `fix/hidden-text-193`. The integrator took the six documentation rows (D1 to D6) and the
-measured note (H3). Each FIXED row names the commit whose message carries its mutations; every
-package's runner restored each mutated file and checked it by sha256.
+measured note (H3). Each FIXED row with a code change names the commit whose message carries its
+mutations (D1, D2, D4 and D6 are corrections to published text and name none, and D3's and H1's
+commits carry no killing mutation; counted by the fourth pass); every package's runner restored each mutated file and checked it by sha256.
 
 | id | Finding | Disposition |
 |---|---|---|
 | C1 [LOW] | a verb before `--gates retire` or `restore` is dropped in silence (the takesNames branch runs ahead of the one-verb check), contradicting README and the 1.9.2 notes | **FIXED** WP-X 690618f (a verb, dashed word or bare word before --gates retire or restore is refused; mutation `const lead = []` FIRED) |
-| C2 [LOW] | with a verb present an unknown dashed option is never refused: `--drain --dryrun` runs a real drain (promotes, prunes) | **FIXED** WP-X 690618f (verbOptions per verb from its parser, exit 2 naming the option before anything runs; 2 mutations FIRED; 59 real invocations unchanged) |
+| C2 [LOW] | with a verb present an unknown dashed option is never refused: `--drain --dryrun` runs a real drain (promotes, prunes) | **FIXED** WP-X 690618f (verbOptions per verb from its parser, exit 2 naming the option before anything runs; 4 mutations FIRED; 59 real invocations unchanged) |
 | C3 [LOW] | seed: stray bare words ignored by --bypass, --seed, --drain, --codex-workspace-rules, the derived --guidance verbs, --learn status, --max status, --codex-max status | **FIXED** WP-X 690618f (verbArguments tokenizer; nine verbs refuse a stray word with their usage; 12 mutations FIRED) |
 | C4 [LOW] | CLI twin of R1: `--memory-guard status` prints "turn the guard on again to repoint it" beside a foreign guard, where `on` always refuses | **FIXED** WP-X 31a539f (no repoint advice beside a foreign guard; mutation `missing = false` FIRED) |
 | T1 [LOW] | memory text reaches the terminal raw, ESC included: recall.py's agents problem strings, the compile's stderr passed on by --gates refresh and retire/restore, the restore refusal | **FIXED** WP-Y adecd27 + e689e05 (recall.py _shown prints untrusted names with ascii(); the CLI wraps every passed-on stderr and refusal in terminalText; 8 mutations FIRED) |
@@ -3876,7 +3877,7 @@ package's runner restored each mutated file and checked it by sha256.
 | P1 [LOW] | probe-user-hooks.js arms its grace timer after the tree kill resolves; when 'close' wins, the timer leaks and the script exits 2 s late (6 of 6 runs) | **FIXED** WP-W a0038f9 (no grace armed after a settled run; mutation FIRED) |
 | P2 [LOW] | seed: the guard probe's cleanup fails in silence with a stray process in its directory (rmSync in catch {}, no retries), and an empty leftover is reused | **FIXED** WP-W 6ee96f6 (async removal with 5 retries; a failure is named in the detail; 2 mutations FIRED) |
 | P3 [NOTE] | the guard probe's grace destroys stdout/stderr but never unrefs the child or ends stdin: on POSIX a surviving child keeps the CLI alive past its answer | **FIXED** WP-W 6ee96f6 + 17b364d (the grace unrefs the child; the unref mutation FIRED; ending stdin is parity only, as stdin is ended at spawn, and its mutant survives) |
-| P4 [NOTE] | seed: the probe confirmation says "Ends after 60 s at most" and classifyProbe "no answer within 60 s"; the answer can come about 62 s after the start | **FIXED** WP-W 11b8d08 (PROBE_LONGEST_MS, 65 s with the grace and the removal retries; 2 mutations FIRED) |
+| P4 [NOTE] | seed: the probe confirmation says "Ends after 60 s at most" and classifyProbe "no answer within 60 s"; the answer can come about 62 s after the start | **FIXED** WP-W 11b8d08 (PROBE_LONGEST_MS, 65 s with the grace and the removal retries; 2 mutations FIRED; classifyProbe's "no answer within 60 s" kept on purpose, since it names the deadline claude missed) |
 | P5 [NOTE] | probe-user-hooks.js: if only the closing freshDirectory fails, a completed run exits 3 and skips the report line | **FIXED** WP-W a0038f9 (a closing cleanup failure is a warning, the report still named, exit 0; mutation FIRED) |
 | P6 [NOTE] | seed: the child-process census reads extension.js only; every async src/ spawn the extension reaches is tracked today, but no test lists them | **FIXED** WP-W 926f978 (test/src-spawn-census.test.js lists all 15 spawn sites in src/ with how each is tracked; 4 mutations FIRED) |
 | H1 [NOTE] | threadsSettled's `state.readable &&` can never be false since its one caller filters readable first | **FIXED** WP-W 2e8c951 (the dead conjunct removed; putting it back is an equivalent mutant, so no test can name a killing mutation) |

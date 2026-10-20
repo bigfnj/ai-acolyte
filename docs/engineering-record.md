@@ -3137,7 +3137,7 @@ is one short real turn.
   `settings.json` keeps every value and comes back LF; `settings.json.pre-memory-guard` keeps the
   bytes from before the first change, CRLF and all, and is written once.
 
-**Mutation record.** 58 mutants over the guard, planner, installer, CLI, extension, `memoryLint.js`,
+**Mutation record.** 60 mutants over the guard, planner, installer, CLI, extension, `memoryLint.js`,
 `recall.py` and the shared constants, each restored and sha-checked. Four survived the first pass
 and each became a stronger test: a copy refresh by bytes (masked by the refresh's own revision
 check, now also exercised through `on`), a backup rewritten on every change (masked because `off`
@@ -3145,7 +3145,8 @@ restored the same bytes), and a `recall.py` fence skip (the fixture's fenced tex
 comment, so skipping it or not gave one answer). The fourth was a mutation pattern matching twice,
 fixed in the harness. A workstation crash at 23:59 killed the run of the last `recall-py.sh`
 mutant with that mutant still applied to `recall.py`; it was found by diff and reverted before the
-first commit.
+first commit. Re-run afterwards, it fired, and so did a second `recall-py.sh` mutant (dropping
+`over_budget` from the `clean:` condition), which shows the bytes fixture still moves one axis.
 
 **Follow-ups.** Add the `if` filter once its `Write` semantics are verified on a box where hooks
 run, and measure the node start it saves there. Verify the hook end to end on such a box: the

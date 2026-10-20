@@ -320,7 +320,10 @@ function hangingCodex(t) {
 
 test('the asynchronous layers read does not block, is bounded, hands its child over, and leaves no codex running', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-async-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // Retried: the app-server stood in `home`, and a .cmd stand-in's hidden console host keeps
+  // that cwd for a while after it dies, which rmSync does not retry. A bare rmSync here failed
+  // the test's hook with EPERM in 1 of 5 loaded full runs (2026-10-20).
+  t.after(() => waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000));
   const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
   fs.mkdirSync(codexHome, { recursive: true });
   const codex = hangingCodex(t);
@@ -454,7 +457,8 @@ async function waitFor(predicate, ms) {
 test('a tree kill of the asynchronous worker ends the codex it started, on every platform', async t => {
   const { endProcessTree } = require('../src/exec-resolve');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-tree-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // Retried, for the console host's cwd (see the asynchronous layers read above).
+  t.after(() => waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000));
   const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
   fs.mkdirSync(codexHome, { recursive: true });
   const codex = hangingCodex(t);

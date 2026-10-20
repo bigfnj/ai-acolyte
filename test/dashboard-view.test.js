@@ -565,12 +565,32 @@ test('every dashboard message reaches its command, and nothing else does', async
     // the script itself on load, and `remove` by the per-row prune button.
     // MUTATION: restore `case 'showWildcards': ...` and its row above. This fails
     // naming showWildcards. Confirmed 2026-10-14.
-    const panelScript = source.slice(source.indexOf('<script nonce='));
-    const senders = new Set((panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [])
-      .map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
+    //
+    // The DASHBOARD's script only (2026-10-20): from its `<script nonce=` to the `</script>` that
+    // closes it. Sliced to the end of the file, as it was, the gates panel's script (a second
+    // webview with a handler of its own) counted as dashboard senders, so a dashboard arm whose
+    // only sender sat in the gates panel passed.
+    const scriptAt = source.indexOf('<script nonce=');
+    const scriptEnd = source.indexOf('</script>', scriptAt);
+    assert.ok(scriptAt > 0 && scriptEnd > scriptAt, 'the dashboard\'s <script> block was not found');
+    const panelScript = source.slice(scriptAt, scriptEnd);
+    assert.ok(!panelScript.includes('<script', 1), 'precondition: the slice holds one script block, not two');
+    const sends = panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [];
+    const senders = new Set(sends.map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
     assert.ok(senders.size > 10, `precondition: the sender scan found only ${senders.size} senders`);
+    // Every post names its type as a literal, or the census cannot read it and must say so.
+    assert.equal(sends.length, (panelScript.match(/postMessage\(/g) || []).length,
+      'a postMessage in the dashboard script does not name its type as a literal, so this census cannot read it');
     const unsent = labels.filter((label) => !senders.has(label));
     assert.deepEqual(unsent, [], `dashboard routes with no sender in the webview: ${unsent.join(', ')}`);
+
+    // AND SENDER -> ARM (2026-10-20). The direction above asks whether every arm has a button;
+    // nothing asked whether every button has an arm, so a new button posting a type the switch
+    // does not handle passed and did nothing when clicked.
+    // MUTATION: add `$('runNow').addEventListener('click', () => vscode.postMessage({ type:
+    // 'notARoute' }));` to the dashboard script. This fails naming notARoute. Confirmed 2026-10-20.
+    const unhandled = [...senders].filter((type) => !labels.includes(type));
+    assert.deepEqual(unhandled, [], `the dashboard posts types its switch does not handle: ${unhandled.join(', ')}`);
 
     // The two that are handled in-process rather than dispatched.
     app.executed.length = 0;

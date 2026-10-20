@@ -8,6 +8,11 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer passes a flag
+that made Claude Code misreport restricted hooks as allowed, **AI Acolyte: Check whether Claude Code
+runs user hooks** asks on demand, open threads compile off the extension host and a healthy
+MEMORY.md's saves no longer start a compile, Turn off open threads works in every state, and the
+INDEX line names the index it measured.
 **Version 1.9.0 keeps the memory index lean**: an optional MEMORY.md guard hook refuses an edit
 after which the index ends past a budget and is worse than before, an Open threads block carries each memory's open status
 into every session in place of index lines, and Toggle Auto Learn switches Auto Learn from the
@@ -73,7 +78,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v190.vsix
+code --install-extension ai-acolyte-v191.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

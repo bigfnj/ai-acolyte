@@ -43,7 +43,7 @@ open-threads line ("Open threads: 2 installed (Claude, Codex)"), the INDEX warni
 while the install is not current. The whole card is hidden while `memory.enabled` is off; the
 open threads keep running, and the palette command still reaches them.
 
-Version **1.9.0** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.9.1** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance

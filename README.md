@@ -271,27 +271,42 @@ Waiting on the owner's choice between the two layouts.
 <!-- /status -->
 ```
 
-Each open memory is one line of the block, `- **AWAITING** <text> (<memory file>)`, sorted by
-status (open, awaiting, blocked, deferred) and then by name. The text is the status block's, on
-one line, cut at 240 characters. At most ten are listed, and one more line counts the rest and
-points at `recall "status"`. `done`, `closed`, `live`, `shelved`, `deleted`, `dropped` and
-`shipped` close a thread: the memory stays, and its line leaves the block on the next compile.
-Any other value, two `status:` lines, or a listed status whose block is missing or sits only
-inside a code fence is left out, and `recall.py --lint` names it.
+Each open memory is one line of the block, `- **AWAITING** <text> (<file stem>)`, the stem being
+the memory's file name without `.md`. Lines are sorted by status (open, awaiting, blocked,
+deferred) and then by stem. The text is the status block's, on one line, with control characters
+and bidirectional controls removed, cut at 240 characters. At most ten are listed, and
+one more line counts the rest and points at `recall "status"`. `done`, `closed`, `live`,
+`shelved`, `deleted`, `dropped` and `shipped` close a thread: the memory stays, and its line
+leaves the block on the next compile. Any other value, two `status:` lines, or a listed status
+whose block is missing or sits only inside a code fence is left out, and `recall.py --lint`
+names it.
 
 While `MEMORY.md` is past 140 lines, 12000 bytes or a 300-character line, the block also carries
-an INDEX line telling every new session to compact it before adding anything. It reaches sessions
+an INDEX line telling every new session to compact it before adding anything. The line names the
+index it measured, home-relative (`~/.claude/projects/<slug>/memory/MEMORY.md`), because the block
+reaches sessions in every project and each project has an index of its own. It reaches sessions
 on a machine whose managed policy keeps user hooks from running.
 
-`recall.py --threads-compile` writes `~/.claude/open-threads.generated.md` from the store the gates
-compile from. The extension recompiles after a memory edit that can change the list, a few seconds
-after activation when there is anything to say, and when the feature is turned on. It installs the
-result into `~/.claude/CLAUDE.md` and Codex's `AGENTS.md`, or a nonempty `AGENTS.override.md`.
-With nothing open and the index within its budgets, the block is removed. To turn it off, click
-**Turn off open threads** on the Claude memory card, run **AI Acolyte: Toggle open threads**, or
-set `permissionWildcarding.openThreads.enabled` to `false` in user settings; while it is off the
-extension neither compiles nor installs it. From a terminal, `wildcard-perms --open-threads
-on|off|status|refresh`.
+The feature is on by default. `recall.py --threads-compile` writes
+`~/.claude/open-threads.generated.md` from the store the gates compile from, and leaves the file
+untouched when the new compile is identical. The extension recompiles after a memory edit that
+can change the list (a `MEMORY.md` edit only when the INDEX line could change), a few seconds
+after activation when there is anything to say, and when the feature is turned on. It runs one
+compile at a time, off the extension host thread. It installs the result into
+`~/.claude/CLAUDE.md` and Codex's `AGENTS.md`, or a nonempty `AGENTS.override.md`. With nothing
+open and the index within its budgets, the block is removed.
+
+To turn it off, click **Turn off open threads** on the Claude memory card, run **AI Acolyte:
+Toggle open threads**, or set `permissionWildcarding.openThreads.enabled` to `false` in user
+settings. Turning it off always turns it off, whatever state the install is in; while it is off
+the extension neither compiles nor installs it. When the install is not current (nothing compiled
+yet, a compile it refused, an instruction file it cannot read, or a block that differs from the
+compile), the card also shows
+**Refresh open threads**, and the toggle's confirmation offers **Refresh**: both compile and
+install and leave the setting on. The Claude memory card is hidden while
+`permissionWildcarding.memory.enabled` is `false`, and the open-threads line and buttons with it;
+the feature keeps running, and the palette command and the setting still reach it. From a
+terminal, `wildcard-perms --open-threads on|off|status|refresh`.
 
 ## 7. Recall over your memory
 

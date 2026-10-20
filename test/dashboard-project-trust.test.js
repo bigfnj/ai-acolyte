@@ -247,6 +247,7 @@ function harness(box, opts = {}) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: null, report: null, gateSources: undefined }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

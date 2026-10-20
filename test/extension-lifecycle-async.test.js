@@ -460,6 +460,12 @@ function harness(tempHome, options = {}) {
             }
             : { conf: {}, dir: null, report: null };
         },
+        // The store alone, as memoryLint.js memoryStoreDir answers it, with the same thrower:
+        // autoSyncRecallIfStale asks this, not memoryReport(), for the store it syncs.
+        memoryStoreDir: () => {
+          if (options.memoryReportThrows) throw new Error('memory store unreadable');
+          return memoryDirs.length ? memoryDirs[0] : null;
+        },
         discoverDirs: (conf) => { discoverCalls.push(conf); return [...memoryDirs]; },
       };
     }

@@ -79,11 +79,11 @@ const {
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
 // memoryStoreDir is memoryReport()'s store without the report: what every recall.py spawn pins and
-// the open threads' watcher compares with. The default is only for a test harness that stubs this
-// module with an older export list, and gives memoryReport()'s answer at its old cost.
+// the open threads' watcher compares with. No fallback for it here: one used to serve only test
+// stubs written before memoryLint.js exported it, and every stub now exports its own
+// (test/memory-lint-stubs.test.js).
 const {
-  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, fastLint, cfg: memoryConf,
-  memoryStoreDir = () => memoryReport().dir,
+  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, fastLint, cfg: memoryConf, memoryStoreDir,
 } = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');

@@ -117,6 +117,7 @@ async function resolveWith(t, { base, home, folders }) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: memoryDir, report: null }),
+        memoryStoreDir: () => memoryDir,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

@@ -282,6 +282,9 @@ function harness(tempHome, opts = {}) {
           if (opts.memoryReport) return opts.memoryReport();
           return { conf: {}, dir: null, report: null, gateSources: undefined };
         },
+        // The store alone, as memoryLint.js memoryStoreDir answers it: not counted, because the
+        // real one reads no report.
+        memoryStoreDir: () => (opts.memoryReport ? opts.memoryReport().dir : null),
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
         // Only when a test supplies it: without it gatesCardData's census throws inside its

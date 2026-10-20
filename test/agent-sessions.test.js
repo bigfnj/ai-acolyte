@@ -112,3 +112,45 @@ test('missing roots are an empty list, not an error', async () => {
   assert.deepEqual(await discoverSessions({ claudeRoot: path.join(os.tmpdir(), 'acolyte-none-1'),
     codexRoot: path.join(os.tmpdir(), 'acolyte-none-2'), now: NOW }), []);
 });
+
+// Codex 0.162/0.163 on Windows append without moving a rollout's mtime (measured 2026-10-20: four
+// sessions writing that minute read the minute they started). The file is aged three hours by its
+// mtime here, as those were, and its last record says one minute ago.
+// MUTATION: take activity from the mtime again (drop meta.lastRecordMs in discoverSessions) and
+// the session is not listed.
+test('a Codex rollout whose mtime is stale is active by its last record time', async (t) => {
+  const roots = home(t);
+  const at = (ms) => new Date(NOW - ms).toISOString();
+  write(path.join(roots.codexRoot, '2026', '10', '16', 'rollout-2026-10-16T09-00-00-77777777-aaaa-4aaa-8aaa-000000000007.jsonl'),
+    jsonl({ type: 'session_meta', timestamp: at(3 * 3600 * 1000), payload: { id: '77777777-aaaa-4aaa-8aaa-000000000007', cwd: 'D:\\w\\delta', originator: 'codex_vscode', source: 'vscode' } },
+      { type: 'turn_context', timestamp: at(2 * 60 * 1000), payload: { approval_policy: 'on-request' } },
+      { type: 'response_item', timestamp: at(60 * 1000), payload: { type: 'message' } }), 3 * 3600 * 1000);
+  // Control: stale by both, its last record an hour old.
+  write(path.join(roots.codexRoot, '2026', '10', '16', 'rollout-2026-10-16T08-00-00-88888888-bbbb-4bbb-8bbb-000000000008.jsonl'),
+    jsonl({ type: 'session_meta', timestamp: at(4 * 3600 * 1000), payload: { id: '88888888-bbbb-4bbb-8bbb-000000000008', cwd: 'D:\\w\\idle', originator: 'codex_vscode' } },
+      { type: 'response_item', timestamp: at(3600 * 1000), payload: { type: 'message' } }), 4 * 3600 * 1000);
+  const sessions = await discoverSessions({ ...roots, now: NOW });
+  assert.deepEqual(sessions.map((s) => [s.id, s.project, s.mode]), [['77777777', 'delta', 'on-request']],
+    'witness:sessions-codex-stale-mtime -- the session writing a minute ago was not listed, or the idle one was');
+  assert.equal(sessions[0].lastActiveAt, NOW - 60 * 1000, 'its activity is its last record, not its mtime');
+});
+
+// MUTATION: list every rollout again (drop the `!row.meta.subagent` filter) and the guardian and
+// the worker appear as sessions; stop counting workers and `subagents` reads 0.
+test('a guardian review is not a session, and a spawned worker counts toward its session', async (t) => {
+  const roots = home(t);
+  const at = (ms) => new Date(NOW - ms).toISOString();
+  const parentId = '99999999-cccc-4ccc-8ccc-000000000009';
+  const rollout = (name, payload, age) => write(path.join(roots.codexRoot, '2026', '10', '16', `rollout-2026-10-16T10-00-00-${name}.jsonl`),
+    jsonl({ type: 'session_meta', timestamp: at(3600 * 1000), payload: { cwd: 'D:\\w\\epsilon', originator: 'codex_vscode', ...payload } },
+      { type: 'response_item', timestamp: at(age), payload: { type: 'message' } }), 3600 * 1000);
+  rollout(parentId, { id: parentId, source: 'vscode' }, 90 * 1000);
+  rollout('aaaaaaaa-dddd-4ddd-8ddd-00000000000a', { id: 'aaaaaaaa-dddd-4ddd-8ddd-00000000000a', source: { subagent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } } }, 30 * 1000);
+  rollout('bbbbbbbb-eeee-4eee-8eee-00000000000b', { id: 'bbbbbbbb-eeee-4eee-8eee-00000000000b', source: { subagent: { other: 'guardian' } } }, 10 * 1000);
+  // A worker whose session is idle is listed on its own rather than hidden.
+  rollout('cccccccc-ffff-4fff-8fff-00000000000c', { id: 'cccccccc-ffff-4fff-8fff-00000000000c', source: { subagent: { thread_spawn: { parent_thread_id: 'dddddddd-0000-4000-8000-00000000000d' } } } }, 20 * 1000);
+  const sessions = await discoverSessions({ ...roots, now: NOW });
+  assert.deepEqual(sessions.map((s) => [s.id, s.subagents]), [['cccccccc', 0], ['99999999', 1]],
+    'witness:sessions-codex-subagents -- the guardian was listed, the worker was not folded in, or the orphan was hidden');
+  assert.equal(sessions[1].lastActiveAt, NOW - 30 * 1000, 'the worker\'s activity is its session\'s');
+});

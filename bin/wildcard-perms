@@ -136,16 +136,21 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   // exit 0, and `--seed --dry-run` merged the starter pack. Each verb's options are its parser's
   // own (verbOptions, at the end of this file). `argv.length` first, so hook mode pays nothing.
   unrecognizedOptions(verbArguments(argv).unknown, verbArguments(argv).verb);
-} else if (argv.length && !VERBS.some((verb) => argv.includes(verb))
-    && argv.some((arg) => arg.startsWith('-'))) {
+} else if (argv.length && !VERBS.some((verb) => argv.includes(verb))) {
   // An unrecognized flag must NEVER reach hook mode. Hook mode rewrites
   // settings.json, so `--gate` (a typo for `--gates`) silently rewrote the
   // user's permission policy and exited 0 — and on a TTY, where nothing ever
   // closes stdin, it instead hung forever waiting for an event that was never
   // coming. There was also no `--help` at all, so the single most likely first
   // command anyone types was itself a policy write.
-  process.stderr.write('wildcard-perms: unrecognized option '
-    + `${argv.filter((arg) => arg.startsWith('-')).join(' ')}\n\n${HELP_USAGE}`);
+  // Nor may a bare word (1.9.4): `wildcard-perms gates status`, the dashes forgotten, and
+  // `wildcard-perms extra` rewrote settings.json and exited 0, or hung on a terminal. Hook mode is
+  // an empty argv only; every installer registers the path with no arguments.
+  const dashed = argv.filter((arg) => arg.startsWith('-'));
+  process.stderr.write(dashed.length
+    ? `wildcard-perms: unrecognized option ${dashed.join(' ')}\n\n${HELP_USAGE}`
+    : `wildcard-perms: unrecognized argument ${argv.join(' ')}: no verb given, and hook mode `
+      + `takes no arguments; nothing was run\n\n${HELP_USAGE}`);
   process.exitCode = 2;
 } else if (argv.includes('--learn')) {
   learn(argv);

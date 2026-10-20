@@ -15,7 +15,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -196,4 +196,63 @@ test('a word the verb never reads is refused with its usage, exit 1, and nothing
   assert.equal(on.status, 0, on.stderr);
   assert.equal(JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')).permissions.defaultMode,
     'bypassPermissions', 'precondition: --bypass on alone writes');
+});
+
+// 1.9.4. A run with bare words and no verb reached hook mode: `gates status` (the dashes
+// forgotten) and `extra` printed "+3 -4 → 3 entries", rewrote settings.json and settings.local.json
+// and exited 0, and on a terminal blocked on stdin. Hook mode is an empty argv only.
+// MUTATION: put back `&& argv.some((arg) => arg.startsWith('-'))` on the no-verb branch of the
+// dispatch chain and `gates status` exits 0 with the home rewritten.
+test('bare words with no verb are refused, exit 2, naming them, and hook mode never runs', async (t) => {
+  const home = tempHome(t);
+  const before = tree(home);
+  for (const args of [['gates', 'status'], ['extra'], ['status'], ['learn', 'scan'], ['']]) {
+    const bad = run(home, args);
+    assert.equal(bad.status, 2, `${JSON.stringify(args)}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: unrecognized argument ${args.join(' ')}: no verb given, `
+      + 'and hook mode takes no arguments; nothing was run\n\n'), `${JSON.stringify(args)}: ${bad.stderr.slice(0, 300)}`);
+    assert.match(bad.stderr, /^usage: wildcard-perms --help \| --version$/m, 'followed by the full usage');
+    assert.equal(bad.stdout, '', JSON.stringify(args));
+    assert.deepEqual(tree(home), before, `${JSON.stringify(args)} wrote into the home`);
+  }
+  // A dashed word beside them is still named as the unrecognized option, as before.
+  const mixed = run(home, ['gates', '--status']);
+  assert.equal(mixed.status, 2, mixed.stderr);
+  assert.equal(mixed.stderr.split('\n')[0], 'wildcard-perms: unrecognized option --status');
+  // --help and --version still answer beside a bare word.
+  assert.match(run(home, ['gates', '--help']).stdout, /^usage: wildcard-perms --help \| --version$/m);
+  assert.equal(run(home, ['extra', '--version']).stdout, `${require('../package.json').version}\n`);
+  assert.deepEqual(tree(home), before, 'help, version and the mixed refusal wrote nothing');
+
+  // On a terminal nothing closes stdin: the refusal must exit without reading it. The payload is
+  // larger than a pipe buffer, so its write completes only if something read it.
+  const root = path.parse(home).root;
+  const child = spawn(process.execPath, [CLI, 'gates', 'status'], {
+    cwd: os.tmpdir(), windowsHide: true,
+    env: {
+      ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
+      CODEX_HOME: path.join(home, '.codex'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+      HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1),
+      TOOLBOX_PYTHON: path.join(home, 'no-such-python'),
+    },
+  });
+  let drained = false;
+  child.stdin.on('error', () => {});
+  child.stdin.write(JSON.stringify({ cwd: home, tool_name: 'Bash', pad: 'x'.repeat(8 * 1024 * 1024) }),
+    (error) => { if (!error) drained = true; });
+  let timedOut = false;
+  const code = await new Promise((resolve) => {
+    const timer = setTimeout(() => { timedOut = true; child.stdin.destroy(); child.kill('SIGKILL'); }, 10000);
+    child.on('close', (exit) => { clearTimeout(timer); resolve(exit); });
+  });
+  assert.equal(timedOut, false, 'gates status waited on an open stdin, as hook mode does');
+  assert.equal(code, 2);
+  assert.equal(drained, false, 'stdin was read, so the words reached hook mode');
+  assert.deepEqual(tree(home), before, 'and the home is untouched');
+
+  // Witness: an empty argv is hook mode, and with this event it rewrites the policy.
+  const hook = run(home, []);
+  assert.equal(hook.status, 0, hook.stderr);
+  assert.match(hook.stderr, /^wildcard-perms: \+3 -4 → 3 entries$/m);
+  assert.notDeepEqual(tree(home), before, 'precondition: hook mode writes');
 });

@@ -177,6 +177,46 @@ test('a bad sub-verb or an extra argument is a usage error that writes nothing',
   }
 });
 
+// Our hook with its node gone reads "turn the guard on again to repoint it", and `on` does that.
+// Beside another tool's guard `on` always refuses (src/claude-hook-config.js planMemoryGuard,
+// "refusing to add"), so status must not send the reader there; `off` is what works. The
+// extension's card had the same dead end (fc1501f).
+// MUTATION: drop the `status.status === 'foreign'` choice in memoryGuard and the foreign case
+// prints "turn the guard on again to repoint it".
+test('a gone node is repointed by on, except beside another guard, where status says to turn ours off', (t) => {
+  const home = tempHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  assert.equal(run(home, ['--memory-guard', 'on']).status, 0, 'precondition: ours is installed');
+  const data = JSON.parse(settingsText(home));
+  const handler = data.hooks.PreToolUse[0].hooks[0];
+  const node = /^"([^"]+)"/.exec(handler.command)[1];
+  const gone = path.join(home, 'gone', path.basename(node)).replace(/\\/g, '/');
+  handler.command = handler.command.replace(`"${node}"`, `"${gone}"`);
+  fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2) + '\n');
+
+  const alone = run(home, ['--memory-guard', 'status']);
+  assert.equal(alone.status, 0, alone.stderr);
+  assert.match(alone.stdout, /^wildcard-perms memory-guard: ON \(NEEDS REPAIR\) - /);
+  assert.ok(alone.stdout.includes(`node ${gone} (MISSING: turn the guard on again to repoint it)\n`), alone.stdout);
+
+  const foreign = { matcher: 'Write', hooks: [{ type: 'command', command: 'node /elsewhere/memory-index-guard.js' }] };
+  data.hooks.PreToolUse.push(foreign);
+  fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2) + '\n');
+  const beside = run(home, ['--memory-guard', 'status']);
+  assert.equal(beside.status, 0, beside.stderr);
+  assert.match(beside.stdout, /^wildcard-perms memory-guard: FOREIGN - /);
+  assert.ok(beside.stdout.includes(`node ${gone} (MISSING: another MEMORY.md guard is registered too, so on cannot `
+    + 'repoint it: turn ours off with --memory-guard off, or remove the other hook)\n'), beside.stdout);
+  assert.doesNotMatch(beside.stdout, /turn the guard on again/);
+  // Witness: the advice it no longer gives cannot work here, and the advice it gives does.
+  const on = run(home, ['--memory-guard', 'on']);
+  assert.equal(on.status, 1, on.stdout);
+  assert.match(on.stderr, /refusing to add the MEMORY\.md guard/);
+  const off = run(home, ['--memory-guard', 'off']);
+  assert.equal(off.status, 0, off.stderr);
+  assert.deepEqual(JSON.parse(settingsText(home)).hooks.PreToolUse, [foreign], 'ours removed, the other hook kept');
+});
+
 test('--help lists the verb', (t) => {
   const help = run(tempHome(t), ['--help']);
   assert.match(help.stdout, /^usage: wildcard-perms --memory-guard on\|off\|status\|probe$/m);

@@ -1543,8 +1543,13 @@ function memoryGuard(args) {
     const changed = cmd === 'status' ? '' : status.changed ? '' : ' (already)';
     process.stdout.write(`wildcard-perms memory-guard: ${head}${changed} - ${tilde(status.settingsPath)}\n`);
     if (status.on) {
+      // Beside another tool's guard `on` always refuses (planMemoryGuard, "refusing to add"), so
+      // the repoint advice would send the reader to a command that cannot work; `off` can.
+      const missing = status.status === 'foreign'
+        ? ' (MISSING: another MEMORY.md guard is registered too, so on cannot repoint it: turn ours off with --memory-guard off, or remove the other hook)'
+        : ' (MISSING: turn the guard on again to repoint it)';
       process.stdout.write(`  hook:   PreToolUse Write|Edit|MultiEdit, node ${status.node || '(unreadable)'}`
-        + `${status.nodeExists === false ? ' (MISSING: turn the guard on again to repoint it)' : ''}\n`);
+        + `${status.nodeExists === false ? missing : ''}\n`);
       process.stdout.write(`  copy:   ${tilde(status.scriptPath)}, revision ${status.copy.revision ?? 'none'}`
         + ` (this build ships ${status.packagedRevision ?? '?'})\n`);
     }

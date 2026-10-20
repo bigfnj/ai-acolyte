@@ -1367,9 +1367,9 @@ def _gate(text):
     (through _gate_body), so no report can count a memory the compiler would skip, or skip one
     it would take. `problem` set means the compiler leaves the gate out for every agent.
 
-    The body has _GATE_STRIP's characters and runs of variation selectors removed before it is
-    trimmed (_strip_hidden, 2026-10-20), so what compiles is what a person reading the memory
-    sees; _gate_hidden counts what went, for --lint. --gates-list keeps the text as written
+    The body has the hidden set removed before it is trimmed (_strip_hidden over _GATE_STRIP,
+    2026-10-20), so what compiles is what a person reading the memory sees; _gate_hidden counts
+    what went, for --lint. --gates-list keeps the text as written
     (_gate_entry), so the gates panel can show where the hidden characters are."""
     if _fm(text, "scope") != "global":
         return None
@@ -1769,43 +1769,66 @@ def _status_block(text):
     return None
 
 
-# Removed from thread text, the stem and the INDEX line's path before anything else (2026-10-20):
-# the C0 and C1 controls and DEL that str.split() does not already treat as whitespace, and the
-# bidirectional controls (ALM, LRM, RLM, the embeddings and overrides U+202A-U+202E, the isolates
-# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Then the invisible
-# format characters, which a person reading the file cannot see and a model reading it still does:
-# the soft hyphen U+00AD, the zero-width space, non-joiner and joiner U+200B-U+200D, the word joiner
-# and invisible operators U+2060-U+2064, U+FEFF, and the tag block U+E0000-U+E007F, whose
-# characters spell out ASCII text that renders as nothing. Then (2026-10-20, the third pass) the
-# combining grapheme joiner U+034F, the Mongolian vowel separator U+180E and the unassigned U+2065,
-# each one hidden bit, and the variation selectors: U+E0100-U+E01EF always, and U+FE00-U+FE0F
-# unless one directly follows a character that is not a selector (_strip_hidden), which keeps the
-# single emoji presentation selector in a warning sign and removes a run, since a run of selectors
-# carries about a byte each and shows as nothing. Code points, not escapes, so no writer can turn
-# them into the characters themselves. memoryLint.js THREAD_STRIP and stripHidden are the same set
-# and rule, held to them by test/threads-compile.sh, and the gate bodies get them too (_GATE_STRIP).
-_THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
-                               *range(0x86, 0xA0), 0x00AD, 0x034F, 0x061C, 0x180E, *range(0x200B, 0x2010),
-                               *range(0x202A, 0x202F), *range(0x2060, 0x206A),
-                               0xFEFF, *range(0xE0000, 0xE0080), *range(0xE0100, 0xE01F0)])
+# THE HIDDEN SET (2026-10-20, the fourth pass): what thread text, the stem and the INDEX line's
+# path (_THREAD_STRIP) and gate bodies (_GATE_STRIP) lose before anything else, what every display
+# marks (src/gates-manage.js isHidden, through markHidden) and what every print here escapes
+# (_shown, _shown_text). Three passes each found a range a hand-written list had missed, so the set
+# is now Unicode's own. _DEFAULT_IGNORABLE is the Default_Ignorable_Code_Point property of Unicode
+# 17.0 (DerivedCoreProperties.txt), the characters a renderer shows as nothing, which a model reading
+# the file still reads: the soft hyphen, U+034F, the Arabic letter mark, the Hangul fillers, the
+# Khmer inherent vowels, the Mongolian free variation selectors and vowel separator, the zero-width
+# and bidi controls U+200B-U+200F and U+202A-U+202E, U+2060-U+206F, the variation selectors, U+FEFF,
+# U+FFF0-U+FFF8, the shorthand and musical format controls, and all of U+E0000-U+E0FFF, where the
+# tag characters and U+E0080-U+E00FF alike spell ASCII as characters that show as nothing. Written
+# out as (first, last) ranges from the toolbox Python's `regex` module (2026.9.10, Unicode 17.0),
+# and test/threads-compile.sh holds it to that module wherever the module is installed.
+_DEFAULT_IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+                      (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+                      (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+                      (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+# Two ranges of format characters outside the property that show as nothing too: the interlinear
+# annotation characters U+FFF9-U+FFFB and the Egyptian hieroglyph format controls U+13430-U+1343F.
+# Every other format character is drawn, and kept: the prepended concatenation marks U+0600-U+0605,
+# U+06DD, U+070F, U+0890-U+0891, U+08E2, U+110BD and U+110CD. test/threads-compile.sh names them,
+# so a Unicode version that adds a format character fails it until the character is placed.
+_HIDDEN_FORMAT = ((0xFFF9, 0xFFFB), (0x13430, 0x1343F))
+# The controls: C0 but the tab and the line feed, DEL, C1, and the line and paragraph separators
+# U+2028 and U+2029, which split a line where an editor may draw none (text mode has already made
+# every line end a line feed). Thread text leaves the whitespace among them to str.split().
+_HIDDEN_CONTROLS = ((0x00, 0x08), (0x0B, 0x1F), (0x7F, 0x9F), (0x2028, 0x2029))
+# The text and emoji presentation selectors, which _strip_hidden keeps once directly after a base
+# that can take one. U+FE00-U+FE0D, which select glyph variants a reader cannot tell apart, go.
+_PRESENTATION_SELECTORS = (0xFE0E, 0xFE0F)
+_KEYCAP_BASES = "0123456789#*"
 
-# The gate bodies' set (2026-10-20): a gate is a standing order installed into every session's
-# CLAUDE.md and AGENTS.md unattended, so its body loses what thread text loses. A body is
-# multi-line markdown and is not collapsed, so the line feed and the tab stay, and the controls
-# thread text leaves to str.split() go here instead: VT, FF, CR (text mode has already made every
-# line end a line feed), U+001C-U+001F and NEL.
-_GATE_STRIP = dict.fromkeys([*_THREAD_STRIP, 0x0B, 0x0C, 0x0D, *range(0x1C, 0x20), 0x85])
+# Code points, not escapes, so no writer can turn them into the characters themselves. The gate
+# bodies' set is all of it: a gate is a standing order installed into every session's CLAUDE.md
+# and AGENTS.md unattended, and a body is multi-line markdown, not collapsed, so only the line feed
+# and the tab stay. Thread text's is the same less Python's whitespace (VT, FF, CR, U+001C-U+001F,
+# NEL, U+2028, U+2029), which its collapse turns into one space. memoryLint.js stripHidden is the
+# same set and walk (through gates-manage.js isHidden), held to these by test/threads-compile.sh.
+_GATE_STRIP = dict.fromkeys(cp for first, last in (*_HIDDEN_CONTROLS, *_DEFAULT_IGNORABLE, *_HIDDEN_FORMAT)
+                            for cp in range(first, last + 1) if cp not in _PRESENTATION_SELECTORS)
+_THREAD_STRIP = dict.fromkeys(cp for cp in _GATE_STRIP if not chr(cp).isspace())
+
+
+def _selector_base(ch):
+    """Whether a presentation selector directly after `ch` is kept: after a keycap base (a digit,
+    `#` or `*`, as in a keycap emoji) or a character outside ASCII that is neither whitespace nor
+    a selector itself (a warning sign, a check mark), and nowhere else. One selector after every
+    ASCII letter of a line carried a byte in two letters and showed as nothing (the fourth pass)."""
+    return ch in _KEYCAP_BASES or (ord(ch) > 0x7F and not ch.isspace() and ord(ch) not in _PRESENTATION_SELECTORS)
 
 
 def _strip_hidden(text, table=_THREAD_STRIP):
-    """`text` with `table`'s characters removed, then every variation selector U+FE00-U+FE0F that
-    does not directly follow a kept character which is not one itself: the first selector after
-    a character stays, the rest of a run go, and so does one at the start. Judged against what is
+    """`text` with `table`'s characters removed, then every presentation selector (U+FE0E, U+FE0F)
+    that does not directly follow a kept _selector_base: the one in a warning sign stays, and one
+    after an ASCII letter, a second one in a row and one at the start go. Judged against what is
     kept, so a removed character between two selectors cannot make a run look like two singles.
     memoryLint.js stripHidden is the same walk."""
     out = []
     for ch in text.translate(table):
-        if 0xFE00 <= ord(ch) <= 0xFE0F and (not out or 0xFE00 <= ord(out[-1]) <= 0xFE0F):
+        if ord(ch) in _PRESENTATION_SELECTORS and not (out and _selector_base(out[-1])):
             continue
         out.append(ch)
     return "".join(out)

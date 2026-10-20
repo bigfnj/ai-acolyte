@@ -390,9 +390,11 @@ gate memories of the store that compiles, retires or restores the ones you unche
 `~/.claude/wildcarding/gate-snapshots`), compiles once, and installs the result only while
 `gates.enabled` is on. **Compile and install** in the same panel compiles and installs what the
 memories hold, which is how a change whose compile or install failed is finished.
-A gate's name, title or text that holds hidden characters (controls, bidi controls, zero-width
-and other invisible format characters, tag characters, runs of variation selectors) shows each
-one as `?`, and the row is tagged; the compile removes them from the text.
+A gate's name, title or text that holds hidden characters (controls, and the characters Unicode
+calls default-ignorable: bidi and zero-width controls, Hangul fillers, tag characters, and the
+variation selectors, except one text or emoji presentation selector directly after a digit, `#`,
+`*` or a character outside ASCII that is not whitespace, as in a warning sign) shows each one as
+`?`, and the row is tagged; the compile removes exactly those characters from the text.
 `memory.dir`, `gates.enabled` and `guidance.enabled` are **machine-scoped** for the same reason
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`

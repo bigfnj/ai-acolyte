@@ -253,7 +253,8 @@ the first on the next compile.
 
 A gate compiles as a person reading it sees it. Hidden characters in its block are removed on the
 way into `CLAUDE.md` and `AGENTS.md`, the same set thread text loses (section 6), plus the vertical
-tab, form feed, carriage return, U+001C-U+001F and NEL; line breaks and tabs stay. `recall.py
+tab, form feed, carriage return, U+001C-U+001F, NEL and the line and paragraph separators U+2028
+and U+2029; line feeds and tabs stay. `recall.py
 --lint` names each gate memory that held any, with how many. The memory itself is not changed:
 the gates panel shows each hidden character in its text as `?`, and `wildcard-perms --gates
 list` does the same in names and titles.
@@ -297,12 +298,15 @@ Waiting on the owner's choice between the two layouts.
 
 Each open memory is one line of the block, `- **AWAITING** <text> (<file stem>)`, the stem being
 the memory's file name without `.md`. Lines are sorted by status (open, awaiting, blocked,
-deferred) and then by stem. The text is the status block's, on one line, with control characters,
-bidirectional controls and invisible format characters (the soft hyphen, U+034F, U+180E, the
-zero-width space, joiners and invisible operators U+200B-U+200D and U+2060-U+2065, U+FEFF, the tag
-block U+E0000-U+E007F and the variation selectors U+E0100-U+E01EF) removed, and of a run of
-variation selectors U+FE00-U+FE0F only the first after a character kept, so the one in a warning
-sign stays; cut at 240 characters. At most ten are listed, and one more line
+deferred) and then by stem. The text is the status block's, on one line, with control characters
+removed, and every character Unicode 17.0 calls default-ignorable (its Default_Ignorable_Code_Point
+property: the soft hyphen, the zero-width and bidirectional controls, the Hangul fillers, the
+variation selectors and all of U+E0000-U+E0FFF, the tag characters among them), and the
+interlinear annotation and Egyptian hieroglyph format controls U+FFF9-U+FFFB and U+13430-U+1343F.
+The format characters a reader sees, such as the Arabic number sign, stay. So does one text or
+emoji presentation selector (U+FE0E, U+FE0F) directly after a digit, `#`, `*` or a character
+outside ASCII that is not whitespace, so the one in a warning sign or a keycap stays and one after
+an ASCII letter goes. Cut at 240 characters. At most ten are listed, and one more line
 counts the rest and points at `recall "status"`. `done`, `closed`, `live`,
 `shelved`, `deleted`, `dropped` and `shipped` close a thread: the memory stays, and its line
 leaves the block on the next compile. Any other value, two `status:` lines, or a listed status

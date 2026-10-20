@@ -655,9 +655,10 @@ test('the list steps run the toolbox Python on recall.py, pinned to the compile 
 
 test('the extension sends the page only the fields it renders, each made safe to show', async () => {
   const rlo = String.fromCharCode(0x202e);
-  // A tag character and a selector run, each code point one ? (2026-10-20).
+  // A tag character and a selector run, each code point one ? (2026-10-20); the run follows a
+  // warning sign, whose own selector shows (the fourth pass: after an ASCII letter it would not).
   const tagA = String.fromCodePoint(0xe0041);
-  const run = String.fromCodePoint(0xfe0f, 0xfe0e);
+  const run = String.fromCodePoint(0x26a0, 0xfe0f, 0xfe0e);
   const app = harness({ respond: () => [null, JSON.stringify({ store: '/s', gates: [
     { file: `feedback_${rlo}a.md`, scope: 'global', state: 'active', agents: ['codex'], problem: null,
       title: `t${rlo}${tagA}`, text: `x\r\ny${rlo}${run}`, description: `d${rlo}`, extra: '<b>no</b>' },
@@ -667,7 +668,7 @@ test('the extension sends the page only the fields it renders, each made safe to
   try {
     const message = (await app.open()).last('gates');
     assert.deepEqual(message.gates, [{ file: `feedback_${rlo}a.md`, label: 'feedback_?a.md', state: 'active', agents: ['codex'],
-      only: 'codex only', problem: '', title: 't??', text: `x\ny?${String.fromCodePoint(0xfe0f)}?`,
+      only: 'codex only', problem: '', title: 't??', text: `x\ny?${String.fromCodePoint(0x26a0, 0xfe0f)}?`,
       hiddenText: true, description: 'd?' },
     { file: 'plain.md', label: 'plain.md', state: 'active', agents: ['codex'], only: 'codex only', problem: '', title: 'p',
       text: 'p\nq', hiddenText: false, description: '' }]);

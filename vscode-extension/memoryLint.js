@@ -25,6 +25,9 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 // see which names this file uses.
 const GUARD_MODULE = require.resolve('./memory-index-guard.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
 const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
+// The hidden set (src/gates-manage.js isHidden), found the same way: stripHidden below.
+const GATES_MANAGE_MODULE = require.resolve('./gates-manage.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
+const { isHidden } = require(GATES_MANAGE_MODULE);
 const LINES_TARGET = GUARD_BUDGETS.lines;
 const ENTRIES_CEILING = GUARD_BUDGETS.entries;
 
@@ -255,27 +258,19 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, the bidi controls and
-// the invisible format characters (U+00AD, U+034F, U+180E, U+200B-U+200D, U+2060-U+2065, U+FEFF,
-// the tag block U+E0000-U+E007F, the variation selectors U+E0100-U+E01EF), removed before anything
-// else. Code points, as recall.py writes them; stripHidden walks the text with Array.from, one code
-// point at a time, so a tag character is one entry here.
-const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
-const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
-  ...span(0x86, 0xa0), 0x00ad, 0x034f, 0x061c, 0x180e, ...span(0x200b, 0x2010), ...span(0x202a, 0x202f),
-  ...span(0x2060, 0x206a), 0xfeff, ...span(0xe0000, 0xe0080), ...span(0xe0100, 0xe01f0)]);
-
-// recall.py _strip_hidden: THREAD_STRIP removed, then each variation selector U+FE00-U+FE0F that
-// does not directly follow a kept character which is not one itself, so a single emoji
-// presentation selector stays and a run goes.
-const isSelector = (cp) => cp >= 0xfe00 && cp <= 0xfe0f;
+// recall.py _strip_hidden over _THREAD_STRIP (2026-10-20): the hidden set removed before anything
+// else, one code point at a time (Array.from), so a tag character is one step, with Python's
+// whitespace kept for the collapse that follows. The set and the selector rule are
+// src/gates-manage.js isHidden's, recall.py's ranges written once for this file and the displays
+// both.
 function stripHidden(raw) {
   const out = [];
+  let last = null;   // the last code point kept
   for (const ch of Array.from(raw)) {
     const cp = ch.codePointAt(0);
-    if (THREAD_STRIP.has(cp)) continue;
-    if (isSelector(cp) && (!out.length || isSelector(out[out.length - 1].codePointAt(0)))) continue;
+    if (isHidden(cp, last) && !PY_SPACE.includes(ch)) continue;
     out.push(ch);
+    last = cp;
   }
   return out.join('');
 }

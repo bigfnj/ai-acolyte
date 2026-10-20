@@ -96,7 +96,7 @@ echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 #
 # The residue check underneath used to be the only guard here, and it was vacuous twice over.
 # It globbed for `recall_index.json.tmp`, but save_index names its temp file with the writing
-# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:432#os.getpid) -- so the literal path
+# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:433#os.getpid) -- so the literal path
 # it tested has never existed on any run, broken or not. And even spelled correctly it only fires for
 # "wrote a tmp, forgot os.replace": revert to an in-place json.dump and there is no temp file
 # to leave behind, so it passes on the state it exists to forbid. Between it and the
@@ -415,12 +415,12 @@ echo "ok: line widths are code points, and comment markers in code are not comme
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1312#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1420#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1304#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1412#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.

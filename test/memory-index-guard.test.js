@@ -363,10 +363,26 @@ test('the hook exits 0, silently, for an edit that compacts or keeps the index l
     { CLAUDE_CONFIG_DIR: f.config });
   assert.equal(shrink.status, 0, shrink.stderr);
   assert.equal(shrink.stderr, '');
-  const multi = runHook(event('MultiEdit', { file_path: f.index, edits: [
-    { old_string: '- hook 1\r\n', new_string: '' }, { old_string: '- hook 2', new_string: '- hook 2 and 1' }] }),
-  { CLAUDE_CONFIG_DIR: f.config });
+  // Every old_string is unique in the file, so the guard reproduces this call and the exit 0 is
+  // its verdict, not a fail-open. `- hook 2` alone would also match hooks 20 to 29.
+  // MUTATION: shorten the second old_string to '- hook 2' and the reproduction check fails.
+  const level = [{ old_string: '- hook 1\r\n', new_string: '' }, { old_string: '- hook 2\r\n', new_string: '- hook 2 and 1\r\n' }];
+  assert.notEqual(applyEdit(OVER.replace(/\n/g, '\r\n'), 'MultiEdit', { edits: level }), null,
+    'precondition: the MultiEdit fixture can be reproduced');
+  const multi = runHook(event('MultiEdit', { file_path: f.index, edits: level }), { CLAUDE_CONFIG_DIR: f.config });
   assert.equal(multi.status, 0, multi.stderr);
+});
+
+// The same reproduction, growing the index: the MultiEdit path judges, it does not only fail open.
+// MUTATION: make applyEdit return null for MultiEdit and this exits 0.
+test('the hook exits 2 for a MultiEdit that grows an index already past its budget', (t) => {
+  const f = configFixture(t);
+  fs.writeFileSync(f.index, OVER.replace(/\n/g, '\r\n'));
+  const run = runHook(event('MultiEdit', { file_path: f.index, edits: [
+    { old_string: '- hook 2\r\n', new_string: '- hook 2\r\n- hook 2b\r\n' },
+    { old_string: '- hook 5\r\n', new_string: '- hook 5\r\n- hook 5b\r\n' }] }), { CLAUDE_CONFIG_DIR: f.config });
+  assert.equal(run.status, 2, run.stderr);
+  assert.match(run.stderr, /lines 152 \(budget 140, was 150\)/);
 });
 
 test('the hook resolves the index from HOME when CLAUDE_CONFIG_DIR is unset', (t) => {

@@ -461,10 +461,11 @@ foreach ($repoPair in ($ProbeRepos | ForEach-Object { @{ n = $_.k; p = $_.v } })
 
 # --------------------------------------------------------- freshness mechanism
 Section 'Freshness (extension corpus watcher)'
-# The SessionStart hook does NOT fire under a managed policy that sets allowManagedHooksOnly.
+# Do not expect the SessionStart hook to fire under a policy that sets allowManagedHooksOnly.
 # Measured 2026-10-19 on Claude Code 2.1.293 and 2.1.301: with hooks restricted, NO user,
-# project or --settings hook of any event ran (PreToolUse, PostToolUse, UserPromptSubmit),
-# so the older per-event reading of the policy no longer holds.
+# project or --settings hook ran on the three events tried (PreToolUse, PostToolUse,
+# UserPromptSubmit; SessionStart itself was not tried), so the per-event reading no longer
+# holds. scripts/probe-user-hooks.js --run-claude repeats it (real Claude Code turns).
 # What actually keeps gates fresh is the extension watching the memory dir. This is a real
 # end-to-end test of that path, so it needs VS Code running with the extension active.
 $memDir = Find-MemoryDir

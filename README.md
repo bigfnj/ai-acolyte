@@ -625,9 +625,13 @@ current Claude Code it is wrong.** Measured on the development box on 2026-10-19
 2.1.293 and 2.1.301, under a managed policy that sets `allowManagedHooksOnly`:
 `claude -p "/goal x"` answered "/goal can't run while hooks are restricted (disableAllHooks or
 allowManagedHooksOnly is set in settings or by policy)", and no user, project or `--settings` hook
-ran on any event tried (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`). Read the setting as "no
-user hooks at all" until a newer client shows otherwise. `wildcard-perms --memory-guard probe`
-asks the installed client the same `/goal` question.
+ran on the three events tried (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`); no other event
+was tried. Those runs were made by hand. `scripts/probe-user-hooks.js` repeats the `/goal` question
+and the `--settings` and project-local cases on all three events (it does not register a user-level
+hook, which would edit `~/.claude/settings.json`), and refuses to run without `--run-claude`,
+because each case is a real Claude Code turn. Read the setting as "no user hooks at all" until a
+newer client shows otherwise. `wildcard-perms --memory-guard probe` asks the installed client the
+same `/goal` question.
 
 An extension is not a hook, so no policy toggle reaches it, and that reframes the build. Trigger
 on the cause rather than the ceremony: recompiling gates on a corpus change fires once per edit

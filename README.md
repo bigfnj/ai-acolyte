@@ -401,11 +401,17 @@ first), or `wildcard-perms --memory-guard probe`. The probe runs
 `claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --no-session-persistence`
 once, in an empty directory of its own, `~/.claude/wildcarding/ai-acolyte-memory-guard-probe`,
 with your own environment. The goal is inert and the run has no built-in tools and no saved
-session; `claude --help` lists no turn limit, so the bound on time is a 60 second deadline that
-ends the whole process tree. It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
+session; `claude --help` lists no turn limit, so the bound on time is a 60 second deadline. On
+Windows the deadline ends the whole process tree (`taskkill /T`, so a `claude` under an npm
+launcher's `cmd.exe` goes too); on Linux and macOS it ends the child alone, which is not started
+as a process group leader (`src/exec-resolve.js:311#endProcessTree`). Two seconds after the
+deadline the probe answers "unknown" even if a process outside that tree still holds its output
+open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`). It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
 flag makes `/goal` run under a policy that blocks user hooks, so the probe would read "not
-restricted" while hooks stay blocked. An existing directory there is used only when it is empty and yours; anything else
-is refused and Claude Code is not run. The answer reads Claude Code's own text: "restricted" is
+restricted" while hooks stay blocked. An existing directory there is used only when it is a
+plain, empty directory, and on Linux and macOS only when you own it; Windows has no owner check
+there (`src/memory-guard-install.js:382#getuid`). Anything else is refused and Claude Code is
+not run. The answer reads Claude Code's own text: "restricted" is
 its refusal message, "not restricted" needs the goal's word in the answer, and anything else,
 a reworded message included, is "unknown". Where hooks are allowed, the probe is one short real
 Claude Code turn. Claude Code still creates one project folder for the directory under

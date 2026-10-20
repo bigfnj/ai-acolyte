@@ -251,10 +251,17 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _thread_text: Python's str.split() whitespace collapsed, comment markers neutralised,
-// a leading `#` escaped. Uncapped, as Python's is.
+// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, and the bidi controls,
+// removed before anything else. Code points, as recall.py writes them.
+const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
+const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
+  ...span(0x86, 0xa0), 0x061c, 0x200e, 0x200f, ...span(0x202a, 0x202f), ...span(0x2066, 0x206a)]);
+
+// recall.py _thread_text: THREAD_STRIP removed, Python's str.split() whitespace collapsed, comment
+// markers neutralised, a leading `#` escaped. Uncapped, as Python's is.
 function threadText(raw) {
-  const text = raw.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
+  const kept = Array.from(raw).filter((ch) => !THREAD_STRIP.has(ch.codePointAt(0))).join('');
+  const text = kept.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
     .split('<!--').join('&lt;!--').split('-->').join('--&gt;');
   return text.startsWith('#') ? String.fromCharCode(92) + text : text;
 }

@@ -35,6 +35,9 @@ const {
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
 const { resolvedLaunch, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
+// execFile's signature, run on a worker thread under the shared spawn gate, so CreateProcess never
+// holds the extension host thread. The open-threads compile uses it (spawnThreadsCompile).
+const { execFileOffThread } = require('./src/spawn-thread');
 const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
@@ -4567,6 +4570,14 @@ function compileThreads({ quiet = false } = {}) {
 // compileGates for `--threads-compile`: the same Python, the same pinned store, the same tracked
 // and tree-killed child with a 60 s deadline. Resolves false when it could not run, having said
 // why: a modal for a person's action, the console and the output channel for an unattended one.
+//
+// OFF THE HOST THREAD (2026-10-20). Unlike the gate compile this one runs unattended and often,
+// so it is started by src/spawn-thread.js execFileOffThread: CreateProcess holds a worker thread
+// rather than the extension host (74-465 ms per spawn, p50, on the development box; the figures
+// are in src/spawn-thread.js's header, and python was not among them), under the gate
+// every spawn thread shares. trackChild and endTreeAfter take the ThreadChild it returns, and
+// deactivate ends its tree through the thread (src/exec-resolve.js END_TREE). compileGates and
+// the other host-thread spawns are unchanged: their harnesses record the host's execFile.
 function spawnThreadsCompile({ quiet = false } = {}) {
   const say = (msg) => {
     if (!quiet) { vscode.window.showWarningMessage('ai-acolyte: ' + msg); return; }
@@ -4580,7 +4591,7 @@ function spawnThreadsCompile({ quiet = false } = {}) {
   if (!st.venv) { say(`DevToolbox venv python not found at ${st.py}, so open threads cannot be compiled.`); return Promise.resolve(false); }
   const env = gateCompileEnv();
   return new Promise((resolve) => {
-    endTreeAfter(trackChild(execFile(st.py, [script, '--threads-compile'], { env }, (err, _out, stderr) => {
+    endTreeAfter(trackChild(execFileOffThread(st.py, [script, '--threads-compile'], { env, windowsHide: true }, (err, _out, stderr) => {
       if (deactivated) { resolve(false); return; }
       if (err) {
         const detail = (stderr || err.message || '').trim().slice(0, 300);

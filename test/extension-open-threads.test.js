@@ -41,8 +41,9 @@ const memory = (status, text = 'Synthetic.') => `---\nname: m\ndescription: synt
 
 // `tiers` maps a setting key to VS Code's per-tier inspect() object; `prepare(box)` seeds the home
 // before activation; `compileWrites` is what a `--threads-compile` writes (a string, or null to
-// write nothing and fail).
-async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites = ONE } = {}) {
+// write nothing and fail). `realThreads` leaves src/spawn-thread.js real, so a compile started
+// off the host thread really runs `box.python`, which the test then has to make a program.
+async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites = ONE, realThreads = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-window-'));
   t.after(() => { try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
   const claude = path.join(home, '.claude');
@@ -62,7 +63,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   fs.mkdirSync(path.dirname(python), { recursive: true });
   fs.writeFileSync(python, '');
   const threadsFile = path.join(claude, 'open-threads.generated.md');
-  const box = { home, store, other, threadsFile, claudeMd: path.join(claude, 'CLAUDE.md'), agentsMd: path.join(home, '.codex', 'AGENTS.md') };
+  const box = { home, store, other, threadsFile, python, claudeMd: path.join(claude, 'CLAUDE.md'), agentsMd: path.join(home, '.codex', 'AGENTS.md') };
   prepare(box);
 
   const watchers = [];
@@ -128,31 +129,32 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     },
   };
   const realChildProcess = require('node:child_process');
-  const recorded = {
-    ...realChildProcess,
-    execFile(file, args, options, callback) {
-      if (file !== python) return realChildProcess.execFile.apply(this, arguments);
-      const done = typeof options === 'function' ? options : callback;
-      spawns.push({ args, env: (typeof options === 'object' && options?.env) || {} });
-      const child = new EventEmitter();
-      // What this compile writes is what the corpus was when it was spawned, as recall.py reads it.
-      const writes = state.compileWrites;
-      const finish = () => {
-        let err = null;
-        if (args.includes('--threads-compile')) {
-          if (writes === null) err = Object.assign(new Error('exit 1'), { code: 1 });
-          else fs.writeFileSync(threadsFile, writes);
-        }
-        done(err, '', err ? '[recall] refusing to compile open threads: the test said so' : '');
-        child.emit('exit', err ? 1 : 0, null);
-        child.emit('close', err ? 1 : 0, null);
-      };
-      // `state.hold`: the compile runs until the test calls its finish (state.holding).
-      if (state.hold && args.includes('--threads-compile')) state.holding.push(finish);
-      else setImmediate(finish);
-      return child;
-    },
+  // The python's spawns, recorded and never run, from the host thread (`via: 'host'`, the
+  // extension's child_process.execFile) or from src/spawn-thread.js (`via: 'thread'`), which
+  // is replaced by the same recorder unless the test asks for the real threads.
+  const record = (via) => function execFile(file, args, options, callback) {
+    if (file !== python) return realChildProcess.execFile.apply(this, arguments);
+    const done = typeof options === 'function' ? options : callback;
+    spawns.push({ via, args, env: (typeof options === 'object' && options?.env) || {} });
+    const child = new EventEmitter();
+    // What this compile writes is what the corpus was when it was spawned, as recall.py reads it.
+    const writes = state.compileWrites;
+    const finish = () => {
+      let err = null;
+      if (args.includes('--threads-compile')) {
+        if (writes === null) err = Object.assign(new Error('exit 1'), { code: 1 });
+        else fs.writeFileSync(threadsFile, writes);
+      }
+      done(err, '', err ? '[recall] refusing to compile open threads: the test said so' : '');
+      child.emit('exit', err ? 1 : 0, null);
+      child.emit('close', err ? 1 : 0, null);
+    };
+    // `state.hold`: the compile runs until the test calls its finish (state.holding).
+    if (state.hold && args.includes('--threads-compile')) state.holding.push(finish);
+    else setImmediate(finish);
+    return child;
   };
+  const recorded = { ...realChildProcess, execFile: record('host') };
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
@@ -174,6 +176,10 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => home };
     if ((request === 'child_process' || request === 'node:child_process') && parent?.filename === extensionPath) return recorded;
+    if (!realThreads && request === './src/spawn-thread' && parent?.filename === extensionPath) {
+      const real = originalLoad.call(this, path.join(rootSrc, 'spawn-thread.js'), parent, isMain);
+      return { ...real, execFileOffThread: record('thread') };
+    }
     // The REAL memoryLint, with the extension's memoryReport() calls counted: it reads every file
     // in the store, and the unattended paths must not.
     if (request === './memoryLint' && parent?.filename === extensionPath) {
@@ -486,6 +492,43 @@ test('a compile asked for while one runs waits for it, and the asks in between a
   // MUTATION: make compileThreads call spawnThreadsCompile directly (no queue) and the second
   // assertion fails at 4 compiles; keep the first ask's `quiet` for the queued compile and the
   // last assertion fails.
+});
+
+// THE COMPILE NEVER HOLDS THE HOST THREAD (2026-10-20). On Windows a spawn holds its calling thread
+// for the length of CreateProcess (src/spawn-thread.js), and this compile runs unattended after
+// edits, activation and the setting. It is started from a worker thread now, under the spawn gate
+// the other thread spawns share. A real thread and a real stand-in: a copy of node named
+// python.exe running a script that writes the compile, so the install that lands proves the thread
+// did the work, and the recorded host execFile proves the host thread did not.
+test('the compile is spawned from a worker thread, never the host thread, and still lands', { timeout: 120000 }, async (t) => {
+  const standIn = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-standin-'));
+  t.after(() => { try { fs.rmSync(standIn, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
+  const marks = path.join(standIn, 'ran.log');
+  const script = path.join(standIn, 'recall-standin.js');
+  fs.writeFileSync(script, `const fs = require('fs'); const path = require('path');
+fs.appendFileSync(${JSON.stringify(marks)}, process.argv.slice(2).join(' ') + '\\n');
+fs.writeFileSync(path.join(process.env.USERPROFILE, '.claude', 'open-threads.generated.md'), ${JSON.stringify(TWO)});
+`);
+  const app = await threadsWindow(t, {
+    realThreads: true,
+    tiers: { 'memory.recallScript': { globalValue: script } },
+    prepare: (box) => {
+      fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+      fs.rmSync(box.python);
+      try { fs.linkSync(process.execPath, box.python); } catch { fs.copyFileSync(process.execPath, box.python); }
+    },
+  });
+  await app.fireTimers();
+  const { setTimeout: wait } = require('node:timers/promises');
+  // Endpoint scanning can hold the first run of a fresh copy of an executable for seconds.
+  const onHost = () => app.spawns.filter((spawn) => spawn.args.includes('--threads-compile'));
+  const landed = () => app.claude().includes('- **BLOCKED** Second. (b)');
+  for (let waited = 0; waited < 90000 && !landed() && !onHost().length; waited += 100) await wait(100);
+  assert.deepEqual(onHost(), [], 'the host thread\'s child_process.execFile was handed the compile');
+  assert.ok(landed(), `the stand-in's compile was installed: ${JSON.stringify(app.channel)}`);
+  assert.match(fs.readFileSync(marks, 'utf8'), /--threads-compile$/m, 'precondition: the stand-in ran as the compile');
+  // MUTATION: spawn it with the host's execFile again in spawnThreadsCompile, and the recorded
+  // host execFile receives --threads-compile.
 });
 
 // One timer serves activation's check and the corpus bursts, so an event from another store in

@@ -826,8 +826,10 @@ test('every child process the extension starts is handed over to be killable', (
 
   // 2. Every execFile call — member form included — reaches trackChild. Two shapes are
   //    accepted because both are correct: wrapped in place, or assigned and handed over.
+  //    execFileOffThread (src/spawn-thread.js, imported by name) is execFile on a worker thread
+  //    and is counted with it: its ThreadChild has to reach trackChild just the same.
   const sites = [];
-  const call = /(?:[\w$]+\s*\.\s*)?\bexecFile\s*\(/g;
+  const call = /(?:[\w$]+\s*\.\s*)?\bexecFile(?:OffThread)?\s*\(/g;
   let hit;
   while ((hit = call.exec(source)) !== null) {
     const lineStart = source.lastIndexOf('\n', hit.index) + 1;
@@ -840,16 +842,19 @@ test('every child process the extension starts is handed over to be killable', (
   }
   // Five since 2026-10-14: the gates panel's runRecallStep (list, edit, compile) is the fifth.
   // Six since 2026-10-19: the Claude memory card's Search (runClaudeMemorySearch).
-  // Seven since 2026-10-19: the open-threads compile (compileThreads).
+  // Seven since 2026-10-19: the open-threads compile (compileThreads), which since 2026-10-20 is
+  // spawned through execFileOffThread (spawnThreadsCompile), the one off-thread site.
   assert.equal(sites.length, 7, `the seven known spawn sites, found ${sites.length}`);
+  assert.equal(sites.filter((site) => /execFileOffThread\s*\(/.test(site.text)).length, 1,
+    'the open-threads compile is the one site spawned off the host thread');
 
   const untracked = [];
   let wrapped = 0;
   let assigned = 0;
   for (const site of sites) {
-    if (/trackChild\(\s*(?:[\w$]+\s*\.\s*)?execFile\s*\(/.test(site.text)) { wrapped += 1; continue; }
+    if (/trackChild\(\s*(?:[\w$]+\s*\.\s*)?execFile(?:OffThread)?\s*\(/.test(site.text)) { wrapped += 1; continue; }
     const binding = site.text.match(
-      /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w$]+\s*\.\s*)?execFile\s*\(/);
+      /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w$]+\s*\.\s*)?execFile(?:OffThread)?\s*\(/);
     if (binding
       && new RegExp(String.raw`trackChild\(\s*${binding[1]}\s*[,)]`).test(source.slice(site.index))) {
       assigned += 1;
@@ -886,14 +891,15 @@ test('every child process the extension starts is handed over to be killable', (
 test('every execFile site takes its deadline from endTreeAfter, never from execFile\'s own timeout', () => {
   const source = fs.readFileSync(extensionPath, 'utf8');
   const deadlines = [];
-  const call = /(?:[\w$]+\s*\.\s*)?\bexecFile\s*\(/g;
+  // execFileOffThread counted with execFile, as in the census above.
+  const call = /(?:[\w$]+\s*\.\s*)?\bexecFile(?:OffThread)?\s*\(/g;
   let hit;
   while ((hit = call.exec(source)) !== null) {
     const line = source.slice(source.lastIndexOf('\n', hit.index) + 1, source.indexOf('\n', hit.index));
     const label = `extension.js:${source.slice(0, hit.index).split('\n').length}`;
     // MUTATION: put `timeout: 30000` back into execFileCaptured's options and drop
     // its endTreeAfter. Both checks below fail. Confirmed 2026-10-14.
-    assert.match(line, /endTreeAfter\(\s*trackChild\(\s*execFile\s*\(/, `${label} is not bounded by endTreeAfter`);
+    assert.match(line, /endTreeAfter\(\s*trackChild\(\s*execFile(?:OffThread)?\s*\(/, `${label} is not bounded by endTreeAfter`);
     // The options are everything between the call and its callback's arrow.
     const head = source.slice(hit.index, source.indexOf('=>', hit.index));
     assert.doesNotMatch(head, /\btimeout\s*:/, `${label} passes execFile its own timeout`);

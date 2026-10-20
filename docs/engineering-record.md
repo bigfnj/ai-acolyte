@@ -655,7 +655,7 @@ and one read of the compiled file per push; `readCompiled` became test-only. `en
 a gateless agent with no block as settled (`vscode-extension/extension.js:4369#wants`), and the toggle
 counts that install as complete (`vscode-extension/extension.js:4412#installed`).
 `scripts/verify-release.ps1` compares `CLAUDE.md` with Claude's section
-(`scripts/verify-release.ps1:221#GetBytes`); its extraction was run alone under PowerShell 5.1 and 7
+(`scripts/verify-release.ps1:233#GetBytes`); its extraction was run alone under PowerShell 5.1 and 7
 against a per-agent compile with non-ASCII text, never through the release script.
 
 **Native Codex gates are left alone.** `src/codex-memory-gates.js` reads `~/.codex/memories` with
@@ -4093,3 +4093,25 @@ loads the extension's `./src/` requires from it, so it tested old modules. A cle
 under verify-release. Any checkout that packaged long ago runs such tests against stale code; CI and
 fresh worktrees have no copy and are unaffected. Not changed here: the harnesses that already map
 the extension's `./src/` requires to the root `src/` show the fix, if the owner wants it.
+
+**Fixed the same day, on the live-hook box (owner's call).** The three script faults:
+"blocks are disjoint" now asks that each block close before the other opens, in either order, and
+needs both END markers; a missing PostToolUse entry is a Note, not a FAIL, since a box with the memory
+features alone has none by design; `Get-TextHash` folds CRLF to LF before hashing `extension.js`.
+Checked under Windows PowerShell 5.1 by a throwaway script that took `Get-TextHash` out of the
+script's own AST: 0 parse errors, an LF file and its CRLF twin hash equal, a different file does
+not, and the disjoint rule gives shell-first true, gates-first true, gates nested in shell false and
+a missing shell END false. On that box's real files, the installed 1.9.5 `extension.js` and the
+checkout's differ raw and agree folded.
+
+**The stale copy reaches the suite by another route than the one above.** The archive test already
+maps `extension.js`'s `./src/` requires to the root `src/`. What prefers the packaged copy is the
+extension's own loading: `memoryLint.js` resolves the guard and `gates-manage.js` from `<dir>/src`
+before `<dir>/../src`, `extension.js` starts the Auto Learn worker from `<dir>/src` when it exists, and
+the recall resolver prefers the bundled `recall.py`. The live-hook box's main checkout held the same
+trap, a 1.8.1 copy whose 44 files differed from `src/`. Rather than change a load order the packaged
+layout depends on, `test/packaged-copies-fresh.test.js` fails while either copy
+(`vscode-extension/src`, `vscode-extension/memory`) differs from its source, names the files and says
+to delete them or run `npm run package`. Absent copies pass, so CI and clean worktrees are unaffected.
+Measured: it failed on that 1.8.1 copy (16 stale files listed), passed with no copies and with fresh
+ones, and failed naming the file for one stale `src/permissions.js` and for one stale `recall.py`.

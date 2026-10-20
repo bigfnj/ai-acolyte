@@ -3486,3 +3486,59 @@ locked up and rebooted (Kernel-Power 41, no BugCheck) while the spawn-timing cap
 spinning threads plus spawn loops beside a full suite. Whether the load caused it is not known.
 The capture was rerun at half the load. Keep synthetic load experiments on this box at that
 level or below.
+
+## Open threads after 1.9.0: the audit's seventeen findings (2026-10-20)
+
+Four read-only audits of the 1.9.0 tree (`e9994db`) found seventeen open-threads issues; branch
+`fix/threads-audit` takes each to a disposition. Every FIXED entry has a test that failed with
+the fix reverted, run one mutation at a time by a runner that restored the file and checked it by
+sha256; the commit messages carry each mutation and the test it failed.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | "Turn off open threads" turned it off only from a settled install, and otherwise ran the ON path (a compile and an install) | **FIXED**: while on, the toggle is always the off path behind its modal; when `threadsNeedRefresh` says the install is not current the modal also offers Refresh, and the card shows **Refresh open threads** from the same predicate |
+| 2 | A recompile armed before the switch went off still compiled | **FIXED**: the timer asks the switch again; the setting's off branch drops it (`cancelThreadsCompile`) |
+| 3 | Turning it on ignored the compile's result and said "ON" over the previous compile | **FIXED**: the result is kept, the last compile is still installed (the CLI's behaviour), and the message says so |
+| 4 | The INDEX line said "MEMORY.md is ..." in every project's sessions without naming which index | **FIXED**: recall.py names it, home-relative (`_home_relative`), or whole outside the home |
+| 5 | C0/C1 controls and bidi controls survived in thread text and the stem | **FIXED**: `_THREAD_STRIP` before the collapse, in the text, the stem and the INDEX path; `memoryLint.js` `threadText` removes the same set, and the agreement corpus now writes them |
+| 6 | `memoryReport()` (the whole store) was read for `.dir` alone on unattended paths | **FIXED**: `memoryLint.js` `memoryStoreDir()` at all five sites; the threads ask it once per burst, inside the debounce |
+| 7 | The compile spawned on the extension host thread, outside the spawn gate | **FIXED** for the threads compile (`execFileOffThread`); **compileGates left on the host thread**: its harnesses record the host's `execFile`, so the move is not the same mechanical change |
+| 8 | A MEMORY.md save always compiled, though the index moves only the INDEX line | **FIXED**: `indexEventMayChange` (not whole, an INDEX line present, or `indexHealth(fastLint(...))` past a budget); `fastLint` now has a production importer, so it is off the TEST_ONLY list in `test/dead-exports.test.js` |
+| 9 | A slow compile could overlap the next, and the older could win | **FIXED**: one running compile and one queued, quiet only if every ask it stands for was |
+| 10 | recall.py rewrote the compiled file when its bytes were unchanged | **FIXED** for the threads output; `compile_gates` unchanged |
+| 11 | Every open window compiles on every burst | **DECLINED**, reasoned below |
+| 12 | Memory watchers lost across a re-activate overlapping a pending deactivate | **FIXED**: `activate()` disposes the maps before its build, and a predecessor's disposer is a no-op after a successor activated |
+| 13 | A stale comment on `gatesCorpusWatchers` | **FIXED** |
+| 14 | `compiledListsThreads` parsed the compiled file a third way | **FIXED**: it asks `src/agent-open-threads.js` `readCompiled`; a compile that reader refuses also recompiles on any edit |
+| 15 | A refused compile told VSIX users to run `wildcard-perms` | **FIXED**: `setOpenThreadsAll` takes `refreshHint`; the extension names its card's Refresh and the toggle's |
+| 16 | `memory.enabled: false` hides the card, open threads included, while they keep compiling | **ACCEPTED-RECORDED**, documented: both READMEs say the card is hidden and the palette command and the setting still reach the feature. A minimal card would be a second render path through a card two other work packages draw into |
+| 17 | Docs | **FIXED**: README section 6 and the extension README |
+
+**11, declined.** The proposed skip (compile only when the compiled file's mtime is older than the
+newest trigger) cannot be made safe here. A window's compile reads the corpus, then writes; an edit
+that lands between the two leaves a compiled file newer than the edit and blind to it, and a second
+window would then skip the compile that would have caught it, until the next trigger. With finding
+10 an identical compile no longer moves the mtime at all, so the skip would fire only after a
+compile that changed something, which is when a second compile matters least and costs the same.
+After 9 and 10 the cost is one compile per window per burst, each off the host thread, and at most
+one write of the file, so the compiled-file watcher fires once per real change rather than once
+per window. Not measured: the number of windows open at once on the development box varies, and
+the saving would be at most N-1 python spawns per burst.
+
+**Behaviour that moved with these.** The threads' store check runs when the burst's timer fires,
+so an event from a store that does not compile arms the timer and then compiles nothing (the
+watcher test asserts the compile count, not the timer). Activation's deferred check shares the
+burst, so a corpus event from another store in its first seconds no longer cancels it. A fresh
+machine with nothing compiled shows **Refresh open threads** on the card until a compile exists;
+one click writes the header-only file and the button goes. The lifecycle census follows
+`execFileOffThread` with `execFile`: still seven sites, the threads compile the one off-thread
+site, each tracked and bounded by `endTreeAfter`.
+
+**Tests added.** `test/extension-open-threads.test.js` (11 new; one runs a real worker thread and
+a hard-linked copy of node named `python.exe` against a stand-in recall script),
+`test/extension-lifecycle-async.test.js` (1), `test/dashboard-view.test.js` (the Refresh route,
+its arguments and the button's visibility), `test/threads-compile.sh` (the INDEX path inside and
+outside the home, the control and bidi strip, the identical-compile no-write, and the generator's
+strip axis with its witness).
+
+**Not done here.** No real VS Code was driven. Nothing was pushed, so CI has not run the branch.

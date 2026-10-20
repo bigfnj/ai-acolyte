@@ -313,7 +313,10 @@ delivered from a server may leave no local trace, so where nothing is found they
 tell, and `wildcard-perms --memory-guard probe` asks Claude Code. The probe runs
 `claude -p "/goal probe"` once in an empty temporary directory and reads Claude Code's own refusal
 text, so a reworded message reads as unknown. Where hooks are allowed, that is one short real
-Claude Code turn. The lint keeps reporting the same measures either way.
+Claude Code turn. Claude Code records even the refusal as a session, so the probe always uses the
+same directory name and leaves a single transcript folder under `~/.claude/projects`. Measured on
+the development box on 2026-10-19 with Claude Code 2.1.301, the probe answered "restricted" in
+about 5 seconds. The lint keeps reporting the same measures either way.
 
 The editor gauge and `recall.py --lint` count lines, line widths and broken comments exactly as
 the guard does, and `recall.py --lint` also holds the entry count to 16;

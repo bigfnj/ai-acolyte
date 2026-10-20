@@ -262,6 +262,12 @@ function classifyProbe(run) {
 // Runs `claude -p "/goal probe"` once, in an empty temporary directory so a session that does
 // start (hooks allowed) has no project to act on, with stdin closed and a 60 s ceiling. Where
 // hooks are allowed this starts a real, short Claude Code turn.
+//
+// ONE directory NAME, not a fresh random one (2026-10-19). Claude Code writes a transcript under
+// ~/.claude/projects/<slug of the cwd>/ even for the refusal (measured: 2.7 KB, Claude Code
+// 2.1.301), so a random name left one more project directory per probe. A fixed name keeps that
+// to one, emptied and recreated for each run.
+const PROBE_DIR_NAME = 'ai-acolyte-memory-guard-probe';
 function memoryGuardProbe(options = {}) {
   const { spawnSync } = require('child_process');
   const { resolvedLaunch } = require('./exec-resolve');
@@ -269,7 +275,9 @@ function memoryGuardProbe(options = {}) {
   let launch;
   try { launch = resolvedLaunch(options.claudeExecutable || 'claude', ['-p', PROBE_PROMPT], 'spawnSync'); }
   catch (error) { return { ...classifyProbe({ error }), command }; }
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-memory-guard-probe-'));
+  const cwd = path.join(os.tmpdir(), PROBE_DIR_NAME);
+  fs.rmSync(cwd, { recursive: true, force: true });
+  fs.mkdirSync(cwd, { recursive: true });
   let run;
   try {
     run = spawnSync(launch.file, launch.args, { ...launch.options, cwd, input: '', encoding: 'utf8',

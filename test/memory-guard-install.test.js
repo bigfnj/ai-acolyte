@@ -318,6 +318,13 @@ test('the probe runs claude -p "/goal probe" once, in an empty temporary directo
   assert.deepEqual(seen.argv, ['-p', '/goal probe']);
   assert.deepEqual(seen.entries, [], 'the probe session has no project to act on');
   assert.equal(fs.existsSync(seen.cwd), false, 'and its directory is removed afterwards');
+  // One fixed name, because Claude Code keeps a transcript directory per working directory.
+  // MUTATION: go back to fs.mkdtempSync and the basename carries a random suffix.
+  assert.equal(path.basename(seen.cwd), 'ai-acolyte-memory-guard-probe');
+  fs.mkdirSync(seen.cwd);
+  fs.writeFileSync(path.join(seen.cwd, 'left-over.txt'), 'from an earlier probe');
+  memoryGuardProbe({ claudeExecutable: stub.executable });
+  assert.deepEqual(stub.record().entries, [], 'a leftover from an earlier probe is cleared first');
   const accepted = stubClaude(t, 'Goal set.', 0);
   assert.equal(memoryGuardProbe({ claudeExecutable: accepted.executable }).result, 'not restricted');
   assert.equal(memoryGuardProbe({ claudeExecutable: path.join(stub.dir, 'missing-claude') }).result, 'unknown');

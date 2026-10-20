@@ -480,6 +480,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['drainLocal', 'permission-wildcarding.drainLocal'],
       ['toggleGuidance', 'permission-wildcarding.toggleGuidance'],
       ['toggleGates', 'permission-wildcarding.toggleGates'],
+      // The Claude memory card's MEMORY.md guard button (2026-10-19).
+      ['toggleMemoryGuard', 'permission-wildcarding.toggleMemoryGuard'],
       ['manageGates', 'permission-wildcarding.manageGates'],
       // showWildcards left with its switch arm on 2026-10-14 (no sender since c09daab):
       // the reverse census at the bottom of this test is what would have caught it.
@@ -3543,4 +3545,115 @@ test('the Project-local card and the drain read one folder filter, so a folder t
   } finally {
     await app.dispose();
   }
+});
+
+// ── the MEMORY.md guard, from the palette and the Claude memory card (2026-10-19) ──────────
+// The hook's presence in settings.json is the state. Turning it on asks first and names what
+// it adds; turning it off does not ask; the card says the state and, every time, whether
+// Claude Code will run it here. node comes from PATH, because this host's execPath is Electron.
+
+function withPath(t, dirs) {
+  const saved = { PATH: process.env.PATH, ProgramFiles: process.env.ProgramFiles };
+  process.env.PATH = dirs.join(path.delimiter);
+  if (process.platform === 'win32') process.env.ProgramFiles = dirs[0] || os.tmpdir();
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+}
+
+const guardScript = (home) => path.join(home, '.claude', 'wildcarding', 'memory-index-guard.js');
+const POLICY_LINE = /Claude Code will not run it here|remotely delivered policy is not visible locally/;
+
+// MUTATION: skip the modal in toggleMemoryGuard (treat every status as already consented) and
+// the first assertion below fails; drop the `choice !== 'Turn on'` return and the cancelled
+// test writes the hook.
+test('turning the MEMORY.md guard on asks first, writes the hook, and the card names its state', async (t) => {
+  const env = setup(t);
+  const before = { model: 'opus', permissions: { allow: ['Bash(git status *)'], deny: [] } };
+  env.write(before);
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.equal(ui.posted.at(-1).memoryGuard.label, 'off');
+    assert.match(ui.posted.at(-1).memoryGuard.policy, POLICY_LINE);
+
+    app.answer('Turn on');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    const asked = app.shown.find((entry) => entry.message === 'Turn on the MEMORY.md guard?');
+    assert.ok(asked, `the toggle must ask before it adds a hook: ${JSON.stringify(app.shown.map((s) => s.message))}`);
+    assert.equal(asked.options.modal, true);
+    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~\/\.claude\/settings\.json/);
+    assert.ok(asked.options.detail.includes(path.join(path.dirname(process.execPath), path.basename(process.execPath))),
+      'the modal names the node it found on PATH');
+    assert.match(asked.options.detail, POLICY_LINE, 'and says whether Claude Code will run it here');
+    const settings = env.read();
+    assert.deepEqual(settings.permissions, before.permissions);
+    assert.equal(settings.hooks.PreToolUse.length, 1);
+    assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /memory-index-guard\.js"$/);
+    assert.ok(fs.existsSync(guardScript(env.tempHome)), 'the stable copy is written');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard ON/.test(entry.message)));
+
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual({ label: data.memoryGuard.label, on: data.memoryGuard.on }, { label: 'on', on: true });
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver({ ...data, memory: { tokens: 10, lines: 3, maxLines: 200, over: 0, broken: 0, unresolved: 0 } });
+    assert.match(panel.dom.byId.get('memoryGuardStatus').textContent, /^MEMORY\.md guard: on\. /);
+    assert.match(panel.dom.byId.get('memoryGuardStatus').textContent, POLICY_LINE);
+    assert.equal(panel.dom.byId.get('memoryGuardBtn').textContent, 'Turn off MEMORY.md guard');
+
+    const asks = app.shown.filter((entry) => entry.level === 'warning').length;
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.equal(app.shown.filter((entry) => entry.level === 'warning').length, asks, 'turning it off does not ask');
+    assert.deepEqual(env.read(), before, 'off takes out exactly what on put in');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard OFF/.test(entry.message)));
+  } finally { await app.dispose(); }
+});
+
+test('a cancelled modal, or no node on PATH, leaves settings.json untouched', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const before = fs.readFileSync(env.settingsPath);
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-no-node-'));
+  t.after(() => fs.rmSync(empty, { recursive: true, force: true }));
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.ok(app.shown.some((entry) => entry.message === 'Turn on the MEMORY.md guard?'), 'precondition: it asked');
+    assert.ok(fs.readFileSync(env.settingsPath).equals(before), 'dismissed: nothing written');
+    assert.equal(fs.existsSync(guardScript(env.tempHome)), false);
+
+    process.env.PATH = empty;
+    if (process.platform === 'win32') process.env.ProgramFiles = empty;
+    const asked = app.shown.length;
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    const said = app.shown.slice(asked);
+    assert.equal(said.length, 1);
+    assert.equal(said[0].level, 'error');
+    assert.match(said[0].message, /no node was found on PATH/);
+    assert.ok(fs.readFileSync(env.settingsPath).equals(before), 'refused before anything was written');
+  } finally { await app.dispose(); }
+});
+
+// Activation refreshes the copy after an upgrade, by revision, and never writes settings.json.
+// MUTATION: drop the refreshMemoryGuardCopy call from activate() and the copy stays at 0.
+test('activation refreshes an outdated guard copy and leaves settings.json alone', async (t) => {
+  const env = setup(t);
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  env.write({ hooks: { PreToolUse: [memoryGuardDefinition({ home: env.tempHome, nodeExecutable: process.execPath })] } });
+  const before = fs.readFileSync(env.settingsPath);
+  fs.mkdirSync(path.dirname(guardScript(env.tempHome)), { recursive: true });
+  fs.writeFileSync(guardScript(env.tempHome), 'const GUARD_REVISION = 0;\n');
+  const app = harness(env.tempHome);
+  try {
+    const packaged = fs.readFileSync(path.join(__dirname, '..', 'src', 'memory-index-guard.js'));
+    assert.ok(fs.readFileSync(guardScript(env.tempHome)).equals(packaged), 'the copy is the packaged guard now');
+    assert.ok(fs.readFileSync(env.settingsPath).equals(before), 'and settings.json was not written');
+  } finally { await app.dispose(); }
 });

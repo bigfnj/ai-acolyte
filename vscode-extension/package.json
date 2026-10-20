@@ -149,6 +149,11 @@
         "icon": "$(law)"
       },
       {
+        "command": "permission-wildcarding.toggleMemoryGuard",
+        "title": "AI Acolyte: Toggle MEMORY.md guard",
+        "icon": "$(shield)"
+      },
+      {
         "command": "permission-wildcarding.manageGates",
         "title": "AI Acolyte: Manage memory gates…",
         "icon": "$(checklist)"
@@ -344,7 +349,7 @@
         "permissionWildcarding.memory.lineBudget": {
           "type": "number",
           "default": 300,
-          "markdownDescription": "Max **characters in one** `MEMORY.md` index line before it's flagged. (This is a width limit for a single hook, not a limit on how many lines the file may have — that's `#permissionWildcarding.memory.maxLines#`.) Hooks over this are drifting into changelog territory — move the detail into the memory file or the project repo."
+          "markdownDescription": "Max **characters in one** `MEMORY.md` line (any line, counted in characters, not UTF-16 units) before it's flagged. (This is a width limit for a single line, not a limit on how many lines the file may have — that's `#permissionWildcarding.memory.maxLines#`.) Hooks over this are drifting into changelog territory — move the detail into the memory file or the project repo. This tunes the editor gauge, not the MEMORY.md guard: the guard hook always uses 300."
         },
         "permissionWildcarding.memory.maxLines": {
           "type": "number",
@@ -354,7 +359,7 @@
         "permissionWildcarding.memory.totalBudget": {
           "type": "number",
           "default": 12000,
-          "markdownDescription": "Byte budget for the whole always-loaded `MEMORY.md` index before the gauge warns."
+          "markdownDescription": "Byte budget for the whole always-loaded `MEMORY.md` index before the gauge warns. This tunes the editor gauge, not the MEMORY.md guard: the guard hook always uses 12000."
         },
         "permissionWildcarding.memory.recallScript": {
           "type": "string",

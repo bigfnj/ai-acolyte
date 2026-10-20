@@ -264,6 +264,66 @@ agent's version. Codex's per-session figure is its `memory_summary.md`, which a 
 loads when its memory is on. The two keep separate indexes on purpose, so a search of one
 agent's memory never returns the other's.
 
+### The MEMORY.md guard (Claude Code, optional)
+
+Claude Code loads the first 200 lines of each project's memory index, `MEMORY.md`, into every
+session and strips its HTML comments. An index grows one reasonable hook at a time, and the lint
+can only report the result afterwards. The guard is a `PreToolUse` hook that refuses the edit that
+causes it. It is off until you turn it on.
+
+It judges a `Write`, `Edit` or `MultiEdit` of `<config>/projects/<project>/memory/MEMORY.md`, where
+`<config>` is `CLAUDE_CONFIG_DIR` or `~/.claude`, or of `MEMORY.md` in the `autoMemoryDirectory`
+your `settings.json` names. Any other file is let through without being read. It replays
+the edit and blocks only when a measure **ends past its budget and is worse than it was**
+(`src/memory-index-guard.js:220#verdict`):
+
+| Measure | Budget |
+|---|---|
+| lines | 140 |
+| bytes | 12,000 |
+| longest line, in characters (any line, not only entries) | 300 |
+| resident `- ` entries | 16 |
+| broken HTML comments: a `<!--` inside an open comment, an orphan `-->`, a `<!--` never closed | 0 |
+
+The worse-than-before half is what makes it safe over an index that is already too big. Deleting
+lines can only lower the first four, so compacting always gets through, and at 16 entries a new
+one has to replace an old one. The one deletion it refuses is half of a comment, because the
+comment's body would then load into every session. When it blocks, Claude Code shows the model
+each measure with its value and budget and the fix: move detail and status into the memory file.
+Anything the guard cannot judge is let through: a payload over 8 MiB, an `old_string` that is not
+in the file, a `MEMORY.md` it cannot read.
+
+Turn it on with **AI Acolyte: Toggle MEMORY.md guard**, the button on the **Claude memory** card,
+or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `status` says what is
+installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
+registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
+(`src/claude-hook-config.js:56#memoryGuardDefinition`). The copy outlives upgrades and is replaced
+only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
+`~/.claude/backups/settings.json.pre-memory-guard`. If another hook already runs a
+`memory-index-guard.js` from a different path, turning the guard on refuses, and that hook is
+never touched.
+
+**Managed policy can stop it running.** Where a managed policy sets `allowManagedHooksOnly` or
+`disableAllHooks`, current Claude Code runs no user hook at all (see the correction under
+[watch the cause](#design-principle-watch-the-cause-do-not-hook-the-event)), so the guard is
+installed and inert. The card, the toggle and `--memory-guard status` say so whenever a local file
+shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`, or
+`disableAllHooks` in your own settings (`src/memory-guard-install.js:124#hookPolicy`). A policy
+delivered from a server may leave no local trace, so where nothing is found they say they cannot
+tell, and `wildcard-perms --memory-guard probe` asks Claude Code. The probe runs
+`claude -p "/goal probe"` once in an empty temporary directory and reads Claude Code's own refusal
+text, so a reworded message reads as unknown. Where hooks are allowed, that is one short real
+Claude Code turn. Claude Code records even the refusal as a session, so the probe always uses the
+same directory name and leaves a single transcript folder under `~/.claude/projects`. Measured on
+the development box on 2026-10-19 with Claude Code 2.1.301, the probe answered "restricted" in
+about 5 seconds. The lint keeps reporting the same measures either way.
+
+The editor gauge and `recall.py --lint` count lines, line widths and broken comments exactly as
+the guard does, and `recall.py --lint` also holds the entry count to 16;
+`test/memory-guard-parity.test.js` measures the same indexes with all three. The extension's
+`memory.lineBudget` and `memory.totalBudget` settings tune the gauge only; the hook always uses
+the budgets above.
+
 ## 7. Saved permissions (Claude Code and Codex)
 
 The **Saved permissions** row combines Claude allow entries and local Codex allow
@@ -493,12 +553,18 @@ it, because a stale union would hand back the entry you deliberately pruned.
 
 The automation lives in a VS Code extension rather than a Claude Code hook, and that is what makes
 it survive a locked-down managed policy. A `SessionStart` hook is the obvious way to make an agent
-do something automatically, and it is exactly what an org policy can take away:
-`allowManagedHooksOnly` is enforced per event, so on a machine whose policy defines only
-`PostToolUse` a user `SessionStart` entry sits in `settings.json` and never fires. A `PostToolUse` canary was run against this
-and reported 4 of 4 tool calls, with a real session start and a `/clear` both leaving the
-compiled file untouched. ⚠ That run left no artefact in the tree, so treat it as a report
-rather than a reproducible measurement until someone repeats it.
+do something automatically, and it is exactly what an org policy can take away.
+
+This section used to say that `allowManagedHooksOnly` is enforced per event, so that a user hook
+still runs on an event the policy itself defines. That rested on a `PostToolUse` canary that
+reported 4 of 4 tool calls under such a policy, and the run left no artefact in the tree. **On
+current Claude Code it is wrong.** Measured on the development box on 2026-10-19 with Claude Code
+2.1.293 and 2.1.301, under a managed policy that sets `allowManagedHooksOnly`:
+`claude -p "/goal x"` answered "/goal can't run while hooks are restricted (disableAllHooks or
+allowManagedHooksOnly is set in settings or by policy)", and no user, project or `--settings` hook
+ran on any event tried (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`). Read the setting as "no
+user hooks at all" until a newer client shows otherwise. `wildcard-perms --memory-guard probe`
+asks the installed client the same `/goal` question.
 
 An extension is not a hook, so no policy toggle reaches it, and that reframes the build. Trigger
 on the cause rather than the ceremony: recompiling gates on a corpus change fires once per edit

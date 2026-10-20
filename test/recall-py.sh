@@ -357,9 +357,13 @@ check_axis() {   # check_axis <name> <warning substring>
     && fail "--lint printed the $1 warning and then called the corpus clean"
 }
 
+# 50 prose lines of ~255 characters: past the byte budget, and still inside the 140-line target
+# and the 300-character line rule, so this arm moves bytes alone (it used 200 short lines until
+# the line target existed, which would have made it a two-axis fixture).
+PAD="$(printf '%0240d' 0 | tr 0 p)"
 { clean_index
-  i=0; while [ $i -lt 200 ]; do
-    printf 'Prose line %03d, padding the index past its byte budget without adding an entry.\n' "$i"
+  i=0; while [ $i -lt 50 ]; do
+    printf 'Prose line %03d, %s\n' "$i" "$PAD"
     i=$((i + 1))
   done
 } > "$MEM/MEMORY.md"
@@ -373,7 +377,41 @@ check_axis over_ceiling 'over the attention ceiling'
 clean_index
 printf 'A forward link to nothing: [[no-such-memory]]\n' >> "$MEM/MEMORY.md"
 check_axis unresolved 'unresolved \[\[links\]\]'
+
+# The MEMORY.md guard's three rules (2026-10-19), one axis each, the same way.
+#   over_lines       150 short prose lines: past the 140-line target, ~1.5 KB, no entries added
+#   over (any line)  one 301-character PROSE line: the rule used to read only "- " lines
+#   comment_defects  a <!-- inside an open comment: one short line, nothing else moves
+{ clean_index
+  i=0; while [ $i -lt 150 ]; do printf 'note %03d\n' "$i"; i=$((i + 1)); done
+} > "$MEM/MEMORY.md"
+check_axis over_lines 'line(s) past the 140-line target'
+
+clean_index
+printf '%0301d\n' 0 | tr 0 q >> "$MEM/MEMORY.md"
+check_axis long_prose_line 'index line(s) over 300 chars'
+
+clean_index
+printf '<!-- header <!-- nested --> tail -->\n' >> "$MEM/MEMORY.md"
+check_axis comment_defects 'broken HTML comment'
 echo "ok: the clean verdict tests every finding it prints, not five of eight"
+
+# --------------------------------------------- widths are code points, and fenced markers are code
+# 300 astral emoji are 300 characters to len(), the guard and the editor lint alike, and 1200
+# UTF-8 bytes. A comment marker inside a fence or a code span is an example, not a comment.
+# Mutation: measure width in UTF-8 bytes or UTF-16 units, or drop the fence skip in
+# _comment_defects, and this fails.
+clean_index
+"$PY" -c "import sys; open(sys.argv[1], 'a', encoding='utf-8').write('\U0001F600' * 300 + '\n')" "$MEM/MEMORY.md"
+printf '```\n<!-- an example\n```\n- write `-->` to close\n' >> "$MEM/MEMORY.md"
+WIDE_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero on the code-point fixture"
+printf '%s\n' "$WIDE_LINT" | grep -q 'over 300 chars' \
+  && fail "300 code points were counted as more than 300 characters"
+printf '%s\n' "$WIDE_LINT" | grep -q 'broken HTML comment' \
+  && fail "a comment marker inside fenced code or a code span was read as a comment"
+printf '%s\n' "$WIDE_LINT" | grep -q 'clean:' \
+  || fail "the code-point fixture should be clean"
+echo "ok: line widths are code points, and comment markers in code are not comments"
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at

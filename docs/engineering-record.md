@@ -3139,7 +3139,12 @@ expected file. They are listed in `f00f59e`'s message.
 
 **Not verified in a real VS Code.** The suite and the scripted harnesses drove this, not an
 installed VSIX. The acceptance badge assertion (`scripts/vscode-acceptance/renderer.js`) was
-updated to the new row text, but it was not run.
+updated to the new row text, but it was not run. (Superseded 2026-10-20: it ran. `drive-vscode.js
+--review-runtime yes --dashboard-ui yes` passed 6 of 6 against the installed 1.9.0 on VS Code
+1.142.0, per "The 1.9.0 backlog clearance (2026-10-20)" below. That group cannot pass without the
+Scan case (`scripts/vscode-acceptance/renderer.js:1962#completedAutoLearn`), and
+`scripts/vscode-acceptance/renderer.js:662#driveAutoLearn` checks in that case, before its click,
+that the badge reads "disabled · Turn on".)
 
 ## Spawn timing under load: what a timing capture found (2026-10-20)
 
@@ -3253,7 +3258,11 @@ set in settings or by policy)", and no user, project or `--settings` hook ran on
 anything else that keeps a hook from firing; the `/goal` refusal names the policy, and that is
 what carries the conclusion. Left for whoever owns them: `hookEventAllowed` in
 `src/managed-policy.js` still answers per event (no production caller), and a comment in
-`scripts/verify-release.ps1` restates the per-event claim.
+`scripts/verify-release.ps1` restates the per-event claim. (Superseded 2026-10-20 for the
+comment: `377d705` replaced the per-event claim with this measurement, and `771aa9e` narrowed it
+to the three events tried. The runs above were made by hand; `771aa9e` also adds
+`scripts/probe-user-hooks.js`, which repeats the `/goal` question and the `--settings` and
+project-local cases on those three events when run with `--run-claude`.)
 
 So on that box the guard is installed and inert, and it has to say so. Every status, the card and
 the enable modal carry a policy line read from what is local: a `managed-settings.json`, the cached
@@ -3434,7 +3443,13 @@ original text checked present before anything was committed.
 
 **Not done here, and why.** `scripts/drive-installed.js`, `scripts/verify-release.ps1` and
 `scripts/smoke.sh` are the integrator's to wire. Nothing was pushed, so the new CI step has not run
-on GitHub. No real VS Code was driven.
+on GitHub. No real VS Code was driven. (Superseded 2026-10-20: all four were done for 1.9.0.
+`7520395` drives open threads end to end through the packaged command and `recall.py` in
+`drive-installed.js` (and `094e575` the MEMORY.md guard, in the same pass); `3dd98af` adds an Open
+threads section to `verify-release.ps1`; `b013d95` has smoke check `--open-threads status`; and
+`38483a7` reads the Claude memory card's open-threads line from a real VS Code webview. The CI step
+ran on GitHub: BACKLOG.md's 1.9.0 release paragraph records `test/threads-compile.sh` passing there,
+in the `gates-manage` job ("recall.py gate edits on Python 3.11").)
 
 **Residuals, not changed here:**
 - The CLI has no setting: `--open-threads refresh` installs whatever the extension's setting says,

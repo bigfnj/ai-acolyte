@@ -3486,3 +3486,48 @@ locked up and rebooted (Kernel-Power 41, no BugCheck) while the spawn-timing cap
 spinning threads plus spawn loops beside a full suite. Whether the load caused it is not known.
 The capture was rerun at half the load. Keep synthetic load experiments on this box at that
 level or below.
+
+## The MEMORY.md guard audit, fixed on fix/guard-audit (2026-10-20)
+
+Four read-only audits of 1.9.0's guard found seventeen items. Each one's disposition, with the
+test that fails without it (every one mutation-tested; the mutation is in its commit message):
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | The block message, modal and READMEs said "already past its budget" and "shrinking edits always pass" | **FIXED.** The wording is "ends past a budget and worse than before"; a first crossing, a half-comment or fence-line deletion and a line join are named as refused. Advice follows the reasons ("close or remove the whole comment" for a defect, located by line). The modal's numbers come from `BUDGETS`. GUARD_REVISION 2. |
+| 2 | With the hook's node gone, the card said "turn it on again" and its button turned the guard off | **FIXED.** Such a hook reads `on (needs repair)`; the toggle repairs it with no modal. |
+| 3 | smoke.sh's status pattern was lowercase, the CLI prints uppercase | **FIXED.** A test reads the ERE out of smoke.sh and runs it on the real CLI output for every label `labelFor` returns. |
+| 4 | `status` exited 0 on an unsupported hooks shape it labels UNREADABLE | **FIXED.** Exit 1. |
+| 5 | The probe's fixed directory sat in the shared temp dir and an existing one was accepted | **FIXED.** `<config>/wildcarding/ai-acolyte-memory-guard-probe`, created without `recursive`; an existing one is used only when it is a plain, empty directory the current user owns, else the probe refuses and Claude Code is not run. |
+| 6 | The probe was an unbounded agent run, and a timeout left the process under cmd.exe running | **FIXED.** An inert goal, `--tools ""`, `--strict-mcp-config`, `--no-session-persistence` (all in `claude --help`, 2.1.293; no turn-limit flag is listed, so none is passed), `npmShimLaunch` before `resolvedLaunch`, and an async run whose deadline calls `endProcessTree`. |
+| 7 | Any exit 0 read as "not restricted" | **FIXED.** The answer must carry the goal's word; "Unknown skill: goal" and the trust-gate text read as unknown. |
+| 8 | The VSIX's UI named CLI verbs it does not ship | **FIXED.** Palette command "Check whether Claude Code runs user hooks"; `hookPolicy` takes a `surface`; the withdrawn workspace scope's note (extension.js and the setting's description) says which lines to delete. A census test drives what the extension shows about the guard. |
+| 9 | No backup when settings.json was absent at the first `on`, so `off` snapshotted the installed bytes | **FIXED.** A `.absent` marker is written at the first change and stops every later snapshot. |
+| 10 | CLAUDE_CONFIG_DIR honoured by the guard, ignored by install and status | **FIXED.** `configDirFor`; settings.json, the copy, the backup and remote-settings.json follow it. The policy lock stays under the home. |
+| 11 | On Windows `memory.md` bypassed the exact basename check | **FIXED** for case and trailing dots and spaces, file and memory directory. GUARD_REVISION 3. **ACCEPTED-RECORDED:** 8.3 short names (`MEMORY~1.MD`), `::$DATA` streams, `\\?\` and UNC spellings and junction targets fail open. Resolving them costs a file-system call per Write on every file in a session, and Claude Code writes the index by its plain path. macOS's default case-insensitive volume has the same case gap; not folded, because `comparable` does not fold directories there either and a case-sensitive volume would then guard a different file. |
+| 12 | A MultiEdit test could not fail (its old_string was ambiguous) | **FIXED.** Unique old_strings, a reproduction precondition, and a growing MultiEdit that must exit 2. |
+| 13 | `restricted`, `sources` and status's `foreign` were never read | **FIXED.** `--memory-guard status` prints a `source:` line per restricting file; status no longer returns `foreign` (the reason names it, and the planner reads its own list). |
+| 14 | The packaged revision was re-read on every status call | **FIXED.** Read once per process; a failed read is not kept. |
+| 15 | An Edit that Claude Code matches only after normalising reads as not found and passes | **ACCEPTED-RECORDED (fail open).** The rule cannot be stated: Claude Code 2.1.293's Edit is compiled bytecode, and its error text shows at least one more normalisation ("Edit also tried swapping \uXXXX escapes and their characters"). A guessed rule could refuse an edit Claude Code applies differently; letting an unreproducible edit through is the guard's stated design. |
+| 16 | A user's wrapper around our copy read as ours, so `on` replaced it and `off` deleted it | **FIXED.** Ours is a node and our copy and nothing else; anything else is foreign. |
+| 17 | Docs | **FIXED.** README and extension README. |
+
+**The probe, measured once (2026-10-20, Claude Code 2.1.293).** The bounded probe answered "not
+restricted" on the development box in 4.3 s, with the probe directory under a throwaway home and
+the real claude and environment. The box carries no `managed-settings.json` in either Windows
+location, no registry policy, and a `remote-settings.json` holding only `companyAnnouncements`,
+so the managed policy the 2026-10-19 "restricted" measurement ran under is not present locally
+now. With `--no-session-persistence` Claude Code saved no transcript but still created one
+project folder for the directory, holding an empty `memory/`. Left for the owner: that folder,
+`~/.claude/projects/C--Users-Admin-AppData-Local-Temp-wp2-real-probe-8DyQf1--claude-wildcarding-ai-acolyte-memory-guard-probe`,
+and the fact that this box's `~/.claude/settings.json` registers the guard (copy at revision 1),
+which, if user hooks now run here, is live in every session. The bounded probe's refusal path has
+not been seen with the new flags, because the box no longer refuses. Every flag is in 2.1.293's
+help, so an unknown-option error cannot come first on that version, and the classification of
+the refusal text is pinned by a stub test.
+
+**Not fixed here, recorded.** A 1.9.0 backup taken by `off` after an `on` with no settings.json
+holds the guard-installed bytes; nothing here detects or rewrites it. On POSIX the deadline ends
+the child alone (endProcessTree has no group to signal without `detached`); an npm `claude` there
+is one process. The open-threads module's `wildcard-perms --open-threads refresh` error string
+(src/agent-open-threads.js) is another owner's and is not in the census.

@@ -57,6 +57,8 @@ const PROBE_COMMAND = `claude -p "${PROBE_PROMPT}" --tools "" --no-session-persi
 const PROBE_TIMEOUT_MS = 60 * 1000;
 const PROBE_OUTPUT_CAP = 4 * 1024 * 1024;
 const PROBE_CLOSE_GRACE_MS = 2000;
+const PROBE_RM_RETRIES = 5;             // the removal's retries, as scripts/probe-user-hooks.js's
+const PROBE_RM_RETRY_DELAY_MS = 200;
 const RESTRICTED_TEXT = /can['\u2019]t run while hooks are restricted/i;
 
 function resolveHome(options) {
@@ -401,11 +403,21 @@ function memoryGuardProbe(options = {}) {
   return new Promise((resolve) => {
     let cwd = null;
     let settled = false;
+    // THE DIRECTORY GOES, OR THE ANSWER SAYS IT DID NOT (audit of 1.9.2). A process the run left in
+    // the directory (on Windows, any process standing in it or holding a file there) made one rmSync
+    // fail, and the failure was swallowed: an empty leftover was reused next time and a non-empty one
+    // refused, with nothing said either time. The removal now retries as scripts/probe-user-hooks.js
+    // does, asynchronously so the retries never hold the extension host, and a removal that still
+    // fails is named in the detail. The answer itself stays what Claude Code said.
     const settle = (run) => {
       if (settled) return;
       settled = true;
-      if (cwd) try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* a probe dir left behind is refused next time */ }
-      resolve({ ...classifyProbe(run), command: PROBE_COMMAND, directory });
+      const answer = { ...classifyProbe(run), command: PROBE_COMMAND, directory };
+      if (!cwd) { resolve(answer); return; }
+      fs.promises.rm(cwd, { recursive: true, force: true, maxRetries: PROBE_RM_RETRIES, retryDelay: PROBE_RM_RETRY_DELAY_MS })
+        .then(() => resolve(answer), (error) => resolve({ ...answer,
+          detail: `${answer.detail} The probe's directory, ${cwd}, could not be removed afterwards (${error.code || error.message}): `
+            + 'a process may still be running in it or holding a file there.' }));
     };
     try {
       const { spawn } = require('child_process');
@@ -430,11 +442,15 @@ function memoryGuardProbe(options = {}) {
       // whose parent has exited is outside taskkill's tree, and on POSIX only the child is
       // signalled. So PROBE_CLOSE_GRACE_MS after the deadline the probe answers as timed out and
       // destroys its own ends of the pipes, which would otherwise keep a process like the CLI alive.
+      // And it lets go of the child itself, stdin and the handle (audit of 1.9.2), as its twin in
+      // scripts/probe-user-hooks.js (abandon) does: on POSIX a child that survives the deadline's
+      // SIGTERM kept `wildcard-perms --memory-guard probe` running after it printed its answer.
       const timer = setTimeout(() => {
         timedOut = true;
         execResolve.endProcessTree(child);
         grace = setTimeout(() => {
-          for (const stream of ['stdout', 'stderr']) try { child[stream].destroy(); } catch { /* already closed */ }
+          for (const stream of ['stdin', 'stdout', 'stderr']) try { child[stream].destroy(); } catch { /* already closed */ }
+          try { child.unref(); } catch { /* gone */ }
           settle(timedOutRun());
         }, PROBE_CLOSE_GRACE_MS);
       }, options.timeoutMs || PROBE_TIMEOUT_MS);

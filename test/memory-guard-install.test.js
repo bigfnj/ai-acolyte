@@ -571,6 +571,169 @@ test('a probe whose pipes are held past its deadline still answers, and lets its
   }
 });
 
+// A child that survives the deadline's kill is let go at the grace: its stdin, stdout and stderr
+// destroyed and its handle unref'd, as scripts/probe-user-hooks.js's abandon does, so nothing the
+// probe holds keeps its process alive. The grace destroyed stdout and stderr only, so on POSIX a
+// claude that outlived its SIGTERM kept `wildcard-perms --memory-guard probe` running after it had
+// printed (audit of 1.9.2). In a driver process. The stand-in claude is node itself (the driver
+// replaces npmShimLaunch) and stands in the temp directory, which nothing here removes. On POSIX
+// it ignores SIGTERM and the real tree kill runs; Windows has no kill a process can ignore
+// (taskkill /F), so there the driver replaces the tree kill with one that does nothing.
+// MUTATION: drop the child.unref() from the grace and the driver is still running at 20 s. (The
+// stdin destroy is for parity with the twin: stdin was ended at the start, and dropping it alone
+// survived, 26 of 26.)
+test('a child that survives the deadline\'s kill does not keep the probe\'s process alive', async (t) => {
+  const { setTimeout: wait } = require('node:timers/promises');
+  const { spawn } = require('node:child_process');
+  const f = fixture(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-survivor-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const record = path.join(dir, 'survivor.json');
+  const stub = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(stub, `process.chdir(${JSON.stringify(os.tmpdir())});\n`
+    + `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid }));\n`
+    + "process.on('SIGTERM', () => {});\nsetTimeout(() => {}, 60 * 1000);\n");
+  const src = path.resolve(__dirname, '..', 'src');
+  const options = { home: f.home, env: {}, claudeExecutable: 'claude-stand-in', timeoutMs: 1000 };
+  const driver = spawn(process.execPath, ['-e', [
+    `const execResolve = require(${JSON.stringify(path.join(src, 'exec-resolve.js'))});`,
+    `execResolve.npmShimLaunch = (name, args) => ({ file: process.execPath, args: [${JSON.stringify(stub)}, ...args], options: {} });`,
+    "if (process.platform === 'win32') execResolve.endProcessTree = () => Promise.resolve();",
+    `require(${JSON.stringify(path.join(src, 'memory-guard-install.js'))}).memoryGuardProbe(${JSON.stringify(options)})`,
+    '  .then((probe) => {',
+    // The witness is taken here, before the driver exits: on Windows a child that is not
+    // detached is in the driver's kill-on-close job, and goes with it.
+    `    const { pid } = JSON.parse(require('fs').readFileSync(${JSON.stringify(record)}, 'utf8'));`,
+    '    let survived = true;',
+    '    try { process.kill(pid, 0); } catch { survived = false; }',
+    '    process.stdout.write(JSON.stringify({ ...probe, survived }));',
+    '  });',
+  ].join('\n')], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const survivor = () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')).pid : null);
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  try {
+    let stdout = '';
+    let stderr = '';
+    driver.stdout.on('data', (chunk) => { stdout += chunk; });
+    driver.stderr.on('data', (chunk) => { stderr += chunk; });
+    let exited = false;
+    driver.on('exit', () => { exited = true; });
+    const started = Date.now();
+    for (let i = 0; i < 400 && !exited; i += 1) await wait(50);
+    assert.ok(survivor(), `precondition: the stand-in claude started. ${stderr}`);
+    assert.equal(exited, true, `the probe's process was still running ${Date.now() - started} ms after it started, against a 1 s deadline`);
+    const probe = JSON.parse(stdout);
+    assert.equal(probe.survived, true, 'WITNESS: the stand-in claude outlived the deadline\'s kill');
+    assert.equal(probe.result, 'unknown');
+    assert.match(probe.detail, /claude gave no answer within/);
+  } finally {
+    try { driver.kill(); } catch { /* exited */ }
+    const pid = survivor();
+    if (pid) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+      for (let i = 0; i < 100 && alive(pid); i += 1) await wait(50);
+    }
+  }
+});
+
+// A stand-in claude that answers as a restricted client and leaves the probe's directory hard to
+// remove: on Windows a detached process standing in it for `lifeMs`, on POSIX (where a process in a
+// directory does not stop its removal) a subdirectory nobody may write to. What it left goes to
+// its record, for the cleanup.
+function strayClaude(t, lifeMs) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-stray-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const record = path.join(dir, 'stray.json');
+  const script = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(script, `const fs = require('fs');
+const path = require('path');
+if (process.platform === 'win32') {
+  const stray = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, ${lifeMs})'],
+    { cwd: process.cwd(), detached: true, stdio: 'ignore', windowsHide: true });
+  fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: stray.pid }));
+  stray.unref();
+} else {
+  const held = path.join(process.cwd(), 'held');
+  fs.mkdirSync(held);
+  fs.writeFileSync(path.join(held, 'file'), 'x');
+  fs.chmodSync(held, 0o555);
+  fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ held }));
+}
+process.stdout.write(${JSON.stringify(RESTRICTED)} + '\\n');
+process.exitCode = 1;
+`);
+  let executable;
+  if (process.platform === 'win32') {
+    executable = path.join(dir, 'claude.cmd');
+    fs.writeFileSync(executable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    executable = path.join(dir, 'claude');
+    fs.writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(executable, 0o755);
+  }
+  const left = () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')) : {});
+  const cleanup = async (probeDir) => {
+    const { setTimeout: wait } = require('node:timers/promises');
+    const { pid, held } = left();
+    if (pid) {
+      try { process.kill(pid); } catch { /* gone */ }
+      for (let i = 0; i < 100; i += 1) { try { process.kill(pid, 0); } catch { break; } await wait(50); }
+    }
+    if (held && fs.existsSync(held)) fs.chmodSync(held, 0o755);
+    // Retried by hand: Windows lets go of a directory a moment after the process in it has gone,
+    // and on Node 24 rmSync's own retries gave up on that EPERM at once (measured).
+    for (let i = 0; ; i += 1) {
+      try { fs.rmSync(probeDir, { recursive: true, force: true }); break; } catch (error) { if (i >= 50) throw error; }
+      await wait(100);
+    }
+  };
+  return { executable, left, cleanup };
+}
+
+// A directory the probe cannot remove is said, and the answer stays Claude Code's. The removal
+// sat in a bare catch, so a stray process left an empty directory that was reused, or a non-empty
+// one that was refused, next time, and nothing said why (audit of 1.9.2).
+// MUTATION: swallow the removal's failure again (resolve the plain answer on both paths) and the
+// detail no longer names the directory.
+test('a probe directory that cannot be removed afterwards is named in the detail, and the answer stays', {
+  skip: typeof process.getuid === 'function' && process.getuid() === 0 && 'root may write where the stub forbids it',
+}, async (t) => {
+  const f = fixture(t);
+  const stray = strayClaude(t, 60 * 1000);
+  const directory = path.join(f.home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe');
+  try {
+    const probe = await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stray.executable });
+    assert.ok(stray.left().pid || stray.left().held, 'precondition: the stand-in left something in the directory');
+    assert.equal(probe.result, 'restricted', probe.detail);
+    assert.ok(probe.detail.startsWith('Claude Code refused /goal because hooks are restricted'), probe.detail);
+    assert.match(probe.detail, /The probe's directory, .*ai-acolyte-memory-guard-probe, could not be removed afterwards \((EBUSY|EPERM|ENOTEMPTY|EACCES)\): a process may still be running in it or holding a file there\.$/);
+    assert.ok(fs.existsSync(directory), 'precondition: the directory is still there');
+  } finally {
+    await stray.cleanup(directory);
+  }
+});
+
+// And a process that leaves within the removal's retries is waited out. Windows only: on POSIX a
+// process standing in a directory does not stop its removal.
+// MUTATION: drop maxRetries from the removal and the first EBUSY is the answer: the directory
+// stays and the detail names it.
+test('a stray process that leaves the probe\'s directory soon after is waited out', {
+  skip: process.platform !== 'win32' && 'POSIX removes a directory a process stands in',
+}, async (t) => {
+  const f = fixture(t);
+  const stray = strayClaude(t, 300);
+  const directory = path.join(f.home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe');
+  try {
+    const probe = await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stray.executable });
+    assert.ok(stray.left().pid, 'precondition: the stand-in left a process standing in the directory');
+    assert.equal(probe.result, 'restricted', probe.detail);
+    assert.doesNotMatch(probe.detail, /could not be removed/);
+    assert.equal(fs.existsSync(directory), false, 'the directory was removed once the stray had gone');
+  } finally {
+    await stray.cleanup(directory);
+  }
+});
+
 // The fixed directory used to sit in os.tmpdir(), which is /tmp and shared on Linux: another
 // user could create it first, holding a .claude/settings.json (or CLAUDE.md, .mcp.json) that
 // `claude -p` would load as the victim, and the pre-created directory made rmSync throw,

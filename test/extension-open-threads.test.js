@@ -484,6 +484,28 @@ test('Refresh, from the modal or the card, compiles and installs and leaves the 
   // the `enabled` check on the refresh request and the last compile count is 3.
 });
 
+// A FAILED COMPILE IS NOT A FRESH ONE (2026-10-20). Turning it on ignored compileThreads()'s
+// answer, installed the previous compile and said "ON" over it. It still installs the last compile,
+// as `wildcard-perms --open-threads refresh` does, and now says that is what it did.
+test('turning it on with a compile that fails installs the last compile and says so', async (t) => {
+  const app = await threadsWindow(t, { tiers: { 'openThreads.enabled': { globalValue: false } }, compileWrites: null,
+    prepare: (box) => fs.writeFileSync(box.threadsFile, ONE) });
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  await app.settle();
+  assert.equal(app.tiers['openThreads.enabled'].globalValue, true, 'precondition: the setting went on');
+  assert.equal(app.compiles().length, 1, 'precondition: it compiled, and the compile failed');
+  assert.ok(app.claude().includes('- **AWAITING** The owner decides. (a)'), 'the last compile is installed');
+  const on = app.infos.filter((message) => /open threads ON/.test(message));
+  assert.equal(on.length, 1, `one ON message: ${JSON.stringify(app.infos)}`);
+  assert.match(on[0], /the compile failed, so the last compile is installed: /);
+  // A compile that succeeds says nothing of the kind.
+  app.state.compileWrites = TWO;
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')({ refresh: true });
+  await app.settle();
+  assert.doesNotMatch(app.infos.at(-1), /failed/);
+  // MUTATION: pass `true` for `compiled` from refreshOpenThreads and the first match fails.
+});
+
 // A VSIX SHIPS NO bin/ (2026-10-20). A refused compile's error named `wildcard-perms --open-threads
 // refresh`, which an extension user does not have; the extension names its own way instead.
 test('a refused compile tells an extension user how the extension recompiles, never the CLI', async (t) => {

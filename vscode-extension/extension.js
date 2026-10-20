@@ -4693,27 +4693,34 @@ async function toggleOpenThreads(request = null) {
 // Compile, then install what is compiled, for a person's click: the toggle turning it on, and
 // Refresh. The setting's own listener may just have armed a recompile; this one covers it, so it
 // is dropped rather than run a second time two seconds later.
+// A compile that failed still installs what was compiled before, as the CLI's refresh does, and
+// every message then says so: "ON" over an old compile reads as a fresh one (2026-10-20).
 async function refreshOpenThreads() {
   cancelThreadsCompile();
-  await compileThreads();
+  const compiled = await compileThreads();
   if (deactivated) return;
-  reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true);
+  reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true, compiled);
 }
 
-function reportThreadsInstall(results, next) {
+function reportThreadsInstall(results, next, compiled = true) {
   const refused = results.length === 1 && results[0].refusal ? results[0] : null;
   const failed = results.filter((result) => result.error);
+  const stale = next && !compiled;
   if (refused && !refused.error) {
-    vscode.window.showWarningMessage(`ai-acolyte: open threads are on, and nothing is installed: ${refused.reason}.`);
+    vscode.window.showWarningMessage('ai-acolyte: open threads are on, and nothing is installed: '
+      + `${stale ? 'the compile failed, and ' : ''}${refused.reason}.`);
   } else if (failed.length) {
-    vscode.window.showErrorMessage(`ai-acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
+    vscode.window.showErrorMessage(`ai-acolyte: ${stale ? 'open threads: the compile failed; ' : ''}`
+      + failed.map((result) => `${result.agent}: ${result.error}`).join('; '));
   } else if (!results.length) {
     vscode.window.showWarningMessage('ai-acolyte: open threads: no agent instruction file to write.');
   } else if (next && !results.some((result) => result.on)) {
-    vscode.window.showInformationMessage('ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its '
-      + 'budgets, so no block is installed until something is.');
+    vscode.window.showInformationMessage(stale
+      ? 'ai-acolyte: open threads ON — the compile failed, and the last compile lists nothing open, so no block is installed.'
+      : 'ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its budgets, so no block is installed until something is.');
   } else {
     vscode.window.showInformationMessage(`ai-acolyte: open threads ${next ? 'ON' : 'OFF'} — `
+      + (stale ? 'the compile failed, so the last compile is installed: ' : '')
       + results.map((result) => result.path.replace(os.homedir(), '~')).join(', ')
       + (next ? ' (applies from each agent’s next session)' : ''));
   }

@@ -119,6 +119,11 @@
         "icon": "$(question)"
       },
       {
+        "command": "permission-wildcarding.toggleAutoLearn",
+        "title": "AI Acolyte: Toggle Auto Learn",
+        "icon": "$(debug-pause)"
+      },
+      {
         "command": "permission-wildcarding.autoLearnShowBlocked",
         "title": "AI Acolyte: Auto Learn - Show families blocked by managed policy",
         "icon": "$(shield)"
@@ -238,7 +243,7 @@
         "permissionWildcarding.autoLearn.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Incrementally correlate Claude Code and Codex shell history on startup, on transcript changes, and during periodic reconciliation. Confirmed successes add evidence, failures are retained as negative evidence, and unanswered calls are ignored. Raw transcript arguments and absolute transcript paths are never saved in Auto Learn state."
+          "markdownDescription": "Incrementally correlate Claude Code and Codex shell history on startup, on transcript changes, and during periodic reconciliation. Confirmed successes add evidence, failures are retained as negative evidence, and unanswered calls are ignored. Raw transcript arguments and absolute transcript paths are never saved in Auto Learn state. **AI Acolyte: Toggle Auto Learn** and the Auto Learn card's button switch it in your user settings. Off stops the extension's background scans only: Codex's after-turn Stop hook and `wildcard-perms --learn` do not read this setting. A workspace may only make this stricter: it can turn Auto Learn off, never on when your user setting has it off."
         },
         "permissionWildcarding.autoLearn.mode": {
           "type": "string",

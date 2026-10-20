@@ -3174,6 +3174,26 @@ machine-scoped manifest census, deactivate's timeout count (16, where the old bo
 fail for any timer dropped since), and `fastLint` from HELD to TEST_ONLY in
 `test/dead-exports.test.js`, because the new reading test calls it directly.
 
+**Mutations, each run one at a time by a runner that restored the file and checked it by
+sha256.** 47 of `recall.py` against `test/threads-compile.sh` (selection, every status class,
+duplicate refusal, fence and marker anchoring, the text's collapse, neutralising, escaping and cap,
+the line cap, the header-only file, each INDEX budget and its join, each refusal, the atomic write,
+the run-alone check, every `--lint` section, its count line, its reserved phrases and `clean:`):
+all killed, three only after the test gaps they exposed were closed (an index fixture whose
+frontmatter sat below its index lines and so declared nothing, no text under 240 characters but
+over 240 bytes, no shorter fence closer before a block). 13 of `memoryLint.js`'s reading against
+the agreement half: all killed, one (JavaScript's `.` in `FENCE_OPEN`) only after the generator
+learned to put U+2028 in a fence's info string. 7 more of the reading against
+`test/open-threads-reading.test.js`, which CI's node matrix runs: all killed. 12 of
+`src/agent-open-threads.js` and 11 of `bin/wildcard-perms`: all killed. 32 of `extension.js`, one
+of `memoryLint.js`'s counts and one of the manifest, against the extension, dashboard, lifecycle,
+activation and machine-scope tests: all killed, one (the content check in `threadsMayChange`) only
+after its test stopped letting a listed thread arm the recompile first. Not separately
+falsifiable: `ensureOpenThreads`' early return for a missing compile, since `setOpenThreadsAll`
+then writes nothing either; it saves a second read. The runner itself was killed once by a
+workstation crash, mid-mutation; the one file it left mutated was restored and every mutation's
+original text checked present before anything was committed.
+
 **Not done here, and why.** `scripts/drive-installed.js`, `scripts/verify-release.ps1` and
 `scripts/smoke.sh` are the integrator's to wire. Nothing was pushed, so the new CI step has not run
 on GitHub. No real VS Code was driven.

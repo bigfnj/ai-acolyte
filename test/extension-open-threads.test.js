@@ -306,14 +306,17 @@ test('the corpus watcher hands every change to both the gates and the threads, a
   app.fireCorpus(app.store, 'extra.md');
   assert.deepEqual(app.live(), [], 'an edit that cannot move the threads arms nothing');
   // MEMORY.md: the gates skip it, the threads compile for its health, with gates switched off.
+  // That compile lists nothing, so the status edit below arms on its own words alone.
+  app.state.compileWrites = NONE;
   app.fireCorpus(app.store, 'MEMORY.md');
   assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'an index edit arms the threads recompile, gates off or not');
   await app.fireTimers();
   assert.equal(app.compiles().length, 1, 'and it compiles');
-  // A memory that now declares a status.
+  // A memory that now declares a status, while the compile lists none.
+  app.state.compileWrites = ONE;
   fs.writeFileSync(path.join(app.store, 'extra.md'), memory('blocked'));
   app.fireCorpus(app.store, 'extra.md');
-  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'a status edit arms it');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'a status edit arms it, on what the file says');
   // Two events in a burst are one compile.
   app.fireCorpus(app.store, 'extra.md');
   assert.equal(app.live().length, 1, 'debounced');

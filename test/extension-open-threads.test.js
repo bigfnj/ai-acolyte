@@ -526,6 +526,43 @@ test('a settings edit takes effect without a reload: off removes the block, on r
   // MUTATION: drop the openThreads branch from the configuration listener and nothing here moves.
 });
 
+// SWITCHED OFF STAYS OFF, FOR A RECOMPILE ALREADY ARMED (2026-10-20). The timer re-checked only
+// `deactivated`, and neither the setting's off branch nor the toggle's off path cleared it, so an
+// edit 2.5 s before the switch went off still compiled after it.
+test('a recompile armed before the switch went off is dropped, and compiles nothing if it fires anyway', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
+  app.fireCorpus(app.store, 'a.md');
+  const pending = app.live();
+  assert.deepEqual(pending.map((entry) => entry.ms), [2500], 'precondition: a status edit armed the recompile');
+  app.tiers['openThreads.enabled'] = { globalValue: false };
+  app.fireConfig('permissionWildcarding.openThreads.enabled');
+  assert.ok(pending.every((entry) => entry.cleared), 'turning it off in settings dropped the armed recompile');
+  for (const entry of pending) { entry.fired = true; entry.fn(); }
+  await app.settle();
+  await app.settle();
+  assert.deepEqual(app.compiles(), [], 'and the timer, run anyway, compiled nothing');
+  // The toggle's off path, from a fresh window with a recompile armed: its setting write reaches
+  // the same listener.
+  const second = await threadsWindow(t, { prepare: (box) => {
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+    fs.writeFileSync(box.threadsFile, ONE);
+  } });
+  second.fireCorpus(second.store, 'a.md');
+  const armed = second.live();
+  assert.equal(armed.length, 1, 'precondition: armed');
+  second.state.warningAnswer = 'Turn off';
+  await second.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.ok(armed.every((entry) => entry.cleared), 'the toggle turning it off dropped it');
+  for (const entry of armed) { entry.fired = true; entry.fn(); }
+  await second.settle();
+  await second.settle();
+  assert.deepEqual(second.compiles(), [], 'and nothing compiled');
+  assert.equal(installedIn(second.claude()), false);
+  // MUTATION: drop `|| !openThreadsEnabled()` from scheduleThreadsCompile's timer and both
+  // "compiled nothing" assertions fail; drop the listener's `else cancelThreadsCompile()` and the
+  // first "dropped" assertion fails.
+});
+
 test('deactivate clears the pending recompile, so a torn-down host never compiles', async (t) => {
   const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
   app.fireCorpus(app.store, 'a.md');

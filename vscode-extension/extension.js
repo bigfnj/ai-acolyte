@@ -2818,9 +2818,11 @@ function registerLocalWatchers(context) {
       if (event.affectsConfiguration('permissionWildcarding.gates')) ensureGates(true);
       // Off removes the block at once; on installs what was compiled and recompiles, because
       // nothing compiles while it is off (threadsCorpusBump), so the last compile may be stale.
+      // Off also drops a recompile already armed, which would otherwise compile after the switch.
       if (event.affectsConfiguration('permissionWildcarding.openThreads')) {
         ensureOpenThreads(true);
         if (openThreadsEnabled()) scheduleThreadsCompile();
+        else cancelThreadsCompile();
       }
       if (event.affectsConfiguration('permissionWildcarding.memory')) {
         // BOTH, and in this order. Refreshing only the dashboard was worse than
@@ -4544,13 +4546,22 @@ function compileThreads({ quiet = false } = {}) {
 }
 
 // One debounced compile and install, shared by the corpus watcher, activation and the setting.
+// The switch is asked again when the timer fires, not only when it was armed: turned off in
+// between, nothing compiles (2026-10-20).
 function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS) {
   if (deactivated) return;
   clearTimeout(threadsBounce);
   threadsBounce = setTimeout(() => {
     threadsBounce = null;
+    if (deactivated || !openThreadsEnabled()) return;
     compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
   }, delay);
+}
+
+// The armed recompile, dropped: the switch went off, or a person's compile is about to cover it.
+function cancelThreadsCompile() {
+  clearTimeout(threadsBounce);
+  threadsBounce = null;
 }
 
 // After activation, a compile only when one could say something: a memory declares `status:`,
@@ -4674,6 +4685,8 @@ async function toggleOpenThreads(request = null) {
   }
   if (deactivated) return;
   if (next) { await refreshOpenThreads(); return; }
+  // An armed recompile was dropped by the setting's own listener (cancelThreadsCompile), and the
+  // timer asks the switch again if it fires regardless.
   reportThreadsInstall(setOpenThreadsAll(false), false);
 }
 
@@ -4681,8 +4694,7 @@ async function toggleOpenThreads(request = null) {
 // Refresh. The setting's own listener may just have armed a recompile; this one covers it, so it
 // is dropped rather than run a second time two seconds later.
 async function refreshOpenThreads() {
-  clearTimeout(threadsBounce);
-  threadsBounce = null;
+  cancelThreadsCompile();
   await compileThreads();
   if (deactivated) return;
   reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true);

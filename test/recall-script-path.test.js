@@ -2,7 +2,7 @@
 
 // NO WORKSPACE FOLDER EVER SUPPLIES THE RECALL SCRIPT THE EXTENSION RUNS (2026-10-14, G1).
 //
-// recallScriptPath (vscode-extension/extension.js:652#recallScriptPath) resolves the
+// recallScriptPath (vscode-extension/extension.js:656#recallScriptPath) resolves the
 // memory.recallScript setting (user tier only since F7, 177c901), then the copy bundled into
 // the VSIX, then the dev layout. Until this change it went on to three legs over every open
 // workspace folder (the folder as the repo root, as a projects/ dir, as a .claude/ root) and a

@@ -279,7 +279,7 @@ test('the status bar warns past the 140-line target, below the cap, and counts a
   }
 });
 
-// memoryLint.js pickPrimaryDir and recall.py:123#_discover_memory_dir answer the same
+// memoryLint.js pickPrimaryDir and recall.py:126#_discover_memory_dir answer the same
 // question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
 // sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.
 // Until these two tests existed, every test that reached pickPrimaryDir had at most one
@@ -675,7 +675,7 @@ test('a gate source is counted only when recall.py would compile it', () => {
   const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
   const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
 
-  // The index itself. recall.py:1421#EXCLUDE skips EXCLUDE before it looks at anything
+  // The index itself. recall.py:1459#EXCLUDE skips EXCLUDE before it looks at anything
   // else, so a MEMORY.md carrying frontmatter and a gate block is still not a gate source.
   fs.writeFileSync(path.join(dir, 'MEMORY.md'),
     fm('global') + '# Memory Index\n\n' + block, 'utf8');
@@ -1286,7 +1286,7 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
 // this repo, from the pinned-`memory.dir` bug, and is why
-// `memoryStoreDirs` (extension.js:3365-3366#memoryStoreDirs) overrides `dir` before calling this.
+// `memoryStoreDirs` (extension.js:3396-3397#memoryStoreDirs) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

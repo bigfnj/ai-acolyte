@@ -176,7 +176,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo**, **Why prompt?** and
 **Turn on** / **Turn off**, and they post five of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4842#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:5134#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -239,10 +239,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4791#showWarningMessage`).
+`vscode-extension/extension.js:5083#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4591#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4883#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -327,12 +327,12 @@ MEMORY.md guard" has the rule, the install and the policy caveat.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:652#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:656#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:918#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:922#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -345,7 +345,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:729#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:733#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -364,7 +364,7 @@ the model asset and the venv, and never runs Python.
   off.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1131#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1135#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -512,7 +512,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 37 commands under AI Acolyte in the
+The manifest registers 38 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 

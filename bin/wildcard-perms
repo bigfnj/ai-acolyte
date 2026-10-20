@@ -105,8 +105,22 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   // Required lazily: the hook path must not pay for reading package.json.
   process.stdout.write(`${require('../package.json').version}\n`);
 } else if (takesNames) {
-  // Ahead of every other verb, for the reason at the top of this chain.
-  gates(argv);
+  // Ahead of every other verb, for the reason at the top of this chain. What comes BEFORE
+  // `--gates` is not a name, so it is held to the rules every other verb is: `--bypass on --gates
+  // retire x` ran the retire and dropped the bypass, and `--seed --gates retire` printed the gates
+  // usage. A verb there is a second verb, a dashed word an unrecognized option, and a bare word is
+  // refused with the gates usage, as `extra --gates status` is.
+  const lead = argv.slice(0, gatesAt);
+  if (VERBS.some((verb) => lead.includes(verb))) {
+    oneVerbAtATime(VERBS.filter((verb) => verb === '--gates' || lead.includes(verb)));
+  } else if (lead.some((arg) => arg.startsWith('-'))) {
+    unrecognizedOptions(lead.filter((arg) => arg.startsWith('-')), '--gates');
+  } else if (lead.length) {
+    process.stderr.write(GATES_USAGE);
+    process.exitCode = 1;
+  } else {
+    gates(argv);
+  }
 } else if (VERBS.filter((verb) => optionArgs.includes(verb)).length > 1) {
   // One verb per run. The chain below runs the first verb it finds and drops the rest without a
   // word: `--seed --gates off` wrote settings.json and never touched the gates, and `--guidance
@@ -114,9 +128,14 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   // passes two (installers, hooks, the extension and the smoke script each run one), so two is
   // refused before either runs. After the `takesNames` branch, so `--gates retire --seed` still
   // reads `--seed` as a name, never a second verb.
-  process.stderr.write('wildcard-perms: one verb at a time, got '
-    + `${VERBS.filter((verb) => optionArgs.includes(verb)).join(' ')}; nothing was run\n\n${HELP_USAGE}`);
-  process.exitCode = 2;
+  oneVerbAtATime(VERBS.filter((verb) => optionArgs.includes(verb)));
+} else if (argv.length && verbArguments(argv).unknown.length) {
+  // An option the verb does not take, refused before the verb runs. The guard below fires only
+  // when NO verb is present, so with one an unknown option was ignored: `--drain --dryrun` (a typo
+  // for --dry-run) ran a REAL drain, promoting into settings.json and pruning settings.local.json,
+  // exit 0, and `--seed --dry-run` merged the starter pack. Each verb's options are its parser's
+  // own (verbOptions, at the end of this file). `argv.length` first, so hook mode pays nothing.
+  unrecognizedOptions(verbArguments(argv).unknown, verbArguments(argv).verb);
 } else if (argv.length && !VERBS.some((verb) => argv.includes(verb))
     && argv.some((arg) => arg.startsWith('-'))) {
   // An unrecognized flag must NEVER reach hook mode. Hook mode rewrites
@@ -131,7 +150,7 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
 } else if (argv.includes('--learn')) {
   learn(argv);
 } else if (argv.includes('--seed')) {
-  seed();
+  seed(argv);
 } else if (argv.includes('--drain')) {
   drain(argv);
 } else if (argv.includes('--guidance')) {
@@ -326,6 +345,13 @@ function workspaceRootFor(args, createAutoLearnManager) {
 }
 
 function learn(args) {
+  // A word the parser never reads is refused before anything runs, as --gates refuses one:
+  // `--learn status extra` printed the status and dropped `extra`. Option values are not strays.
+  if (verbArguments(args).stray.length) {
+    process.stderr.write(LEARN_USAGE);
+    process.exitCode = 1;
+    return;
+  }
   const { resolveCodexHome } = require('../src/codex-paths');
   // Keep the PostToolUse hot path independent of the optional learner stack.
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
@@ -691,6 +717,11 @@ function drainWorkspace(workspaceRoot, { dryRun = false, inPlaceFallback = true 
 // Promote a project's local approvals into user scope and drop the ones user
 // scope now covers. `--dry-run` reports without writing either file.
 function drain(args) {
+  // `--drain extra` and `--drain --workspace x extra` ran a real drain and dropped `extra`.
+  if (verbArguments(args).stray.length) {
+    process.stderr.write(DRAIN_USAGE);
+    process.exit(1);
+  }
   let workspaceRoot;
   try {
     workspaceRoot = path.resolve(learnOption(args, '--workspace', process.cwd()));
@@ -798,6 +829,12 @@ function guidance(args) {
   // advice earned from measured evidence, one item at a time, and nothing is
   // written until a human names the item.
   if (cmd === 'derived' || cmd === 'accept' || cmd === 'decline' || cmd === 'reset') {
+    // Their `--workspace <path>` and one id (none for derived), and nothing else: `--guidance
+    // accept <id> extra` recorded the decision and dropped `extra`.
+    if (verbArguments(args).stray.length) {
+      process.stderr.write(GUIDANCE_USAGE);
+      process.exit(1);
+    }
     const { createAutoLearnManager } = require('../src/auto-learn-manager');
     try {
       // `--workspace` is not cosmetic here: the learner's state is partitioned
@@ -1124,7 +1161,16 @@ function gates(args) {
   const at = args.indexOf('--gates');
   const cmd = (args[at + 1] || 'status').toLowerCase();
 
-  if (cmd === 'list') { gatesList(args.slice(at + 2)); return; }
+  if (cmd === 'list') {
+    // `--json` after `list`, and nothing else: `--gates list extra` listed and dropped `extra`.
+    if (verbArguments(args).stray.length) {
+      process.stderr.write(GATES_USAGE);
+      process.exitCode = 1;
+      return;
+    }
+    gatesList(args.slice(at + 2));
+    return;
+  }
   if (cmd === 'retire' || cmd === 'restore') { gatesChange(cmd, args.slice(at + 2)); return; }
   // The other four take nothing more, as --memory-guard (2026-10-20): `--gates off --memory-guard
   // on` turned the gates off and dropped the rest without a word, since dispatch takes the first
@@ -1332,7 +1378,12 @@ function openThreads(args) {
   }
 }
 
-function seed() {
+function seed(args) {
+  // `--seed` takes nothing: `--seed extra` merged the starter pack and dropped `extra`.
+  if (verbArguments(args).stray.length) {
+    process.stderr.write('usage: wildcard-perms --seed\n');
+    process.exit(1);
+  }
   let pack;
   try {
     pack = JSON.parse(fs.readFileSync(PACK_PATH, 'utf8'));
@@ -1411,6 +1462,12 @@ function withPolicyLock(flag, run) {
 function bypass(args) {
   const { applyBypass, isBypassOn, currentMode } = require('../src/permissions');
   const cmd = (args[args.indexOf('--bypass') + 1] || 'status').toLowerCase();
+  // on, off or status, and nothing after it: `--bypass on extra` switched every prompt off and
+  // dropped `extra`, exit 0.
+  if (verbArguments(args).stray.length) {
+    process.stderr.write('usage: wildcard-perms --bypass on|off|status\n');
+    process.exit(1);
+  }
 
   if (cmd === 'status') {
     const settings = readSettings() ?? {};
@@ -1574,7 +1631,8 @@ function memoryGuard(args) {
 function codexWorkspaceRules(args) {
   const { removeGeneratedCodexRules } = require('../src/policy-exporters');
   const cmd = String(args[args.indexOf('--codex-workspace-rules') + 1] || 'status').toLowerCase();
-  if (cmd !== 'status' && cmd !== 'remove') {
+  // A stray word is a usage error too: `status extra` reported and dropped `extra`.
+  if ((cmd !== 'status' && cmd !== 'remove') || verbArguments(args).stray.length) {
     process.stderr.write(WORKSPACE_RULES_USAGE);
     process.exitCode = 1;
     return;
@@ -1667,7 +1725,8 @@ function legacyCodexMax(args) {
     CODEX_CONFIG, LEGACY_CODEX_STATE_FILE, legacyCodexMaxStatus,
     removeLegacyCodexMax, removeLegacyStateFile,
   } = require('../src/legacy-max-cleanup');
-  const cmd = String(args[args.indexOf('--codex-max') + 1] || 'status').toLowerCase();
+  const at = args.indexOf('--codex-max');
+  const cmd = String(args[at + 1] || 'status').toLowerCase();
 
   if (cmd === 'on') {
     process.stderr.write(
@@ -1676,14 +1735,16 @@ function legacyCodexMax(args) {
     process.exitCode = 1;
     return;
   }
-  if (args.some((arg) => arg.startsWith('--') && arg !== '--codex-max')) {
+  // Outside the dispatch's option check (verbOptions says why), so refused here: a single-dash
+  // word too, which `startsWith('--')` let through, and a stray word after off or status.
+  if (args.some((arg) => arg.startsWith('-') && arg !== '--codex-max')) {
     process.stderr.write(
       'wildcard-perms --codex-max: the retired compatibility command accepts no options.\n'
     );
     process.exitCode = 1;
     return;
   }
-  if (cmd !== 'status' && cmd !== 'off') {
+  if ((cmd !== 'status' && cmd !== 'off') || args.some((arg, index) => index !== at && index !== at + 1)) {
     process.stderr.write(
       'wildcard-perms --codex-max: retired compatibility command accepts only off or status.\n'
     );
@@ -1792,14 +1853,22 @@ function legacyClaudeMax(args) {
     removeLegacyApproveScript, legacyGeneratedAllowFromState,
   } = require('../src/legacy-max-cleanup');
   const { purgeLegacyBackupCopies } = require('../src/legacy-backup-cleanup');
-  const cmd = String(args[args.indexOf('--max') + 1] || 'status').toLowerCase();
+  const at = args.indexOf('--max');
+  const cmd = String(args[at + 1] || 'status').toLowerCase();
 
   if (cmd === 'on') {
     process.stderr.write('wildcard-perms --max: this feature was removed; nothing was changed.\n');
     process.exitCode = 1;
     return;
   }
-  if (cmd !== 'status' && cmd !== 'off') {
+  // As --codex-max: no options, and nothing after off or status. `--max off --dry-run` ran the
+  // real cleanup.
+  if (args.some((arg) => arg.startsWith('-') && arg !== '--max')) {
+    process.stderr.write('wildcard-perms --max: the retired compatibility command accepts no options.\n');
+    process.exitCode = 1;
+    return;
+  }
+  if ((cmd !== 'status' && cmd !== 'off') || args.some((arg, index) => index !== at && index !== at + 1)) {
     process.stderr.write(
       'wildcard-perms --max: retired compatibility command accepts only off or status.\n'
     );
@@ -1932,4 +2001,80 @@ function legacyClaudeMax(args) {
 function codexCliStatus(codexHome, executable) {
   if (!fs.existsSync(codexHome)) return null;
   return require('../src/codex-version').codexVersionStatus({ executable });
+}
+
+// ── what each verb reads (1.9.3) ──────────────────────────────────────────────
+// Every option a verb's own parser reads, taken from the parser. `sub`: it reads args[at + 1] as
+// its subcommand. `values`: options that take the next argument, which learnOption reads wherever
+// they stand. `flags`: options that take none. `subs` narrows the list to one subcommand, `ids` is
+// how many bare words that subcommand reads after itself (positionalAfter's id), and `afterSub`
+// says the option counts only after the subcommand (gatesList reads `args.slice(at + 2)`).
+// `--gates retire|restore` are absent: everything after them is a name (the `takesNames` branch).
+// The retired `--max` and `--codex-max` are absent on purpose: whatever follows their `on` must
+// reach "this feature was removed" (test/cli-hook.test.js passes `--codex-max on
+// --override-stale-policy`), so their own handlers refuse options, as --codex-max always has.
+// A function, not a const, for the reason recallPath() gives.
+function verbOptions() {
+  const workspace = { values: ['--workspace'] };
+  return {
+    '--learn': { sub: true, values: ['--mode', '--workspace', '--codex-scope', '--threshold', '--codex-executable'] },
+    '--seed': {},
+    '--drain': { values: ['--workspace'], flags: ['--dry-run'] },
+    '--guidance': { sub: true, subs: { derived: workspace, accept: { ...workspace, ids: 1 },
+      decline: { ...workspace, ids: 1 }, reset: { ...workspace, ids: 1 } } },
+    '--gates': { sub: true, subs: { list: { flags: ['--json'], afterSub: true } } },
+    '--memory-guard': { sub: true },
+    '--open-threads': { sub: true },
+    '--bypass': { sub: true },
+    '--codex-workspace-rules': { sub: true, values: ['--workspace'] },
+    '--codex-hook': { sub: true },
+  };
+}
+
+// The run's verb, and what its parser would NOT read: `unknown`, the dashed words it does not
+// define (refused at dispatch, exit 2), and `stray`, the bare words it never reads (each verb
+// refuses those with its own usage, as gates() does). A value option takes the next word unless
+// that starts with `--`, as learnOption does, and only at its first occurrence, the one
+// learnOption reads, so the word after a repeated `--workspace` is a stray. With no verb, or a
+// retired one, both lists are empty.
+function verbArguments(args) {
+  const verb = VERBS.find((name) => args.includes(name));
+  const table = verbOptions()[verb];
+  if (!table) return { verb, unknown: [], stray: [] };
+  const at = args.indexOf(verb);
+  const head = String(args[at + 1] ?? '');
+  const sub = table.sub && head && !head.startsWith('-') ? head.toLowerCase() : null;
+  const spec = { ...table, ...((sub !== null && table.subs && table.subs[sub]) || {}) };
+  const values = spec.values || [];
+  const flags = spec.flags || [];
+  let ids = spec.ids || 0;
+  const read = new Set();
+  const unknown = [];
+  const stray = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index]);
+    if (index === at || (sub !== null && index === at + 1)) continue;
+    if (arg.startsWith('-')) {
+      if (!(values.includes(arg) || flags.includes(arg)) || (spec.afterSub && index < at + 2)) {
+        unknown.push(arg);
+      } else if (values.includes(arg) && !read.has(arg)) {
+        read.add(arg);
+        if (index + 1 < args.length && !String(args[index + 1]).startsWith('--')) index += 1;
+      }
+      continue;
+    }
+    if (index > at && ids > 0) { ids -= 1; continue; }
+    stray.push(arg);
+  }
+  return { verb, unknown, stray };
+}
+
+function oneVerbAtATime(verbs) {
+  process.stderr.write(`wildcard-perms: one verb at a time, got ${verbs.join(' ')}; nothing was run\n\n${HELP_USAGE}`);
+  process.exitCode = 2;
+}
+
+function unrecognizedOptions(options, verb) {
+  process.stderr.write(`wildcard-perms: unrecognized option ${options.join(' ')} for ${verb}; nothing was run\n\n${HELP_USAGE}`);
+  process.exitCode = 2;
 }

@@ -168,13 +168,20 @@ test('smoke.sh\'s --memory-guard status pattern matches the CLI\'s output for ev
 test('a bad sub-verb or an extra argument is a usage error that writes nothing', (t) => {
   const home = tempHome(t);
   const before = settingsText(home);
-  for (const args of [['--memory-guard', 'bogus'], ['--memory-guard', 'on', 'now'], ['--memory-guard', 'on', '--verbose']]) {
+  for (const args of [['--memory-guard', 'bogus'], ['--memory-guard', 'on', 'now']]) {
     const bad = run(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}`);
     assert.equal(bad.stderr, 'usage: wildcard-perms --memory-guard on|off|status|probe\n');
     assert.equal(settingsText(home), before, `${args.join(' ')} wrote settings.json`);
     assert.equal(fs.existsSync(script(home)), false);
   }
+  // An option the verb does not take is the dispatch chain's refusal, exit 2, naming it.
+  const option = run(home, ['--memory-guard', 'on', '--verbose']);
+  assert.equal(option.status, 2, option.stdout);
+  assert.ok(option.stderr.startsWith('wildcard-perms: unrecognized option --verbose for --memory-guard; nothing was run\n\n'),
+    option.stderr);
+  assert.equal(settingsText(home), before, 'on --verbose wrote settings.json');
+  assert.equal(fs.existsSync(script(home)), false);
 });
 
 // Our hook with its node gone reads "turn the guard on again to repoint it", and `on` does that.

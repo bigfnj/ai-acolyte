@@ -395,11 +395,14 @@ function fastLint(dir, conf, names = null, text = null) {
   // A trailing newline splits into a final empty element that is not a line. Dropping it
   // is what makes this agree with `wc -l`, and with what the loader counts.
   const lineCount = lines.length - (lines[lines.length - 1] === '' ? 1 : 0);
-  // The longest physical line in code points, for the open threads' INDEX budget (indexHealth).
-  // Array.from only for a line longer than the longest so far, so the common case costs nothing.
+  // The longest physical line in code points, every CR out, for the open threads' INDEX budget
+  // (indexHealth). The CRs come out as they do for the per-line check below and in the guard
+  // (2026-10-20): a 300-character line holding one interior CR read as 301 here and nowhere else.
+  // Array.from only for a line longer than the longest so far, so the common case costs nothing:
+  // removing CRs and counting code points can only shorten a line, never lengthen it.
   let longestLine = 0;
   for (const ln of lines) {
-    if (ln.length > longestLine) longestLine = Math.max(longestLine, Array.from(ln).length);
+    if (ln.length > longestLine) longestLine = Math.max(longestLine, Array.from(ln.replace(/\r/g, '')).length);
   }
 
   const over = [];

@@ -68,7 +68,26 @@ const BODIES = {
   astral: `# Index\n${'\u{1F600}'.repeat(300)}\n${'\u{1F600}'.repeat(301)}\n`,
   longProse: `# Index\n${'p'.repeat(301)}\n- ${'h'.repeat(298)}\n`,
   manyLines: Array.from({ length: 150 }, (_, i) => (i < 20 ? `- [a](a.md) hook ${i}` : `note ${i}`)).join('\n') + '\n',
+  // Characters a universal-newline read or str.splitlines() ends a line at and the guard does not
+  // (2026-10-20). The guard counts 2 entries here; recall.py's `mem.splitlines()` counted 4.
+  lineSeparators: `# x\n- a${String.fromCharCode(0x2028)}- b\n- c${String.fromCharCode(0x0c)}- d\n`,
+  // 300 characters a reader sees and one interior CR: within the width budget to the guard, so no
+  // INDEX line. fastLint's longestLine and recall.py's _index_health both read it as 301.
+  interiorCr: `# Index\n- ${'a'.repeat(150)}\r${'b'.repeat(148)}\n`,
 };
+
+// Bodies whose recall.py --lint ends `clean:`. The two above are in it on purpose: a lint that
+// counted the CR as a character would report the 300-character line and lose the verdict.
+const CLEAN = new Set(['clean', 'lineSeparators', 'interiorCr']);
+
+// The phrases of an INDEX line ("141 lines (budget 140)", ...), keyed by the budget each names.
+function indexVerdicts(phrases) {
+  return {
+    lines: phrases.some((p) => /^\d+ lines \(budget \d+\)$/.test(p)),
+    bytes: phrases.some((p) => /^\d+ bytes \(budget \d+\)$/.test(p)),
+    lineChars: phrases.some((p) => /^\d+ characters on its longest line \(budget \d+\)$/.test(p)),
+  };
+}
 
 function guardView(body) {
   const m = measure(body);
@@ -79,11 +98,15 @@ function guardView(body) {
     entries: m.entries,
     longLines: lines.filter((line) => Array.from(line.replace(/\r/g, '')).length > BUDGETS.lineChars).length,
     comments: commentDefectList(body).map((defect) => `${defect.line + 1}:${defect.kind}`),
+    // What the guard would hold the INDEX line to: past a budget, judged by its own measure.
+    index: { lines: m.lines > BUDGETS.lines, bytes: m.bytes > BUDGETS.bytes, lineChars: m.lineChars > BUDGETS.lineChars },
   };
 }
 
+// MUTATION: count `Array.from(ln)` again in fastLint's longestLine (CRs kept) and interiorCr's
+// INDEX verdict fails here; `ln.length` instead of code points and astral's does.
 test('the editor lint reads every fixture exactly as the guard does', () => {
-  const { fastLint } = loadLint();
+  const { fastLint, indexHealth } = loadLint();
   const conf = { enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 };
   for (const [name, body] of Object.entries(BODIES)) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-parity-'));
@@ -97,6 +120,8 @@ test('the editor lint reads every fixture exactly as the guard does', () => {
       assert.deepEqual(r.comments.map((defect) => `${defect.line + 1}:${defect.kind}`), g.comments, `${name}: comment defects`);
       assert.equal(r.linesTarget, BUDGETS.lines);
       assert.equal(r.linesOverTarget, g.lines > BUDGETS.lines, `${name}: the 140-line target`);
+      // The open threads' INDEX line, from fastLint, against the guard's own verdicts.
+      assert.deepEqual(indexVerdicts(indexHealth(r)), g.index, `${name}: the INDEX line\n${indexHealth(r).join('; ')}`);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -106,39 +131,57 @@ test('the editor lint reads every fixture exactly as the guard does', () => {
   assert.ok(views.some((v) => v.comments.length) && views.some((v) => !v.comments.length));
   assert.ok(views.some((v) => v.longLines) && views.some((v) => !v.longLines));
   assert.ok(views.some((v) => v.lines > BUDGETS.lines) && views.some((v) => v.lines <= BUDGETS.lines));
+  assert.ok(views.some((v) => v.index.lineChars) && views.some((v) => !v.index.lineChars));
   assert.deepEqual(guardView(BODIES.astral).longLines, 1, '300 emoji pass, 301 do not');
   assert.deepEqual(guardView(BODIES.crlfNestedHeader).comments, ['2:nested', '3:orphan']);
   assert.deepEqual(guardView(BODIES.fencedMarkers).comments, ['7:unclosed']);
+  // The two separator bodies hold what they are for: 2 entries to the guard where splitlines()
+  // sees 4, and a 300-character line that is 301 with its CR counted.
+  assert.equal(guardView(BODIES.lineSeparators).entries, 2);
+  const crLine = BODIES.interiorCr.split('\n')[1];
+  assert.equal(Array.from(crLine).length, BUDGETS.lineChars + 1, 'precondition: the CR is in the line');
+  assert.equal(measure(BODIES.interiorCr).lineChars, BUDGETS.lineChars);
 });
 
 const PYTHON = process.env.TOOLBOX_PYTHON
   || path.join(process.env.LOCALAPPDATA || '', 'DevToolbox', 'python', '.venv', 'Scripts', 'python.exe');
 
-// recall.py needs the toolbox Python, which CI does not have. Where it is missing this says so
-// on every run rather than passing in silence.
-test('recall.py --lint reads every fixture exactly as the guard does', async (t) => {
+// recall.py needs a Python with numpy and onnxruntime, which the node matrix in CI does not have.
+// Where it is missing this says so on every run rather than passing in silence, and where the run
+// says one IS there (ACOLYTE_REQUIRE_PYTHON, set by the gates-manage job in .github/workflows/
+// test.yml, which installs both) a missing one is a failure, so that step cannot pass having run
+// nothing.
+test('recall.py --lint and --threads-compile read every fixture exactly as the guard does', async (t) => {
   if (!fs.existsSync(PYTHON)) {
+    assert.ok(!process.env.ACOLYTE_REQUIRE_PYTHON,
+      `ACOLYTE_REQUIRE_PYTHON is set but there is no Python at ${PYTHON}, so the recall.py half did not run`);
     t.skip(`DEGRADED: no toolbox Python at ${PYTHON}, so the recall.py half of the parity check did not run`);
     return;
   }
+  const { fastLint, indexHealth } = loadLint();
+  const conf = { enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 };
   const run = promisify(execFile);
   const results = await Promise.all(Object.entries(BODIES).map(async ([name, body]) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-parity-py-'));
     try {
       const store = path.join(home, 'memory');
       fs.mkdirSync(store);
+      fs.mkdirSync(path.join(home, '.claude'));
       fs.writeFileSync(path.join(store, 'MEMORY.md'), body);
       fs.writeFileSync(path.join(store, 'a.md'), '---\nname: a\n---\nbody\n');
       const root = path.parse(home).root;
-      const { stdout } = await run(PYTHON, [RECALL, '--lint'], { encoding: 'utf8', windowsHide: true, env: {
+      const options = { encoding: 'utf8', windowsHide: true, env: {
         ...process.env, HOME: home, USERPROFILE: home, HOMEDRIVE: root.replace(/[\\/]$/, ''),
-        HOMEPATH: home.slice(root.length - 1), RECALL_MEMORY_DIR: store, RECALL_REEXEC: '1', PYTHONIOENCODING: 'utf-8' } });
-      return { name, body, stdout };
+        HOMEPATH: home.slice(root.length - 1), RECALL_MEMORY_DIR: store, RECALL_REEXEC: '1', PYTHONIOENCODING: 'utf-8' } };
+      const { stdout } = await run(PYTHON, [RECALL, '--lint'], options);
+      await run(PYTHON, [RECALL, '--threads-compile'], options);
+      const threads = fs.readFileSync(path.join(home, '.claude', 'open-threads.generated.md'), 'utf8');
+      return { name, body, stdout, threads, js: indexHealth(fastLint(store, conf)) };
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
   }));
-  for (const { name, body, stdout } of results) {
+  for (const { name, body, stdout, threads, js } of results) {
     const g = guardView(body);
     const number = (re) => { const m = re.exec(stdout); return m ? Number(m[1]) : 0; };
     assert.equal(number(/^ {2}(\d+) lines, target 140/m), g.lines, `${name}: lines\n${stdout}`);
@@ -146,6 +189,16 @@ test('recall.py --lint reads every fixture exactly as the guard does', async (t)
     assert.equal(number(/^ {2}(\d+) index line\(s\) over 300 chars/m), g.longLines, `${name}: long lines`);
     assert.equal(number(/^ {2}! (\d+) broken HTML comment/m), g.comments.length, `${name}: comment defects\n${stdout}`);
     assert.equal(/^ {2}! \d+ line\(s\) past the 140-line target/m.test(stdout), g.lines > BUDGETS.lines, `${name}: target`);
-    assert.equal(/clean:/.test(stdout), name === 'clean', `${name}: the clean verdict`);
+    assert.equal(/clean:/.test(stdout), CLEAN.has(name), `${name}: the clean verdict\n${stdout}`);
+    // The INDEX line _index_health writes: its phrases are memoryLint.js indexHealth's, word for
+    // word, and say what the guard's own measure says about each budget.
+    // MUTATION: put back `line[:-1] if line.endswith("\r") else line` in _index_health and
+    // interiorCr gains a 301-character phrase here.
+    const found = /^- \*\*INDEX\*\* MEMORY\.md is (.*): compact it before adding anything/m.exec(threads);
+    const phrases = found ? found[1].split('; ') : [];
+    assert.deepEqual(phrases, js, `${name}: the INDEX line, Python against JavaScript\n${threads}`);
+    assert.deepEqual(indexVerdicts(phrases), g.index, `${name}: the INDEX line against the guard\n${threads}`);
   }
+  assert.ok(results.some((r) => r.js.length) && results.some((r) => !r.js.length),
+    'precondition: some fixture writes an INDEX line and some does not');
 });

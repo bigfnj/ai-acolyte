@@ -1026,15 +1026,7 @@ def lint():
         # this answers "would the compiler take this file?", and the compiler needs the PAIR.
         meta[stem] = (_fm(text, "type"), _fm(text, "scope"), bool(GATE_BLOCK.search(text)))
 
-    entries = [ln for ln in mem.splitlines() if ln.startswith("- ")]
-    print(f"  {len(entries)} resident index entries" +
-          (f", target < {LINT_ENTRY_WARN}" if LINT_ENTRY_WARN else " (no ceiling set yet)"))
-    over_ceiling = bool(LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN)
-    if over_ceiling:
-        print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
-    print()
-
-    # The lines, their widths and the comments, measured the way the MEMORY.md guard
+    # The entries, lines, widths and comments, measured the way the MEMORY.md guard
     # (src/memory-index-guard.js) and vscode-extension/memoryLint.js measure them (2026-10-19):
     # read with newline="" so a line ends at LF or CRLF only, a trailing newline is not one more
     # line, a CR is not a character, and a width is code points, which is what len() counts.
@@ -1044,6 +1036,19 @@ def lint():
     raw_lines = re.split(r"\r?\n", raw)
     if raw_lines and raw_lines[-1] == "":
         raw_lines.pop()
+
+    # Over raw_lines, not `mem.splitlines()` (2026-10-20): `mem` is a universal-newline read, so
+    # a lone CR already ended a line there, and splitlines() also ends one at \v, \f, \x1c-\x1e,
+    # \x85, U+2028 and U+2029. The guard splits at LF or CRLF only, so "- a", a U+2028, then
+    # "- b" was one entry to the hook that enforces the ceiling and two here.
+    entries = [ln for ln in raw_lines if ln.startswith("- ")]
+    print(f"  {len(entries)} resident index entries" +
+          (f", target < {LINT_ENTRY_WARN}" if LINT_ENTRY_WARN else " (no ceiling set yet)"))
+    over_ceiling = bool(LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN)
+    if over_ceiling:
+        print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
+    print()
+
     print(f"  {len(raw_lines)} lines, target {LINT_LINES_WARN} (Claude Code loads the first 200)")
     over_lines = len(raw_lines) > LINT_LINES_WARN
     if over_lines:
@@ -1805,7 +1810,7 @@ def _index_health():
     """Each budget MEMORY.md is past, as "<value> <unit> (budget <b>)" phrases, [] when it is
     within all three or there is none. Lines as `wc -l` and memoryLint.js fastLint count them
     (a final newline adds none); bytes on disk; the longest physical line in code points, its
-    line ending excluded. An index that exists and cannot be read is warned about and skipped:
+    CRs excluded. An index that exists and cannot be read is warned about and skipped:
     the threads still compile."""
     index = os.path.join(MEMORY_DIR, "MEMORY.md")
     try:
@@ -1820,7 +1825,10 @@ def _index_health():
     lines = data.decode("utf-8", errors="replace").split("\n")
     if lines[-1] == "":
         lines.pop()
-    longest = max((len(line[:-1] if line.endswith("\r") else line) for line in lines), default=0)
+    # Every CR out, not only a trailing one (2026-10-20): the guard, the lint and memoryLint.js
+    # all measure a line with its CRs removed, and a 300-character line holding one interior CR
+    # read as 301 here, an INDEX line for a width the guard calls within budget.
+    longest = max((len(line.replace("\r", "")) for line in lines), default=0)
     over = []
     if len(lines) > LINT_LINES_WARN:
         over.append(f"{len(lines)} lines (budget {LINT_LINES_WARN})")

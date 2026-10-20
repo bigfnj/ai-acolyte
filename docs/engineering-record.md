@@ -3071,3 +3071,69 @@ This is the same lesson as the release-note claim about validating the deployed 
 keeps arriving from a different direction: **a patch script that asserts `count === 1` proves
 its pattern was unique, not that the pattern was the only place the thing was said.** Uniqueness
 of a string is not coverage of a concept. Grep the artefact for the CONCEPT afterwards.
+
+---
+
+## Toggle Auto Learn, and `autoLearn.enabled` made tighten-only (2026-10-19)
+
+**DONE** on `feat/auto-learn-toggle`, `f00f59e`. The owner asked why the Auto Learn row said
+"disabled" with no way to turn it on or off from the extension. `autoLearn.enabled` could only be
+changed in Settings, and Cycle mode, the one Auto Learn switch, never touches it.
+
+**The command.** AI Acolyte: Toggle Auto Learn
+(`vscode-extension/extension.js:2146#toggleAutoLearn`) flips the effective value.
+- Off writes `false` to user settings, so it holds in every window.
+- On writes `true` to user settings. A workspace or folder `false` would still hold this window
+  off, so it is removed, as Cycle mode's raise removes a capping mode. The difference is a modal
+  first, naming the file (`vscode-extension/extension.js:2124#workspaceSettingsFile`), because it
+  may be a `.vscode/settings.json` the repository commits. A dismissal writes nothing.
+- User settings are written before any removal, so a failed write changes nothing.
+- `deactivated` is checked on entry, after the modal and after the writes.
+- It arms or disarms the periodic scan itself, and schedules a scan when turning on, instead of
+  waiting for the configuration event, as `cycleAutoLearnMode` does.
+- The toast says the extension's scans stop or start, and that Codex's after-turn Stop hook and
+  the CLI's `--learn` are separate. Neither reads a VS Code setting.
+
+**The card.** A Turn on / Turn off button in the Auto Learn card's row posts `toggleAutoLearn`.
+While off, the collapsed row reads "disabled · Turn on" with no tint
+(`vscode-extension/extension.js:5464#stAutoLearn`), since off is a choice. Review and Apply safe,
+refused while off, now name the command where they said "Enable it" in settings.
+
+**Tighten-only.** `autoLearn.enabled` is the fifth key in
+`vscode-extension/extension.js:1307#TIGHTEN_ONLY`, shaped like `localDrain.enabled`, and
+`autoLearnConfig` reads it through `vscode-extension/extension.js:1407#tightenOnlySetting`. The
+census above ("The settings census behind S2") called the key safe, because a scan writes only the
+learner's own state. That holds in `recommend`. In `auto-safe` every scan applies grants
+(`src/auto-learn-manager.js:2925#application`), so a repository's `true` could restart unattended
+applies for a user who turned Auto Learn off and left the mode at auto-safe. That census row is
+superseded by this section. A workspace `false` still turns it off. A looser value is ignored, with
+the same single output line as the other four keys:
+
+`[<time>] Settings: workspace setting autoLearn.enabled=true ignored: a workspace may only turn Auto Learn off (user setting: false).`
+
+**Residuals.**
+- Turning on edits the repository's settings file when one holds `false`. The modal says so and
+  names it.
+- The configuration is read without a resource, and VS Code then reports no folder tier, so the
+  folder branch is reached only in harnesses today. In a multi-root window it names "the folder's
+  .vscode/settings.json", because it cannot say which folder.
+- Off does not stop the Codex Stop hook or `wildcard-perms --learn`. The hook scans in the mode the
+  learner last persisted, auto-safe included. The off toast points at Configure Codex after-turn
+  learning.
+- Scan now still scans while off, and in auto-safe its scan still applies. That is a click, not
+  unattended.
+- A release before this one still honours a workspace `true`.
+
+**Tests.** `test/auto-learn-toggle.test.js` (8 tests) drives the real extension over a temp home
+with a tier-by-tier configuration, as `test/workspace-tighten-only.test.js` does, and finds the
+periodic scan by its period (7 minutes, which no other interval here uses). One test in
+`test/dashboard-view.test.js` runs the panel script: the label, the row's text and tone, the click,
+and the route. The routes census gained `toggleAutoLearn`; the manifest loop in
+`test/workspace-tighten-only.test.js` gained the key; two refusal strings in
+`test/extension-activation.test.js` changed with the wording. 25 mutations, each applied alone,
+its blast radius run, and the file restored and checked by hash; all 25 failed a test in the
+expected file. They are listed in `f00f59e`'s message.
+
+**Not verified in a real VS Code.** The suite and the scripted harnesses drove this, not an
+installed VSIX. The acceptance badge assertion (`scripts/vscode-acceptance/renderer.js`) was
+updated to the new row text, but it was not run.

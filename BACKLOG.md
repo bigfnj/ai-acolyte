@@ -10,8 +10,9 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
-**Cleared 2026-10-20 for 1.9.2.** A second full audit, of what 1.9.1 changed, filed 22 findings
-(one MED, none HIGH). 21 are FIXED with mutation-tested commits and one is ACCEPTED-RECORDED;
+**Cleared 2026-10-20 for 1.9.2.** A second full audit, of what 1.9.1 changed, filed 22 rows
+(one MED, none HIGH), 21 distinct (S7 repeats R2; WP-B found L2b while fixing L2). 20 of the
+distinct findings are FIXED with mutation-tested commits and one is ACCEPTED-RECORDED;
 every row and the evidence are in `docs/engineering-record.md` under "The 1.9.2 audit clearance:
 the second pass (2026-10-20)". The MED finding was a false sentence in the 1.9.1 notes and README
 (that 1.9.0's probe passed `--strict-mcp-config`); both release bodies and the README are corrected.

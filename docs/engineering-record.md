@@ -3786,7 +3786,9 @@ The maintainer's instruction was to audit again after each release and to keep g
 finds nothing new. The second pass audited what 1.9.1 changed (`e9994db..8aab0ed`, 58 files) with
 three read-only lenses: regressions, functions that cannot run and calls that go nowhere; leaks,
 dead code and optimisation; documentation claims, security and findings worth surfacing. It filed
-22 distinct findings, one of them MED and none HIGH. Four fix packages took them to dispositions on
+22 rows, one of them MED and none HIGH: 21 distinct findings, since S7 repeats R2, and one
+of the 21, L2b, was found by WP-B while it fixed L2 (corrected 2026-10-20 by the third pass, from
+"22 distinct findings"). Four fix packages took them to dispositions on
 their own branches, merged `--no-ff` into `release/1.9.2` in this order: WP-B `fix/threads-192`, WP-C
 `fix/cli-strip-192`, WP-A `fix/guard-probe-192`, WP-D `fix/scripts-docs-192`. Each FIXED row names
 the commit whose message carries the mutation that made its test fail; each package's runner

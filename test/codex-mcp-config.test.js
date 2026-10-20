@@ -333,7 +333,22 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   // the late-start path has its own test below.
   const reading = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
     timeoutMs: 8000, track: child => tracked.push(child) });
-  assert.ok(Date.now() - started < 1000, 'the call returned before Codex answered: nothing here waits synchronously');
+  const returnedAfter = Date.now() - started;
+  // NO CLOCK IN THIS CLAIM (2026-10-20). It was `returnedAfter < 1000`, but on Windows the call
+  // holds this thread for the worker's CreateProcess, which is not waiting on Codex and, under
+  // the loaded runs captured that day, took 243-693 ms for this worker and up to 1,080 ms for a
+  // node child. The 1.8.0 full run failed this test once (which line was not recorded). The
+  // witness is an order instead: the call returned before the codex it asks had even started.
+  // That codex is two more process starts away (the worker's, then cmd.exe's), so only a call
+  // that waited could see its pid file. MUTATION: route readCodexConfigLayersAsync through the
+  // synchronous nativeRpc (spawnSync), handing `track` a stand-in object. The call returns after
+  // the worker's 25 s default deadline and this fails ("it returned after 31308 ms"). Confirmed
+  // 2026-10-20. Two witnesses that looked natural are not ones: a setImmediate that must run
+  // before the answer survives that mutation on Windows, because libuv runs a completed read in
+  // the next iteration's pending phase, after check; and blocking the thread after spawn()
+  // starts nothing, because the worker's request is written only once the loop runs.
+  assert.equal(fs.existsSync(codex.pidFile), false,
+    `the call returned only after the codex it asks had started, so it waited for it (it returned after ${returnedAfter} ms)`);
   assert.equal(tracked.length, 1, 'the worker is handed to the caller, so a deactivate can end it');
   // The WORKER's deadline, not this side's backstop: the worker is the one that
   // can end its own codex gracefully, so it has to be the one that fires first.

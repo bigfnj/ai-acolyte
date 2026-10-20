@@ -279,7 +279,12 @@ function threadOf(raw) {
 // recall.py _index_health's three budgets (LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN), and
 // its phrases, over a fastLint result: [] when MEMORY.md is within all three. Not the 16-entry
 // ceiling, which is a soft attention target. `longestLine` is in code points, as Python counts.
-const INDEX_BUDGETS = { lines: 140, bytes: 12000, lineChars: 300 };
+// Taken from the guard's BUDGETS rather than restated (2026-10-20): the numbers were written out
+// here a second time, beside the import they equal, and test/memory-guard-parity.test.js pins
+// recall.py's constants to BUDGETS, so one source holds all three places together.
+const INDEX_BUDGETS = Object.freeze({
+  lines: GUARD_BUDGETS.lines, bytes: GUARD_BUDGETS.bytes, lineChars: GUARD_BUDGETS.lineChars,
+});
 function indexHealth(fast) {
   if (!fast) return [];
   const over = [];

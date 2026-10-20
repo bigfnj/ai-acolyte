@@ -60,6 +60,29 @@ test('the guard budgets, recall.py\'s lint constants and the extension defaults 
   }
 });
 
+// memoryLint.js's indexHealth budgets are the guard's BUDGETS, not a second copy of the numbers
+// (2026-10-20): loaded against a guard whose budgets moved, the INDEX phrases move with them.
+// MUTATION: write `lines: 140` back into INDEX_BUDGETS and the moved line budget is not followed.
+test('the editor lint\'s INDEX budgets follow the guard\'s BUDGETS', () => {
+  const realGuard = require('../src/memory-index-guard');
+  const moved = Object.freeze({ ...realGuard.BUDGETS, lines: 5, bytes: 50, lineChars: 7, entries: 2 });
+  const modulePath = require.resolve('../vscode-extension/memoryLint');
+  const originalLoad = Module._load;
+  Module._load = function load(request, parent, isMain) {
+    if (request === 'vscode') return { workspace: { getConfiguration: () => ({ get: () => undefined }) } };
+    if (parent?.filename === modulePath && /memory-index-guard\.js$/.test(request)) return { ...realGuard, BUDGETS: moved };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  let lint;
+  try { lint = require(modulePath); } finally { Module._load = originalLoad; delete require.cache[modulePath]; }
+  const over = { lineCount: 6, bytes: 51, longestLine: 8 };
+  assert.deepEqual(lint.indexHealth(over), ['6 lines (budget 5)', '51 bytes (budget 50)',
+    '8 characters on its longest line (budget 7)']);
+  assert.deepEqual(lint.indexHealth({ lineCount: 5, bytes: 50, longestLine: 7 }), [], 'at each budget is within it');
+  assert.deepEqual(loadLint().indexHealth(over), [], 'precondition: the real budgets do not flag the same figures');
+});
+
 // Synthetic indexes, each aimed at one rule, and one that is clean.
 const BODIES = {
   clean: '# Memory Index\n\n- [a](a.md) hook\n',

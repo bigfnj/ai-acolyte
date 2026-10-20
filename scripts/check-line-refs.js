@@ -50,6 +50,8 @@
 // Exit 1 only when something is BROKEN. STALE does not fail the run, because a
 // verdict that is right most of the time is a report, not a gate. Under
 // --fix-anchored, exit 1 when an anchored reference is still BROKEN afterwards.
+// Weak anchors (an anchor on many lines of its target; see WEAK ANCHORS) are
+// counted on every check run, listed unless --quiet, and never fail it.
 
 const fs = require('fs');
 const path = require('path');
@@ -1032,6 +1034,26 @@ function runFix(root, quiet) {
   process.exitCode = report.left.length ? 1 : 0;
 }
 
+// WEAK ANCHORS (2026-10-20). An anchored reference is exact about its token and blind to which
+// occurrence of it the author meant: when the anchor sits on many lines of its target, a
+// citation that drifts onto another occurrence still reads OK. Measured on the tree that day:
+// 34 of 300 anchored references named an anchor on 10 or more lines of their target, 105 on 5 or
+// more, the worst on 92. So this is a REPORT, printed on every check run (the count under
+// --quiet, the list otherwise, the whole set in --json), and never a failure: re-anchoring 105
+// citations is its own job, and a gate that failed on all of them would be switched off.
+const WEAK_ANCHOR_LINES = 5;
+const VERY_WEAK_ANCHOR_LINES = 10;
+
+// The OK anchored references whose anchor occurs on at least `min` lines of the target, the
+// most-repeated first. A BROKEN one is already reported as BROKEN.
+function weakAnchors(results, min = WEAK_ANCHOR_LINES) {
+  return results
+    .filter((r) => isAnchored(r) && r.verdict === 'OK' && Array.isArray(r.occurs) && r.occurs.length >= min)
+    .map((r) => ({ where: `${r.source}:${r.sourceLine}`, ref: r.raw, anchor: r.declaredAnchor,
+      target: r.resolved, lines: r.occurs.length }))
+    .sort((a, b) => b.lines - a.lines || a.where.localeCompare(b.where));
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const asJson = argv.includes('--json');
@@ -1056,6 +1078,7 @@ function main() {
   for (const r of results) counts[r.verdict] = (counts[r.verdict] || 0) + 1;
   // Only BROKEN decides the exit code; see the verdict table at the top.
   const bad = results.filter((r) => r.verdict === 'BROKEN');
+  const weak = weakAnchors(results);
 
   if (asJson) {
     process.stdout.write(
@@ -1064,6 +1087,7 @@ function main() {
           total: results.length,
           anchored,
           counts,
+          weakAnchors: weak,
           results: results.map((r) => ({
             source: r.source,
             sourceLine: r.sourceLine,
@@ -1107,6 +1131,15 @@ function main() {
     const order = ['OK', 'NEAR', 'STALE', 'BROKEN', 'UNVERIFIABLE'];
     const summary = order.filter((k) => counts[k]).map((k) => `${k} ${counts[k]}`).join(' | ');
     process.stdout.write(`\n${results.length} references, ${anchored} anchored: ${summary}\n`);
+    const veryWeak = weak.filter((w) => w.lines >= VERY_WEAK_ANCHOR_LINES);
+    process.stdout.write(`weak anchors (reported, not failed): ${weak.length} OK anchored references name an anchor `
+      + `on ${WEAK_ANCHOR_LINES} or more lines of their target, ${veryWeak.length} on ${VERY_WEAK_ANCHOR_LINES} or more, `
+      + 'so a drift onto another occurrence would still pass\n');
+    if (!quiet) {
+      for (const w of argv.includes('--detail') ? weak : veryWeak) {
+        process.stdout.write(`  ${String(w.lines).padStart(4)} lines  #${w.anchor} in ${w.target}  <- ${w.where}\n`);
+      }
+    }
   }
   process.exitCode = bad.length ? 1 : 0;
 }

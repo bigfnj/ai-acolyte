@@ -56,9 +56,9 @@ const END_BOUND_MS = 6000;
 // as long as Codex takes to answer). When the two spawns overlapped, the worker held
 // the probe's stdout open, so the probe's 'close' and its answer waited for the
 // worker to exit. Measured on the development box under load: `--version` exited
-// 2.3 s after the probe began, its 'close' came 4.8 s later, one millisecond after
-// the worker exited, and the probe's 5 s timer had already called it "timed out",
-// which then stood for 60 s. In isolation, two threads spawning together: the short
+// 2.3 s after the probe began, its 'close' came 2.8 s after that, one millisecond
+// after the worker exited, and the probe's 5 s timer had already called it "timed
+// out", which then stood for 60 s. In isolation, two threads spawning together: the short
 // child's 'close' came about 4 s after its exit in 8 of 8 rounds, until the long one
 // exited, and 0 ms after it in 8 of 8 with each spawn() held under one lock.
 //

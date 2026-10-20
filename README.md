@@ -129,14 +129,14 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3198#showCodexRules`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3201#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:5283#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:5343#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:5083#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:5143#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
@@ -307,10 +307,12 @@ To turn it off, click **Turn off open threads** on the Claude memory card, run *
 Toggle open threads**, or set `permissionWildcarding.openThreads.enabled` to `false` in user
 settings. Turning it off always turns it off, whatever state the install is in; while it is off
 the extension neither compiles nor installs it. When the install is not current (nothing compiled
-yet, a compile it refused, an instruction file it cannot read, or a block that differs from the
-compile), the card also shows
+yet, a compile it refused, or a block that differs from the compile), the card also shows
 **Refresh open threads**, and the toggle's confirmation offers **Refresh**: both compile and
-install and leave the setting on. The Claude memory card is hidden while
+install and leave the setting on. An instruction file it cannot read (one that is not UTF-8, say)
+is skipped by every install, so it never holds Refresh up; the card's line names it and why. The
+compile needs `recall.py` and the DevToolbox venv's Python: without either, nothing is compiled
+or retried, Refresh is not offered, and the line says which one is missing. The Claude memory card is hidden while
 `permissionWildcarding.memory.enabled` is `false`, and the open-threads line and buttons with it;
 the feature keeps running, and the palette command and the setting still reach it. From a
 terminal, `wildcard-perms --open-threads on|off|status|refresh`.
@@ -614,7 +616,7 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:3412#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:3415#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They

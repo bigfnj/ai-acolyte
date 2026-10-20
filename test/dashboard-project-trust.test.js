@@ -20,7 +20,7 @@
 // and the version probe a push started pushes once when it lands.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:505#sharing).
+// (test/extension-activation.test.js:509#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -247,6 +247,7 @@ function harness(box, opts = {}) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: null, report: null, gateSources: undefined }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

@@ -58,7 +58,7 @@ function harness(tempHome, options = {}) {
   const warnings = [];
   // `options.answers` is queued BEFORE activate(), which is the only way to reach
   // the managed-policy prompt: onManagedPolicyChanged() runs from activation
-  // (vscode-extension/extension.js:3139#onManagedPolicyChanged) and this harness's file-system
+  // (vscode-extension/extension.js:3142#onManagedPolicyChanged) and this harness's file-system
   // watcher is a no-op, so there is no post-activation trigger to push an answer for.
   const warningAnswers = [...(options.answers || [])];
   const settings = { ...(options.settings || {}) };
@@ -124,6 +124,7 @@ function harness(tempHome, options = {}) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

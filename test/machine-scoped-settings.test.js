@@ -13,7 +13,7 @@
 // the backup tests (test/policy-backup.test.js); this file holds the manifest and the script.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:505#sharing).
+// (test/extension-activation.test.js:509#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -99,6 +99,7 @@ async function recallScriptHandedToWorker(t, tiers) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

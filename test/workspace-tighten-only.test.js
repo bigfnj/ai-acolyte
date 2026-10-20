@@ -21,7 +21,7 @@
 // activation's drain left in settings.json, and the output channel are the observables.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:505#sharing).
+// (test/extension-activation.test.js:509#sharing).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -131,6 +131,7 @@ async function windowOver(t, tiers = {}, { local = null, answers = [] } = {}) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

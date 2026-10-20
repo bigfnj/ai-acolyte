@@ -104,6 +104,7 @@ test('off settings remove shadowed Codex guidance and gates on activation and co
     if (request === './memoryLint' && parent?.filename === extensionPath) return {
       MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
       memoryReport: () => ({ conf: {}, dir: null, report: null }), discoverDirs: () => [],
+      memoryStoreDir: () => null,
       cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
     };
     return originalLoad.call(this, request, parent, isMain);
@@ -193,6 +194,7 @@ test('activation never writes a held CLAUDE.md in place, and logs each gates tar
     if (request === './memoryLint' && parent?.filename === extensionPath) return {
       MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
       memoryReport: () => ({ conf: {}, dir: null, report: null }), discoverDirs: () => [],
+      memoryStoreDir: () => null,
       cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
     };
     return originalLoad.call(this, request, parent, isMain);
@@ -294,6 +296,7 @@ test('a per-agent install with no Claude gates is settled on activation, and the
     if (request === './memoryLint' && parent?.filename === extensionPath) return {
       MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
       memoryReport: () => ({ conf: {}, dir: null, report: null }), discoverDirs: () => [],
+      memoryStoreDir: () => null,
       cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
     };
     return originalLoad.call(this, request, parent, isMain);
@@ -413,6 +416,7 @@ test('extension activates with mocked VS Code and deactivates without live polic
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };
@@ -581,6 +585,7 @@ test('activation does not leak channels, watchers or timers', async () => {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

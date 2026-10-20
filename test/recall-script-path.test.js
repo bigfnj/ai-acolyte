@@ -2,7 +2,7 @@
 
 // NO WORKSPACE FOLDER EVER SUPPLIES THE RECALL SCRIPT THE EXTENSION RUNS (2026-10-14, G1).
 //
-// recallScriptPath (vscode-extension/extension.js:673#recallScriptPath) resolves the
+// recallScriptPath (vscode-extension/extension.js:675#recallScriptPath) resolves the
 // memory.recallScript setting (user tier only since F7, 177c901), then the copy bundled into
 // the VSIX, then the dev layout. Until this change it went on to three legs over every open
 // workspace folder (the folder as the repo root, as a projects/ dir, as a .claude/ root) and a
@@ -17,7 +17,7 @@
 // being the normal case.
 //
 // Harness copied, not shared, per the suite's standing decision
-// (test/extension-activation.test.js:505#sharing). Its shape is test/machine-scoped-settings.test.js's.
+// (test/extension-activation.test.js:509#sharing). Its shape is test/machine-scoped-settings.test.js's.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -117,6 +117,7 @@ async function resolveWith(t, { base, home, folders }) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: memoryDir, report: null }),
+        memoryStoreDir: () => memoryDir,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

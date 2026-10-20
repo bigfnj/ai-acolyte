@@ -707,6 +707,77 @@ function customExecCanAttributeSuccess(jsSource, commands) {
   return curlyDepth === 0;
 }
 
+// ── Code-mode cells that run more than one command (2026-10-20) ──────────────
+//
+// MEASURED 2026-10-20 on the live-hook box, Codex 0.162.0-alpha.17.2 (VS Code) and
+// 0.163.0-alpha.10.2 (desktop), code mode on. A nested `tools.exec_command(...)`
+// returns an object, and a script that prints it writes it as a JSON part of the
+// cell's output:
+//   {"chunk_id":"860c8f","wall_time_seconds":0.26,"exit_code":0,"original_token_count":4567,"output":"..."}
+// (inside {"i":0,"status":"fulfilled","value":{...}} when the script printed a
+// Promise.allSettled). 0.161.0 printed the same result as text with an "Exit code: N"
+// line, which nestedShellStatuses reads. One day's sessions held 1,681 cells: 303 ran
+// several literal commands with every result printed at exit_code 0, and all of them
+// read `unknown`, because success was credited only to a cell with one call site.
+// That was about half the day's commands, and most of its approved escalations.
+//
+// THE RULE (customExecRunsSucceeded). A cell's commands are credited from these
+// results only when they account for every execution and every one exited 0:
+//   - every call site in the script is a literal command this reader extracted (a
+//     dynamic one is an execution nothing can name), and each became an observation;
+//   - with one call site, any number of results: every run was that literal command;
+//   - with several, nothing before the last call site can repeat or skip one (no
+//     loop, branch or callback), so each site ran at most once, and there are exactly
+//     as many results as sites, so each ran once.
+// A refused cell is never credited. A failed result still fails the cell, as any
+// failure did; a pending one (a session_id and no exit_code) still credits nothing.
+// Results are read only from a part that is wholly a JSON value, and only from an
+// object carrying both an integer exit_code and a numeric wall_time_seconds, the
+// result's own fields. A command's stdout is a string inside `output`, never parsed.
+const CODE_MODE_RUN_BLOCKERS = /\b(?:catch|class|do|else|exit|finally|for|function|if|switch|try|while|with)\b|&&|\|\||=>|\?/;
+
+function customExecRunShape(jsSource, commands) {
+  const code = maskJsCode(jsSource);
+  const sites = [...code.matchAll(new RegExp(NESTED_SHELL_CALL_RE.source, 'g'))];
+  const last = sites.length ? sites[sites.length - 1].index : 0;
+  return {
+    sites: sites.length,
+    extracted: Array.isArray(commands) ? commands.length : 0,
+    straightBeforeLast: !CODE_MODE_RUN_BLOCKERS.test(code.slice(0, last)),
+  };
+}
+
+function execResultStatuses(output) {
+  const statuses = [];
+  for (const part of Array.isArray(output) ? output : [output]) {
+    const text = typeof part === 'string' ? part : (isObject(part) && typeof part.text === 'string' ? part.text : null);
+    if (text === null) continue;
+    const trimmed = text.trim();
+    if (!/^[[{]/.test(trimmed)) continue;
+    let value;
+    try { value = JSON.parse(trimmed); } catch { continue; }
+    collectExecResults(value, statuses, 0);
+  }
+  return statuses;
+}
+
+function collectExecResults(value, statuses, depth) {
+  if (depth > 6 || value === null || typeof value !== 'object') return;
+  if (!Array.isArray(value) && Number.isInteger(value.exit_code) && typeof value.wall_time_seconds === 'number') {
+    statuses.push(value.exit_code === 0 ? 'success' : 'failed');
+    return;
+  }
+  for (const child of Array.isArray(value) ? value : Object.values(value)) collectExecResults(child, statuses, depth + 1);
+}
+
+function customExecRunsSucceeded(group, runs) {
+  const shape = group._execShape;
+  if (!shape || !runs.length || !runs.every((status) => status === 'success')) return false;
+  if (shape.sites !== shape.extracted || group.length !== shape.extracted) return false;
+  if (shape.sites === 1) return true;
+  return shape.straightBeforeLast && runs.length === shape.sites;
+}
+
 // Exit-code lines if there are any, otherwise Codex's wording. Deliberately a
 // whole-payload fallback rather than a per-string one, because a single
 // execution emits BOTH a `Script completed` summary and an `Output:` block
@@ -1103,11 +1174,42 @@ function codeModeMissingCell(output) {
 // way: the only failure the result reports is the refusal's.
 const CODE_MODE_REFUSALS = new Set([
   'approval policy is Never; reject command \u2014 you cannot ask for escalated permissions if the approval policy is Never',
-  'exec_command failed: CreateProcess { message: "Rejected(\\"rejected by user\\")" }',
 ]);
+// ANY REJECTION, NOT ONLY THE USER'S WORDS (2026-10-20). 0.161.0's decline carried a fixed text,
+// "rejected by user". Codex 0.162.0-alpha.17.2's guardian reviewer, which judges an escalation
+// request in a thread of its own, rejects with its reason in the same place:
+//   exec_command failed: CreateProcess { message: "Rejected(\"This action was rejected due to
+//   unacceptable risk.\\nReason: ...\")" }
+// 19 of them in one day on this box, every one in the exact two-part script-error shape above,
+// each read `failed`: a refusal counted against the command's family. `Rejected(...)` is the
+// approval layer's answer before any process exists, whatever the reason says, so the reason is
+// matched as any text and the shape stays exact.
+const CODE_MODE_REJECTED_RE = /^exec_command failed: CreateProcess \{ message: "Rejected\(\\"[\s\S]*\\"\)" \}$/;
+
+function codeModeRefusal(message) {
+  return typeof message === 'string' && (CODE_MODE_REFUSALS.has(message) || CODE_MODE_REJECTED_RE.test(message));
+}
 
 function codeModeRefused(output) {
-  return CODE_MODE_REFUSALS.has(codeModeScriptError(output));
+  return codeModeRefusal(codeModeScriptError(output));
+}
+
+// A REFUSAL AFTER PRINTED RESULTS (2026-10-20). A script that ran and printed earlier
+// commands before a later one was refused dies the same way, with those printed parts
+// between the head and the error: "Script failed ... Output:", one part per text(...)
+// call, then "Script error:\n" plus the refusal. Measured: 7 such cells in one day on the
+// live-hook box (9 commands), every one read `failed` for all of its commands, the refused
+// one that never ran included. The runtime's error is always the last part (a script's
+// own printing is a part before it), so a refusal there is the runtime's. Returns true
+// for that shape; the caller withholds the cell, and a printed result that exited nonzero
+// is still a failure (execResultStatuses).
+function codeModeRefusedAfterOutput(output) {
+  if (!Array.isArray(output) || output.length < 3) return false;
+  if (!output.every((part) => isObject(part) && typeof part.text === 'string')) return false;
+  const head = output[0].text.replace(/\r\n/g, '\n');
+  const last = output[output.length - 1].text.replace(/\r\n/g, '\n');
+  if (!CODE_MODE_ERROR_HEAD_RE.test(head) || !last.startsWith(CODE_MODE_ERROR_PREFIX)) return false;
+  return codeModeRefusal(last.slice(CODE_MODE_ERROR_PREFIX.length));
 }
 
 // `terminate` is read wide: any value other than absent or false stops the
@@ -1180,10 +1282,12 @@ function applyCodexGroupResult(group, result) {
   let effectiveResult = result;
   if (group._customExec) {
     const nested = Array.isArray(result.nestedStatuses) ? result.nestedStatuses : [];
+    const runs = Array.isArray(result.execStatuses) ? result.execStatuses : [];
     let status = 'unknown';
-    if (result.status === 'failed' || nested.includes('failed')) status = 'failed';
+    if (result.status === 'failed' || nested.includes('failed') || runs.includes('failed')) status = 'failed';
     else if (!result.pending && group._canAttributeSuccess && group.length === 1 &&
         nested.length === 1 && nested[0] === 'success') status = 'success';
+    else if (!result.pending && !result.refused && customExecRunsSucceeded(group, runs)) status = 'success';
     effectiveResult = { ...result, status };
   } else if ((result.pending || group.length > 1) && result.status !== 'failed') {
     effectiveResult = { ...result, status: 'unknown' };
@@ -1468,6 +1572,7 @@ function parseCodexJsonl(text, options = {}) {
         const group = callGroups.get(groupKey);
         group._customExec = true;
         group._canAttributeSuccess = customExecCanAttributeSuccess(input, commands);
+        group._execShape = customExecRunShape(input, commands);
         calls.forEach(({ command, shell }, commandIndex) => {
           const tool = codexTool(options, shell);
           if (!tool) return;
@@ -1502,11 +1607,17 @@ function parseCodexJsonl(text, options = {}) {
         // result here; a wait's is neutralised the same way for the join below.
         const refused = codeModeRefused(item.output);
         const cellRefused = refused && item.type === 'custom_tool_call_output';
+        // A refusal after the script printed earlier commands' results (codeModeRefusedAfterOutput):
+        // withheld as the bare refusal is, except that a printed result that exited nonzero is
+        // still that command's failure.
+        const refusedAfter = !cellRefused && item.type === 'custom_tool_call_output' && codeModeRefusedAfterOutput(item.output);
         const result = {
-          status: processResult?.pending || cellRefused ? 'unknown' : classifyCodexOutput(item), offset: location.offset, end: location.end,
+          status: processResult?.pending || cellRefused || refusedAfter ? 'unknown' : classifyCodexOutput(item), offset: location.offset, end: location.end,
           pending: yieldId !== null || pendingShellResult(item.output),
-          nestedStatuses: item.type === 'custom_tool_call_output' && !cellRefused
+          nestedStatuses: item.type === 'custom_tool_call_output' && !cellRefused && !refusedAfter
             ? nestedShellStatuses(item.output) : [],
+          execStatuses: item.type === 'custom_tool_call_output' && !cellRefused ? execResultStatuses(item.output) : [],
+          refused: cellRefused || refusedAfter,
         };
         const resultKey = callKey(outerCallId);
         const previous = results.get(resultKey);
@@ -1516,6 +1627,11 @@ function parseCodexJsonl(text, options = {}) {
             ...(Array.isArray(previous.nestedStatuses) ? previous.nestedStatuses : []),
             ...result.nestedStatuses,
           ];
+          result.execStatuses = [
+            ...(Array.isArray(previous.execStatuses) ? previous.execStatuses : []),
+            ...result.execStatuses,
+          ];
+          result.refused = Boolean(previous.refused || result.refused);
         }
         results.set(resultKey, result);
         applyCodexGroupResult(callGroups.get(resultKey), result);
@@ -1524,8 +1640,12 @@ function parseCodexJsonl(text, options = {}) {
           // A refusal reaching a yielded cell through its wait still closes the
           // cell (it is terminal) and binds no failure: the joined result is only
           // what the cell's other parts say, and for a refused cell that is nothing.
+          const waitRefusedAfter = !refused && codeModeRefusedAfterOutput(item.output);
           const bound = cellJoin.waitOutput(state.session || '', outerCallId, {
-            status: refused ? 'unknown' : classifyCodexOutput(item), nestedStatuses: refused ? [] : nestedShellStatuses(item.output),
+            status: refused || waitRefusedAfter ? 'unknown' : classifyCodexOutput(item),
+            nestedStatuses: refused || waitRefusedAfter ? [] : nestedShellStatuses(item.output),
+            execStatuses: refused ? [] : execResultStatuses(item.output),
+            refused: refused || waitRefusedAfter,
             pending: pendingShellResult(item.output), offset: location.offset, end: location.end,
             missing: codeModeMissingCell(item.output),
           }, codeModeHeader(item.output), location);
@@ -1535,6 +1655,8 @@ function parseCodexJsonl(text, options = {}) {
             // nested status a directly completed cell would need.
             let status = 'unknown';
             const nestedStatuses = [];
+            const execStatuses = [];
+            let refusedPart = false;
             // The wait and the cell it names share a session (codeModeJoin keys
             // both by it), so the cell's call key is the current one.
             const cellKey = callKey(bound.cell.callId);
@@ -1542,8 +1664,10 @@ function parseCodexJsonl(text, options = {}) {
               if (!part) continue;
               status = mergeStatus(status, part.status);
               nestedStatuses.push(...(Array.isArray(part.nestedStatuses) ? part.nestedStatuses : []));
+              execStatuses.push(...(Array.isArray(part.execStatuses) ? part.execStatuses : []));
+              refusedPart = refusedPart || Boolean(part.refused);
             }
-            const joined = { status, nestedStatuses, pending: bound.terminal.pending,
+            const joined = { status, nestedStatuses, execStatuses, refused: refusedPart, pending: bound.terminal.pending,
               offset: bound.terminal.offset, end: bound.terminal.end };
             results.set(cellKey, joined);
             const group = callGroups.get(cellKey);
@@ -1916,7 +2040,7 @@ function continuedFingerprint(prior, size) {
 // `session_meta` line. An append slice starts at `prior.size - overlapBytes`,
 // so the head is absent, both stay undefined, and the manager then drops the
 // observation outright when a workspace root is configured
-// (`src/auto-learn-manager.js:2614#within`, `within(root, undefined) === false`) --
+// (`src/auto-learn-manager.js:2618#within`, `within(root, undefined) === false`) --
 // or keeps it under a SECOND identity, because `session` is part of `identityParts`
 // (`src/history-adapters.js:121-123#identityParts`). Two ids for one call defeat the
 // `observationHashes` dedupe and inflate `counts.success`, which is what gates auto-safe apply.

@@ -198,7 +198,7 @@ test('scan trouble is logged when its kinds change, not when a count moves, and 
   t.after(() => { try { fs.rmSync(heldHome, { recursive: true, force: true }); } catch {} });
   const heldState = path.join(heldHome, '.claude', 'wildcarding', 'auto-learn-state.json');
   fs.mkdirSync(path.dirname(heldState), { recursive: true });
-  fs.writeFileSync(heldState, JSON.stringify({ version: 3, codexEvidenceRevision: 4, codexEvidenceRebuildPending: true,
+  fs.writeFileSync(heldState, JSON.stringify({ version: 3, codexEvidenceRevision: 5, codexEvidenceRebuildPending: true,
     codexEvidencePendingFiles: [`path-sha256:${'b'.repeat(24)}`], candidates: {}, cursors: {} }));
   const held = require('../src/auto-learn-manager').createAutoLearnManager({
     home: heldHome, statePath: heldState,

@@ -2409,10 +2409,10 @@ Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `const updated = {` at `src/auto-learn-manager.js:2374-2377#updated`, written `src/auto-learn-manager.js:2431#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2428-2430#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2975#next`, written `src/auto-learn-manager.js:3056#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:2111#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2107#change.afterHash`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3075#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3071#item.restored.hash` hash guard. |
+| `const updated = {` at `src/auto-learn-manager.js:2378-2381#updated`, written `src/auto-learn-manager.js:2435#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2432-2434#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2979#next`, written `src/auto-learn-manager.js:3060#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:2115#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2111#change.afterHash`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3079#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3075#item.restored.hash` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:287#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:225#readFileSync` read → `src/local-settings.js:287#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -2427,7 +2427,7 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `src/auto-learn-manager.js:2111#change.before.content` blindly restores `change.before.content`. If the writer
+- `rollback()` at `src/auto-learn-manager.js:2115#change.before.content` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a
@@ -3131,7 +3131,7 @@ refused while off, now name the command where they said "Enable it" in settings.
 `autoLearnConfig` reads it through `vscode-extension/extension.js:1435#tightenOnlySetting`. The
 census above ("The settings census behind S2") called the key safe, because a scan writes only the
 learner's own state. That holds in `recommend`. In `auto-safe` every scan applies grants
-(`src/auto-learn-manager.js:2925#application`), so a repository's `true` could restart unattended
+(`src/auto-learn-manager.js:2929#application`), so a repository's `true` could restart unattended
 applies for a user who turned Auto Learn off and left the mode at auto-safe. That census row is
 superseded by this section. A workspace `false` still turns it off. A looser value is ignored, with
 the same single output line as the other four keys:
@@ -4115,3 +4115,49 @@ layout depends on, `test/packaged-copies-fresh.test.js` fails while either copy
 to delete them or run `npm run package`. Absent copies pass, so CI and clean worktrees are unaffected.
 Measured: it failed on that 1.8.1 copy (16 stale files listed), passed with no copies and with fresh
 ones, and failed naming the file for one stale `src/permissions.js` and for one stale `recall.py`.
+
+## Codex 0.162/0.163 sessions: approvals the card and Auto Learn did not show (1.9.6, 2026-10-20)
+
+**The report.** "A full active Codex session with multiple approvals ... doesn't seem to be captured or
+reflected in our plugin." Diagnosed read-only on the live-hook box, then reproduced on copies in an
+isolated home. The session was a multi-agent one in the Codex VS Code extension (0.162.0-alpha.17.2),
+beside the desktop app (0.163.0-alpha.10.2): 65 rollouts that day, 10 of them working threads (one
+session, its six spawned workers, three desktop sessions) and 52 guardian approval reviews. Auto Learn
+read every file and kept up with it (each cursor at the file's size), so nothing was missed by reading.
+Three defects shaped what the reading produced.
+
+**1. The Agent sessions card showed the wrong threads.** It took activity from the mtime, which a
+Codex append on Windows does not move: the four threads writing that minute read the minute they
+started, while their ctime matched their last record to the second. And it listed every rollout, so
+two guardian reviews were the Codex "sessions". Now a rollout is a candidate when its mtime or ctime
+is in the window, its activity is its last record's `timestamp` (the mtime when none has one), a
+guardian thread is never a session, and a spawned worker counts toward its session's `subagents`
+(one whose session is idle is listed itself). On the real history the card read one Codex session,
+active now, with 3 workers, where it read two guardian threads.
+
+**2. Cells of several commands earned no evidence.** All shell work ran in code-mode `exec` cells, and
+a nested result is now printed as JSON with its `exit_code`. Success was credited only to a cell with
+one call site, so a `Promise.allSettled` of literal commands, every one at exit 0, read `unknown`:
+1,081 of 1,989 commands that day, and most approved escalations. `customExecRunsSucceeded` credits
+them when the printed results account for every run (every site an extracted literal; one site, any
+number of runs; several, nothing before the last site that can repeat or skip one, and one result per
+site), all at exit 0. Measured on the same rollouts: credited commands 567 -> 1,378, escalated ones
+110 -> 298; 893 credited cells, none with a nonzero exit code or a rejection in its output.
+
+**3. A guardian rejection counted against the command.** The refusal check matched 0.161.0's exact
+"rejected by user"; guardian writes its reason in the same place, and 19 rejections read `failed`, 9
+of them in cells that had printed earlier results before dying. Any `CreateProcess Rejected(...)` is
+now a refusal, bare or as the last part after printed output, and withheld; a printed nonzero result
+in such a cell still fails it.
+
+**Evidence revision 5** re-reads already-scanned Codex history once, as revision 4 did for 0.161.0.
+The real manager over an isolated copy of the ten working rollouts: 974 -> 1,730 Codex observations,
+17 -> 21 candidates at the threshold (`Get-Content` 190 -> 551 successes, `Set-Content` 26 -> 125,
+`git` 20 -> 68; `python` failures 91 -> 78, the rejections no longer counted).
+
+**What stays unknown, on purpose (ACCEPTED-RECORDED).** A command built at run time (290 cells that
+day: template literals, concatenation, variables) yields no observation, because the source cannot say
+what ran; a cell with a branch, loop or callback before its last site, or whose printed results do not
+match its sites, credits nothing; a process still running when its cell returned credits nothing until
+a terminal result is joined. Each would need Codex to record the executed command and its outcome
+itself, which these builds do not (no `exec_command_end` for a nested call).

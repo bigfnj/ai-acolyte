@@ -160,7 +160,7 @@ test('only the exact measured refusal, in the runtime\'s two-part shape, withhol
     ['one string, not two parts', (output) => output.map((part) => part.text).join('')],
     ['the error part without its prefix', (output, message) => [output[0], { ...output[1], text: message }]],
     ['another approval policy named', (output, message) => [output[0], { ...output[1], text: `Script error:\n${message.replace(/Never/g, 'OnRequest')}` }]],
-    ['another rejection reason', (output, message) => [output[0], { ...output[1], text: `Script error:\n${message.replace('rejected by user', 'rejected by guardian')}` }]],
+    ['a rejection that is not CreateProcess\'s', (output, message) => [output[0], { ...output[1], text: `Script error:\n${message.replace('CreateProcess', 'SpawnProcess')}` }]],
   ];
   for (const key of ['refused-never/A', 'declined/A', 'declined-after-yield/A']) {
     const records = segment(key);
@@ -169,13 +169,24 @@ test('only the exact measured refusal, in the runtime\'s two-part shape, withhol
     for (const [label, change] of variants) {
       // Each rewording applies to the message that contains its words.
       if (label === 'another approval policy named' && REFUSAL_OF[key] !== 'never') continue;
-      if (label === 'another rejection reason' && REFUSAL_OF[key] !== 'declined') continue;
+      if (label === 'a rejection that is not CreateProcess\'s' && REFUSAL_OF[key] !== 'declined') continue;
       const forged = replaced(records, terminal(records, 'call_cell_1'), (payload) => ({ ...payload, output: change(payload.output, message) }));
       assert.equal(statuses(forged).call_cell_1, 'failed', `${key}, ${label}: not the measured refusal, so the script's failure counts`);
     }
     // Either measured refusal is recognised in either session: the set is the measured messages, not one per path.
     const other = REFUSED[REFUSAL_OF[key] === 'never' ? 'declined' : 'never'];
     assert.equal(statuses(withError(records, 'call_cell_1', `Script error:\n${other}`)).call_cell_1, 'unknown', `${key}: the other measured refusal`);
+  }
+  // ANY REJECTION REASON (2026-10-20). Codex 0.162.0-alpha.17.2's guardian reviewer rejects an
+  // escalation with its own reason in the declined message's place; measured 19 in one day on the
+  // live-hook box, each the exact two-part shape. Withheld like the user's decline, never failed.
+  // MUTATION: drop CODE_MODE_REJECTED_RE from codeModeRefused and both read `failed`.
+  const declinedRecords = segment('declined/A');
+  for (const reason of ['rejected by guardian',
+    'This action was rejected due to unacceptable risk.\\\\nReason: the destination is outside the workspace.']) {
+    const guardian = replaced(declinedRecords, terminal(declinedRecords, 'call_cell_1'), (payload) => ({ ...payload,
+      output: [payload.output[0], { ...payload.output[1], text: `Script error:\n${REFUSED.declined.replace('rejected by user', reason)}` }] }));
+    assert.equal(statuses(guardian).call_cell_1, 'unknown', `a rejection whose reason is "${reason}" is a refusal`);
   }
   // The change is scoped to code-mode results; the direct shape it mirrors is
   // untouched. A direct call's output is the bare message (measured, above, and

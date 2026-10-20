@@ -82,7 +82,7 @@ function cachePath({ home = os.homedir(), cacheFile } = {}) {
 //
 // Their mtimeMs:size IS the cache's version. A hand-bumped constant is the trap this
 // project already fell into: Auto Learn's state `VERSION` was write-only, with no migration
-// hook until 2026-09-14 (src/auto-learn-manager.js:57#VERSION). A stat also self-invalidates
+// hook until 2026-09-14 (src/auto-learn-manager.js:61#VERSION). A stat also self-invalidates
 // on an in-place `git checkout`, which is exactly what someone bisecting the generalizer
 // does and exactly what a constant cannot see. Measured ~0.03 ms per statSync.
 // WARNING for anyone extending this beyond the CLI.

@@ -499,6 +499,76 @@ test('a probe that outlives its deadline is ended with everything it started', a
   assert.equal(alive, false, `the stub (pid ${pid}) outlived the probe's deadline`);
 });
 
+// 'close' waits for every holder of the child's pipes, and a process outside the tree the deadline
+// ends can hold them: here the stand-in claude starts a middle process that starts a detached
+// holder with the same stdout and exits, so the holder's parent is gone and taskkill /T (or the
+// POSIX child kill) never reaches it. The probe used to settle only on 'close', so it waited out
+// the holder's 60 s, and the extension's probingUserHooks and the CLI stayed stuck with it (audit
+// of 1.9.1). Run in a driver process, so the test also proves nothing the probe leaves keeps a
+// process like the CLI alive.
+// MUTATION: drop the grace timer after the deadline and the driver is still running at 25 s;
+// drop the pipe destroy and it still is.
+test('a probe whose pipes are held past its deadline still answers, and lets its process exit', async (t) => {
+  const { setTimeout: wait } = require('node:timers/promises');
+  const { spawn } = require('node:child_process');
+  const f = fixture(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-holder-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const record = path.join(dir, 'holder.json');
+  const holder = path.join(dir, 'holder.js');
+  const middle = path.join(dir, 'middle.js');
+  const script = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(holder, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid }));\n`
+    + 'setTimeout(() => {}, 60 * 1000);\n');
+  // The middle and the holder run in this directory, not the probe's: Windows will not remove a
+  // directory a process stands in, and the probe's lies inside the fixture.
+  fs.writeFileSync(middle, `const held = require('child_process').spawn(process.execPath, [${JSON.stringify(holder)}],\n`
+    + `  { detached: true, cwd: ${JSON.stringify(dir)}, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });\n`
+    + 'held.unref();\n');
+  fs.writeFileSync(script, `require('child_process').spawn(process.execPath, [${JSON.stringify(middle)}],\n`
+    + `  { cwd: ${JSON.stringify(dir)}, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });\n`
+    + 'setTimeout(() => {}, 60 * 1000);\n');
+  let executable;
+  if (process.platform === 'win32') {
+    executable = path.join(dir, 'claude.cmd');
+    fs.writeFileSync(executable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    executable = path.join(dir, 'claude');
+    fs.writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(executable, 0o755);
+  }
+  const held = () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')).pid : null);
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const options = { home: f.home, env: {}, claudeExecutable: executable, timeoutMs: 1500 };
+  const driver = spawn(process.execPath, ['-e',
+    `require(${JSON.stringify(path.resolve(__dirname, '..', 'src', 'memory-guard-install.js'))})`
+    + `.memoryGuardProbe(${JSON.stringify(options)}).then((probe) => process.stdout.write(JSON.stringify(probe)));`],
+  { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  try {
+    let stdout = '';
+    driver.stdout.on('data', (chunk) => { stdout += chunk; });
+    let exited = false;
+    driver.on('exit', () => { exited = true; });
+    const started = Date.now();
+    for (let i = 0; i < 500 && !exited; i += 1) await wait(50);
+    assert.ok(held(), 'precondition: the holder started, and holds the probe\'s stdout');
+    const holderAlive = alive(held());
+    assert.equal(exited, true, `the probe's process was still running ${Date.now() - started} ms after it started, against a 1.5 s deadline`);
+    assert.equal(holderAlive, true, 'WITNESS: the holder was still alive when the probe answered, so close had not come');
+    const probe = JSON.parse(stdout);
+    assert.equal(probe.result, 'unknown');
+    assert.match(probe.detail, /claude gave no answer within/);
+  } finally {
+    // In the body, not t.after, so the holder is gone before the hooks remove its directory.
+    try { driver.kill(); } catch { /* exited */ }
+    const pid = held();
+    if (pid) {
+      try { process.kill(pid); } catch { /* gone */ }
+      for (let i = 0; i < 100 && alive(pid); i += 1) await wait(50);
+    }
+  }
+});
+
 // The fixed directory used to sit in os.tmpdir(), which is /tmp and shared on Linux: another
 // user could create it first, holding a .claude/settings.json (or CLAUDE.md, .mcp.json) that
 // `claude -p` would load as the victim, and the pre-created directory made rmSync throw,

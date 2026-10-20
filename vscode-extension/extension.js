@@ -4569,7 +4569,7 @@ async function probeUserHooks() {
   try {
     probe = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'ai-acolyte: asking Claude Code whether it runs user hooks…' },
-      () => memoryGuardProbe({ home: os.homedir() }));
+      () => memoryGuardProbe({ home: os.homedir(), track: trackChild }));
   } catch (err) {
     probe = { result: 'unknown', detail: err.message };
   } finally {

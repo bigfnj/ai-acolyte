@@ -413,6 +413,9 @@ function memoryGuardProbe(options = {}) {
       const launch = execResolve.npmShimLaunch(name, PROBE_ARGS) || execResolve.resolvedLaunch(name, PROBE_ARGS, 'spawn');
       cwd = probeDirectory(directory);
       const child = spawn(launch.file, launch.args, { ...launch.options, cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      // `options.track` receives the child, so the extension's deactivate can end it (its
+      // trackChild), the way codex-version's and codex-mcp-config's callers hand theirs over.
+      if (typeof options.track === 'function') options.track(child);
       const out = { stdout: '', stderr: '' };
       for (const stream of ['stdout', 'stderr']) {
         child[stream].setEncoding('utf8');

@@ -3891,6 +3891,49 @@ test('"Check whether Claude Code runs user hooks" asks first, runs the probe und
   } finally { await app.dispose(); }
 });
 
+// A probe still running when the window closes is ended by deactivate, like every other child the
+// extension starts (audit of 1.9.1): memoryGuardProbe hands its child to `options.track`, and the
+// extension passes trackChild. The stand-in claude records its pid and then sleeps for 60 s.
+// MUTATION: drop `track: trackChild` from probeUserHooks (or the options.track call in
+// memoryGuardProbe) and the stand-in outlives deactivate.
+test('deactivate ends a "Check whether Claude Code runs user hooks" probe that is still running', async (t) => {
+  const { setTimeout: wait } = require('node:timers/promises');
+  const env = setup(t);
+  env.write({});
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-dashboard-claude-slow-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const record = path.join(dir, 'pid.json');
+  const script = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid }));\n`
+    + 'setTimeout(() => {}, 60 * 1000);\n');
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'claude'), 0o755);
+  }
+  const savedAppData = process.env.APPDATA;
+  process.env.APPDATA = dir;
+  t.after(() => { if (savedAppData === undefined) delete process.env.APPDATA; else process.env.APPDATA = savedAppData; });
+  withPath(t, [dir, path.dirname(process.execPath)]);
+  const pid = () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')).pid : null);
+  t.after(() => { try { process.kill(pid()); } catch { /* ended, or never started */ } });
+  const alive = (id) => { try { process.kill(id, 0); return true; } catch { return false; } };
+  const app = harness(env.tempHome, { withProgress: true });
+  try {
+    app.answer('Check');
+    const running = app.commands.get('permission-wildcarding.probeUserHooks')();
+    for (let i = 0; i < 200 && !pid(); i += 1) await wait(50);
+    assert.ok(pid(), 'precondition: the stand-in claude started');
+    assert.equal(alive(pid()), true, 'precondition: and is still running');
+    await app.extension.deactivate();
+    let gone = false;
+    for (let i = 0; i < 100 && !gone; i += 1) { gone = !alive(pid()); if (!gone) await wait(50); }
+    assert.equal(gone, true, `the probe's claude (pid ${pid()}) outlived deactivate`);
+    await running;
+  } finally { await app.dispose(); }
+});
+
 // A census of what the extension shows about the guard: the card's policy line, the modal, the
 // toasts, the refusals and the probe's answers. None may name a `wildcard-perms --` verb, because
 // a VSIX user has no CLI, and the policy line names the palette command by its contributed title.

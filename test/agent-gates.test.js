@@ -13,6 +13,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 
 const { BEGIN, applyGuidance, setGuidance } = require('../src/agent-guidance');
 const {
@@ -30,10 +31,10 @@ const COMPILED = '## Standing gates (1 memories, managed)\n\n- **File edits.** A
 // is the smaller change. Measured before this: the suite left 3 directories in
 // %TEMP% per run, and 798 had accumulated.
 const scratchRoots = [];
-after(() => {
+after(async () => {
   for (const root of scratchRoots) {
-    // maxRetries because a Windows handle can still be closing when we get here.
-    try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); }
+    // removeDir waits out a Windows handle that can still be closing when we get here.
+    try { await removeDir(root); }
     catch { /* a leaked temp dir must never fail the suite */ }
   }
 });

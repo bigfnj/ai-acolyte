@@ -18,6 +18,7 @@ const { createPolicyLock } = require('../src/policy-lock');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 
 const rule = (text, prompts, extra = {}) => ({
   rule: text, prompts, decision: 'ask', tools: [], ...extra,
@@ -327,7 +328,7 @@ test('a hostile rule reaches the instruction file defused, and the advice surviv
 // the other four. It takes the instruction-file lock here instead.
 test('a derived write does not land inside another writer of the same file', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-derived-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  t.after(() => removeDir(home));
   const claude = path.join(home, '.claude', 'CLAUDE.md');
   fs.mkdirSync(path.dirname(claude), { recursive: true });
   const notes = '# my notes\n\nkeep these\n';

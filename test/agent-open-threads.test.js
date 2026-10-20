@@ -14,6 +14,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 
 const { applyGuidance } = require('../src/agent-guidance');
 const { makeGatesBlock, compiledPath: gatesPath } = require('../src/agent-gates');
@@ -36,9 +37,9 @@ const ONE = compiled({ threads: ['- **AWAITING** The owner decides the layout. (
 const INDEX_TEXT = 'MEMORY.md is 152 lines (budget 140): compact it before adding anything, and move detail into the memory files.';
 
 const roots = [];
-after(() => {
+after(async () => {
   for (const root of roots) {
-    try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch { /* never fail the suite */ }
+    try { await removeDir(root); } catch { /* never fail the suite */ }
   }
 });
 

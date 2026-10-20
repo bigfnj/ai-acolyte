@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const crypto = require('node:crypto');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
@@ -50,7 +51,7 @@ function linkDirectory(target, link) {
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-native-gates-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  t.after(() => removeDir(home));
   const codexHome = path.join(home, 'selected'), root = path.join(codexHome, 'memories');
   const base = path.join(codexHome, 'AGENTS.md'), override = path.join(codexHome, 'AGENTS.override.md');
   fs.mkdirSync(root, { recursive: true });

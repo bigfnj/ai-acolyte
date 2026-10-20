@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const { runCodexStopHook } = require('../src/codex-stop-hook');
@@ -34,7 +35,7 @@ function assertPathFree(message, box) {
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-stop-hook-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  t.after(() => removeDir(root));
   const home = path.join(root, 'home');
   const codexHome = path.join(root, 'profile');
   const workspace = path.join(root, 'workspace');
@@ -182,7 +183,7 @@ const LOST = [
     consumedEnd: 300 * 1048576 }), /could not read 1 stretch of transcript with no line break inside 256 MiB, skipped for good\.$/],
 ];
 
-test('Stop names what it could not read, as a warning with no path in it', (t) => {
+test('Stop names what it could not read, as a warning with no path in it', async (t) => {
   for (const [label, entry, reason] of LOST) {
     const box = fixture(t);
     const result = runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome,
@@ -197,7 +198,7 @@ test('Stop names what it could not read, as a warning with no path in it', (t) =
   // Real, nothing injected: a profile whose history folder disappeared after
   // cursors were saved is a blind scan with zero errors (ENOENT is not one).
   assert.deepEqual(runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome }).output, {}, 'control: the first scan is clean');
-  fs.rmSync(path.join(box.codexHome, 'sessions'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await removeDir(path.join(box.codexHome, 'sessions'));
   const blind = runCodexStopHook(box.input, { home: box.home, codexHome: box.codexHome });
   assert.equal(blind.scan.blindScan, true);
   assert.equal(blind.scan.errors, 0);
@@ -349,7 +350,7 @@ function scannerPreload(box, name, body) {
   return file;
 }
 
-test('standalone Stop callback exits 0 with the reason when it could not read something', (t) => {
+test('standalone Stop callback exits 0 with the reason when it could not read something', async (t) => {
   const box = fixture(t);
   const options = cliOptions(box);
   const preload = scannerPreload(box, 'eacces.js', 'adapters.scanHistoryFiles = (options) => { const result = real(options);\n' +
@@ -367,7 +368,7 @@ test('standalone Stop callback exits 0 with the reason when it could not read so
   assert.equal(busy.status, 0, 'WITNESS another scan holding the lock is a warning, not a failed hook: ' + busy.stderr);
   assert.match(assertWarning(JSON.parse(busy.stdout), 'CLI busy'), /another AI Acolyte scan was running\. Nothing was lost/);
   // Real, nothing injected: cursors are saved, then the history folder goes.
-  fs.rmSync(path.join(box.codexHome, 'sessions'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await removeDir(path.join(box.codexHome, 'sessions'));
   const blind = spawnSync(process.execPath, [EXECUTABLE], options);
   assert.equal(blind.status, 0, blind.stderr);
   assert.match(assertWarning(JSON.parse(blind.stdout), 'CLI blind scan'), /could not read any Codex history: no transcript could be listed/);

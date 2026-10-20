@@ -19,6 +19,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 
 const CLI = path.resolve(__dirname, '..', 'bin', 'wildcard-perms');
 // Not a fixed point: hook mode collapses the two `rg` entries (test/cli-hook.test.js).
@@ -33,7 +34,7 @@ function tempHome(t) {
   fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify(UNOPTIMIZED, null, 2) + '\n');
   fs.writeFileSync(path.join(home, '.claude', 'settings.local.json'), JSON.stringify(LOCAL, null, 2) + '\n');
   fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), '# Mine\n');
-  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  t.after(() => removeDir(home));
   return home;
 }
 

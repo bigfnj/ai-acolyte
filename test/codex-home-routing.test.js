@@ -5,12 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const { spawnSync } = require('node:child_process');
 const { codexRuleFileSet } = require('../src/codex-policy');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-home-routing-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  t.after(() => removeDir(root));
   const home = path.join(root, 'user');
   const codexHome = path.join(root, 'custom-codex');
   const workspace = path.join(root, 'workspace');

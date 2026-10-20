@@ -20,6 +20,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 
@@ -45,7 +46,7 @@ const memory = (status, text = 'Synthetic.') => `---\nname: m\ndescription: synt
 // off the host thread really runs `box.python`, which the test then has to make a program.
 async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites = ONE, realThreads = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-window-'));
-  t.after(() => { try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
+  t.after(() => removeDir(home).catch(() => {}));
   const claude = path.join(home, '.claude');
   const store = path.join(claude, 'projects', 'p', 'memory');
   const other = path.join(claude, 'projects', 'q', 'memory');
@@ -523,7 +524,7 @@ test('a compile asked for while one runs waits for it, and the asks in between a
 // did the work, and the recorded host execFile proves the host thread did not.
 test('the compile is spawned from a worker thread, never the host thread, and still lands', { timeout: 120000 }, async (t) => {
   const standIn = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-standin-'));
-  t.after(() => { try { fs.rmSync(standIn, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
+  t.after(() => removeDir(standIn).catch(() => {}));
   const marks = path.join(standIn, 'ran.log');
   const script = path.join(standIn, 'recall-standin.js');
   fs.writeFileSync(script, `const fs = require('fs'); const path = require('path');

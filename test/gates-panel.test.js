@@ -20,6 +20,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const Module = require('node:module');
 
 const repoRoot = path.resolve(__dirname, '..');
@@ -366,7 +367,7 @@ function harness(options = {}) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
       purgeProjectModules();
-      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      await removeDir(root);
     },
   };
   return app;

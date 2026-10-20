@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
@@ -14,7 +15,7 @@ const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-recall-test-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  t.after(() => removeDir(home));
   const codexHome = path.join(home, 'selected');
   const memory = path.join(codexHome, 'memories');
   fs.mkdirSync(path.join(memory, 'rollout_summaries'), { recursive: true });

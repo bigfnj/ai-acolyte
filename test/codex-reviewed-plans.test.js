@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const crypto = require('node:crypto');
 const { createCodexReviewedPlans } = require('../src/codex-reviewed-plans');
 const { CODEX_BEGIN_MARKER } = require('../src/policy-exporters');
@@ -53,7 +54,7 @@ function linkDirectory(target, link) {
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-reviewed-plans-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  t.after(() => removeDir(root));
   const codexHome = path.join(root, 'codex');
   const workspaceRoot = path.join(root, 'workspace');
   const target = path.join(codexHome, 'rules', 'permission-wildcarding.rules');

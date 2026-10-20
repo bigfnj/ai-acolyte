@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const { Worker } = require('node:worker_threads');
 const { run } = require('../src/auto-learn-worker');
 const { createCodexMemoryGatesUi } = require('../vscode-extension/codexMemoryGatesUi');
@@ -11,7 +12,7 @@ const { createCodexMemoryGatesUi } = require('../vscode-extension/codexMemoryGat
 const native = text => `---\nscope: global\n---\n<!-- gate -->\n${text}\n<!-- /gate -->\n`;
 function fixture(t, extra = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-native-gates-ui-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  t.after(() => removeDir(home));
   const codexHome = path.join(home, 'selected'), root = path.join(codexHome, 'memories');
   fs.mkdirSync(root, { recursive: true });
   const source = path.join(root, 'MEMORY.md'), target = path.join(codexHome, 'AGENTS.md');

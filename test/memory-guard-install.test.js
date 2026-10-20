@@ -384,23 +384,52 @@ process.exitCode = ${exitCode};
   return { dir, executable, record: () => JSON.parse(fs.readFileSync(record, 'utf8')) };
 }
 
-test('the probe runs claude -p "/goal probe" once, in an empty temporary directory', (t) => {
+test('the probe runs claude -p "/goal probe" once, in an empty directory of its own', (t) => {
+  const f = fixture(t);
   const stub = stubClaude(t, RESTRICTED, 1);
-  const probe = memoryGuardProbe({ claudeExecutable: stub.executable });
+  const options = { home: f.home, env: {}, claudeExecutable: stub.executable };
+  const probe = memoryGuardProbe(options);
   assert.equal(probe.result, 'restricted', probe.detail);
   assert.equal(probe.command, 'claude -p "/goal probe"');
   const seen = stub.record();
   assert.deepEqual(seen.argv, ['-p', '/goal probe']);
   assert.deepEqual(seen.entries, [], 'the probe session has no project to act on');
   assert.equal(fs.existsSync(seen.cwd), false, 'and its directory is removed afterwards');
-  // One fixed name, because Claude Code keeps a transcript directory per working directory.
-  // MUTATION: go back to fs.mkdtempSync and the basename carries a random suffix.
+  // One fixed name, because Claude Code keeps a transcript directory per working directory, in
+  // the user's own config dir. MUTATION: go back to fs.mkdtempSync and the basename carries a
+  // random suffix; go back to os.tmpdir() and the parent is not <home>/.claude/wildcarding.
+  assert.equal(fs.realpathSync(path.dirname(seen.cwd)), fs.realpathSync(path.join(f.home, '.claude', 'wildcarding')));
   assert.equal(path.basename(seen.cwd), 'ai-acolyte-memory-guard-probe');
-  fs.mkdirSync(seen.cwd);
-  fs.writeFileSync(path.join(seen.cwd, 'left-over.txt'), 'from an earlier probe');
-  memoryGuardProbe({ claudeExecutable: stub.executable });
-  assert.deepEqual(stub.record().entries, [], 'a leftover from an earlier probe is cleared first');
+  assert.equal(probe.directory, path.join(f.home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe'));
+  fs.mkdirSync(probe.directory);
+  memoryGuardProbe(options);
+  assert.equal(stub.record().cwd, seen.cwd, 'an empty leftover of our own is used');
   const accepted = stubClaude(t, 'Goal set.', 0);
-  assert.equal(memoryGuardProbe({ claudeExecutable: accepted.executable }).result, 'not restricted');
-  assert.equal(memoryGuardProbe({ claudeExecutable: path.join(stub.dir, 'missing-claude') }).result, 'unknown');
+  assert.equal(memoryGuardProbe({ ...options, claudeExecutable: accepted.executable }).result, 'not restricted');
+  assert.equal(memoryGuardProbe({ ...options, claudeExecutable: path.join(stub.dir, 'missing-claude') }).result, 'unknown');
+});
+
+// The fixed directory used to sit in os.tmpdir(), which is /tmp and shared on Linux: another
+// user could create it first, holding a .claude/settings.json (or CLAUDE.md, .mcp.json) that
+// `claude -p` would load as the victim, and the pre-created directory made rmSync throw,
+// uncaught (audit 2026-10-20). An existing directory that is not empty is refused, Claude Code is
+// not run, and the planted files are left exactly where they are.
+// MUTATION: clear and reuse an existing directory as 1.9.0 did (rmSync then mkdirSync
+// recursive) and the stub runs in the planted directory.
+test('the probe refuses a directory that already holds files, and does not run claude', (t) => {
+  const f = fixture(t);
+  const stub = stubClaude(t, 'Goal set.', 0);
+  const dir = path.join(f.home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe');
+  const planted = path.join(dir, '.claude', 'settings.json');
+  fs.mkdirSync(path.dirname(planted), { recursive: true });
+  fs.writeFileSync(planted, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo planted' }] }] } }));
+  const probe = memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable });
+  assert.equal(probe.result, 'unknown');
+  assert.match(probe.detail, /^The probe did not run: .*ai-acolyte-memory-guard-probe already exists and is not empty, so Claude Code was not run in it\./);
+  assert.throws(() => stub.record(), /ENOENT/, 'claude never ran');
+  assert.ok(fs.existsSync(planted), 'and nothing of someone else\'s was deleted');
+  fs.rmSync(dir, { recursive: true });
+  fs.writeFileSync(dir, 'a file, not a directory');
+  assert.match(memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable }).detail, /is not a plain directory/);
+  assert.throws(() => stub.record(), /ENOENT/);
 });

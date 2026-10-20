@@ -229,4 +229,13 @@ test('--memory-guard probe runs the stub claude and reports what it said', (t) =
   const unknown = run(home, ['--memory-guard', 'probe'], { PATH, Path: PATH });
   assert.equal(unknown.status, 1, 'an answer it cannot read is unknown, and exits 1');
   assert.match(unknown.stdout, /probe: unknown\./);
+  // A directory already there, with something in it: a reported refusal, never a stack trace.
+  const planted = path.join(home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe', 'CLAUDE.md');
+  fs.mkdirSync(path.dirname(planted), { recursive: true });
+  fs.writeFileSync(planted, 'planted\n');
+  const refused = run(home, ['--memory-guard', 'probe'], { PATH, Path: PATH });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stdout, /^wildcard-perms memory-guard probe: unknown\. The probe did not run: .* is not empty/);
+  assert.equal(refused.stderr, '', 'no stack trace');
+  assert.ok(fs.existsSync(planted));
 });

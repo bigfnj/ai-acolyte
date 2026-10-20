@@ -287,6 +287,9 @@ function classifyProbe(run) {
   if (RESTRICTED_TEXT.test(output)) {
     return { result: 'restricted', detail: 'Claude Code refused /goal because hooks are restricted, so it will not run the MEMORY.md guard here.' };
   }
+  if (run && run.error && run.error.code === PROBE_REFUSED_CODE) {
+    return { result: 'unknown', detail: `The probe did not run: ${run.error.message}` };
+  }
   if (run && run.error) {
     const why = run.error.code === 'ENOENT' ? 'claude was not found on PATH'
       : run.error.code === 'ETIMEDOUT' ? `claude gave no answer within ${PROBE_TIMEOUT_MS / 1000} s`
@@ -300,33 +303,64 @@ function classifyProbe(run) {
   return { result: 'unknown', detail: `Claude Code neither refused nor accepted /goal: ${first.slice(0, 200)}` };
 }
 
-// Runs `claude -p "/goal probe"` once, in an empty temporary directory so a session that does
+// Runs `claude -p "/goal probe"` once, in an empty directory of its own so a session that does
 // start (hooks allowed) has no project to act on, with stdin closed and a 60 s ceiling. Where
 // hooks are allowed this starts a real, short Claude Code turn.
 //
 // ONE directory NAME, not a fresh random one (2026-10-19). Claude Code writes a transcript under
 // ~/.claude/projects/<slug of the cwd>/ even for the refusal (measured: 2.7 KB, Claude Code
 // 2.1.301), so a random name left one more project directory per probe. A fixed name keeps that
-// to one, emptied and recreated for each run.
+// to one.
+//
+// IN THE USER'S OWN CONFIG DIR, NEVER THE SHARED TEMP DIR (2026-10-20). The fixed name was under
+// os.tmpdir(), which on Linux is /tmp, shared by every local user: another user could create it
+// first with a planted .claude/settings.json, CLAUDE.md or .mcp.json, and `claude -p` would load
+// them as the victim; and a pre-created directory made the rmSync throw, uncaught. It now lives
+// in <config>/wildcarding/, is created without `recursive` so an existing entry is seen, and an
+// existing one is used only when it is a plain, empty directory the current user owns. Anything
+// else is a refusal, reported as the probe's answer, and Claude Code is not run.
 const PROBE_DIR_NAME = 'ai-acolyte-memory-guard-probe';
+const PROBE_REFUSED_CODE = 'PROBE_DIR_REFUSED';
+function probeDirectoryPath(options) {
+  return path.join(configDirFor(options, resolveHome(options)), 'wildcarding', PROBE_DIR_NAME);
+}
+function probeDirectory(dir) {
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const refuse = (why) => {
+    throw Object.assign(new Error(`${dir} already exists and ${why}, so Claude Code was not run in it. Remove it, then run the probe again.`),
+      { code: PROBE_REFUSED_CODE });
+  };
+  try {
+    fs.mkdirSync(dir);
+    return dir;
+  } catch (error) {
+    if (!error || error.code !== 'EEXIST') throw error;
+  }
+  const stat = fs.lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) refuse('is not a plain directory');
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) refuse('belongs to another user');
+  if (fs.readdirSync(dir).length) refuse('is not empty');
+  return dir;
+}
+
 function memoryGuardProbe(options = {}) {
   const { spawnSync } = require('child_process');
   const { resolvedLaunch } = require('./exec-resolve');
   const command = `claude -p "${PROBE_PROMPT}"`;
-  let launch;
-  try { launch = resolvedLaunch(options.claudeExecutable || 'claude', ['-p', PROBE_PROMPT], 'spawnSync'); }
-  catch (error) { return { ...classifyProbe({ error }), command }; }
-  const cwd = path.join(os.tmpdir(), PROBE_DIR_NAME);
-  fs.rmSync(cwd, { recursive: true, force: true });
-  fs.mkdirSync(cwd, { recursive: true });
+  const directory = probeDirectoryPath(options);
+  let cwd = null;
   let run;
   try {
+    const launch = resolvedLaunch(options.claudeExecutable || 'claude', ['-p', PROBE_PROMPT], 'spawnSync');
+    cwd = probeDirectory(directory);
     run = spawnSync(launch.file, launch.args, { ...launch.options, cwd, input: '', encoding: 'utf8',
       timeout: options.timeoutMs || PROBE_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    run = { error };
   } finally {
-    try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* a probe dir left behind is harmless */ }
+    if (cwd) try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* a probe dir left behind is refused next time */ }
   }
-  return { ...classifyProbe(run), command };
+  return { ...classifyProbe(run), command, directory };
 }
 
 module.exports = {

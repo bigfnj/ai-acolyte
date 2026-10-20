@@ -31,7 +31,8 @@ const os  = require('os');
 
 const SETTINGS  = path.join(os.homedir(), '.claude', 'settings.json');
 const PACK_PATH = path.join(__dirname, '..', 'patterns', 'starter-pack.json');
-const LEARN_USAGE = 'usage: wildcard-perms --learn scan|status|apply|undo|hits ' +
+const LEARN_ACTIONS = ['scan', 'status', 'apply', 'undo', 'hits'];
+const LEARN_USAGE = `usage: wildcard-perms --learn ${LEARN_ACTIONS.join('|')} ` +
   '[--mode observe|recommend|auto-safe] [--workspace <path>] ' +
   '[--codex-scope user|off] [--threshold <count>] ' +
   '[--codex-executable <path>]\n';
@@ -362,6 +363,13 @@ function learn(args) {
   const { createAutoLearnManager } = require('../src/auto-learn-manager');
   const index = args.indexOf('--learn');
   const action = String(args[index + 1] || 'status').toLowerCase();
+  // Before the setMode below, which saves the state: `--learn sacn --mode auto-safe` and `--learn
+  // --threshold 1` (no subcommand) wrote the mode or threshold, then printed this usage.
+  if (!LEARN_ACTIONS.includes(action)) {
+    process.stderr.write(LEARN_USAGE);
+    process.exitCode = 1;
+    return;
+  }
 
   try {
     const modeValue = learnOption(args, '--mode', null);
@@ -414,6 +422,7 @@ function learn(args) {
     else if (action === 'undo') result = manager.undo();
     else if (action === 'hits') result = manager.rebuildManagedHits();
     else {
+      // Reached only if LEARN_ACTIONS names an action this chain lacks.
       process.stderr.write(LEARN_USAGE);
       process.exitCode = 1;
       return;

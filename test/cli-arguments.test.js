@@ -256,3 +256,34 @@ test('bare words with no verb are refused, exit 2, naming them, and hook mode ne
   assert.match(hook.stderr, /^wildcard-perms: \+3 -4 → 3 entries$/m);
   assert.notDeepEqual(tree(home), before, 'precondition: hook mode writes');
 });
+
+// 1.9.4. learn() saved --mode and --threshold (setMode) before it checked the subcommand, so a
+// missing or mistyped one wrote the state and then printed the usage: `--learn sacn --mode
+// auto-safe` left Auto Learn in auto-safe, which the Codex Stop hook then scans in.
+// MUTATION: make learn()'s subcommand check `if (false)` and `--learn sacn --mode auto-safe`
+// writes the state file before the usage.
+test('a --learn with a missing or mistyped subcommand prints its usage before --mode or --threshold is saved', (t) => {
+  const home = tempHome(t);
+  const before = tree(home);
+  for (const args of [
+    ['--learn', 'sacn', '--mode', 'auto-safe'],
+    ['--learn', '--mode', 'auto-safe'],
+    ['--learn', '--threshold', '1'],
+    ['--learn', 'scan-all', '--threshold', '2', '--mode', 'observe'],
+    ['--learn', '--workspace', home, '--mode', 'observe'],
+  ]) {
+    const bad = run(home, args);
+    assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.equal(bad.stderr, LEARN_USAGE, args.join(' '));
+    assert.equal(bad.stdout, '', args.join(' '));
+    assert.deepEqual(tree(home), before, `${args.join(' ')} wrote into the home`);
+  }
+
+  // Witness: with a subcommand the same options are saved.
+  const ok = run(home, ['--learn', 'status', '--mode', 'auto-safe', '--threshold', '2', '--workspace', home,
+    '--codex-scope', 'off', '--codex-executable', path.join(home, 'no-codex')]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(JSON.parse(ok.stdout).mode, 'auto-safe', 'precondition: --learn status --mode saves the mode');
+  assert.equal(JSON.parse(ok.stdout).threshold, 2, 'precondition: and the threshold');
+  assert.notDeepEqual(tree(home), before, 'precondition: the state file was written');
+});

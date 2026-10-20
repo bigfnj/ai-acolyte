@@ -152,6 +152,14 @@ test('a refusal is reported on stderr with exit 1', (t) => {
   fs.writeFileSync(path.join(home, '.claude', 'settings.json'), '{ "half": ');
   const unreadable = run(home, ['--memory-guard', 'status']);
   assert.equal(unreadable.status, 1, 'a status that cannot read settings.json says so in the exit code');
+  // A hooks shape it cannot read is labelled UNREADABLE too, and exits the same way.
+  // MUTATION: exit 1 for 'unreadable' alone and the shapes below exit 0.
+  for (const shape of [{ hooks: [] }, { hooks: { PreToolUse: {} } }, { hooks: { PreToolUse: [{}] } }]) {
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify(shape));
+    const unsupported = run(home, ['--memory-guard', 'status']);
+    assert.match(unsupported.stdout, /memory-guard: UNREADABLE/, JSON.stringify(shape));
+    assert.equal(unsupported.status, 1, `${JSON.stringify(shape)} exits 1`);
+  }
 });
 
 // The probe, against a stub `claude` first on PATH that answers the way a restricted machine does.

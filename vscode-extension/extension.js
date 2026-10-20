@@ -4502,8 +4502,10 @@ async function toggleMemoryGuard() {
     return;
   }
   // A hook of ours whose node is gone is repaired, never turned off: the card's button says
-  // "Repair" for it, and `on` re-points it at the node found now (audit 2026-10-20).
-  const repair = status.on && status.nodeExists === false;
+  // "Repair" for it, and `on` re-points it at the node found now (audit 2026-10-20). Not beside a
+  // foreign guard (audit of 1.9.1): planMemoryGuard refuses every add while one is there, so a
+  // repair could only fail, and off, which removes ours, is the click that works.
+  const repair = status.on && status.nodeExists === false && status.status !== 'foreign';
   const next = repair || !(status.status === 'configured' || status.status === 'foreign');
   let nodeExecutable;
   if (next) {
@@ -6537,10 +6539,12 @@ class WildcardingViewProvider {
     // The MEMORY.md guard line (2026-10-19): the hook's state, then whether Claude Code will run it
     // here, said every time, because where policy restricts hooks the guard is installed and inert.
     const mg = (d && d.memoryGuard) || { label: 'unreadable', on: false, policy: '', nodeMissing: false };
+    // Beside a foreign guard the toggle cannot repair (it refuses an add), so no Repair is offered.
+    const mgRepair = mg.nodeMissing && mg.label !== 'foreign';
     $('memoryGuardStatus').textContent = 'MEMORY.md guard: ' + mg.label
-      + (mg.nodeMissing ? ', and the node it runs is gone (Repair re-points it)' : '') + '. ' + mg.policy;
+      + (mgRepair ? ', and the node it runs is gone (Repair re-points it)' : '') + '. ' + mg.policy;
     $('memoryGuardBtn').textContent = !mg.on ? 'Turn on MEMORY.md guard'
-      : (mg.label === 'on (needs repair)' || mg.nodeMissing ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
+      : (mg.label === 'on (needs repair)' || mgRepair ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
     renderThreads((d && d.threads) || null);
     $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
   }

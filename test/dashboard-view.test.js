@@ -3838,6 +3838,38 @@ test('a guard whose node is gone is repaired by the toggle, not turned off', asy
   } finally { await app.dispose(); }
 });
 
+// The same gone node beside a foreign guard (audit of 1.9.1): the card offered Repair, the toggle
+// asked for an add, and planMemoryGuard refuses every add while a foreign guard is there, so each
+// click was an error. Off works there, and is what the card and the toggle now do.
+// MUTATION: drop `&& status.status !== 'foreign'` from the toggle's `repair` and the click errors;
+// drop `&& mg.label !== 'foreign'` from the card and its button says Repair.
+test('a gone node beside a foreign guard offers Turn off, and the toggle removes ours', async (t) => {
+  const env = setup(t);
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  const ghost = path.join(env.tempHome, 'gone', process.platform === 'win32' ? 'node.exe' : 'node');
+  const foreign = { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: 'node "D:/elsewhere/memory-index-guard.js"' }] };
+  env.write({ hooks: { PreToolUse: [memoryGuardDefinition({ home: env.tempHome, nodeExecutable: ghost }), foreign] } });
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual({ label: data.memoryGuard.label, on: data.memoryGuard.on, nodeMissing: data.memoryGuard.nodeMissing },
+      { label: 'foreign', on: true, nodeMissing: true }, 'precondition: ours with its node gone, beside a foreign guard');
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver({ ...data, memory: { tokens: 10, lines: 3, maxLines: 200, over: 0, broken: 0, unresolved: 0 } });
+    assert.equal(panel.dom.byId.get('memoryGuardBtn').textContent, 'Turn off MEMORY.md guard');
+    assert.doesNotMatch(panel.dom.byId.get('memoryGuardStatus').textContent, /Repair/);
+
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.deepEqual(app.shown.filter((entry) => entry.level === 'error').map((entry) => entry.message), [], 'the click does not fail');
+    assert.deepEqual(env.read().hooks.PreToolUse, [foreign], 'ours is removed and the foreign guard is left as it was');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard OFF/.test(entry.message)));
+  } finally { await app.dispose(); }
+});
+
 // A stub `claude`, first on PATH, for the extension's probe. APPDATA is pointed at an empty
 // directory too: on Windows the launcher falls back to %APPDATA%\npm when PATH has no claude,
 // and that is where the real one lives on a development box.

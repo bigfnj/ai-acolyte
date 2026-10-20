@@ -18,13 +18,15 @@ const os = require('os');
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 // The MEMORY.md guard's own rules, shared rather than restated (2026-10-19): the comment-defect
-// scanner, and the 140-line target the guard blocks growth past. The guard hook uses fixed
-// budgets; this lint's window-scoped memory.* settings tune the gauge only. Found in `./src/` in a
-// packaged extension and `../src/` in the repository, as autoLearnUi.js explains, by a resolve
-// rather than a try/catch, so test/dead-exports.test.js can see which names this file uses.
+// scanner, the 140-line target the guard blocks growth past, and (2026-10-20) its 16-entry
+// ceiling. The guard hook uses fixed budgets; this lint's window-scoped memory.* settings tune the
+// gauge only. Found in `./src/` in a packaged extension and `../src/` in the repository, as
+// autoLearnUi.js explains, by a resolve rather than a try/catch, so test/dead-exports.test.js can
+// see which names this file uses.
 const GUARD_MODULE = require.resolve('./memory-index-guard.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
 const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
 const LINES_TARGET = GUARD_BUDGETS.lines;
+const ENTRIES_CEILING = GUARD_BUDGETS.entries;
 
 // recall.py's EXCLUDE (recall.py:233#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
@@ -407,8 +409,16 @@ function fastLint(dir, conf, names = null, text = null) {
 
   const over = [];
   const broken = [];
+  // The resident "- " entries, the guard's measure (a line of the LF-or-CRLF split that starts
+  // with "- "), and the line of the first one past its ceiling, which is where the warning goes.
+  let entries = 0;
+  let entryPastCeiling = null;
   const linkRe = /\]\(([^)]+\.md)(#[^)]*)?\)/g;
   lines.forEach((ln, i) => {
+    if (ln.startsWith('- ')) {
+      entries += 1;
+      if (entries === ENTRIES_CEILING + 1) entryPastCeiling = { line: i, end: ln.length };
+    }
     // EVERY line, in code points (2026-10-19), the guard's and recall.py's rule. This read only
     // "- " lines and measured UTF-16 units, so a 300-character heading passed and a line of 160
     // emoji read as 320. `end` is the UTF-16 length, which is what a Range column counts.
@@ -435,6 +445,12 @@ function fastLint(dir, conf, names = null, text = null) {
     // still loads whole, and every addition should now take a line out.
     linesTarget: LINES_TARGET,
     linesOverTarget: lineCount > LINES_TARGET,
+    // The entry ceiling the guard and recall.py --lint hold the index to (2026-10-20). Past it
+    // the index still loads; "one in, one out" is what the guard then enforces.
+    entries,
+    entriesCeiling: ENTRIES_CEILING,
+    entriesOver: entries > ENTRIES_CEILING,
+    entryPastCeiling,
     // A `<!--` inside an open comment, an orphan `-->`, a comment never closed: Claude Code
     // strips comments from the index, so each one leaks text into every session or hides it.
     comments: commentDefectList(text),
@@ -989,18 +1005,21 @@ class MemoryLint {
     this.status.text = `$(book) mem: ${tok} tok`
       + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines`
         : r.linesOverTarget ? ` · ${r.lineCount} lines, over the ${r.linesTarget}-line target` : '')
+      + (r.entriesOver ? ` · ${r.entries}/${r.entriesCeiling} entries` : '')
       + (issues ? ` · ${issues} to fix` : '');
     this.status.tooltip =
       `MEMORY.md: ${r.bytes} bytes (~${r.tokens} tokens/session, budget ${conf.totalBudget / 4 | 0})\n` +
       `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest; `
         + `the target is ${r.linesTarget}\n` +
+      `${r.entries} resident "- " entries, ceiling ${r.entriesCeiling}\n` +
       `${r.over.length} over-budget line(s), ${r.broken.length} broken index link(s), `
         + `${r.comments.length} broken HTML comment(s)\n` +
       `${path.dirname(r.memPath).replace(os.homedir(), '~')}\nClick for the full report.`;
     // linesOver joins totalOver here rather than the count: neither has a line to point
     // at, and both are worse than anything that does. Past the target is a warning too: the
-    // index still loads, and the next addition should take a line out.
-    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget)
+    // index still loads, and the next addition should take a line out. Past the entry ceiling
+    // likewise (2026-10-20): a state, so it is named in the text and not counted "to fix".
+    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget || r.entriesOver)
       ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.status.show();
   }
@@ -1014,6 +1033,18 @@ class MemoryLint {
         `the memory file or the project repo and leave a one-line hook.`,
         vscode.DiagnosticSeverity.Warning
       );
+      d.source = 'claude-memory';
+      out.push(d);
+    }
+    // One warning for the entry ceiling, on the first entry past it: the index has no single
+    // line at fault, and one squiggle per surplus entry would read as that many faults.
+    if (r.entryPastCeiling) {
+      const at = r.entryPastCeiling;
+      const d = new vscode.Diagnostic(new vscode.Range(at.line, 0, at.line, at.end),
+        `The index holds ${r.entries} resident "- " entries, past the ${r.entriesCeiling}-entry ceiling `
+        + 'the MEMORY.md guard and recall.py --lint hold it to; this is the first one past it. Take an '
+        + 'entry out for each one you add, and move detail into the memory files.',
+        vscode.DiagnosticSeverity.Warning);
       d.source = 'claude-memory';
       out.push(d);
     }
@@ -1086,6 +1117,10 @@ class MemoryLint {
     } else if (r.linesOverTarget) {
       ch.appendLine(`  ! ${r.lineCount - r.linesTarget} line(s) past the ${r.linesTarget}-line target:`
         + ' still loaded, but every addition should now take a line out');
+    }
+    ch.appendLine(`  ${r.entries} resident index entries, ceiling ${r.entriesCeiling}`);
+    if (r.entriesOver) {
+      ch.appendLine(`  ! ${r.entries - r.entriesCeiling} entries past the ceiling: take one out for each one you add`);
     }
     ch.appendLine(`  ${r.fileCount} memory files in the dir`);
     ch.appendLine('');

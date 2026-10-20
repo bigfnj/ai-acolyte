@@ -120,6 +120,8 @@ test('the editor lint reads every fixture exactly as the guard does', () => {
       assert.deepEqual(r.comments.map((defect) => `${defect.line + 1}:${defect.kind}`), g.comments, `${name}: comment defects`);
       assert.equal(r.linesTarget, BUDGETS.lines);
       assert.equal(r.linesOverTarget, g.lines > BUDGETS.lines, `${name}: the 140-line target`);
+      assert.equal(r.entries, g.entries, `${name}: resident entries`);
+      assert.equal(r.entriesOver, g.entries > BUDGETS.entries, `${name}: the entry ceiling`);
       // The open threads' INDEX line, from fastLint, against the guard's own verdicts.
       assert.deepEqual(indexVerdicts(indexHealth(r)), g.index, `${name}: the INDEX line\n${indexHealth(r).join('; ')}`);
     } finally {
@@ -132,6 +134,7 @@ test('the editor lint reads every fixture exactly as the guard does', () => {
   assert.ok(views.some((v) => v.longLines) && views.some((v) => !v.longLines));
   assert.ok(views.some((v) => v.lines > BUDGETS.lines) && views.some((v) => v.lines <= BUDGETS.lines));
   assert.ok(views.some((v) => v.index.lineChars) && views.some((v) => !v.index.lineChars));
+  assert.ok(views.some((v) => v.entries > BUDGETS.entries) && views.some((v) => v.entries <= BUDGETS.entries));
   assert.deepEqual(guardView(BODIES.astral).longLines, 1, '300 emoji pass, 301 do not');
   assert.deepEqual(guardView(BODIES.crlfNestedHeader).comments, ['2:nested', '3:orphan']);
   assert.deepEqual(guardView(BODIES.fencedMarkers).comments, ['7:unclosed']);

@@ -51,6 +51,15 @@ function Note {
 
 function Section { param([string]$Title) Write-Host ""; Write-Host "== $Title" }
 
+# SHA-256 of a text file with CRLF folded to LF, so a CRLF checkout and an LF build of the same
+# file agree. Bytes, not Get-Content: 5.1 would decode a BOM-less file as ANSI.
+function Get-TextHash {
+    param([string]$Path)
+    $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Path)) -replace "`r`n", "`n"
+    $sha = [Security.Cryptography.SHA256]::Create()
+    return -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') })
+}
+
 $SHELL_BEGIN = '<!-- BEGIN permission-wildcarding: shell style (managed) -->'
 $GATES_BEGIN = '<!-- BEGIN permission-wildcarding: memory gates (managed) -->'
 $GATES_END   = '<!-- END permission-wildcarding: memory gates -->'
@@ -174,20 +183,23 @@ foreach ($pair in @(@{ n = 'claude'; p = $claudeMd }, @{ n = 'codex'; p = $agent
     Check "$($pair.n): exactly one shell-style block" ($nShell -eq 1) "found $nShell"
     Check "$($pair.n): exactly one memory-gates block" ($nGates -eq 1) "found $nGates"
 
-    # The two blocks must not have merged or nested: the shell block has to close before
-    # the gates block opens, or an "off" on one would take a bite out of the other.
+    # The two blocks must not have merged or nested: each has to close before the other opens,
+    # or an "off" on one would take a bite out of the other. In EITHER order (2026-10-20): this
+    # asked that the shell block close before the gates block opened, and on the box where the
+    # gates block was installed first it failed every run on two disjoint blocks.
     $iShell = $text.IndexOf($SHELL_BEGIN)
     $iGates = $text.IndexOf($GATES_BEGIN)
     if ($iShell -ge 0 -and $iGates -ge 0) {
-        $shellEnd = $text.IndexOf('<!-- END permission-wildcarding: shell style -->')
+        $shellEnd = $text.IndexOf('<!-- END permission-wildcarding: shell style -->', $iShell)
+        $gatesEnd = $text.IndexOf($GATES_END, $iGates)
         # `-ge 0` first, and it is the whole point. IndexOf returns -1 when the
         # marker is ABSENT, and -1 is less than any index, so the bare
         # comparison printed PASS for exactly the state this check exists to
-        # catch: a missing shell END, which is what "the two blocks merged"
+        # catch: a missing END, which is what "the two blocks merged"
         # looks like on disk.
-        Check "$($pair.n): blocks are disjoint, not nested" `
-            ($shellEnd -ge 0 -and $shellEnd -lt $iGates) `
-            "shell ends at $shellEnd, gates begin at $iGates"
+        $disjoint = ($shellEnd -ge 0 -and $gatesEnd -ge 0) -and (($shellEnd -lt $iGates) -or ($gatesEnd -lt $iShell))
+        Check "$($pair.n): blocks are disjoint, not nested" $disjoint `
+            "shell $iShell-$shellEnd, gates $iGates-$gatesEnd"
     }
 }
 
@@ -418,7 +430,14 @@ if (Test-Path $settings) {
     if ($ok) {
         $events = @()
         if ($cfg.hooks) { $events = @($cfg.hooks.PSObject.Properties.Name) }
-        Check 'PostToolUse hook still registered' ($events -contains 'PostToolUse') ("events: " + ($events -join ', '))
+        # A Check only where the approval hook is registered (2026-10-20). A box that took the
+        # memory features alone, where install.ps1 never ran, has no PostToolUse entry by design,
+        # and this failed there on every run. Its absence is reported, not asserted.
+        if ($events -contains 'PostToolUse') {
+            Check 'PostToolUse hook still registered' $true ("events: " + ($events -join ', '))
+        } else {
+            Note 'PostToolUse hook' ("not registered (events: " + ($events -join ', ') + "). Expected where install.ps1 never ran, as on a box with the memory features only; run install.ps1 if this box should generalize approvals")
+        }
         # NOT a Check. This was a FAIL asserting something the project deliberately
         # does not install and has measured does not fire here: a user SessionStart
         # entry is dropped on a box whose managed policy defines only PostToolUse
@@ -507,8 +526,11 @@ if ($installedDirs.Count -eq 0) {
     $instJs = Join-Path $inst.FullName 'extension.js'
     $srcJs = Join-Path $repo 'vscode-extension\extension.js'
     if ((Test-Path $instJs) -and (Test-Path $srcJs)) {
-        $a = (Get-FileHash $instJs -Algorithm SHA256).Hash
-        $b = (Get-FileHash $srcJs -Algorithm SHA256).Hash
+        # Line endings folded first (2026-10-20). A released VSIX is built on CI from an LF
+        # checkout and a Windows working tree is CRLF, so the raw hashes never matched an
+        # installed release on any box, though the two files were the same code.
+        $a = Get-TextHash $instJs
+        $b = Get-TextHash $srcJs
         Check 'installed extension.js matches the repo source' ($a -eq $b) `
             "installed: $($inst.Name)  -- if this FAILS, package and install the VSIX before judging the eyes-only checks"
         $instGates = Join-Path $inst.FullName 'src\agent-gates.js'

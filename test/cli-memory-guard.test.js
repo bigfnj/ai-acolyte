@@ -86,6 +86,15 @@ test('--memory-guard on installs, repeats as already, and off removes only the g
   assert.equal(settingsText(home), before, 'off restores the file byte for byte');
 });
 
+test('--memory-guard on with no settings.json says the absence was recorded', (t) => {
+  const home = tempHome(t);
+  fs.rmSync(path.join(home, '.claude', 'settings.json'));
+  const on = run(home, ['--memory-guard', 'on']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stdout, /backup: none needed, settings\.json did not exist before the guard's first change \(~[\\/]\.claude[\\/]backups[\\/]settings\.json\.pre-memory-guard\.absent\)/);
+  assert.doesNotMatch(on.stdout, /settings\.json before the guard's first change\)/);
+});
+
 // The CLI follows CLAUDE_CONFIG_DIR as Claude Code does, and leaves ~/.claude alone.
 test('--memory-guard on and status use $CLAUDE_CONFIG_DIR/settings.json when it is set', (t) => {
   const home = tempHome(t);

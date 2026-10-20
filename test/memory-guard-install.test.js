@@ -49,6 +49,7 @@ test('a fresh install writes the copy, the hook and no backup when there was no 
   assert.equal(result.label, 'on');
   assert.equal(result.changed, true);
   assert.equal(result.backupPath, null, 'nothing to back up');
+  assert.equal(result.backupAbsent, `${f.backup}.absent`, 'but the absence is recorded');
   assert.equal(fs.existsSync(f.backup), false);
   assert.deepEqual(f.json(), { hooks: { PreToolUse: [memoryGuardDefinition({ home: f.home, nodeExecutable: process.execPath })] } });
   assert.equal(guardRevision(fs.readFileSync(f.script, 'utf8')), GUARD_REVISION);
@@ -114,6 +115,26 @@ test('CLAUDE_CONFIG_DIR moves the settings.json, the stable copy and the backup,
   const plain = setMemoryGuard(true, { ...f.options, env: { CLAUDE_CONFIG_DIR: '' } });
   assert.equal(plain.settingsPath, f.settingsPath, 'an empty CLAUDE_CONFIG_DIR is unset');
   assert.ok(fs.existsSync(f.script));
+});
+
+// The backup is "as it was before the FIRST change" even when there was no file then (audit
+// 2026-10-20): 1.9.0 wrote nothing on that first on, so the next off snapshotted the
+// guard-installed bytes, and restoring that "backup" turned the guard back on.
+// MUTATION: skip the absent marker (return early on ENOENT as 1.9.0 did) and the off below writes
+// a backup holding the installed hook.
+test('on with no settings.json records the absence, and a later off never backs up the installed bytes', (t) => {
+  const f = fixture(t);
+  const on = setMemoryGuard(true, f.options);
+  assert.equal(fs.existsSync(f.settingsPath), true, 'precondition: on created settings.json');
+  const off = setMemoryGuard(false, f.options);
+  assert.equal(off.changed, true);
+  assert.equal(fs.existsSync(f.backup), false, 'no backup of the guard-installed bytes');
+  assert.equal(off.backupPath, null);
+  assert.equal(off.backupAbsent, on.backupAbsent, 'off reports the first change\'s record');
+  assert.match(fs.readFileSync(on.backupAbsent, 'utf8'), /did not exist before the MEMORY\.md guard first changed it/);
+  setMemoryGuard(true, f.options);
+  setMemoryGuard(false, f.options);
+  assert.equal(fs.existsSync(f.backup), false, 'nor on any later change');
 });
 
 // writeTransform writes LF; a CRLF settings.json keeps every value, and its exact CRLF bytes are

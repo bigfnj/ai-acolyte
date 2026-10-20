@@ -1513,6 +1513,9 @@ function memoryGuard(args) {
     if (status.reason) process.stdout.write(`  note:   ${status.reason}\n`);
     if (cmd === 'on' && status.changed) process.stdout.write('  Applies to Claude Code sessions started from now on.\n');
     if (status.backupPath) process.stdout.write(`  backup: ${tilde(status.backupPath)} (settings.json before the guard's first change)\n`);
+    if (status.backupAbsent) {
+      process.stdout.write(`  backup: none needed, settings.json did not exist before the guard's first change (${tilde(status.backupAbsent)})\n`);
+    }
     process.stdout.write(`  policy: ${status.policy.line}\n`);
     if (cmd === 'status' && status.status === 'unreadable') process.exitCode = 1;
   } catch (error) {

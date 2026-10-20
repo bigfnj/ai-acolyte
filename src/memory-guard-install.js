@@ -56,6 +56,7 @@ function settingsPathFor(config) { return path.join(config, 'settings.json'); }
 // them takes it at this path.
 function lockPathFor(home) { return path.join(home, '.claude', 'wildcarding', 'auto-learn-policy.lock'); }
 function backupPathFor(config) { return path.join(config, 'backups', 'settings.json.pre-memory-guard'); }
+const ABSENT_SUFFIX = '.absent';
 
 function isFile(target) {
   try { return fs.statSync(target).isFile(); } catch { return false; }
@@ -112,15 +113,29 @@ function installGuardCopy(home, config, options = {}) {
 
 // The settings.json bytes as they were before this feature ever changed them. Written once:
 // a later on/off keeps the first snapshot, which is the one a person undoing the feature wants.
+//
+// AN ABSENT settings.json IS RECORDED TOO (2026-10-20). When there was no settings.json at the
+// first change, there is nothing to copy, and 1.9.0 wrote nothing; the next `off` then found no
+// backup and snapshotted the guard-installed bytes, so restoring "the backup" turned the guard
+// back on. The first change now leaves a marker saying the file did not exist, and either the
+// backup or the marker stops every later snapshot. Returns { path, absent } for the record that
+// holds the pre-change state.
 function takeBackup(config, settingsPath) {
   const target = backupPathFor(config);
-  if (fs.existsSync(target)) return target;
-  let bytes;
+  const marker = `${target}${ABSENT_SUFFIX}`;
+  if (fs.existsSync(target)) return { path: target, absent: false };
+  if (fs.existsSync(marker)) return { path: marker, absent: true };
+  let bytes = null;
   try { bytes = fs.readFileSync(settingsPath); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (bytes === null) {
+    writeFileAtomicSync(marker, `${settingsPath} did not exist before the MEMORY.md guard first changed it, `
+      + `${new Date().toISOString()}. Undo the guard by deleting that file.\n`, { inPlaceFallback: false });
+    return { path: marker, absent: true };
+  }
   writeFileAtomicSync(target, bytes, { inPlaceFallback: false });
-  return target;
+  return { path: target, absent: false };
 }
 
 function readJson(file) {
@@ -220,7 +235,7 @@ function setMemoryGuard(enabled, options = {}) {
   const plan = { home, configDir: config, nodeExecutable, platform };
   let outcome = null;
   let copy = null;
-  let backupPath = null;
+  let backup = null;
   createPolicyLock({ lockPath: lockPathFor(home) }).locked(() => {
     const state = readSettingsState(settingsPath);
     if (state.state === SETTINGS_UNREADABLE) {
@@ -231,7 +246,7 @@ function setMemoryGuard(enabled, options = {}) {
     // backup is written, so a refused `on` leaves no trace.
     const dry = planMemoryGuard(state.settings, enabled, plan);
     if (enabled) copy = installGuardCopy(home, config, options);
-    if (dry.changed) backupPath = takeBackup(config, settingsPath);
+    if (dry.changed) backup = takeBackup(config, settingsPath);
     if (options.beforeWrite) options.beforeWrite(settingsPath);
     outcome = createSettingsWriter({ settingsPath }).writeTransform((latest) => planMemoryGuard(latest, enabled, plan));
   });
@@ -240,7 +255,9 @@ function setMemoryGuard(enabled, options = {}) {
   if (!held) {
     throw new Error(`settings.json did not keep the MEMORY.md guard ${enabled ? 'on' : 'off'} (it reads ${after.status} now)`);
   }
-  return { ...after, changed: Boolean(outcome && outcome.wrote), backupPath, copy };
+  // backupPath is a copy of the bytes; backupAbsent the marker that says there were none.
+  return { ...after, changed: Boolean(outcome && outcome.wrote), copy,
+    backupPath: backup && !backup.absent ? backup.path : null, backupAbsent: backup && backup.absent ? backup.path : null };
 }
 
 // Activation's refresh: when our hook is registered and this build's guard is newer than the

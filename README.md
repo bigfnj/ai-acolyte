@@ -356,7 +356,9 @@ registers that copy in `~/.claude/settings.json`, run by the absolute `node` fou
 `~/.claude` path in this section is that directory instead, as it is for Claude Code
 (`src/memory-guard-install.js:46#configDirFor`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
-`~/.claude/backups/settings.json.pre-memory-guard`. A hook is the guard's own only when its
+`~/.claude/backups/settings.json.pre-memory-guard`; when there was no `settings.json` then, a
+`settings.json.pre-memory-guard.absent` marker beside it says so, and no later change takes a
+snapshot. A hook is the guard's own only when its
 command is a `node` and that copy and nothing else. If another hook already runs a
 `memory-index-guard.js`, from a different path or wrapped in a command of your own (`timeout 5
 node "<copy>"`), turning the guard on refuses, and that hook is never touched.

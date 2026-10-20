@@ -37,9 +37,11 @@ minutes. For each it shows the app, the folder name, the permission mode when it
 the last activity, and the subagents that are working.
 **Claude memory** and **Codex memory** are two rows with the same layout and the same actions.
 Each shows the CPU model status, its folder, four figures, an issues line, **Search**, **Rebuild**
-and **Inspect memory sources**, its gates, and the agent version.
+and **Inspect memory sources**, its gates, and the agent version. The Claude card also has an
+open-threads line ("Open threads: 2 installed (Claude, Codex)"), the INDEX warning while
+`MEMORY.md` is past a budget, and **Turn on / Turn off open threads**.
 
-Version **1.8.1** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.9.0** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -172,9 +174,9 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 ### Review and policy output
 
-The Auto Learn card carries **Scan now**, **Review (N)**, **Undo** and **Why prompt?**, and
-they post four of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:4678#switch`. This sentence has now been wrong three times: twice it
+The Auto Learn card carries **Scan now**, **Review (N)**, **Undo**, **Why prompt?** and
+**Turn on** / **Turn off**, and they post five of the message arms the webview host handles; the switch is at
+`vscode-extension/extension.js:5134#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -237,10 +239,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:4627#showWarningMessage`).
+`vscode-extension/extension.js:5083#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4427#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:4883#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -263,7 +265,15 @@ watcher-driven scan waits out, so a burst of transcript writes coalesces into on
 `permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
 `permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
 how long one worker operation may run before the extension stops waiting). The full list of
-all 18 settings is at the end of this file.
+all 19 settings is at the end of this file.
+
+**AI Acolyte: Toggle Auto Learn**, and the card's **Turn on** / **Turn off** button, switch
+`autoLearn.enabled` in your user settings. Off stops the extension's background scans; **Scan
+now** still scans when you ask. Codex's after-turn Stop hook and `wildcard-perms --learn` are
+separate and do not read the setting, so turning Auto Learn off here does not stop either. When
+a workspace or folder setting holds Auto Learn off, turning it on first asks, in a modal that
+names the settings file, before it removes that value: the file may be a `.vscode/settings.json`
+the repository commits. Dismissing it changes nothing.
 
 `autoLearn.codexExecutable` is **machine-scoped**: set it in user settings. The extension
 runs that program without asking (`--version` for the dashboard's version line, `app-server`
@@ -292,23 +302,37 @@ works under a managed policy.
 - A **status-bar gauge** (`$(book) mem: 1.9k tok · N to fix`) shows the always-loaded
   token cost and, warning-tinted, how many issues it found. Click it for the full
   report (an output channel: over-budget lines, broken links, unresolved `[[links]]`).
-- **Editor diagnostics** squiggle each `MEMORY.md` hook line over the budget and any
-  index link pointing at a missing file.
+- **Editor diagnostics** squiggle each `MEMORY.md` line over the width budget (any line, counted
+  in characters), any index link pointing at a missing file, and any broken HTML comment: a
+  `<!--` inside an open comment, an orphan `-->`, or a `<!--` never closed. Claude Code strips
+  comments from the index, so each of those leaks text into every session or hides it.
+- Past **140 lines** (the MEMORY.md guard's target, below the 200-line load cap) the gauge
+  turns to a warning and names the target: the index still loads whole, and each addition
+  should now take a line out.
 - It auto-discovers every `~/.claude/projects/*/memory/MEMORY.md`, updates on save and
   on external edits, and can be pinned or tuned via the `permissionWildcarding.memory.*`
   settings (`enabled`, `dir`, `lineBudget` for one hook's width, `maxLines` for how many lines
   Claude Code actually loads, `totalBudget`, `recallScript`). Command:
   `Acolyte: Lint memory index`.
 
+The lint is not a hook and needs none. The optional **MEMORY.md guard** is: a Claude Code
+`PreToolUse` hook that refuses an edit leaving the index worse on a measure already past its
+budget (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken comment),
+and lets every shrinking edit through. It uses those fixed budgets; the `memory.*` settings tune
+this gauge, not the hook. Turn it on with **Toggle MEMORY.md guard**, which asks first. Where a
+managed policy sets `allowManagedHooksOnly` or `disableAllHooks`, Claude Code runs no user hook,
+so the guard is installed and inert there, and the card says so. The root README section "The
+MEMORY.md guard" has the rule, the install and the policy caveat.
+
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:651#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:656#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:917#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:922#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -321,7 +345,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:728#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:733#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -334,9 +358,13 @@ the model asset and the venv, and never runs Python.
 - **⟳ Rebuild recall index** — the one button. It runs `recall.py --rebuild` in the
   DevToolbox venv to force a full CPU re-embed (model + corpus pinned via env so the
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
+- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`
+  or `foreign`, followed every time by whether Claude Code will run it here. The button turns the
+  guard on (after a confirmation naming the hook and the `node` it runs), repairs it, or turns it
+  off.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1130#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1135#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -355,6 +383,13 @@ memories hold, which is how a change whose compile or install failed is finished
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`
 and `AGENTS.md` carry, so all three are read from user settings only.
+The open-threads compiler spawns `recall.py --threads-compile` after a memory edit that can
+change its list (a file that mentions `status:` or a status marker, any edit while a thread is
+listed, and every `MEMORY.md` change, for the INDEX line), a few seconds after activation when
+a memory declares `status:`, a compile already exists or `MEMORY.md` is past a budget, and when
+`openThreads.enabled` is turned on. Only edits in the store that compiles count. While the
+setting is off it compiles nothing. `openThreads.enabled` is machine-scoped for the same reason
+as `gates.enabled`.
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
@@ -458,7 +493,10 @@ whose org was prompting them.
 
 ## Auto Learn card
 
-Four buttons: **Scan now**, **Review (N)**, **Undo**, **Why prompt?**
+Five buttons: **Scan now**, **Review (N)**, **Undo**, **Why prompt?**, **Turn on** / **Turn off**
+
+**Turn on** / **Turn off** is the Toggle Auto Learn command, and its label follows the state.
+While Auto Learn is off, the collapsed row reads "disabled · Turn on".
 
 **Review** shows a live count of candidates the picker will actually offer —
 candidates an existing allow rule already covers are excluded from the count, since
@@ -474,7 +512,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 35 commands under AI Acolyte in the
+The manifest registers 38 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -497,6 +535,7 @@ dashboard title-bar buttons.
 | Auto Learn - Undo last application | Release this claimant's grants through the claims registry |
 | Auto Learn - Cycle mode | `observe` → `recommend` → `auto-safe`. A step above your user setting is saved in user settings; any other step is saved where the mode already lives |
 | Auto Learn - Why did this prompt? | Diagnose one command against user settings and org policy |
+| Toggle Auto Learn | Turn the extension's background scans off or on, in user settings. Turning on asks before it removes a workspace or folder value that holds Auto Learn off. Codex's after-turn Stop hook and `wildcard-perms --learn` are separate |
 | Auto Learn - Show families blocked by managed policy | Families whose prompt no user rule can stop, with the rule |
 | Derived guidance - review mitigations for prompts no rule can stop | Accept / decline each measured mitigation by id |
 | Drain project-local approvals into user scope | Promote, verify, then prune `.claude/settings.local.json` |
@@ -506,7 +545,9 @@ dashboard title-bar buttons.
 | Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
+| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit leaving a `MEMORY.md` index worse on a measure already past its budget; asks before adding it, and says when managed policy will stop Claude Code running it |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
+| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line while `MEMORY.md` is past a budget |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |
 | Rebuild recall index | Force a full CPU bge-small re-embed |
@@ -518,7 +559,7 @@ dashboard title-bar buttons.
 
 ## Every setting
 
-All 19 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
+All 20 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
 
 The Auto Learn worker deadline, `autoLearn.workerTimeoutSeconds`, is the one that needs a
 word. It exists so a worker wedged in a synchronous filesystem call cannot hold teardown open
@@ -528,17 +569,18 @@ value, so a repository's `.vscode/settings.json` cannot switch the deadline off.
 `PERMISSION_WILDCARDING_WORKER_TIMEOUT_MS` (milliseconds, `0` disables) still applies; once
 set, the setting wins. An edit applies to the next scan, with no reload.
 
-Four keys are **tighten-only**: `autoLearn.mode`, `autoLearn.successThreshold`,
-`autoLearn.codexScope` and `localDrain.enabled`. Each decides whether the extension writes your
-global files unattended, so a workspace or folder value may make it stricter than your user
-setting but never looser. A repository's `.vscode/settings.json` can put one project in
-`observe`, but it cannot switch you to `auto-safe`. A value that would loosen one is ignored, and
+Five keys are **tighten-only**: `autoLearn.enabled`, `autoLearn.mode`,
+`autoLearn.successThreshold`, `autoLearn.codexScope` and `localDrain.enabled`. Each decides
+whether the extension writes your global files unattended, so a workspace or folder value may make
+it stricter than your user setting but never looser. A repository's `.vscode/settings.json` can
+put one project in `observe` or turn Auto Learn off there, but it cannot switch you to `auto-safe`
+or turn Auto Learn back on. A value that would loosen one is ignored, and
 the Acolyte output channel says so once per window. With no user setting, the default is the bar.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `backupMirrorPath` | `""` | Off-tree copy of the allow/deny backup. Empty means `~/.permission-wildcarding/allow-list.latest.json`; point it at another volume to survive more than a `~/.claude` reset. Machine-scoped: a workspace value is ignored |
-| `autoLearn.enabled` | `true` | Scan history at all |
+| `autoLearn.enabled` | `true` | The extension's background scans of history. **Toggle Auto Learn** and the card's button switch it in user settings. A workspace may only make it stricter: it can turn Auto Learn off, never on when your user setting has it off |
 | `autoLearn.mode` | `"recommend"` | `observe` / `recommend` / `auto-safe`. A workspace may only make it stricter: a workspace or folder value can lower the mode, and one above your user setting is ignored |
 | `autoLearn.successThreshold` | `3` | Confirmed successes before an auto-safe candidate applies. A workspace may only make it stricter: it can raise the threshold, never lower it below your user setting |
 | `autoLearn.intervalMinutes` | `5` | Periodic reconcile, the backstop for missed watcher events |
@@ -549,6 +591,7 @@ the Acolyte output channel says so once per window. With no user setting, the de
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button. A workspace may only make it stricter: it can turn the drain off, never on when your user setting has it off |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation. Machine-scoped: a workspace value is ignored |
 | `gates.enabled` | `true` | Keep the memory-gates block installed on activation. Machine-scoped: a workspace value is ignored |
+| `openThreads.enabled` | `true` | Keep the open-threads block in step with your memories: compile after an edit that can change it, after activation when there is anything to say, and on turning it on; install the result. Off removes the block, and nothing compiles or installs it. Machine-scoped: a workspace value is ignored |
 | `claudeStripModelCheck` | `true` | Once per new Claude Code binary (about 30 s after activation, on a worker thread), compare its known-safe environment variables with the 2.1.296 list the generalizer models, and warn once on a difference. Never edits the list: a change still needs a release. Machine-scoped: a workspace value is ignored |
 | `memory.enabled` | `true` | Claude index lint/gauge and native Codex diagnostics; native gate refresh has a separate installed-marker opt-in |
 | `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home. Machine-scoped: a workspace value is ignored |

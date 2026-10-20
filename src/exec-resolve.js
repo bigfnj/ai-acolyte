@@ -297,7 +297,17 @@ function taskkillPath() {
 // against the ChildProcess it holds, so every rule above (the tree kill, the group
 // signal, the freed-PID guard) is applied to the real handle, by this function.
 // What the host holds is a ThreadChild, which answers END_TREE.
+//
+// A TREE BEING ENDED SAYS SO (2026-10-20). taskkill /T ends the leaves first and the
+// root last (measured on the development box: root last in 10 of 10 trees). Under
+// load that gap was long enough for a config worker to see its app-server die, answer
+// "Codex config server exited early" and exit on its own before taskkill reached it,
+// so an ask its caller had ended read as Codex's own failure (1 of 3 loaded full
+// runs). A live ChildProcess handed here is marked TREE_ENDING before anything is
+// signalled, so its owner can tell "ended by my caller" from what it printed while
+// dying (src/codex-mcp-config.js, nativeRpcAsync).
 const END_TREE = Symbol.for('ai-acolyte.endProcessTree');
+const TREE_ENDING = Symbol.for('ai-acolyte.treeEnding');
 function endProcessTree(child) {
   const fallback = () => { try { child.kill(); } catch { /* already gone */ } };
   if (!child) return Promise.resolve();
@@ -312,6 +322,7 @@ function endProcessTree(child) {
     fallback();
     return Promise.resolve();
   }
+  child[TREE_ENDING] = true;
   if (process.platform !== 'win32') {
     try { process.kill(-child.pid, 'SIGTERM'); } catch { /* not a group leader, or already gone */ }
     fallback();
@@ -386,5 +397,5 @@ function endTreeAfter(child, ms) {
 // less than the tests that already exist.
 module.exports = {
   resolveExecutable, commandLaunch, resolvedLaunch, quoteForCommandProcessor, endProcessTree, taskkillPath, endTreeAfter,
-  END_TREE, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE,
+  END_TREE, TREE_ENDING, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE,
 };

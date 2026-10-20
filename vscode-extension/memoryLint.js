@@ -17,11 +17,20 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-// recall.py's EXCLUDE (recall.py:230#EXCLUDE): the index is just hooks, so it is never a search
+// The MEMORY.md guard's own rules, shared rather than restated (2026-10-19): the comment-defect
+// scanner, and the 140-line target the guard blocks growth past. The guard hook uses fixed
+// budgets; this lint's window-scoped memory.* settings tune the gauge only. Found in `./src/` in a
+// packaged extension and `../src/` in the repository, as autoLearnUi.js explains, by a resolve
+// rather than a try/catch, so test/dead-exports.test.js can see which names this file uses.
+const GUARD_MODULE = require.resolve('./memory-index-guard.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
+const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
+const LINES_TARGET = GUARD_BUDGETS.lines;
+
+// recall.py's EXCLUDE (recall.py:233#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:263-264#GATE_BEGIN), and the pattern
+// recall.py's gate markers (recall.py:266-268#GATE_BEGIN), and the pattern
 // _compile_gates_text actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one
@@ -176,6 +185,110 @@ function gateAgents(text) {
   return { agents: GATE_AGENTS.filter((agent) => wanted.has(agent)), problem: null };
 }
 
+// ── Open threads: recall.py's _thread, in JavaScript (2026-10-19) ─────────────────────
+//
+// What a memory is to `recall.py --threads-compile`, for the dashboard's count and for
+// activation's "is there anything to compile" question. recall.py is the authority that
+// compiles; test/threads-compile.sh holds this reading to it memory by memory, over generated
+// frontmatter and bodies, and holds indexHealth to _index_health over generated indexes.
+const THREAD_STATUSES = ['open', 'awaiting', 'blocked', 'deferred'];
+const THREAD_CLOSED = ['done', 'closed', 'live', 'shelved', 'deleted', 'dropped', 'shipped'];
+const STATUS_BEGIN = '<!-- status -->';
+// recall.py's _STATUS_MARK, _FENCE_OPEN and _FENCE_CLOSE under fullmatch. A line here never holds
+// a newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not (it also stops at
+// a carriage return, U+2028 and U+2029, which a Python line can hold).
+const STATUS_MARK = /^ {0,3}(<!-- \/?status -->)[ \t]*$/;
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// recall.py _status_of: { value, problem }. Both null when the memory declares no `status:`.
+function statusOf(text) {
+  const found = frontmatterBlock(text).split('\n').filter((line) => {
+    const rest = pyLstrip(line);
+    return rest.startsWith('status') && pyLstrip(rest.slice(6)).startsWith(':');
+  });
+  if (!found.length) return { value: null, problem: null };
+  if (found.length > 1) return { value: null, problem: 'more than one `status:` line' };
+  const value = uncomment(pyLstrip(pyLstrip(found[0]).slice(6)).slice(1));
+  return { value: pyStrip(pyStrip(pyStrip(pyStrip(value), '"'), "'")), problem: null };
+}
+
+// recall.py _memory_body, over the text as Python's universal newlines hand it over.
+function memoryBody(text) {
+  const unix = String(text).replace(/\r\n?/g, '\n');
+  let start = 0;
+  while (start < unix.length && (unix.charCodeAt(start) === 0xfeff || ' \t\n'.includes(unix[start]))) start += 1;
+  const head = unix.slice(start);
+  if (!head.startsWith('---')) return unix;
+  const end = head.indexOf('\n---', 3);
+  if (end === -1) return '';
+  const below = head.indexOf('\n', end + 4);
+  return below === -1 ? '' : head.slice(below + 1);
+}
+
+// recall.py _status_block: the lines between the first paired markers outside fenced code, or null.
+function statusBlock(text) {
+  let start = null;
+  let fence = null;
+  const lines = memoryBody(text).split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (fence) {
+      const shut = FENCE_CLOSE.exec(line);
+      if (shut && shut[1][0] === fence.char && shut[1].length >= fence.length) fence = null;
+      continue;
+    }
+    const open = FENCE_OPEN.exec(line);
+    if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+      fence = { char: open[1][0], length: open[1].length };
+      continue;
+    }
+    const mark = STATUS_MARK.exec(line);
+    if (!mark) continue;
+    if (mark[1] === STATUS_BEGIN) start = i;
+    else if (start !== null) return lines.slice(start + 1, i).join('\n');
+  }
+  return null;
+}
+
+// recall.py _thread_text: Python's str.split() whitespace collapsed, comment markers neutralised,
+// a leading `#` escaped. Uncapped, as Python's is.
+function threadText(raw) {
+  const text = raw.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
+    .split('<!--').join('&lt;!--').split('-->').join('--&gt;');
+  return text.startsWith('#') ? String.fromCharCode(92) + text : text;
+}
+
+// recall.py _thread: null for no `status:`, else { kind, status, text } with kind one of
+// listed, closed, duplicate, unknown, no-block. `status` is lowercased except for an unknown
+// value, which is kept as written; `text` is set for a listed thread only.
+function threadOf(raw) {
+  const { value, problem } = statusOf(raw);
+  if (problem !== null) return { kind: 'duplicate', status: null, text: null, problem };
+  if (value === null) return null;
+  const status = value.toLowerCase();
+  if (THREAD_CLOSED.includes(status)) return { kind: 'closed', status, text: null };
+  if (!THREAD_STATUSES.includes(status)) return { kind: 'unknown', status: value, text: null };
+  const block = statusBlock(raw);
+  if (block === null) return { kind: 'no-block', status, text: null };
+  return { kind: 'listed', status, text: threadText(block) };
+}
+
+// recall.py _index_health's three budgets (LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN), and
+// its phrases, over a fastLint result: [] when MEMORY.md is within all three. Not the 16-entry
+// ceiling, which is a soft attention target. `longestLine` is in code points, as Python counts.
+const INDEX_BUDGETS = { lines: 140, bytes: 12000, lineChars: 300 };
+function indexHealth(fast) {
+  if (!fast) return [];
+  const over = [];
+  if (fast.lineCount > INDEX_BUDGETS.lines) over.push(`${fast.lineCount} lines (budget ${INDEX_BUDGETS.lines})`);
+  if (fast.bytes > INDEX_BUDGETS.bytes) over.push(`${fast.bytes} bytes (budget ${INDEX_BUDGETS.bytes})`);
+  if (fast.longestLine > INDEX_BUDGETS.lineChars) {
+    over.push(`${fast.longestLine} characters on its longest line (budget ${INDEX_BUDGETS.lineChars})`);
+  }
+  return over;
+}
+
 // Backstop cadence for re-discovering the memory store. A file watcher can only
 // report on a directory that exists when the watcher is made, so when the store
 // MOVES every watcher dies at once and no surviving watcher can say so. Same
@@ -217,7 +330,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:3269-3270#memoryStoreDirs) overrides `dir` before it calls this.
+// (extension.js:3396-3397#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive
@@ -244,7 +357,7 @@ function norm(s) {
   return s.trim().toLowerCase().replace(/-/g, '_');
 }
 
-// Fast lint of one dir's MEMORY.md: size + over-budget hook lines + broken file links.
+// Fast lint of one dir's MEMORY.md: size + over-long lines + broken file links + broken comments.
 // Cheap enough to run on every save (reads one file, no sibling scan).
 //
 // `names` is the dir's `.md` listing when the caller already has one (fullReport does),
@@ -282,13 +395,23 @@ function fastLint(dir, conf, names = null, text = null) {
   // A trailing newline splits into a final empty element that is not a line. Dropping it
   // is what makes this agree with `wc -l`, and with what the loader counts.
   const lineCount = lines.length - (lines[lines.length - 1] === '' ? 1 : 0);
+  // The longest physical line in code points, for the open threads' INDEX budget (indexHealth).
+  // Array.from only for a line longer than the longest so far, so the common case costs nothing.
+  let longestLine = 0;
+  for (const ln of lines) {
+    if (ln.length > longestLine) longestLine = Math.max(longestLine, Array.from(ln).length);
+  }
 
   const over = [];
   const broken = [];
   const linkRe = /\]\(([^)]+\.md)(#[^)]*)?\)/g;
   lines.forEach((ln, i) => {
-    if (ln.startsWith('- ') && ln.length > conf.lineBudget) {
-      over.push({ line: i, len: ln.length, text: ln });
+    // EVERY line, in code points (2026-10-19), the guard's and recall.py's rule. This read only
+    // "- " lines and measured UTF-16 units, so a 300-character heading passed and a line of 160
+    // emoji read as 320. `end` is the UTF-16 length, which is what a Range column counts.
+    const len = Array.from(ln.replace(/\r/g, '')).length;
+    if (len > conf.lineBudget) {
+      over.push({ line: i, len, end: ln.length, text: ln });
     }
     let m;
     linkRe.lastIndex = 0;
@@ -303,7 +426,15 @@ function fastLint(dir, conf, names = null, text = null) {
     dir, memPath, bytes, tokens, over, broken,
     totalOver: bytes > conf.totalBudget,
     lineCount,
+    longestLine,
     linesOver: lineCount > conf.maxLines,
+    // Below the loader's cap, the target the MEMORY.md guard holds growth to: past it the index
+    // still loads whole, and every addition should now take a line out.
+    linesTarget: LINES_TARGET,
+    linesOverTarget: lineCount > LINES_TARGET,
+    // A `<!--` inside an open comment, an orphan `-->`, a comment never closed: Claude Code
+    // strips comments from the index, so each one leaks text into every session or hides it.
+    comments: commentDefectList(text),
   };
 }
 
@@ -437,7 +568,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1313#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1459#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.
@@ -452,6 +583,12 @@ function fullReport(dir, conf, known = null) {
   // gate step, so the count describes the same memories the panel shows. Read by gateEntryOf,
   // the reading the gate count above uses, so the two cannot disagree about a file.
   const gateRetired = [];
+  // Memories that declare a `status:` at all, and those `recall.py --threads-compile` lists as
+  // open threads (threadOf, recall.py's _thread): the Claude memory card's open-threads line, and
+  // activation's question whether a compile could have anything to say. The index is excluded,
+  // as recall.py excludes it.
+  let threadDeclared = 0;
+  let threadListed = 0;
   for (const f of files) {
     let raw;
     try { raw = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
@@ -460,6 +597,9 @@ function fullReport(dir, conf, known = null) {
     valid.add(norm(f.slice(0, -3)));
     const nm = raw.slice(0, 400).match(/^\s*name:\s*(.+)$/m);
     if (nm) valid.add(norm(nm[1].trim().replace(/^["']|["']$/g, '')));
+    const thread = f !== MEMORY_INDEX ? threadOf(raw) : null;
+    if (thread) threadDeclared += 1;
+    if (thread?.kind === 'listed') threadListed += 1;
     const gate = f !== MEMORY_INDEX ? gateEntryOf(raw) : null;
     if (gate && gate.state === 'retired') gateRetired.push({ file: f, agents: gate.agents, problem: gate.problem });
     else if (gate && gate.state === 'excluded') gateExcluded.push({ file: f, problem: gate.problem });
@@ -481,7 +621,8 @@ function fullReport(dir, conf, known = null) {
   const unresolved = [...new Set(
     [...stripCode(all).matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]).filter((l) => !valid.has(norm(l)))
   )].sort();
-  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies, gateExcluded, gateRetired };
+  return { ...fast, fileCount: files.length, unresolved, gateSources, gateBodies, gateExcluded, gateRetired,
+    threadDeclared, threadListed };
 }
 
 // ── Gates in the OTHER memory stores: reported, never compiled ────────────────────
@@ -839,19 +980,24 @@ class MemoryLint {
     // is absent here and lands on the same hide() the second call's null used to reach.
     const r = primary ? lints.get(primary) : null;
     if (!r) { this.status.hide(); return; }
-    const issues = r.over.length + r.broken.length;
+    const issues = r.over.length + r.broken.length + r.comments.length;
     const tok = r.tokens >= 1000 ? (r.tokens / 1000).toFixed(1) + 'k' : String(r.tokens);
+    // Past the cap names the cap; below it, past the 140-line target names the target.
     this.status.text = `$(book) mem: ${tok} tok`
-      + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines` : '')
+      + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines`
+        : r.linesOverTarget ? ` · ${r.lineCount} lines, over the ${r.linesTarget}-line target` : '')
       + (issues ? ` · ${issues} to fix` : '');
     this.status.tooltip =
       `MEMORY.md: ${r.bytes} bytes (~${r.tokens} tokens/session, budget ${conf.totalBudget / 4 | 0})\n` +
-      `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest\n` +
-      `${r.over.length} over-budget hook line(s), ${r.broken.length} broken index link(s)\n` +
+      `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest; `
+        + `the target is ${r.linesTarget}\n` +
+      `${r.over.length} over-budget line(s), ${r.broken.length} broken index link(s), `
+        + `${r.comments.length} broken HTML comment(s)\n` +
       `${path.dirname(r.memPath).replace(os.homedir(), '~')}\nClick for the full report.`;
     // linesOver joins totalOver here rather than the count: neither has a line to point
-    // at, and both are worse than anything that does.
-    this.status.backgroundColor = (issues || r.totalOver || r.linesOver)
+    // at, and both are worse than anything that does. Past the target is a warning too: the
+    // index still loads, and the next addition should take a line out.
+    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget)
       ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.status.show();
   }
@@ -860,11 +1006,23 @@ class MemoryLint {
     const out = [];
     for (const o of r.over) {
       const d = new vscode.Diagnostic(
-        new vscode.Range(o.line, 0, o.line, o.len),
+        new vscode.Range(o.line, 0, o.line, o.end),
         `Index line is ${o.len} chars (budget ${conf.lineBudget}). Move the running detail into ` +
         `the memory file or the project repo and leave a one-line hook.`,
         vscode.DiagnosticSeverity.Warning
       );
+      d.source = 'claude-memory';
+      out.push(d);
+    }
+    const said = {
+      nested: '`<!--` inside a comment that is already open: the first `-->` closes both, and the text up to the next `-->` is loaded into every session.',
+      orphan: '`-->` with no comment open: it is shown as text in every session.',
+      unclosed: '`<!--` never closed: everything after it is hidden from every session.',
+    };
+    for (const c of r.comments) {
+      const width = c.kind === 'orphan' ? 3 : 4;
+      const d = new vscode.Diagnostic(new vscode.Range(c.line, c.column, c.line, c.column + width),
+        `Broken HTML comment in the index. ${said[c.kind]}`, vscode.DiagnosticSeverity.Warning);
       d.source = 'claude-memory';
       out.push(d);
     }
@@ -922,14 +1080,23 @@ class MemoryLint {
     if (r.linesOver) {
       ch.appendLine(`  ! ${r.lineCount - conf.maxLines} line(s) past the cap`
         + ` — everything after line ${conf.maxLines} is NOT being loaded into sessions`);
+    } else if (r.linesOverTarget) {
+      ch.appendLine(`  ! ${r.lineCount - r.linesTarget} line(s) past the ${r.linesTarget}-line target:`
+        + ' still loaded, but every addition should now take a line out');
     }
     ch.appendLine(`  ${r.fileCount} memory files in the dir`);
     ch.appendLine('');
     if (r.over.length) {
       ch.appendLine(`${r.over.length} index line(s) over ${conf.lineBudget} chars — leave a hook, move detail out:`);
       for (const o of [...r.over].sort((a, b) => b.len - a.len)) {
-        ch.appendLine(`  ${String(o.len).padStart(4)} ch  L${o.line + 1}  ${o.text.slice(2, 72)}...`);
+        ch.appendLine(`  ${String(o.len).padStart(4)} ch  L${o.line + 1}  ${o.text.slice(o.text.startsWith('- ') ? 2 : 0, 72)}...`);
       }
+      ch.appendLine('');
+    }
+    if (r.comments.length) {
+      ch.appendLine('broken HTML comments (Claude Code strips comments, so these leak text into sessions or hide it):');
+      const kinds = { nested: '<!-- inside an open comment', orphan: '--> with no comment open', unclosed: '<!-- never closed' };
+      for (const c of r.comments) ch.appendLine(`  L${c.line + 1}  ${kinds[c.kind]}`);
       ch.appendLine('');
     }
     if (r.broken.length) {
@@ -946,11 +1113,13 @@ class MemoryLint {
     // resolve, because the verdict only tests over + broken. The unresolved ones are
     // report-only and correctly excluded from the verdict; the sentence just has to stop
     // claiming otherwise when there are any.
-    if (!r.over.length && !r.broken.length) {
+    // The comments joined the verdict with their check (2026-10-19), and the sentence names them,
+    // so it claims exactly what it tests.
+    if (!r.over.length && !r.broken.length && !r.comments.length) {
       ch.appendLine(r.unresolved.length
-        ? `clean: every index line within budget, every index link resolves. `
+        ? `clean: every index line within budget, every index link resolves, every comment closes. `
           + `The ${r.unresolved.length} [[link]](s) above are forward-links, not faults.`
-        : 'clean: every index line within budget, all index links resolve.');
+        : 'clean: every index line within budget, all index links resolve, every comment closes.');
     }
     ch.show(true);
     this.refresh();
@@ -976,4 +1145,5 @@ function memoryReport() {
 // production importer either, but test/memory-line-cap.test.js and
 // test/memory-lint-watchers.test.js call them directly, and those calls are the
 // mutation-killing assertions for the line cap and the store-selection rule.
-module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf };
+module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf,
+  threadOf, indexHealth };

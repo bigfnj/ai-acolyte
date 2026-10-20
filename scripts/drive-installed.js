@@ -170,6 +170,12 @@ function message(kind, m, options, ...choices) {
   if (kind === 'warning' && ['Retire 1 gate?', 'Restore 1 gate?'].includes(m) && choices.includes('Apply')) {
     return Promise.resolve('Apply');
   }
+  if (kind === 'warning' && m === 'Turn on the MEMORY.md guard?' && choices.includes('Turn on')) {
+    return Promise.resolve('Turn on');
+  }
+  if (kind === 'warning' && m === 'Turn off open threads?' && choices.includes('Turn off')) {
+    return Promise.resolve('Turn off');
+  }
   return Promise.resolve(kind === 'warning' &&
     ['Remove shell-style guidance?', 'Remove memory gates?'].includes(m) && choices.includes('Remove')
     ? 'Remove' : undefined);
@@ -340,6 +346,9 @@ Module._load = function load(request, parent, isMain) {
     'permission-wildcarding.drainLocal',
     'permission-wildcarding.toggleGuidance',
     'permission-wildcarding.toggleGates',
+    'permission-wildcarding.toggleAutoLearn',
+    'permission-wildcarding.toggleMemoryGuard',
+    'permission-wildcarding.toggleOpenThreads',
   ];
   const missing = expected.filter((id) => !commands.has(id));
   if (missing.length) bad('the real command handlers registered', `missing: ${missing.join(', ')}`);
@@ -534,6 +543,89 @@ Module._load = function load(request, parent, isMain) {
     assert.ok(fs.readFileSync(codexInstructions, 'utf8').includes('Fixture Codex-only gate.'));
     assert.ok(fs.readFileSync(instructionFiles[0]).equals(claudeBefore), 'restoring a Codex-only gate changed CLAUDE.md');
     return retired.slice(0, 160);
+  });
+  // The MEMORY.md guard (1.9.0), end to end through the packaged artefact: the command installs the
+  // stable copy and the PreToolUse handler, the COPY (not the source tree) refuses an over-budget
+  // index write and allows a shrink and a non-index file, and the command takes the handler out
+  // again leaving every other settings field as it was.
+  await check('the MEMORY.md guard installs through the packaged command, its copy blocks and allows as specified, and it turns off', async () => {
+    const { memoryGuardStatus } = require(path.join(INSTALLED, 'src', 'memory-guard-install.js'));
+    const settingsFile = path.join(home, '.claude', 'settings.json');
+    const before = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, 'utf8')) : {};
+    assert.equal(memoryGuardStatus({ home }).on, false, 'precondition: the guard starts off');
+    await invoke('toggleMemoryGuard');
+    const on = memoryGuardStatus({ home });
+    assert.equal(on.status, 'configured', `the command left the guard ${on.status}`);
+    assert.ok(on.copy.exists && on.copy.revision === on.packagedRevision, 'the stable copy is missing or not the packaged revision');
+    assert.ok(on.scriptPath.startsWith(path.join(home, '.claude', 'wildcarding')), `copy outside the sandbox: ${on.scriptPath}`);
+    const handlers = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse.flatMap((group) => group.hooks);
+    const ours = handlers.filter((h) => String(h.command).includes('memory-index-guard.js'));
+    assert.equal(ours.length, 1, 'expected exactly one guard handler');
+    assert.ok(!ours[0].async, 'the guard handler must not be async (an async hook cannot block)');
+    const store = path.join(home, '.claude', 'projects', 'guard-drive', 'memory');
+    fs.mkdirSync(store, { recursive: true });
+    const index = path.join(store, 'MEMORY.md');
+    fs.writeFileSync(index, '# Memory Index\n' + Array.from({ length: 9 }, (_, i) => `- entry ${i}\n`).join(''));
+    const lines = (n) => Array.from({ length: n }, (_, i) => `line ${i}`).join('\n') + '\n';
+    const run = (filePath, content) => spawnSync(process.execPath, [on.scriptPath], {
+      input: JSON.stringify({ session_id: 'drive', hook_event_name: 'PreToolUse', tool_name: 'Write', cwd: home,
+        tool_input: { file_path: filePath, content } }),
+      env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }, encoding: 'utf8', timeout: 20000, windowsHide: true,
+    });
+    const grow = run(index, lines(150));
+    assert.equal(grow.status, 2, `an over-budget index write was not refused (exit ${grow.status}): ${grow.stderr}`);
+    assert.match(grow.stderr, /140/, 'the refusal does not name the line budget');
+    const shrink = run(index, lines(5));
+    assert.equal(shrink.status, 0, `a shrinking index write was refused: ${shrink.stderr}`);
+    const other = run(path.join(store, 'other.md'), lines(150));
+    assert.equal(other.status, 0, `a non-index memory file was refused: ${other.stderr}`);
+    await invoke('toggleMemoryGuard');
+    const off = memoryGuardStatus({ home });
+    assert.equal(off.on, false, `the command left the guard ${off.status}`);
+    const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    const strip = (s) => { const c = JSON.parse(JSON.stringify(s)); delete c.hooks; return c; };
+    assert.deepEqual(strip(after), strip(before), 'turning the guard on and off changed settings outside hooks');
+    return `copy r${on.copy.revision}: over-budget write exit 2, shrink 0, non-index 0; off leaves settings as they were`;
+  });
+  // Open threads (1.9.0), through the packaged command and the packaged recall.py with the toolbox
+  // Python: a memory declaring `status: awaiting` with a status block is compiled and installed as
+  // its own block in both instruction files, the user text and the gates block are untouched, and
+  // turning it off takes the block out of both.
+  await check('open threads compile through the packaged recall.py, install into both instruction files, and turn off', async () => {
+    const begin = '<!-- BEGIN permission-wildcarding: open threads (managed) -->';
+    const gatesBegin = '<!-- BEGIN permission-wildcarding: memory gates (managed) -->';
+    const store = path.join(home, '.claude', 'projects', 'drive', 'memory');
+    assert.ok(fs.existsSync(path.join(store, 'MEMORY.md')), 'precondition: the store the gates check created');
+    const thread = path.join(store, 'fixture_thread.md');
+    fs.writeFileSync(thread, '---\nname: fixture_thread\nmetadata:\n  type: project\n  status: awaiting\n---\n\n'
+      + '<!-- status -->\nFixture thread waiting on the owner.\n<!-- /status -->\n');
+    const count = (text, marker) => text.split(marker).length - 1;
+    const gatesBefore = instructionFiles.map((file) => count(fs.readFileSync(file, 'utf8'), gatesBegin));
+    try {
+      await invoke('toggleOpenThreads');
+      assert.equal(config.get('openThreads.enabled'), true, 'the toggle did not leave the setting on');
+      const compiled = fs.readFileSync(path.join(home, '.claude', 'open-threads.generated.md'), 'utf8');
+      assert.match(compiled, /^<!-- generated by recall\.py --threads-compile; sha [0-9a-f]{16} -->/, 'compiled header');
+      instructionFiles.forEach((file, i) => {
+        const text = fs.readFileSync(file, 'utf8');
+        assert.ok(text.startsWith(ownInstructions), `user text was changed in ${file}`);
+        assert.equal(count(text, begin), 1, `open threads block count in ${file}`);
+        assert.match(text, /\*\*AWAITING\*\* Fixture thread waiting on the owner/, `the thread line is missing in ${file}`);
+        assert.match(text, /fixture_thread/, `the thread does not name its memory in ${file}`);
+        assert.equal(count(text, gatesBegin), gatesBefore[i], `installing threads changed the gates block in ${file}`);
+      });
+      await invoke('toggleOpenThreads');
+      assert.equal(config.get('openThreads.enabled'), false, 'the toggle did not leave the setting off');
+      instructionFiles.forEach((file, i) => {
+        const text = fs.readFileSync(file, 'utf8');
+        assert.equal(count(text, begin), 0, `the open threads block is still in ${file}`);
+        assert.ok(text.startsWith(ownInstructions), `user text was changed in ${file}`);
+        assert.equal(count(text, gatesBegin), gatesBefore[i], `removing threads changed the gates block in ${file}`);
+      });
+    } finally {
+      fs.rmSync(thread, { force: true });
+    }
+    return 'awaiting thread compiled by the packaged recall.py, installed in CLAUDE.md and the Codex file, then removed';
   });
 
   try {

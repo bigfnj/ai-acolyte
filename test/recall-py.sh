@@ -90,13 +90,13 @@ echo "$ERR" | grep -q 'recall_index.json' || fail "the warning does not name the
 echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 
 # ---------------------------------------------------------------- B2: the write is ATOMIC
-# Mutation: replace save_index's body (memory/recall.py:416-427#save_index) with a plain in-place
+# Mutation: replace save_index's body (memory/recall.py:419-430#save_index) with a plain in-place
 # `json.dump(idx, open(INDEX_PATH, "w"))`. The file-identity assertion below fails; nothing
 # else in this suite does.
 #
 # The residue check underneath used to be the only guard here, and it was vacuous twice over.
 # It globbed for `recall_index.json.tmp`, but save_index names its temp file with the writing
-# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:432#os.getpid) -- so the literal path
+# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:436#os.getpid) -- so the literal path
 # it tested has never existed on any run, broken or not. And even spelled correctly it only fires for
 # "wrote a tmp, forgot os.replace": revert to an in-place json.dump and there is no temp file
 # to leave behind, so it passes on the state it exists to forbid. Between it and the
@@ -357,9 +357,13 @@ check_axis() {   # check_axis <name> <warning substring>
     && fail "--lint printed the $1 warning and then called the corpus clean"
 }
 
+# 50 prose lines of ~255 characters: past the byte budget, and still inside the 140-line target
+# and the 300-character line rule, so this arm moves bytes alone (it used 200 short lines until
+# the line target existed, which would have made it a two-axis fixture).
+PAD="$(printf '%0240d' 0 | tr 0 p)"
 { clean_index
-  i=0; while [ $i -lt 200 ]; do
-    printf 'Prose line %03d, padding the index past its byte budget without adding an entry.\n' "$i"
+  i=0; while [ $i -lt 50 ]; do
+    printf 'Prose line %03d, %s\n' "$i" "$PAD"
     i=$((i + 1))
   done
 } > "$MEM/MEMORY.md"
@@ -373,16 +377,50 @@ check_axis over_ceiling 'over the attention ceiling'
 clean_index
 printf 'A forward link to nothing: [[no-such-memory]]\n' >> "$MEM/MEMORY.md"
 check_axis unresolved 'unresolved \[\[links\]\]'
+
+# The MEMORY.md guard's three rules (2026-10-19), one axis each, the same way.
+#   over_lines       150 short prose lines: past the 140-line target, ~1.5 KB, no entries added
+#   over (any line)  one 301-character PROSE line: the rule used to read only "- " lines
+#   comment_defects  a <!-- inside an open comment: one short line, nothing else moves
+{ clean_index
+  i=0; while [ $i -lt 150 ]; do printf 'note %03d\n' "$i"; i=$((i + 1)); done
+} > "$MEM/MEMORY.md"
+check_axis over_lines 'line(s) past the 140-line target'
+
+clean_index
+printf '%0301d\n' 0 | tr 0 q >> "$MEM/MEMORY.md"
+check_axis long_prose_line 'index line(s) over 300 chars'
+
+clean_index
+printf '<!-- header <!-- nested --> tail -->\n' >> "$MEM/MEMORY.md"
+check_axis comment_defects 'broken HTML comment'
 echo "ok: the clean verdict tests every finding it prints, not five of eight"
+
+# --------------------------------------------- widths are code points, and fenced markers are code
+# 300 astral emoji are 300 characters to len(), the guard and the editor lint alike, and 1200
+# UTF-8 bytes. A comment marker inside a fence or a code span is an example, not a comment.
+# Mutation: measure width in UTF-8 bytes or UTF-16 units, or drop the fence skip in
+# _comment_defects, and this fails.
+clean_index
+"$PY" -c "import sys; open(sys.argv[1], 'a', encoding='utf-8').write('\U0001F600' * 300 + '\n')" "$MEM/MEMORY.md"
+printf '```\n<!-- an example\n```\n- write `-->` to close\n' >> "$MEM/MEMORY.md"
+WIDE_LINT="$("$PY" "$RECALL" --lint)" || fail "--lint exited non-zero on the code-point fixture"
+printf '%s\n' "$WIDE_LINT" | grep -q 'over 300 chars' \
+  && fail "300 code points were counted as more than 300 characters"
+printf '%s\n' "$WIDE_LINT" | grep -q 'broken HTML comment' \
+  && fail "a comment marker inside fenced code or a code span was read as a comment"
+printf '%s\n' "$WIDE_LINT" | grep -q 'clean:' \
+  || fail "the code-point fixture should be clean"
+echo "ok: line widths are code points, and comment markers in code are not comments"
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1312#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1458#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1304#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1450#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.

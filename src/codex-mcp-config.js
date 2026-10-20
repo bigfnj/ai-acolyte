@@ -9,7 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync, spawn } = require('node:child_process');
 const { resolveCodexHome } = require('./codex-paths');
-const { commandLaunch, endProcessTree, npmShimLaunch } = require('./exec-resolve');
+const { commandLaunch, endProcessTree, npmShimLaunch, TREE_ENDING } = require('./exec-resolve');
 const { writeFileAtomicSync } = require('./permissions');
 
 const MODES = new Set(['auto', 'prompt', 'writes', 'approve']);
@@ -207,11 +207,21 @@ function nativeRpcAsync(requests, options, context) {
     let stdout = '';
     let stderr = '';
     let overflow = false;
+    // AN ASK ITS CALLER ENDED READS AS ENDED (2026-10-20). A caller's endProcessTree (deactivate's,
+    // or a thread's for it) marks the worker before taskkill /T runs, and that kill ends the
+    // app-server before the worker: under load the worker answered "Codex config server exited
+    // early" in between, so a killed ask read as Codex's own failure (src/exec-resolve.js, "A TREE
+    // BEING ENDED SAYS SO"). After the mark nothing the worker prints is the answer; its exit is.
+    const endedByCaller = () => child[TREE_ENDING] === true && !timedOut && !overflow;
     const finish = (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(backstop);
       if (timedOut) { reject(new Error('Codex config RPC is unavailable: the worker timed out')); return; }
+      if (endedByCaller()) {
+        reject(new Error('Codex config RPC is unavailable: ' + String(error?.message || 'the worker was ended').slice(0, 600)));
+        return;
+      }
       if (error && !stdout.trim()) {
         reject(new Error('Codex config RPC is unavailable: ' + String(error.message || error).slice(0, 600)));
         return;
@@ -229,8 +239,11 @@ function nativeRpcAsync(requests, options, context) {
     // `detached` on POSIX only: it makes the worker a process-group leader, so the
     // tree kill (endProcessTree) reaches its codex as well. On Windows it would
     // open a console; the tree kill there is taskkill /T and needs no group.
-    const child = spawn(launch.file, launch.args, { ...launch.options, windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    // `options.spawnGate`, from src/spawn-thread.js only, holds the spawn under the
+    // lock its threads share, so no other thread's child inherits this one's pipes.
+    const gate = typeof options.spawnGate === 'function' ? options.spawnGate : (start) => start();
+    const child = gate(() => spawn(launch.file, launch.args, { ...launch.options, windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
     // THE ANSWER IS THE LINE, NOT THE EXIT (2026-10-14). The worker ends its answer with a
     // newline (JSON.stringify never emits a raw one), then spends its grace and its kill
     // ending its codex before it exits. This side used to read the answer only on 'close',
@@ -256,7 +269,7 @@ function nativeRpcAsync(requests, options, context) {
       if (overflow) return;
       stdout += chunk;
       if (stdout.length > WORKER_OUTPUT_LIMIT) { overflow = true; endProcessTree(child); return; }
-      if (!timedOut && chunk.includes('\n')) answer(stdout.slice(0, stdout.indexOf('\n')));
+      if (!timedOut && !endedByCaller() && chunk.includes('\n')) answer(stdout.slice(0, stdout.indexOf('\n')));
     });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => { if (stderr.length < 4096) stderr += chunk; });

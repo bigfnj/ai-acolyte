@@ -8,6 +8,10 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.0 keeps the memory index lean**: an optional MEMORY.md guard hook refuses an edit
+that leaves the index worse past its budget, an Open threads block carries each memory's open status
+into every session in place of index lines, and Toggle Auto Learn switches Auto Learn from the
+dashboard (a workspace may now only turn it off). Two Windows process-spawn races are fixed.
 **Version 1.8.1 groups the dashboard rows** under Activity, Memory & instructions and Permissions,
 with Agent sessions first. **Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
 Inspect memory sources, a gates line and the Claude Code version, and Codex memory gains the CPU model
@@ -67,7 +71,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v181.vsix
+code --install-extension ai-acolyte-v190.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they
@@ -118,14 +122,14 @@ Codex rule export remains **experimental**. The feature-by-feature acceptance
 matrix and dated evidence are in
 [`docs/codex-compatibility.md`](docs/codex-compatibility.md).
 
-Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3064#showCodexRules`).
+Version 1.6.0 adds **Show Codex rules** (`vscode-extension/extension.js:3179#showCodexRules`).
 It lists local rules and confirms removal of a selected literal allow declaration
-("Remove this Codex allow rule?", `vscode-extension/extension.js:4627#showWarningMessage`). Current Auto Learn builds remember removals across
+("Remove this Codex allow rule?", `vscode-extension/extension.js:5083#showWarningMessage`). Current Auto Learn builds remember removals across
 workspaces. Computed policy remains read-only. This feature is included in the
 1.6.0 package; development checks used isolated staging before release preparation.
 
 Version 1.6.0 also adds **Restore Codex rules**
-(`vscode-extension/extension.js:4427#showCodexRestorePicker`). Restore preserves current rules and deliberate
+(`vscode-extension/extension.js:4883#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
 (`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
 evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
@@ -243,7 +247,53 @@ way, and installed only while memory gates are on: gates you switched off stay o
 terminal, `wildcard-perms --gates list`, `--gates retire <memory>` and `--gates restore <memory>`
 do the same. Only the store that compiles is changed, never the other stores the card reports.
 
-## 6. Recall over your memory
+## 6. Open threads (both agents)
+
+Status gets a home outside the memory index. Claude Code loads only the first 200 lines of
+`MEMORY.md`, and status written on index lines ("DONE", "AWAITING the owner") is what fills them.
+Instead, a memory says it is still open in its own frontmatter, and the open ones are listed in a
+managed block that both agents read at the start of every session.
+
+> **Buys you:** every session knows what is still waiting, and the index stays a list of hooks.
+
+```yaml
+---
+name: dashboard-layout
+metadata:
+  type: project
+  status: awaiting       # open, awaiting, blocked or deferred
+---
+
+The memory itself.
+
+<!-- status -->
+Waiting on the owner's choice between the two layouts.
+<!-- /status -->
+```
+
+Each open memory is one line of the block, `- **AWAITING** <text> (<memory file>)`, sorted by
+status (open, awaiting, blocked, deferred) and then by name. The text is the status block's, on
+one line, cut at 240 characters. At most ten are listed, and one more line counts the rest and
+points at `recall "status"`. `done`, `closed`, `live`, `shelved`, `deleted`, `dropped` and
+`shipped` close a thread: the memory stays, and its line leaves the block on the next compile.
+Any other value, two `status:` lines, or a listed status whose block is missing or sits only
+inside a code fence is left out, and `recall.py --lint` names it.
+
+While `MEMORY.md` is past 140 lines, 12000 bytes or a 300-character line, the block also carries
+an INDEX line telling every new session to compact it before adding anything. It reaches sessions
+on a machine whose managed policy keeps user hooks from running.
+
+`recall.py --threads-compile` writes `~/.claude/open-threads.generated.md` from the store the gates
+compile from. The extension recompiles after a memory edit that can change the list, a few seconds
+after activation when there is anything to say, and when the feature is turned on. It installs the
+result into `~/.claude/CLAUDE.md` and Codex's `AGENTS.md`, or a nonempty `AGENTS.override.md`.
+With nothing open and the index within its budgets, the block is removed. To turn it off, click
+**Turn off open threads** on the Claude memory card, run **AI Acolyte: Toggle open threads**, or
+set `permissionWildcarding.openThreads.enabled` to `false` in user settings; while it is off the
+extension neither compiles nor installs it. From a terminal, `wildcard-perms --open-threads
+on|off|status|refresh`.
+
+## 7. Recall over your memory
 
 ![Memory and recall card](img/07-memoryllm.png)
 
@@ -264,7 +314,67 @@ agent's version. Codex's per-session figure is its `memory_summary.md`, which a 
 loads when its memory is on. The two keep separate indexes on purpose, so a search of one
 agent's memory never returns the other's.
 
-## 7. Saved permissions (Claude Code and Codex)
+### The MEMORY.md guard (Claude Code, optional)
+
+Claude Code loads the first 200 lines of each project's memory index, `MEMORY.md`, into every
+session and strips its HTML comments. An index grows one reasonable hook at a time, and the lint
+can only report the result afterwards. The guard is a `PreToolUse` hook that refuses the edit that
+causes it. It is off until you turn it on.
+
+It judges a `Write`, `Edit` or `MultiEdit` of `<config>/projects/<project>/memory/MEMORY.md`, where
+`<config>` is `CLAUDE_CONFIG_DIR` or `~/.claude`, or of `MEMORY.md` in the `autoMemoryDirectory`
+your `settings.json` names. Any other file is let through without being read. It replays
+the edit and blocks only when a measure **ends past its budget and is worse than it was**
+(`src/memory-index-guard.js:220#verdict`):
+
+| Measure | Budget |
+|---|---|
+| lines | 140 |
+| bytes | 12,000 |
+| longest line, in characters (any line, not only entries) | 300 |
+| resident `- ` entries | 16 |
+| broken HTML comments: a `<!--` inside an open comment, an orphan `-->`, a `<!--` never closed | 0 |
+
+The worse-than-before half is what makes it safe over an index that is already too big. Deleting
+lines can only lower the first four, so compacting always gets through, and at 16 entries a new
+one has to replace an old one. The one deletion it refuses is half of a comment, because the
+comment's body would then load into every session. When it blocks, Claude Code shows the model
+each measure with its value and budget and the fix: move detail and status into the memory file.
+Anything the guard cannot judge is let through: a payload over 8 MiB, an `old_string` that is not
+in the file, a `MEMORY.md` it cannot read.
+
+Turn it on with **AI Acolyte: Toggle MEMORY.md guard**, the button on the **Claude memory** card,
+or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `status` says what is
+installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
+registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
+(`src/claude-hook-config.js:56#memoryGuardDefinition`). The copy outlives upgrades and is replaced
+only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
+`~/.claude/backups/settings.json.pre-memory-guard`. If another hook already runs a
+`memory-index-guard.js` from a different path, turning the guard on refuses, and that hook is
+never touched.
+
+**Managed policy can stop it running.** Where a managed policy sets `allowManagedHooksOnly` or
+`disableAllHooks`, current Claude Code runs no user hook at all (see the correction under
+[watch the cause](#design-principle-watch-the-cause-do-not-hook-the-event)), so the guard is
+installed and inert. The card, the toggle and `--memory-guard status` say so whenever a local file
+shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`, or
+`disableAllHooks` in your own settings (`src/memory-guard-install.js:124#hookPolicy`). A policy
+delivered from a server may leave no local trace, so where nothing is found they say they cannot
+tell, and `wildcard-perms --memory-guard probe` asks Claude Code. The probe runs
+`claude -p "/goal probe"` once in an empty temporary directory and reads Claude Code's own refusal
+text, so a reworded message reads as unknown. Where hooks are allowed, that is one short real
+Claude Code turn. Claude Code records even the refusal as a session, so the probe always uses the
+same directory name and leaves a single transcript folder under `~/.claude/projects`. Measured on
+the development box on 2026-10-19 with Claude Code 2.1.301, the probe answered "restricted" in
+about 5 seconds. The lint keeps reporting the same measures either way.
+
+The editor gauge and `recall.py --lint` count lines, line widths and broken comments exactly as
+the guard does, and `recall.py --lint` also holds the entry count to 16;
+`test/memory-guard-parity.test.js` measures the same indexes with all three. The extension's
+`memory.lineBudget` and `memory.totalBudget` settings tune the gauge only; the hook always uses
+the budgets above.
+
+## 8. Saved permissions (Claude Code and Codex)
 
 The **Saved permissions** row combines Claude allow entries and local Codex allow
 rules, with an agent label on each entry. Its 12-entry preview alternates agents;
@@ -294,7 +404,7 @@ call it decided. Only counts are stored, keyed by a hash of each rule.
 
 > **Buys you:** a list worth pruning, without deleting a rule something still uses.
 
-## 8. Agent sessions
+## 9. Agent sessions
 
 The **Agent sessions** row lists the Claude and Codex sessions that wrote a transcript in the
 last 15 minutes. For each one it shows:
@@ -448,7 +558,7 @@ header sha. One write and one read cover both agents, `compiledForAgents` refuse
 when any section is torn, and an agent the compile gives no gates has its block removed. A corpus
 with no `agents:` key compiles byte for byte as it did before the key was read. Nothing
 here registers a `SessionStart` hook; the one automatic recompile trigger is `gatesCorpusWatchers`
-(`vscode-extension/extension.js:3254#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
+(`vscode-extension/extension.js:3381#gatesCorpusWatchers`), watching `*.md` in every discovered memory store and
 compiling then installing after a 2 s debounce.
 
 Retiring and restoring a single gate is `recall.py --gates-retire` and `--gates-restore`. They
@@ -461,6 +571,19 @@ request for both front ends, computing what each agent loads before and after, s
 panel refuse and report alike. After the edit the change compiles once, through the same atomic
 write every compile uses, and installs through `setGatesAll`'s single read. The corpus watcher
 skips the memories the edit itself rewrote (`isOwnGateEdit`), so one change is one compile.
+
+The open-threads block is a third instance of `createManagedBlock`, in `src/agent-open-threads.js`,
+with its own markers, switch and `pre-open-threads` backups. `recall.py --threads-compile` reads
+`status:` the way `agents:` is read, at any indent with its comment dropped, takes the block text
+only from marker lines that sit on their own outside fenced code, and writes through the same
+temp-and-replace helper as the gates compile. It never writes an empty file: zero threads is the
+header and the heading, so an empty read can only be a torn one. The installer reads the file once
+and refuses a missing header, a sha that does not match the bytes below it, or a missing heading,
+with every instruction file left as it was. The same `*.md` watcher hands each event to the gates
+and to the threads, and the threads decide for themselves: they react to `MEMORY.md`, ignore
+whether gates are on, and skip a store that does not compile. `vscode-extension/memoryLint.js`
+`threadOf` is the JavaScript reading the card counts with, and `test/threads-compile.sh` holds it
+to Python's over a generated corpus.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
 with Okapi BM25 over the whole file, each leg min-max normalized per query. The lexical leg exists
@@ -493,12 +616,18 @@ it, because a stale union would hand back the entry you deliberately pruned.
 
 The automation lives in a VS Code extension rather than a Claude Code hook, and that is what makes
 it survive a locked-down managed policy. A `SessionStart` hook is the obvious way to make an agent
-do something automatically, and it is exactly what an org policy can take away:
-`allowManagedHooksOnly` is enforced per event, so on a machine whose policy defines only
-`PostToolUse` a user `SessionStart` entry sits in `settings.json` and never fires. A `PostToolUse` canary was run against this
-and reported 4 of 4 tool calls, with a real session start and a `/clear` both leaving the
-compiled file untouched. ⚠ That run left no artefact in the tree, so treat it as a report
-rather than a reproducible measurement until someone repeats it.
+do something automatically, and it is exactly what an org policy can take away.
+
+This section used to say that `allowManagedHooksOnly` is enforced per event, so that a user hook
+still runs on an event the policy itself defines. That rested on a `PostToolUse` canary that
+reported 4 of 4 tool calls under such a policy, and the run left no artefact in the tree. **On
+current Claude Code it is wrong.** Measured on the development box on 2026-10-19 with Claude Code
+2.1.293 and 2.1.301, under a managed policy that sets `allowManagedHooksOnly`:
+`claude -p "/goal x"` answered "/goal can't run while hooks are restricted (disableAllHooks or
+allowManagedHooksOnly is set in settings or by policy)", and no user, project or `--settings` hook
+ran on any event tried (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`). Read the setting as "no
+user hooks at all" until a newer client shows otherwise. `wildcard-perms --memory-guard probe`
+asks the installed client the same `/goal` question.
 
 An extension is not a hook, so no policy toggle reaches it, and that reframes the build. Trigger
 on the cause rather than the ceremony: recompiling gates on a corpus change fires once per edit

@@ -81,6 +81,52 @@ test('execFile on a thread answers in execFile\'s shape, and its handle closes w
   assert.ok(Date.now() - started < 100, 'a closed thread child is not asked to end anything');
 });
 
+// THE GATE EVERY SPAWN THREAD SHARES (2026-10-20, src/spawn-thread.js "ONE SPAWN AT A TIME").
+// Driven from here, through the process-wide slot the module keeps it in: while this thread
+// holds the gate no spawn thread starts its child, and a hold older than GATE_STALE_MS (5 s)
+// is taken over. The dashboard's consequence, the version probe waiting on the trust worker,
+// is pinned in test/dashboard-project-trust.test.js.
+test('a thread spawns only while no other holds the gate, and takes over a hold left stale', async () => {
+  const run = () => {
+    const answer = { at: null };
+    execFileOffThread(process.execPath, ['-e', ''], { windowsHide: true }, (error) => { answer.at = Date.now(); answer.error = error; });
+    return answer;
+  };
+  const first = run();
+  assert.ok(await waitFor(() => first.at, 15000), 'precondition: a thread spawned and answered');
+  const shared = globalThis[Symbol.for('ai-acolyte.spawn-gate')];
+  assert.ok(shared instanceof SharedArrayBuffer, 'precondition: the threads were handed the process\'s gate');
+  const lock = new Int32Array(shared, 0, 1);
+  const base = new Float64Array(shared, 8, 1);
+  const stamp = (at) => 1 + Math.floor((at - base[0]) / 100);
+  assert.equal(Atomics.compareExchange(lock, 0, 0, stamp(Date.now())), 0, 'precondition: the gate was free');
+  const held = run();
+  // No clock in the claim: nothing releases the gate but this test. MUTATION: make `gated`
+  // run its spawn at once. The answer lands during this wait and this fails. Confirmed 2026-10-20.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const releasedAt = Date.now();
+  assert.equal(held.at, null, 'a thread spawned while another held the gate');
+  Atomics.store(lock, 0, 0);
+  Atomics.notify(lock, 0);
+  assert.ok(await waitFor(() => held.at, 15000), 'the spawn ran once the gate was released');
+  assert.equal(held.error, null);
+  assert.ok(held.at >= releasedAt);
+  // A hold taken "10 s ago": `base` is moved back, which only this process's threads read.
+  base[0] = Date.now() - 60000;
+  Atomics.store(lock, 0, stamp(Date.now() - 10000));
+  const stale = run();
+  try {
+    // MUTATION: drop the stale takeover in `gated`. The thread waits on the stale hold and
+    // this times out. Confirmed 2026-10-20.
+    assert.ok(await waitFor(() => stale.at, 15000), 'a stale hold stopped every later spawn');
+    assert.equal(stale.error, null);
+    assert.equal(Atomics.load(lock, 0), 0, 'the thread that took the stale hold over released it');
+  } finally {
+    // So a failure here fails by name instead of leaving that thread waiting with the file open.
+    if (stale.at === null) { Atomics.store(lock, 0, 0); Atomics.notify(lock, 0); }
+  }
+});
+
 // The asynchronous layers read, as the extension makes it (`offThread: true`):
 // bounded by its budget, ended by the worker's own deadline (its wording), and no
 // codex left running. The same contract test/codex-mcp-config.test.js pins for

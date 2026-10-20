@@ -180,7 +180,7 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
     if (ids.includes(scrollTo)) element = doc.getElementById(scrollTo);
     else if (scrollTo === 'savedPermissionsHead') element = doc.querySelector('.rowhead[data-row="list"]');
     else if (scrollTo === 'savedMore') element = doc.querySelector('#list li.more');
-    else if (['guidanceHead', 'gatesHead', 'autoLearnHead', 'codexMemoryHead', 'permissionToolsHead'].includes(scrollTo)) {
+    else if (['guidanceHead', 'gatesHead', 'autoLearnHead', 'memoryHead', 'codexMemoryHead', 'permissionToolsHead'].includes(scrollTo)) {
       element = doc.querySelector('.rowhead[data-row="' + scrollTo.replace('Head', '') + '"]');
     } else throw new Error('unexpected dashboard scroll target');
     if (!element) throw new Error('dashboard scroll control is absent');
@@ -227,6 +227,14 @@ function inspectDashboardDocument(expectedUrl, scrollTo) {
     badge: text(doc.getElementById('stAutoLearn')), status: text(doc.getElementById('altext')),
     notes: text(doc.getElementById('alsub')), headPoint: point(autoLearnHead), headHit: hit(autoLearnHead),
     counts: Object.fromEntries(['safe', 'review', 'observe'].map((key) => [key, text(doc.getElementById('al' + key))])), buttons: {} };
+  // The Claude memory card (shown when a memory store exists) and its 1.9.0 lines.
+  const claudeMemoryHead = doc.querySelector('.rowhead[data-row="memory"]');
+  const memCard = doc.getElementById('memCard');
+  result.memory = memCard ? { visible: visible(memCard), expanded: visible(doc.getElementById('bodyMemory')),
+    badge: text(doc.getElementById('stMemory')), headPoint: point(claudeMemoryHead), headHit: hit(claudeMemoryHead),
+    guard: text(doc.getElementById('memoryGuardStatus')), guardButton: text(doc.getElementById('memoryGuardBtn')),
+    threads: text(doc.getElementById('claudeMemoryThreadsStatus')),
+    threadsButton: text(doc.getElementById('claudeMemoryThreads')) } : null;
   for (const id of ['alScan', 'alReview', 'alUndo', 'alWhy']) {
     const button = doc.getElementById(id);
     if (!button) return { ready: false, reason: 'Auto Learn controls are absent', url: doc.location.href };
@@ -659,7 +667,7 @@ async function main() {
     assert.equal(path.dirname(path.resolve(fixture.ackPath)), path.dirname(options.progress));
     const before = await autoLearnReady(fixture.expectedBeforeButtons);
     if (fixture.action === 'scan') {
-      assert.equal(before.autoLearn.badge, 'disabled', 'first Scan and rescan must run with background learning disabled');
+      assert.equal(before.autoLearn.badge, 'disabled · Turn on', 'first Scan and rescan must run with background learning disabled');
       assert.equal(before.autoLearn.buttons.alReview.enabled, false, 'Review must stay disabled during the manual scans');
     }
     const id = fixture.action === 'scan' ? 'alScan' : 'alUndo';
@@ -779,8 +787,25 @@ async function main() {
       const after = await dashboardState();
       assertDashboardState(after, fixture.expected, true);
       const expandedScreenshot = await dashboardScreenshot('partial-expanded');
+      // 1.9.0: the Claude memory card's MEMORY.md guard and open-threads lines, in the real webview.
+      // The fixture home has a healthy store and no status memory, the guard is not installed and
+      // open threads are on by default, so the texts and labels below are exact.
+      // Read from the rendered DOM (textContent), which the webview fills whether or not the row is
+      // open, so the check does not depend on a click landing on the row head.
+      assert.ok(after.memory && after.memory.visible, 'the Claude memory card is not shown although the fixture has a store');
+      const memoryCard = await waitFor('waiting for the Claude memory card lines to render', async () => {
+        const observed = await dashboardState('memoryHead');
+        return observed?.memory?.guard && observed.memory.threads ? observed : null;
+      });
+      assert.match(memoryCard.memory.guard, /^MEMORY\.md guard: off\. /, 'the guard line disagrees with an uninstalled guard');
+      assert.equal(memoryCard.memory.guardButton, 'Turn on MEMORY.md guard', 'the guard button label');
+      assert.equal(memoryCard.memory.threads, 'Open threads: none compiled yet.', 'the open-threads line');
+      assert.equal(memoryCard.memory.threadsButton, 'Turn off open threads', 'the open-threads button label');
+      const memoryScreenshot = await dashboardScreenshot('claude-memory');
+      report.claudeMemoryCard = { guard: memoryCard.memory.guard, guardButton: memoryCard.memory.guardButton,
+        threads: memoryCard.memory.threads, threadsButton: memoryCard.memory.threadsButton, screenshot: memoryScreenshot };
       const evidence = { status: 'passed', before, after, clicked: null, modalDecision: null,
-        screenshots: [collapsedScreenshot, expandedScreenshot] };
+        screenshots: [collapsedScreenshot, expandedScreenshot, memoryScreenshot] };
       report.dashboard.push({ caseId: fixture.caseId, ...evidence });
       ackDashboard(evidence);
       activeDashboard = null;

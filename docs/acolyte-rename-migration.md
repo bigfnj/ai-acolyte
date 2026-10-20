@@ -44,6 +44,7 @@ the **managed-block markers**:
 
     <!-- BEGIN permission-wildcarding: shell style (managed) -->
     <!-- BEGIN permission-wildcarding: memory gates (managed) -->
+    <!-- BEGIN permission-wildcarding: open threads (managed) -->
     <!-- BEGIN permission-wildcarding: <slug> (derived) -->
 
 A rewrite targeting the prefix therefore rewrote the markers too, in five source files

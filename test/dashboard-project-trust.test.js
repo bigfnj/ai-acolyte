@@ -34,10 +34,11 @@ const realSetTimeout = global.setTimeout;
 const tick = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
 // Longer than DASHBOARD_BOUNCE_MS (60 ms): refresh() is debounced.
 const settle = () => tick(150);
+// `what` may be a function, read only on a timeout, so the message says what was there instead.
 async function until(predicate, ms = 8000, what = 'condition') {
   const start = Date.now();
   while (!predicate()) {
-    if (Date.now() - start > ms) assert.fail(`timed out waiting for ${what}`);
+    if (Date.now() - start > ms) assert.fail(`timed out waiting for ${typeof what === 'function' ? what() : what}`);
     await tick(25);
   }
 }
@@ -77,7 +78,8 @@ function fixture(t, { projectRules = true, codexConfigOnly = false } = {}) {
 // `markFile`, when given, gets one line per invocation: proof it was run at all.
 // `versionGate`, when given, holds `--version` until that file exists (20 s at
 // most), so a test decides when the version probe lands instead of racing it.
-function fakeCodex(dir, mode, pidFile, markFile, versionGate) {
+// `layersGate` does the same for the app-server's config/read answer.
+function fakeCodex(dir, mode, pidFile, markFile, versionGate, layersGate) {
   fs.mkdirSync(dir, { recursive: true });
   const script = path.join(dir, 'fake-codex.js');
   fs.writeFileSync(script, `
@@ -101,7 +103,13 @@ else if (${JSON.stringify(mode)} === 'hang') {
     const result = message.method === 'config/read'
       ? { config: {}, layers: [{ name: { type: 'project', dotCodexFolder: require('path').join(message.params.cwd, '.codex') }, version: 'x' }] }
       : {};
-    process.stdout.write(JSON.stringify({ id: message.id, result }) + '\\n');
+    const send = () => process.stdout.write(JSON.stringify({ id: message.id, result }) + '\\n');
+    const gate = ${JSON.stringify(layersGate || '')};
+    if (!gate || message.method !== 'config/read') { send(); return; }
+    const started = Date.now();
+    const wait = setInterval(() => {
+      if (require('fs').existsSync(gate) || Date.now() - started > 20000) { clearInterval(wait); send(); }
+    }, 20);
   });
   rl.on('close', () => process.exit(0));
 }
@@ -399,7 +407,9 @@ test('a cold push starts no process on the host thread, and both Codex answers s
   try {
     app.open();
     await until(() => app.posted.some((data) => data.codexMemory?.cli?.version)
-      && app.posted.at(-1)?.codexPermissions?.pending === false, 30000, 'the version and the trust verdict');
+      && app.posted.at(-1)?.codexPermissions?.pending === false, 30000,
+    () => `the version and the trust verdict; the last push had ${JSON.stringify({ cli: app.posted.at(-1)?.codexMemory?.cli?.reason
+      ?? app.posted.at(-1)?.codexMemory?.cli?.version ?? null, pending: app.posted.at(-1)?.codexPermissions?.pending })}`);
     const ran = fs.readFileSync(marks, 'utf8');
     assert.match(ran, /^--version$/m, 'precondition: the version probe ran the stand-in');
     assert.match(ran, /^app-server --stdio$/m, 'precondition: the trust worker ran the stand-in');
@@ -411,6 +421,39 @@ test('a cold push starts no process on the host thread, and both Codex answers s
     assert.deepEqual(app.hostSpawns.map((entry) => `${entry.via} ${path.basename(String(entry.file))}`), [],
       'a process was started on the extension host thread');
   } finally {
+    await app.dispose();
+  }
+});
+
+// THE VERSION DOES NOT WAIT FOR THE TRUST ASK THE SAME PUSH STARTED (2026-10-20). The test
+// above timed out at 30 s in one of three loaded full runs, and the timing capture showed
+// why: the two threads a cold push starts spawned at the same moment, the config worker
+// inherited the version probe's stdout, so the probe's 'close' waited for the worker to exit,
+// and its 5 s timer called it "timed out" first (src/spawn-thread.js, "ONE SPAWN AT A TIME").
+// Here that wait is made unconditional, without a clock: the stand-in holds its config/read
+// answer until this test writes `gate`, and the test writes it only once the version is on
+// screen. So the version can land only if it never depended on the trust worker.
+test('the version a cold push asks for lands while the trust ask it started is still open', async (t) => {
+  const box = fixture(t);
+  const gate = path.join(box.base, 'layers-gate');
+  const codex = fakeCodex(path.join(box.base, 'bin'), 'answer', null, null, null, gate);
+  const app = harness(box, { codexExecutable: codex });
+  try {
+    app.open();
+    const cli = () => app.posted.findLast((data) => data.codexMemory?.cli)?.codexMemory.cli;
+    // MUTATION: run spawn-thread's two spawns ungated (`gated` returns start() at once). The
+    // worker holds the probe's pipe, so the probe's answer cannot come before the worker exits,
+    // which is after this test opens the gate: this times out. Confirmed 2026-10-20, 5 of 5.
+    await until(() => cli()?.version || cli()?.reason, 15000,
+      () => `the version probe to answer, with the trust ask still open (the last push had cli ${JSON.stringify(cli() ?? null)})`);
+    assert.equal(cli().version, '0.161.0', `the version probe answered ${JSON.stringify(cli())}`);
+    assert.equal(app.posted.at(-1).codexPermissions.pending, true,
+      'precondition: the trust ask was still waiting on the gate when the version landed');
+    fs.writeFileSync(gate, '');
+    await until(() => app.posted.at(-1)?.codexPermissions?.pending === false, 30000, 'the trust verdict');
+    assert.deepEqual(codexLabels(app.posted.at(-1)).sort(), ['["fd"]', '["rg"]'], 'the trust answer was read');
+  } finally {
+    try { fs.writeFileSync(gate, ''); } catch {}
     await app.dispose();
   }
 });

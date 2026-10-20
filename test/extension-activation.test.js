@@ -476,8 +476,8 @@ test('extension activates with mocked VS Code and deactivates without live polic
     await commands.get('permission-wildcarding.autoLearnReview')();
     await commands.get('permission-wildcarding.autoLearnApplySafe')();
     assert.deepEqual(warnings.slice(-2), [
-      'Auto Learn is disabled in settings. Enable it before reviewing candidates.',
-      'Auto Learn is disabled in settings. Enable it before applying policy.',
+      'Auto Learn is off. Turn it on with "AI Acolyte: Toggle Auto Learn" or the Auto Learn card before reviewing candidates.',
+      'Auto Learn is off. Turn it on with "AI Acolyte: Toggle Auto Learn" or the Auto Learn card before applying policy.',
     ]);
     await extension.deactivate();
   } finally {
@@ -635,8 +635,11 @@ test('activation does not leak channels, watchers or timers', async () => {
     // autoLearnBounce; the two added are gatesBounce, whose callback spawns
     // Python, and the deferred recall check, whose handle was never captured at
     // all. autoLearnTimer is a clearInterval and so is not in this count.
-    assert.ok(timers.cleared - clearedBefore >= 7,
-      `deactivate cleared ${timers.cleared - clearedBefore} timeouts, expected at least 7`);
+    // Sixteen, measured 2026-10-19 with threadsBounce (the open-threads recompile, which spawns
+    // Python and then writes the instruction files) the last one added. The bound was 7 and
+    // deactivate already cleared 15, so it could not fail for a timer dropped since; now it does.
+    assert.ok(timers.cleared - clearedBefore >= 16,
+      `deactivate cleared ${timers.cleared - clearedBefore} timeouts, expected at least 16`);
   } finally {
     // Unconditional, and it has to be. When an assertion above fails,
     // deactivate never runs, and the deferred recall check then fires ten

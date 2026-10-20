@@ -66,14 +66,11 @@ const TEST_DIR = path.join(ROOT, 'test') + path.sep;
 // for TEST_ONLY, because the census now follows a require through a path.join and so sees
 // the tests that load them that way. fastLint is still reached only through a loader that
 // takes the module path as an argument.
-const HELD = {
-  'vscode-extension/memoryLint.js': {
-    fastLint:
-      'test-only, not dead, and invisible here: test/memory-line-cap.test.js reaches it '
-      + 'through loadLint(), which re-requires the module by resolved path, so no require '
-      + 'site names it. Those calls are what make the line-cap off-by-one falsifiable.',
-  },
-};
+//
+// 2026-10-19: memoryLint.js's fastLint left this list for TEST_ONLY. test/memory-line-cap.test.js
+// still reaches it through loadLint(), which no scan can follow, and
+// test/open-threads-reading.test.js now calls it as memoryLint.fastLint, which this census counts.
+const HELD = {};
 
 // Found with no consumer at all by this census on 2026-09-24, when it was widened past its
 // original three modules. Each is a dead EXPORT over a live function — every one of them is
@@ -128,6 +125,14 @@ const TEST_ONLY = {
   // drive a pass with an injected scanner. agent-sessions.js: the tests age fixtures by the window.
   'src/rule-usage.js': ['analyzeRuleUsage', 'countRuleUsage', 'createRuleIndex', 'creditsFor', 'probesFor', 'ruleKey', 'trackedRule'],
   'src/agent-sessions.js': ['WINDOW_MS'],
+  // 2026-10-19, the MEMORY.md guard. memory-index-guard.js runs as a hook from its stable copy,
+  // so production enters at `require.main === module`; these are the seams its test drives the
+  // rule, the edit replay and the path filter through. memoryGuardDefinition is what the planner
+  // writes and the tests compare against; classifyProbe and guardRevision are the probe's reading
+  // of Claude Code's message and the installer's reading of a copy's revision.
+  'src/memory-index-guard.js': ['GUARD_REVISION', 'applyEdit', 'blockMessage', 'commentDefects', 'decide', 'isIndexPath', 'measure', 'verdict'],
+  'src/claude-hook-config.js': ['memoryGuardDefinition'],
+  'src/memory-guard-install.js': ['classifyProbe', 'guardRevision'],
   // 2026-10-14: agent-gates.js left this list, and agent-guidance.js, derived-guidance.js
   // and history-adapters.js shrank, when the census learned to follow a require through a
   // path.join. scripts/check-codex-runtime.js and scripts/vscode-acceptance/ load the STAGED
@@ -137,6 +142,9 @@ const TEST_ONLY = {
   // readCompiled joined 2026-10-14: the dashboard's gate count now rides on gatesStatusAll's
   // per-agent rows, so extension.js no longer reads the compiled file a second time.
   'src/agent-gates.js': ['readCompiled'],
+  // 2026-10-19: the open-threads markers, which test/agent-open-threads.test.js pins to the
+  // strings docs/acolyte-rename-migration.md lists; production builds its block inside the module.
+  'src/agent-open-threads.js': ['THREADS_BEGIN', 'THREADS_END'],
   'src/auto-learn-manager.js': ['migrateStateTo'],
   'src/auto-learn-worker.js': ['run'],
   // These are exercised inside their own production modules; exporting them
@@ -188,7 +196,13 @@ const TEST_ONLY = {
   // file; in production it is called inside the module, by fullReport and the census.
   // gateEntryOf joined the same day for the same reason, held to recall.py's _gate_entry (the
   // card's retired count against the list the gates panel shows).
-  'vscode-extension/memoryLint.js': ['gateEntryOf', 'gateOf', 'pickPrimaryDir'],
+  // threadOf joined 2026-10-19: test/open-threads-reading.test.js pins its documented forms, and
+  // test/threads-compile.sh holds it to recall.py's _thread memory by memory; in production
+  // fullReport calls it inside the module, for the card's count and activation's check.
+  // fastLint joined the same day, off HELD: test/memory-line-cap.test.js reaches it by path (its
+  // calls are what make the line-cap off-by-one falsifiable), and test/open-threads-reading.test.js
+  // holds its code-point count of the longest line, which indexHealth reads.
+  'vscode-extension/memoryLint.js': ['fastLint', 'gateEntryOf', 'gateOf', 'pickPrimaryDir', 'threadOf'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
   // drives a command-line tool through; the tools themselves are run by hand or by CI.
   'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],

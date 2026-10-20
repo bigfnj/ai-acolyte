@@ -51,6 +51,10 @@ const { discoverSessions, sessionsSignature } = require('./src/agent-sessions');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
+const { memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable } = require('./src/memory-guard-install');
+const {
+  openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath,
+} = require('./src/agent-open-threads');
 const {
   MODELLED_VERSION: STRIP_MODEL_MODELLED, checkOffThread: checkStripModelOffThread, defaultBinary: findClaudeCodeBinary,
 } = require('./src/claude-strip-model');
@@ -68,7 +72,7 @@ const {
 // memoryReport() also backs the dashboard Memory card (stats only, still pure Node).
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
-const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, cfg: memoryConf } = require('./memoryLint');
+const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, cfg: memoryConf } = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP_DIR    = path.join(os.homedir(), '.claude', 'backups');
@@ -114,6 +118,7 @@ let dashboard = null;        // WildcardingViewProvider instance
 let lastRun = null;          // timestamp of the last write we made
 let memBounce = null;        // debounce for MEMORY.md-driven dashboard refreshes
 let gatesBounce = null;      // debounce for corpus-driven gate recompiles
+let threadsBounce = null;    // debounce for the open-threads recompile (corpus, activation, setting)
 let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gate)
 let autoLearnBounce = null;  // debounce for Claude/Codex transcript writes
 let autoLearnTimer = null;   // periodic reconciliation timer
@@ -1158,7 +1163,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:3202#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:3329#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1203,14 +1208,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:589-597#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:730-738#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:888-892#conf.enabled), and test/memory-lint-watchers.test.js:429#lintMemory
+    // (memoryLint.js:1046-1050#conf.enabled), and test/memory-lint-watchers.test.js:460#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:817#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:958#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1229,6 +1234,10 @@ function memoryCardData(precomputed = null) {
         lines: report.lineCount,
         maxLines: conf.maxLines,
         linesOver: report.linesOver,
+        // The MEMORY.md guard's 140-line target and broken-comment count (2026-10-19).
+        linesTarget: report.linesTarget,
+        linesOverTarget: report.linesOverTarget,
+        comments: report.comments ? report.comments.length : 0,
         files: report.fileCount,
         indexable: recall.indexable,
         embedded: recall.embedded,
@@ -1289,8 +1298,12 @@ function userSetting(key, fallback) {
 // workspace's .claude/settings.local.json into user scope. A repository's .vscode/settings.json
 // could set all four, so it could opt the user into unattended writes the user had not chosen.
 //
+// `autoLearn.enabled` joined them on 2026-10-19 with the Toggle Auto Learn command: off stops the
+// background scans, so it decides whether an auto-safe apply can happen unattended at all.
+//
 // The maintainer's decision: a workspace may make each one STRICTER, never looser. A lower mode,
-// a higher threshold, Codex export off and the drain off all take effect per workspace or folder.
+// a higher threshold, Codex export off, Auto Learn off and the drain off all take effect per
+// workspace or folder.
 // A value that would loosen the user's own setting is ignored, with one output line, and the
 // user tier stands (the manifest default when the user set nothing). They stay window-scoped,
 // not machine-scoped, because a stricter per-project choice is worth keeping. The census that
@@ -1322,6 +1335,14 @@ const TIGHTEN_ONLY = {
   },
   'localDrain.enabled': {
     fallback: true, rule: 'a workspace may only turn the automatic drain off',
+    normalize: (value) => (typeof value === 'boolean' ? value : undefined),
+    strictness: (value) => (value ? 0 : 1),
+  },
+  // The fifth key (2026-10-19). Off stops the extension's background scans, and with them every
+  // unattended auto-safe apply, so a repository must not be able to switch them back on for a
+  // user who turned Auto Learn off. A workspace may still turn it off.
+  'autoLearn.enabled': {
+    fallback: true, rule: 'a workspace may only turn Auto Learn off',
     normalize: (value) => (typeof value === 'boolean' ? value : undefined),
     strictness: (value) => (value ? 0 : 1),
   },
@@ -1366,8 +1387,8 @@ function noteLooserSettingIgnored(line) {
 // Cross-agent Auto Learn keeps transcript text in memory only. Persistent state
 // contains normalized prefixes, counters, reason labels, hashes, and cursors.
 //
-// mode, successThreshold and codexScope are tighten-only (above): a workspace or
-// folder value may make each stricter than the user's setting, never looser.
+// enabled, mode, successThreshold and codexScope are tighten-only (above): a workspace
+// or folder value may make each stricter than the user's setting, never looser.
 function autoLearnConfig() {
   const cfg = vscode.workspace.getConfiguration('permissionWildcarding');
   const mode = tightenOnlySetting(cfg, 'autoLearn.mode').value;
@@ -1392,7 +1413,7 @@ function autoLearnConfig() {
     scopeWarning = WORKSPACE_SCOPE_WITHDRAWN_NOTE;
   }
   return {
-    enabled: cfg.get('autoLearn.enabled', true),
+    enabled: tightenOnlySetting(cfg, 'autoLearn.enabled').value,
     mode,
     threshold: tightenOnlySetting(cfg, 'autoLearn.successThreshold').value,
     intervalMinutes: Math.max(1, Number(cfg.get('autoLearn.intervalMinutes', 5)) || 5),
@@ -1530,7 +1551,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:6299#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:6817#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1787,12 +1808,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:6332#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:6850#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:2965#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:3066#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -1840,7 +1861,7 @@ async function scanBeforeUserAction(purpose) {
 async function applyAutoLearnSafe() {
   const cfg = autoLearnConfig();
   if (!cfg.enabled) {
-    vscode.window.showWarningMessage('Auto Learn is disabled in settings. Enable it before applying policy.');
+    vscode.window.showWarningMessage(`Auto Learn is off. ${AUTO_LEARN_TURN_ON} before applying policy.`);
     return;
   }
   if (cfg.mode === 'observe') {
@@ -1887,7 +1908,7 @@ async function showCoveredAutoLearnFamilies(covered, settings) {
 async function reviewAutoLearnCandidates() {
   const cfg = autoLearnConfig();
   if (!cfg.enabled) {
-    vscode.window.showWarningMessage('Auto Learn is disabled in settings. Enable it before reviewing candidates.');
+    vscode.window.showWarningMessage(`Auto Learn is off. ${AUTO_LEARN_TURN_ON} before reviewing candidates.`);
     return;
   }
   if (cfg.mode === 'observe') {
@@ -2099,6 +2120,80 @@ async function cycleAutoLearnMode() {
     + (raising ? ' A workspace may only lower the mode, so raising it is a user setting.' : '')
     + (removed.length ? ` The ${removed.join(' and ')} setting that capped it here was removed.` : ''));
   scheduleAutoLearn(50);
+  dashboard?.refresh();
+}
+
+// What a message says to turn Auto Learn on. It quotes the manifest's title, and
+// test/auto-learn-toggle.test.js fails if the two drift apart.
+const AUTO_LEARN_TURN_ON = 'Turn it on with "AI Acolyte: Toggle Auto Learn" or the Auto Learn card';
+
+// The file a workspace or folder setting lives in, named in full by a modal that edits it. A
+// single-folder window keeps both tiers in the folder's .vscode/settings.json, which a repository
+// may commit; a multi-root window keeps its workspace tier in the .code-workspace file.
+function workspaceSettingsFile(tier) {
+  const workspaceFile = vscode.workspace.workspaceFile;
+  if (tier === 'workspace' && workspaceFile) {
+    return workspaceFile.scheme && workspaceFile.scheme !== 'file'
+      ? "this untitled workspace's settings" : workspaceFile.fsPath;
+  }
+  const folders = vscode.workspace.workspaceFolders || [];
+  return folders.length === 1 ? path.join(folders[0].uri.fsPath, '.vscode', 'settings.json')
+    : "the folder's .vscode/settings.json";
+}
+
+// The Auto Learn switch (2026-10-19): the Toggle Auto Learn command and the card's Turn on /
+// Turn off button. Until then autoLearn.enabled could only be changed in Settings, and the card
+// said "disabled" with nothing to click. It flips the EFFECTIVE value, which is tighten-only
+// (TIGHTEN_ONLY): a workspace or folder may turn Auto Learn off, never on.
+// - Off writes false to user settings, so it holds in every window.
+// - On writes true to user settings. A workspace or folder `false` would still keep it off in this
+//   window, so, as in cycleAutoLearnMode's raise, it is removed. Not silently: that file may be a
+//   .vscode/settings.json the repository commits, so a modal names it first, and a dismissal
+//   writes nothing at all.
+// The setting reaches the extension's own scans only. Codex's after-turn Stop hook
+// (src/codex-stop-hook.js) and the CLI's --learn read no VS Code setting, and the toast says so.
+async function toggleAutoLearn() {
+  if (deactivated) return;
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  const spec = TIGHTEN_ONLY['autoLearn.enabled'];
+  const next = !tightenOnlySetting(config, 'autoLearn.enabled').value;
+  const inspected = (typeof config.inspect === 'function' && config.inspect('autoLearn.enabled')) || {};
+  const { Global, Workspace, WorkspaceFolder } = vscode.ConfigurationTarget;
+  // Turning on: every folder or workspace `false` that would still hold it off here.
+  const caps = !next ? [] : [[WorkspaceFolder, inspected.workspaceFolderValue, 'folder'],
+    [Workspace, inspected.workspaceValue, 'workspace']]
+    .filter(([, raw]) => spec.normalize(raw) === false)
+    .map(([target, , tier]) => ({ target, file: workspaceSettingsFile(tier) }));
+  const files = [...new Set(caps.map((cap) => cap.file))].join(' and ');
+  if (caps.length) {
+    const answer = await vscode.window.showWarningMessage('Turn on Auto Learn in this window?', {
+      modal: true,
+      detail: `${files} turns Auto Learn off here, and a workspace setting may only turn it off. `
+        + 'Turning it on saves true in your user settings and removes permissionWildcarding.autoLearn.enabled '
+        + `from ${files}. If the repository commits that file, the removal is a change to it.`,
+    }, 'Remove and turn on');
+    if (answer !== 'Remove and turn on' || deactivated) return;
+  }
+  try {
+    // User settings first, so a failed write has changed nothing.
+    await config.update('autoLearn.enabled', next, Global);
+    for (const cap of caps) await config.update('autoLearn.enabled', undefined, cap.target);
+  } catch (error) {
+    vscode.window.showErrorMessage(`AI Acolyte: Auto Learn was not switched: ${error.message}`);
+    return;
+  }
+  if (deactivated) return;
+  // In VS Code the configuration listener does this as well. Done here too, as cycleAutoLearnMode
+  // does, so the switch does not wait on an event: off disarms the periodic scan, on re-arms it
+  // and scans soon.
+  resetAutoLearnTimer();
+  if (next) scheduleAutoLearn(50);
+  const separate = " Codex's after-turn Stop hook and the CLI's --learn are separate: neither reads this setting.";
+  vscode.window.showInformationMessage(next
+    ? "Auto Learn is on, saved in your user settings. The extension's background scans of Claude Code and Codex history start again."
+      + (caps.length ? ` The setting in ${files} that turned it off here was removed.` : '') + separate
+    : "Auto Learn is off, saved in your user settings. The extension's background scans stop; Scan now still scans when you ask."
+      + separate + ' To remove the hook, run "AI Acolyte: Configure Codex after-turn learning".');
   dashboard?.refresh();
 }
 
@@ -2721,6 +2816,12 @@ function registerLocalWatchers(context) {
       // memory.enabled once at activation, so its four keys were picked up only
       // by the 5-minute reconcile or a save event.
       if (event.affectsConfiguration('permissionWildcarding.gates')) ensureGates(true);
+      // Off removes the block at once; on installs what was compiled and recompiles, because
+      // nothing compiles while it is off (threadsCorpusBump), so the last compile may be stale.
+      if (event.affectsConfiguration('permissionWildcarding.openThreads')) {
+        ensureOpenThreads(true);
+        if (openThreadsEnabled()) scheduleThreadsCompile();
+      }
       if (event.affectsConfiguration('permissionWildcarding.memory')) {
         // BOTH, and in this order. Refreshing only the dashboard was worse than
         // refreshing nothing: memoryCardData() re-reads the configuration and
@@ -3032,6 +3133,20 @@ function activate(context) {
     context.subscriptions.push(gatesWatcher);
   } catch { /* never block activation */ }
 
+  // The compiled open threads, the same way: whoever compiles (the corpus watcher below, the CLI's
+  // `--open-threads refresh`) only writes this file, and this installs it. ensureOpenThreads is a
+  // no-op when the install is already settled.
+  try {
+    const threadsFile = threadsCompiledPath();
+    const threadsWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(threadsFile)), path.basename(threadsFile))
+    );
+    threadsWatcher.onDidChange(() => ensureOpenThreads());
+    threadsWatcher.onDidCreate(() => ensureOpenThreads());
+    threadsWatcher.onDidDelete(() => dashboard?.refresh());
+    context.subscriptions.push(threadsWatcher);
+  } catch { /* never block activation */ }
+
   // Sidebar dashboard (Activity Bar → webview).
   dashboard = new WildcardingViewProvider(context);
   context.subscriptions.push(
@@ -3074,6 +3189,7 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.autoLearnUndo', () => undoAutoLearn()),
     vscode.commands.registerCommand('permission-wildcarding.autoLearnCycleMode', () => cycleAutoLearnMode()),
     vscode.commands.registerCommand('permission-wildcarding.autoLearnWhy', () => explainAutoLearnPrompt()),
+    vscode.commands.registerCommand('permission-wildcarding.toggleAutoLearn', () => toggleAutoLearn()),
     vscode.commands.registerCommand('permission-wildcarding.autoLearnShowBlocked', () => showAutoLearnBlocked()),
     vscode.commands.registerCommand('permission-wildcarding.derivedGuidance', () => showDerivedGuidance())
   );
@@ -3174,8 +3290,11 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.drainLocal', () => drainLocal(true)),
     vscode.commands.registerCommand('permission-wildcarding.toggleGuidance', () => toggleGuidance()),
     vscode.commands.registerCommand('permission-wildcarding.toggleGates', () => toggleGates()),
+    vscode.commands.registerCommand('permission-wildcarding.toggleMemoryGuard', () => toggleMemoryGuard()),
     // Retire or restore one memory gate at a time, from the card's Manage gates… or the palette.
-    vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates())
+    vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates()),
+    // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card.
+    vscode.commands.registerCommand('permission-wildcarding.toggleOpenThreads', () => toggleOpenThreads())
   );
   try {
     registerLocalWatchers(context);
@@ -3194,6 +3313,14 @@ function activate(context) {
   // Gates too. Install-only: this never spawns python, so a corpus edit reaches the block
   // through the compiled file that the CLI or the SessionStart hook last wrote.
   ensureGates();
+  // The MEMORY.md guard's stable copy, after an upgrade: replaced only when our hook is
+  // registered and this build's GUARD_REVISION is higher. settings.json is never written here.
+  try { refreshMemoryGuardCopy({ home: os.homedir() }); } catch (err) { console.error('ai-acolyte: MEMORY.md guard copy refresh failed —', err); }
+  // Open threads: install what was last compiled now, then recompile a few seconds in when a
+  // compile could say something new (activationThreadsCompile), because an agent may have edited
+  // MEMORY.md or closed a thread while this window was closed.
+  ensureOpenThreads();
+  activationThreadsCompile();
   // A retire or restore a reload or a crash cut short, reported once (pending-gates.<pid>.json).
   try { reportInterruptedGateChanges(); } catch (err) { console.error('ai-acolyte: pending gate change check failed —', err); }
   startAutoLearn(context);
@@ -3283,10 +3410,10 @@ function memoryCardBump() {
 // Recompile the gates when the corpus that produced them changes.
 //
 // A SessionStart hook would be the obvious home for this and it does not work under a
-// managed policy. Enforcement of `allowManagedHooksOnly` is PER EVENT: a user hook runs
-// only on an event the managed policy itself defines. Measured on a box whose policy
-// defines PostToolUse and nothing else — a user PostToolUse canary fired 4 times out of 4,
-// while a real session start and a /clear both left the compiled file untouched.
+// managed policy. This said enforcement of `allowManagedHooksOnly` is PER EVENT, from a
+// PostToolUse canary that fired 4 of 4 on a box whose policy defined PostToolUse alone. On
+// 2026-10-19 (Claude Code 2.1.293 and 2.1.301) no user hook of any event ran under it, so
+// read it as "no user hooks" (README, "watch the cause, do not hook the event").
 //
 // A memory file changing is the better trigger regardless. It is the actual cause, it
 // fires once per edit instead of once per session, and the extension is not a hook, so no
@@ -3308,6 +3435,52 @@ function gatesCorpusBump(uri) {
   gatesBounce = setTimeout(() => {
     compileGates({ quiet: true }).then((ok) => { if (ok) ensureGates(); });
   }, 2000);
+}
+
+// Every *.md event of every store, handed to both consumers. Each decides for itself, so the
+// open threads inherit none of the gates' skips: they compile while gates are off, they do not
+// skip a gate edit this host made (its `status:` may have changed too), and they DO react to
+// MEMORY.md, whose health is their INDEX line. One throwing never starves the other.
+function memoryCorpusChanged(uri) {
+  try { gatesCorpusBump(uri); } catch (err) { console.error('ai-acolyte: gate recompile not scheduled —', err); }
+  try { threadsCorpusBump(uri); } catch (err) { console.error('ai-acolyte: open threads recompile not scheduled —', err); }
+}
+
+// Recompile the open threads when a change can move them. Never while openThreads.enabled is
+// off (switched off stays off; turning it on compiles), and only when one of these holds:
+//   * the file is MEMORY.md, whose budgets the INDEX line reports;
+//   * the compiled file currently lists a thread, so any edit, a deletion included, may be the
+//     one that closes it, and a closed thread has to leave the block;
+//   * the file mentions `status:` or a status marker, so it may be opening one.
+// A change in a store that does not compile is skipped: the compile reads one store.
+function threadsCorpusBump(uri) {
+  if (deactivated || !openThreadsEnabled()) return;
+  const file = uri?.fsPath;
+  if (file && !threadsMayChange(file)) return;
+  if (file) {
+    let store = null;
+    try { store = memoryReport().dir; } catch { /* unknown: compile, the compile pins its own */ }
+    if (store && gateEditKey(path.dirname(file)) !== gateEditKey(store)) return;
+  }
+  scheduleThreadsCompile();
+}
+
+function threadsMayChange(file) {
+  if (path.basename(file) === 'MEMORY.md') return true;
+  if (compiledListsThreads()) return true;
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    return /status\s*:/.test(text) || text.includes('<!-- status -->') || text.includes('<!-- /status -->');
+  } catch { return false; }
+}
+
+// Whether open-threads.generated.md's heading counts any thread. A torn or missing file reads as
+// none: the next status-mentioning edit or MEMORY.md change compiles it again.
+function compiledListsThreads() {
+  try {
+    const heading = /^## Open threads \((\d+), managed\)$/m.exec(fs.readFileSync(threadsCompiledPath(), 'utf8'));
+    return !!heading && Number(heading[1]) > 0;
+  } catch { return false; }
 }
 
 // Add watchers for dirs that appeared, drop the ones whose dir went away. memoryLint.js's
@@ -3337,7 +3510,7 @@ function reconcileMemoryWatchers() {
   // reconcile and could hand the two sets different answers if a store appeared between them.
   const dirs = new Set(memoryStoreDirs());
   syncWatcherSet(memoryCardWatchers, dirs, 'MEMORY.md', memoryCardBump);
-  syncWatcherSet(gatesCorpusWatchers, dirs, '*.md', gatesCorpusBump);
+  syncWatcherSet(gatesCorpusWatchers, dirs, '*.md', memoryCorpusChanged);
 }
 
 function disposeMemoryWatchers() {
@@ -4258,6 +4431,289 @@ async function toggleGates() {
   dashboard?.refresh();
 }
 
+// The MEMORY.md guard (src/memory-index-guard.js), on or off. Its hook's presence in
+// ~/.claude/settings.json is the whole state: there is no setting key, and it is off until the
+// user turns it on. Turning it on asks first, because it adds a PreToolUse hook to the user's
+// global settings. The hook needs a real node: this host's process.execPath is Electron, so node
+// comes from PATH the way the CLI finds it, and its absence is refused before anything is written.
+// An install that differs from what this version writes reads as needing repair, and the toggle
+// repairs it rather than removing it, the rule toggleGates follows for a stale block.
+async function toggleMemoryGuard() {
+  const home = os.homedir();
+  let status;
+  try { status = memoryGuardStatus({ home }); }
+  catch (err) { vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`); return; }
+  if (status.status === 'unreadable' || status.status === 'unsupported') {
+    vscode.window.showErrorMessage(`ai-acolyte: the MEMORY.md guard cannot be changed: ${status.reason}. Nothing was changed.`);
+    return;
+  }
+  if (status.status === 'foreign' && !status.on) {
+    vscode.window.showWarningMessage(`ai-acolyte: ${status.reason}. Remove that hook from ~/.claude/settings.json `
+      + 'to use this one. Nothing was changed.');
+    return;
+  }
+  const next = !(status.status === 'configured' || status.status === 'foreign');
+  let nodeExecutable;
+  if (next) {
+    nodeExecutable = resolveNodeExecutable();
+    if (!nodeExecutable) {
+      vscode.window.showErrorMessage('ai-acolyte: the MEMORY.md guard runs as a Claude Code hook under Node.js, and '
+        + 'no node was found on PATH. Install Node.js or put it on PATH, then try again. Nothing was changed.');
+      return;
+    }
+    if (status.status === 'missing') {
+      const choice = await vscode.window.showWarningMessage(
+        'Turn on the MEMORY.md guard?',
+        {
+          modal: true,
+          detail: 'Adds a PreToolUse hook to ~/.claude/settings.json. Before each Write or Edit, Claude Code runs '
+            + `${nodeExecutable} on a copy of the guard in ~/.claude/wildcarding, and the guard refuses an edit that `
+            + 'leaves a memory index (MEMORY.md) worse on a measure already past its budget: 140 lines, 12000 bytes, '
+            + '300 characters on one line, 16 "- " entries, no broken HTML comment. Edits that shrink the index always '
+            + `pass, and anything it cannot read is let through. settings.json is backed up first. ${status.policy.line}`,
+        },
+        'Turn on');
+      if (choice !== 'Turn on') return;
+    }
+  }
+  // The modal is an await, and the window may have closed behind it.
+  if (deactivated) return;
+  try {
+    const result = setMemoryGuard(next, { home, nodeExecutable });
+    vscode.window.showInformationMessage(next
+      ? `ai-acolyte: MEMORY.md guard ON, for Claude Code sessions started from now on. ${result.policy.line}`
+      : 'ai-acolyte: MEMORY.md guard OFF. Sessions already running keep it until they end.');
+  } catch (err) {
+    vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
+  }
+  dashboard?.refresh();
+}
+
+// ── open threads (2026-10-19) ──────────────────────────────────────────────────────
+// `recall.py --threads-compile` lists every memory whose `status:` is open, awaiting, blocked or
+// deferred, from the store compileGates pins, in ~/.claude/open-threads.generated.md, with an
+// INDEX line when MEMORY.md is past a budget; src/agent-open-threads.js installs it as its own
+// managed block in CLAUDE.md and AGENTS.md. The index stays a list of hooks, and the status that
+// bloated it has a home that every session still reads. A separate block from the gates, with a
+// separate switch, so neither can take the other with it.
+//
+// Unlike the gates, the compile runs unattended from the start, because the INDEX line has to
+// reach a box whose managed policy keeps the MEMORY.md guard hook from running: on a corpus
+// change that can move the block (threadsCorpusBump), on activation when there is anything to
+// say (activationThreadsCompile), and when the setting is turned on. Never while it is off.
+
+// USER settings only (machine-scoped), read as gatesEnabled reads its key: it decides what the
+// user's global instruction files say, so a workspace may neither install the block nor strip it.
+// Switched off stays off: ensure removes the block, and nothing compiles or installs it.
+function openThreadsEnabled() {
+  return userSetting('openThreads.enabled', true);
+}
+
+const THREADS_BOUNCE_MS = 2500;       // after a corpus edit or the setting; not the gates' 2000
+const THREADS_ACTIVATION_MS = 4000;   // after activation, once the host has settled
+
+// compileGates for `--threads-compile`: the same Python, the same pinned store, the same tracked
+// and tree-killed child with a 60 s deadline. Resolves false when it could not run, having said
+// why: a modal for a person's action, the console and the output channel for an unattended one.
+function compileThreads({ quiet = false } = {}) {
+  const say = (msg) => {
+    if (!quiet) { vscode.window.showWarningMessage('ai-acolyte: ' + msg); return; }
+    console.error('ai-acolyte: ' + msg);
+    sharedChannel()?.appendLine(`[${new Date().toISOString()}] open threads: ${msg}`);
+  };
+  if (deactivated) return Promise.resolve(false);
+  const script = recallScriptPath();
+  if (!script) { say('recall.py not found, so open threads cannot be compiled.'); return Promise.resolve(false); }
+  const st = recallStatus();
+  if (!st.venv) { say(`DevToolbox venv python not found at ${st.py}, so open threads cannot be compiled.`); return Promise.resolve(false); }
+  const env = gateCompileEnv();
+  return new Promise((resolve) => {
+    endTreeAfter(trackChild(execFile(st.py, [script, '--threads-compile'], { env }, (err, _out, stderr) => {
+      if (deactivated) { resolve(false); return; }
+      if (err) {
+        const detail = (stderr || err.message || '').trim().slice(0, 300);
+        if (quiet) say(`compile failed — ${detail}`);
+        else vscode.window.showErrorMessage(`ai-acolyte: open threads compile failed — ${detail}`);
+        resolve(false);
+        return;
+      }
+      resolve(true);
+    })), 60000);
+  });
+}
+
+// One debounced compile and install, shared by the corpus watcher, activation and the setting.
+function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS) {
+  if (deactivated) return;
+  clearTimeout(threadsBounce);
+  threadsBounce = setTimeout(() => {
+    threadsBounce = null;
+    compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
+  }, delay);
+}
+
+// After activation, a compile only when one could say something: a memory declares `status:`,
+// the compiled file exists (a thread may have closed while the window was shut), or MEMORY.md is
+// past a budget. A machine that never uses the feature never spawns Python for it. The question
+// is asked in the deferred timer, not here: it reads the whole store (memoryReport), and
+// activation itself reads none of it.
+function activationThreadsCompile() {
+  if (deactivated || !openThreadsEnabled()) return;
+  clearTimeout(threadsBounce);
+  threadsBounce = setTimeout(() => {
+    threadsBounce = null;
+    if (deactivated || !openThreadsEnabled() || !threadsWorthCompiling()) return;
+    compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
+  }, THREADS_ACTIVATION_MS);
+}
+
+function threadsWorthCompiling() {
+  try {
+    try { if (fs.statSync(threadsCompiledPath()).size > 0) return true; } catch { /* none yet */ }
+    const { report } = memoryReport();
+    if (!report) return false;
+    return report.threadDeclared > 0 || (typeof indexHealth === 'function' && indexHealth(report).length > 0);
+  } catch (err) {
+    console.error('ai-acolyte: open threads compile not scheduled —', err);
+    return false;
+  }
+}
+
+// Keep the instruction files in step with the setting and the compiled file. Silent and
+// write-free when already settled. Unattended (activation, the compiled-file watcher, the
+// recompile), so no in-place fallback, and every failed target goes to the output channel.
+function ensureOpenThreads(announce = false) {
+  try {
+    if (deactivated) return;
+    const want = !!openThreadsEnabled();
+    const states = openThreadsStatusAll().filter((state) => state.readable);
+    if (!states.length) return;
+    // Nothing compiled yet is nothing to do, and never a reason to touch a file.
+    if (want && states[0].compile === 'missing') return;
+    const wants = (state) => want && state.wanted;
+    if (states.every((state) => (want ? state.compile === 'whole' : true) && state.on === wants(state)
+        && (wants(state) ? state.current : !state.shadowedPaths?.length))) return;
+    const results = setOpenThreadsAll(want, { inPlaceFallback: false });
+    const failed = results.filter((result) => result.error);
+    if (failed.length) {
+      const channel = sharedChannel();
+      const stamp = new Date().toISOString();
+      for (const result of failed) {
+        channel?.appendLine(`[${stamp}] open threads: ${result.agent} `
+          + `(${String(result.path || '').replace(os.homedir(), '~')}): ${result.error}`);
+      }
+    }
+    const changed = results.filter((result) => result.changed);
+    if (!changed.length) return;
+    if (announce || want) {
+      const added = changed.filter((result) => result.on).map((result) => result.agent);
+      const removed = changed.filter((result) => !result.on).map((result) => result.agent);
+      vscode.window.setStatusBarMessage('$(pin) ai-acolyte: open threads ' + [
+        added.length ? 'added to ' + added.join(' + ') : '',
+        removed.length ? 'removed from ' + removed.join(' + ') : '',
+      ].filter(Boolean).join(', '), 6000);
+    }
+    dashboard?.refresh();
+  } catch (err) {
+    console.error('ai-acolyte: open threads write failed —', err);
+  }
+}
+
+// `permission-wildcarding.toggleOpenThreads`: the user-tier setting, as toggleGates writes
+// gates.enabled. On (or a stale install) compiles and installs; a settled install is turned off,
+// after a confirmation, which removes the block from every agent.
+async function toggleOpenThreads() {
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  const enabled = !!openThreadsEnabled();
+  const states = openThreadsStatusAll();
+  const settled = (state) => state.readable && state.compile === 'whole'
+    && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
+  const next = !(enabled && states.length && states.every(settled));
+  if (!next) {
+    const files = states.filter((state) => state.on).map((state) => state.path.replace(os.homedir(), '~')).join(', ');
+    const choice = await vscode.window.showWarningMessage('Turn off open threads?', {
+      modal: true,
+      detail: (files ? `Removes the managed block from ${files}. ` : '')
+        + 'The memories keep their status; nothing is compiled or installed while this is off, and '
+        + 'MEMORY.md\'s health is no longer reported to new sessions. Sets openThreads.enabled to false.',
+    }, 'Turn off');
+    if (choice !== 'Turn off') return;
+  }
+  try {
+    await config.update('openThreads.enabled', next, vscode.ConfigurationTarget.Global);
+  } catch (err) {
+    vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
+    return;
+  }
+  if (deactivated) return;
+  // The setting's own listener has just armed a recompile; this one covers it, so it is dropped
+  // rather than run a second time two seconds later.
+  if (next) {
+    clearTimeout(threadsBounce);
+    threadsBounce = null;
+    await compileThreads();
+  }
+  if (deactivated) return;
+  const results = setOpenThreadsAll(next);
+  const refused = results.length === 1 && results[0].refusal ? results[0] : null;
+  const failed = results.filter((result) => result.error);
+  if (refused && !refused.error) {
+    vscode.window.showWarningMessage(`ai-acolyte: open threads are on, and nothing is installed: ${refused.reason}.`);
+  } else if (failed.length) {
+    vscode.window.showErrorMessage(`ai-acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
+  } else if (!results.length) {
+    vscode.window.showWarningMessage('ai-acolyte: open threads: no agent instruction file to write.');
+  } else if (next && !results.some((result) => result.on)) {
+    vscode.window.showInformationMessage('ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its '
+      + 'budgets, so no block is installed until something is.');
+  } else {
+    vscode.window.showInformationMessage(`ai-acolyte: open threads ${next ? 'ON' : 'OFF'} — `
+      + results.map((result) => result.path.replace(os.homedir(), '~')).join(', ')
+      + (next ? ' (applies from each agent’s next session)' : ''));
+  }
+  dashboard?.refresh();
+}
+
+// The Claude memory card's guard line: the state, and whether Claude Code will run it here.
+function memoryGuardCardData() {
+  try {
+    const status = memoryGuardStatus({ home: os.homedir() });
+    return { label: status.label, on: status.on, policy: status.policy.line, nodeMissing: status.nodeExists === false };
+  } catch (err) {
+    return { label: 'unreadable', on: false, policy: err.message, nodeMissing: false };
+  }
+}
+
+// The Claude memory card's open-threads line. One status read; `declared` and `listed` come from
+// the push's memory report (memoryLint.js threadOf, recall.py's reading), so the card can say how
+// many would be listed before anything is compiled.
+function threadsCardData(precomputed = null) {
+  try {
+    const enabled = !!openThreadsEnabled();
+    const states = openThreadsStatusAll();
+    let report = null;
+    try { report = (precomputed || memoryReport()).report; } catch { /* the line still draws */ }
+    const declared = report?.threadDeclared ?? null;
+    const listed = report?.threadListed ?? null;
+    if (!states.length) return { enabled, none: true, declared, listed };
+    const first = states[0];
+    return {
+      enabled,
+      none: false,
+      compile: first.compile,
+      count: first.threads,
+      index: states.find((state) => state.index)?.index || null,
+      installed: states.filter((state) => state.on).map((state) => state.agent),
+      current: states.every((state) => (state.wanted ? state.on && state.current : !state.on)),
+      reason: first.reason,
+      declared,
+      listed,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // `precomputed` is the same optional memoryReport() result memoryCardData takes —
 // this card needs exactly one integer out of it, `report.gateSources`, which the
 // memory card's call already computed. Defaults to a fresh call so the other
@@ -4684,12 +5140,15 @@ class WildcardingViewProvider {
         case 'autoLearnReview': vscode.commands.executeCommand('permission-wildcarding.autoLearnReview'); break;
         case 'autoLearnUndo': vscode.commands.executeCommand('permission-wildcarding.autoLearnUndo'); break;
         case 'autoLearnWhy': vscode.commands.executeCommand('permission-wildcarding.autoLearnWhy'); break;
+        case 'toggleAutoLearn': vscode.commands.executeCommand('permission-wildcarding.toggleAutoLearn'); break;
         case 'rebuildRecall': vscode.commands.executeCommand('permission-wildcarding.rebuildRecall'); break;
         case 'lintMemory':   vscode.commands.executeCommand('permission-wildcarding.lintMemory'); break;
         case 'drainLocal':   vscode.commands.executeCommand('permission-wildcarding.drainLocal'); break;
         case 'toggleGuidance': vscode.commands.executeCommand('permission-wildcarding.toggleGuidance'); break;
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
+        case 'toggleMemoryGuard': vscode.commands.executeCommand('permission-wildcarding.toggleMemoryGuard'); break;
         case 'manageGates': vscode.commands.executeCommand('permission-wildcarding.manageGates'); break;
+        case 'toggleOpenThreads': vscode.commands.executeCommand('permission-wildcarding.toggleOpenThreads'); break;
         // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
         // c09daab (the shared Saved permissions picker replaced that button), and the
         // two synthetic test rows posting it directly were all that kept it alive. The
@@ -4918,6 +5377,7 @@ class WildcardingViewProvider {
       lastRun,
       autoLearn,
       memory: memoryCardData(memory),
+      memoryGuard: memoryGuardCardData(),
       // The Claude memory card's version line, the counterpart of the Codex card's CLI line
       // (2026-10-19). defaultBinary is a directory look, 0.8 ms on the development box.
       claudeCodeVersion: (() => {
@@ -4949,6 +5409,8 @@ class WildcardingViewProvider {
       local: localCardData(),
       guidance: guidanceCardData(),
       gates: gatesCardData(memory),
+      // The Claude memory card's open-threads line (2026-10-19), from the same memory report.
+      threads: threadsCardData(memory),
     });
   }
 
@@ -5170,6 +5632,7 @@ class WildcardingViewProvider {
           <button class="restore" id="alReview">Review</button>
           <button class="restore" id="alUndo">Undo</button>
           <button class="restore" id="alWhy">Why prompt?</button>
+          <button class="restore" id="alToggle">Turn off</button>
         </div>
       </div>
     </div>
@@ -5198,6 +5661,11 @@ class WildcardingViewProvider {
         <button class="restore" id="inspectClaudeMemory">Inspect memory sources…</button>
         <div class="muted sub" id="claudeMemoryGatesStatus"></div>
         <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
+        <div class="muted sub" id="memoryGuardStatus"></div>
+        <button class="managed-action" id="memoryGuardBtn" title="A PreToolUse hook that refuses an edit leaving MEMORY.md worse on a measure already past its budget">Turn on MEMORY.md guard</button>
+        <div class="muted sub" id="claudeMemoryThreadsStatus"></div>
+        <div class="sub" id="claudeMemoryThreadsIndex" hidden></div>
+        <button class="managed-action" id="claudeMemoryThreads" title="The open-threads block: every memory whose status: is still open, in CLAUDE.md and AGENTS.md">Turn on open threads</button>
         <div class="muted sub" id="claudeCodeVersion"></div>
       </div>
     </div>
@@ -5371,7 +5839,8 @@ class WildcardingViewProvider {
   function renderRowStates(d) {
     const a = d.autoLearn || {};
     const counts = a.counts || {};
-    if (!a.enabled) setState('stAutoLearn', 'disabled');
+    // Off is a choice, not trouble, so no tint; the phrase names the card's button that undoes it.
+    if (!a.enabled) setState('stAutoLearn', 'disabled · Turn on');
     else if (a.busy) setState('stAutoLearn', 'scanning…');
     else if (a.error) setState('stAutoLearn', 'error', 'hot');
     else {
@@ -5423,15 +5892,16 @@ class WildcardingViewProvider {
     // "3 to fix" while the card body said "index clean, all links resolve" in the same view,
     // over a Rebuild button that cannot clear it because there is nothing to clear. Every
     // other consumer -- status bar, output channel, card body -- counts over + broken.
-    const issues = (m.over || 0) + (m.broken || 0);
+    const issues = (m.over || 0) + (m.broken || 0) + (m.comments || 0);
     // linesOver and overBudget are whole-file conditions with no line to point at, so they
     // do not inflate the "to fix" count. They must still colour the row: a truncated index
     // is worse than anything the count can hold, and reading green through it is the
     // failure this card already had once.
-    const capped = !!(m.linesOver || m.overBudget);
+    const capped = !!(m.linesOver || m.overBudget || m.linesOverTarget);
     setState('stMemory',
       (m.tokens != null ? fmtK(m.tokens) + ' tok' : 'no index')
-        + (m.linesOver ? ' · ' + m.lines + '/' + (m.maxLines || 200) + ' lines' : '')
+        + (m.linesOver ? ' · ' + m.lines + '/' + (m.maxLines || 200) + ' lines'
+          : m.linesOverTarget ? ' · ' + m.lines + ' lines' : '')
         + (issues ? ' · ' + issues + ' to fix' : ''),
       (issues || capped) ? 'warn' : null);
 
@@ -5663,6 +6133,8 @@ class WildcardingViewProvider {
     for (const id of ['alScan', 'alWhy']) $(id).disabled = !!a.busy;
     $('alReview').disabled = !active || !!a.busy || a.mode === 'observe';
     $('alReview').textContent = (counts.review > 0) ? 'Review (' + counts.review + ')' : 'Review';
+    // The switch (2026-10-19). Never disabled: turning off during a scan is fine, the scan finishes.
+    $('alToggle').textContent = active ? 'Turn off' : 'Turn on';
 
     // What the last scan could not read. Never collapsed into a.error, which is
     // the message of an exception that ESCAPED — a scan that returned while
@@ -5822,13 +6294,15 @@ class WildcardingViewProvider {
         + ' and drops the rest without saying so.';
     $('memLines').style.color = m.linesOver
       ? 'var(--vscode-charts-red, #f85149)'
-      : (m.lines != null && m.lines >= maxLines * 0.9
+      : (m.linesOverTarget || (m.lines != null && m.lines >= maxLines * 0.9)
         ? 'var(--vscode-charts-yellow, #d29922)' : '');
 
     const issues = [];
     if (m.linesOver) issues.push(m.lines + '/' + maxLines + ' lines, past the cap');
+    else if (m.linesOverTarget) issues.push(m.lines + ' lines, past the ' + m.linesTarget + '-line target');
     if (m.over)   issues.push(m.over + ' over budget');
     if (m.broken) issues.push(m.broken + ' broken link' + (m.broken !== 1 ? 's' : ''));
+    if (m.comments) issues.push(m.comments + ' broken comment' + (m.comments !== 1 ? 's' : ''));
     const el = $('memIssues');
     el.innerHTML = '';
     if (issues.length) {
@@ -5862,7 +6336,44 @@ class WildcardingViewProvider {
       : g.partial ? 'Memory gates: ' + count + ', partially installed.'
         : g.on ? 'Memory gates: ' + count + ' installed; ' + (g.current ? 'current.' : 'update pending.')
           : 'Memory gates: ' + count + ' compiled, not installed.';
+    // The MEMORY.md guard line (2026-10-19): the hook's state, then whether Claude Code will run it
+    // here, said every time, because where policy restricts hooks the guard is installed and inert.
+    const mg = (d && d.memoryGuard) || { label: 'unreadable', on: false, policy: '', nodeMissing: false };
+    $('memoryGuardStatus').textContent = 'MEMORY.md guard: ' + mg.label
+      + (mg.nodeMissing ? ', and the node it runs is gone (turn it on again)' : '') + '. ' + mg.policy;
+    $('memoryGuardBtn').textContent = !mg.on ? 'Turn on MEMORY.md guard'
+      : (mg.label === 'on (needs repair)' ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
+    renderThreads((d && d.threads) || null);
     $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
+  }
+
+  // The open-threads line, its INDEX warning and its toggle (2026-10-19): what the block holds and
+  // where it is installed, and, while MEMORY.md is past a budget, the same sentence every new
+  // session reads. Text only: a thread's words never reach the card, only counts and the INDEX
+  // line, which recall.py writes from numbers.
+  function renderThreads(t) {
+    const agent = (name) => (name === 'claude' ? 'Claude' : name === 'codex' ? 'Codex' : name);
+    const n = (count) => count + ' thread' + (count === 1 ? '' : 's');
+    let line;
+    if (!t) line = 'Open threads: unavailable.';
+    else if (!t.enabled) {
+      line = 'Open threads: off.' + (t.declared ? ' ' + t.listed + ' of ' + t.declared + ' status memories would be listed.' : '');
+    } else if (t.none) line = 'Open threads: no agent instruction file found.';
+    else if (t.compile === 'refused') line = 'Open threads: the compiled file was refused (' + t.reason + ').';
+    else if (t.compile === 'missing') {
+      line = t.declared ? 'Open threads: ' + t.listed + ' open, not compiled yet.' : 'Open threads: none compiled yet.';
+    } else if (t.installed.length) {
+      line = 'Open threads: ' + t.count + ' installed (' + t.installed.map(agent).join(', ') + ')'
+        + (t.current ? '.' : '; update pending.');
+    } else {
+      line = t.count || t.index ? 'Open threads: ' + n(t.count) + ' compiled, not installed.' : 'Open threads: none open.';
+    }
+    $('claudeMemoryThreadsStatus').textContent = line;
+    const index = $('claudeMemoryThreadsIndex');
+    index.hidden = !(t && t.enabled && t.index);
+    index.textContent = t && t.index ? '⚠ INDEX: ' + t.index : '';
+    index.style.color = 'var(--vscode-charts-yellow, #d29922)';
+    $('claudeMemoryThreads').textContent = t && t.enabled ? 'Turn off open threads' : 'Turn on open threads';
   }
 
   // One wording for both memory cards' CPU LLM line: the Claude and Codex searches run the same
@@ -6175,6 +6686,7 @@ class WildcardingViewProvider {
   $('alReview').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnReview' }));
   $('alUndo').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnUndo' }));
   $('alWhy').addEventListener('click', () => vscode.postMessage({ type: 'autoLearnWhy' }));
+  $('alToggle').addEventListener('click', () => vscode.postMessage({ type: 'toggleAutoLearn' }));
   $('permissionsView').addEventListener('click', () => vscode.postMessage({ type: 'viewPermissions' }));
   $('deadApprovals').addEventListener('click', () => {
     if (oneOffShown) vscode.postMessage({ type: 'viewPermissions', selection: { filter: 'dead' } });
@@ -6198,6 +6710,8 @@ class WildcardingViewProvider {
   $('searchClaudeMemory').addEventListener('click', () => vscode.postMessage({ type: 'searchClaudeMemory' }));
   $('inspectClaudeMemory').addEventListener('click', () => vscode.postMessage({ type: 'inspectClaudeMemory' }));
   $('claudeMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'manageGates' }));
+  $('memoryGuardBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleMemoryGuard' }));
+  $('claudeMemoryThreads').addEventListener('click', () => vscode.postMessage({ type: 'toggleOpenThreads' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));
@@ -6235,6 +6749,10 @@ async function deactivate() {
   // the recall timeout's handle was never captured at all, so both could fire
   // against a torn-down extension after a reload or an upgrade.
   clearTimeout(gatesBounce);
+  // The open-threads recompile, armed by the corpus watcher, activation or the setting: its
+  // callback spawns Python and then writes the instruction files.
+  clearTimeout(threadsBounce);
+  threadsBounce = null;
   clearTimeout(recallSyncTimer);
   clearTimeout(dashboardBounce);
   // The strip-model check: its timer, and a scan already running on its thread.

@@ -248,7 +248,38 @@ test('an index inside the line cap says nothing about lines at all', () => {
   }
 });
 
-// memoryLint.js pickPrimaryDir and recall.py:123#_discover_memory_dir answer the same
+// Below the 200-line cap there is a second state (2026-10-19): past the MEMORY.md guard's
+// 140-line target the index still loads whole, and the gauge warns that the next addition
+// should take a line out. A broken HTML comment counts as one more thing to fix.
+// MUTATION: drop `|| r.linesOverTarget` from the background condition in refresh() and the
+// gauge stays neutral at 150 lines.
+test('the status bar warns past the 140-line target, below the cap, and counts a broken comment', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-target-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---work', 'memory');
+  writeStore(dir, 'x\n'.repeat(150));
+  const h = harness(tempHome);
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    lint.refresh();
+    let text = h.statusText[h.statusText.length - 1];
+    assert.match(text, /150 lines, over the 140-line target/);
+    assert.ok(!/to fix/.test(text), 'a line count is a state, not an issue with a line to point at');
+    assert.equal(lint.status.backgroundColor?.id, 'statusBarItem.warningBackground');
+
+    writeStore(dir, '<!-- a <!-- b -->\n- x\n');
+    lint.refresh();
+    text = h.statusText[h.statusText.length - 1];
+    assert.match(text, /1 to fix/, text);
+    assert.ok(!/lines/.test(text), 'two lines: inside the target');
+    assert.match(lint.status.tooltip, /1 broken HTML comment\(s\)/);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// memoryLint.js pickPrimaryDir and recall.py:126#_discover_memory_dir answer the same
 // question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
 // sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.
 // Until these two tests existed, every test that reached pickPrimaryDir had at most one
@@ -644,7 +675,7 @@ test('a gate source is counted only when recall.py would compile it', () => {
   const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
   const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
 
-  // The index itself. recall.py:1313#EXCLUDE skips EXCLUDE before it looks at anything
+  // The index itself. recall.py:1459#EXCLUDE skips EXCLUDE before it looks at anything
   // else, so a MEMORY.md carrying frontmatter and a gate block is still not a gate source.
   fs.writeFileSync(path.join(dir, 'MEMORY.md'),
     fm('global') + '# Memory Index\n\n' + block, 'utf8');
@@ -1255,7 +1286,7 @@ test('the report is null, with the dir still named, when MEMORY.md cannot be rea
 // recompilation off for anyone who hid the status-bar gauge. That exact outcome (zero
 // watchers, gates silently never recompiled, nothing logged) already happened once on
 // this repo, from the pinned-`memory.dir` bug, and is why
-// `memoryStoreDirs` (extension.js:3269-3270#memoryStoreDirs) overrides `dir` before calling this.
+// `memoryStoreDirs` (extension.js:3396-3397#memoryStoreDirs) overrides `dir` before calling this.
 test('discoverDirs answers which stores EXIST, so memory.enabled cannot switch it off', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-discover-enabled-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---off', 'memory');

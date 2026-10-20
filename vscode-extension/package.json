@@ -2,7 +2,7 @@
   "name": "permission-wildcarding",
   "displayName": "AI Acolyte",
   "description": "Reduces approval friction in Claude Code and Codex with history-based learning, reviewed permission changes, policy recovery, shell guidance, memory diagnostics and recall. Codex uses native prefix rules and reviewed MCP settings. Codex support remains experimental.",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -119,6 +119,11 @@
         "icon": "$(question)"
       },
       {
+        "command": "permission-wildcarding.toggleAutoLearn",
+        "title": "AI Acolyte: Toggle Auto Learn",
+        "icon": "$(debug-pause)"
+      },
+      {
         "command": "permission-wildcarding.autoLearnShowBlocked",
         "title": "AI Acolyte: Auto Learn - Show families blocked by managed policy",
         "icon": "$(shield)"
@@ -144,9 +149,19 @@
         "icon": "$(law)"
       },
       {
+        "command": "permission-wildcarding.toggleMemoryGuard",
+        "title": "AI Acolyte: Toggle MEMORY.md guard",
+        "icon": "$(shield)"
+      },
+      {
         "command": "permission-wildcarding.manageGates",
         "title": "AI Acolyte: Manage memory gates…",
         "icon": "$(checklist)"
+      },
+      {
+        "command": "permission-wildcarding.toggleOpenThreads",
+        "title": "AI Acolyte: Toggle open threads",
+        "icon": "$(pin)"
       },
       {
         "command": "permission-wildcarding.lintMemory",
@@ -238,7 +253,7 @@
         "permissionWildcarding.autoLearn.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Incrementally correlate Claude Code and Codex shell history on startup, on transcript changes, and during periodic reconciliation. Confirmed successes add evidence, failures are retained as negative evidence, and unanswered calls are ignored. Raw transcript arguments and absolute transcript paths are never saved in Auto Learn state."
+          "markdownDescription": "Incrementally correlate Claude Code and Codex shell history on startup, on transcript changes, and during periodic reconciliation. Confirmed successes add evidence, failures are retained as negative evidence, and unanswered calls are ignored. Raw transcript arguments and absolute transcript paths are never saved in Auto Learn state. **AI Acolyte: Toggle Auto Learn** and the Auto Learn card's button switch it in your user settings. Off stops the extension's background scans only: Codex's after-turn Stop hook and `wildcard-perms --learn` do not read this setting. A workspace may only make this stricter: it can turn Auto Learn off, never on when your user setting has it off."
         },
         "permissionWildcarding.autoLearn.mode": {
           "type": "string",
@@ -319,6 +334,12 @@
           "scope": "machine",
           "markdownDescription": "Maintain a second managed block holding your own **standing orders**, compiled out of your Claude Code file-memory. `recall.py --gates-compile` lifts the `<!-- gate -->` section from every memory marked `scope: global` into `~/.claude/gates.generated.md`, and this installs it into each agent's instruction file. Why it needs to be resident: the memory index is a list of one-line hooks, so the enforceable half of a rule sits in a file that only loads if a recall surfaces it — which never happens for a rule you are already breaking, because nothing triggers the lookup. Reference material is fine on demand; policy is not. Installing is a file read and runs on activation; compiling spawns python, an explicit action until the block is installed and then again after each memory edit. Marker-fenced separately from the shell-style block, so turning either off leaves the other byte-identical. To retire or restore one gate at a time instead, run **AI Acolyte: Manage memory gates…**: it edits and recompiles either way, and installs its change only while this is on, which it never changes. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
         },
+        "permissionWildcarding.openThreads.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "markdownDescription": "Maintain a third managed block, **open threads**, in each agent's instruction file. `recall.py --threads-compile` lists every memory whose frontmatter `status:` is `open`, `awaiting`, `blocked` or `deferred`, with the text of its `<!-- status -->` block, into `~/.claude/open-threads.generated.md`, and this installs it. While `MEMORY.md` is past 140 lines, 12000 bytes or a 300-character line, the block also carries an INDEX line telling every new session to compact it. Status then has a home outside the index, whose first 200 lines are all Claude Code loads. The compile runs on its own: after a memory edit that can change the list, on activation when there is anything to say, and when this is turned on. Off removes the block and nothing compiles or installs it. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
+        },
         "permissionWildcarding.claudeStripModelCheck": {
           "type": "boolean",
           "default": true,
@@ -339,7 +360,7 @@
         "permissionWildcarding.memory.lineBudget": {
           "type": "number",
           "default": 300,
-          "markdownDescription": "Max **characters in one** `MEMORY.md` index line before it's flagged. (This is a width limit for a single hook, not a limit on how many lines the file may have — that's `#permissionWildcarding.memory.maxLines#`.) Hooks over this are drifting into changelog territory — move the detail into the memory file or the project repo."
+          "markdownDescription": "Max **characters in one** `MEMORY.md` line (any line, counted in characters, not UTF-16 units) before it's flagged. (This is a width limit for a single line, not a limit on how many lines the file may have — that's `#permissionWildcarding.memory.maxLines#`.) Hooks over this are drifting into changelog territory — move the detail into the memory file or the project repo. This tunes the editor gauge, not the MEMORY.md guard: the guard hook always uses 300."
         },
         "permissionWildcarding.memory.maxLines": {
           "type": "number",
@@ -349,7 +370,7 @@
         "permissionWildcarding.memory.totalBudget": {
           "type": "number",
           "default": 12000,
-          "markdownDescription": "Byte budget for the whole always-loaded `MEMORY.md` index before the gauge warns."
+          "markdownDescription": "Byte budget for the whole always-loaded `MEMORY.md` index before the gauge warns. This tunes the editor gauge, not the MEMORY.md guard: the guard hook always uses 12000."
         },
         "permissionWildcarding.memory.recallScript": {
           "type": "string",

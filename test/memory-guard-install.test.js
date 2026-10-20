@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const {
   resolveNodeExecutable, memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy,
   memoryGuardProbe, classifyProbe, guardRevision,
@@ -523,7 +524,7 @@ test('a probe whose pipes are held past its deadline still answers, and lets its
   const { spawn } = require('node:child_process');
   const f = fixture(t);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-holder-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  t.after(() => removeDir(dir));
   const record = path.join(dir, 'holder.json');
   const holder = path.join(dir, 'holder.js');
   const middle = path.join(dir, 'middle.js');
@@ -597,7 +598,7 @@ test('a child that survives the deadline\'s kill does not keep the probe\'s proc
   const { spawn } = require('node:child_process');
   const f = fixture(t);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-survivor-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  t.after(() => removeDir(dir));
   const record = path.join(dir, 'survivor.json');
   const stub = path.join(dir, 'claude-stub.js');
   // The SIGTERM handler first, and the record after it: the record is the stand-in saying it is
@@ -655,7 +656,7 @@ test('a child that survives the deadline\'s kill does not keep the probe\'s proc
 // its record, for the cleanup.
 function strayClaude(t, lifeMs) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-stray-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  t.after(() => removeDir(dir));
   const record = path.join(dir, 'stray.json');
   const script = path.join(dir, 'claude-stub.js');
   fs.writeFileSync(script, `const fs = require('fs');

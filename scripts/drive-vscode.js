@@ -10,11 +10,15 @@
 //   [--codex-restore yes] [--codex-derived yes] [--features-only yes] [--approvals-only yes] [--mcp-only yes] [--recall-only yes] [--native-gates-only yes]
 // Windows-only launcher: Start-Process keeps the test instance hidden and separate
 // from the user's running editor. The test instance exits when acceptance ends.
+// Each run's isolated profile and logs stay in %TEMP% for inspection. Before it makes its
+// own, a run removes the earlier ones beyond the 3 most recent (ACOLYTE_DRIVE_KEEP=<n>
+// keeps n) and says how many went and what that freed; see scripts/prune-drive-dirs.js.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const { DRIVE_PREFIX, pruneDriveDirs } = require('./prune-drive-dirs');
 
 assert.equal(process.platform, 'win32', 'drive-vscode currently requires the Windows Start-Process launcher');
 const repo = path.resolve(__dirname, '..');
@@ -87,7 +91,8 @@ const codeCommand = resolveExecutable('code');
 assert.ok(codeCommand, 'VS Code is not installed or its code command cannot be resolved');
 const codeExecutable = path.resolve(path.dirname(codeCommand), '..', 'Code.exe');
 assert.ok(fs.existsSync(codeExecutable), `VS Code application is missing: ${codeExecutable}`);
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-vscode-drive-'));
+pruneDriveDirs();
+const root = fs.mkdtempSync(path.join(os.tmpdir(), DRIVE_PREFIX));
 const home = path.join(root, 'home');
 const codexHome = codexLayout === 'custom-override' ? path.join(root, 'custom-codex') : path.join(home, '.codex');
 const codexInstructions = path.join(codexHome, codexLayout === 'custom-override' ? 'AGENTS.override.md' : 'AGENTS.md');

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./helpers/remove-dir');
 const Module = require('node:module');
 
 function disposable() { return { dispose() {} }; }
@@ -132,7 +133,7 @@ test('off settings remove shadowed Codex guidance and gates on activation and co
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
     purgeProjectModules(extensionPath, rootSrc);
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await removeDir(root);
   }
 });
 
@@ -227,7 +228,7 @@ test('activation never writes a held CLAUDE.md in place, and logs each gates tar
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
     purgeProjectModules(extensionPath, rootSrc);
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await removeDir(root);
   }
 });
 
@@ -326,7 +327,7 @@ test('a per-agent install with no Claude gates is settled on activation, and the
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
     purgeProjectModules(extensionPath, rootSrc);
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await removeDir(root);
   }
 });
 

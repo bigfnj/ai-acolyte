@@ -264,8 +264,10 @@ function harness(tempHome, opts = {}) {
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
-        // COUNTED, not just stubbed. The real memoryReport is 6.99 ms and 25 fs
-        // syscalls against a live corpus, and _push used to call it twice for two
+        // COUNTED, not just stubbed. The real memoryReport was 6.99 ms and 25 fs
+        // syscalls against a live corpus when this was written, and grows with the store
+        // (docs/engineering-record.md, the 2026-10-20 dated note under the refuted rows of
+        // "Optimizations measured and DECLINED"); _push used to call it twice for two
         // cards that need disjoint parts of one result. How many times it is
         // called is the whole property, and nothing else in the suite can see it.
         memoryReport: () => {
@@ -1668,7 +1670,9 @@ test('the saved-permissions card names over-broad wildcard grants and links to t
 
 // The memory report is the most expensive thing one push does: measured 6.99 ms
 // and 25 fs syscalls (12 readFileSync + 11 existsSync + 2 readdirSync) against a
-// live corpus. _push called it TWICE — once for the Memory card, once for a
+// live corpus at the time; it has grown with the store since (a warm 29.4 ms p50 at
+// 171 files: docs/engineering-record.md, the 2026-10-20 dated note under the refuted
+// rows of "Optimizations measured and DECLINED"). _push called it TWICE — once for the Memory card, once for a
 // one-integer `gateSources` lookup in the Gates card that the first call had
 // already computed. Two calls measured 9.92 ms, so the duplicate cost 2.93 ms of
 // every refresh, and a refresh fires on every settings.json change.

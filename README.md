@@ -8,6 +8,10 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.5 makes the number of `MEMORY.md` entries a count, never a warning**: the 16-entry
+ceiling the editor began warning about in 1.9.1 was never measured, and an index that gives every
+memory its own line could not get under it. It is gone from the Problems panel, the status bar
+colour, the MEMORY.md guard and `recall.py --lint`; the line, byte and line-length budgets stay.
 **Version 1.9.4 fixes what a fourth audit found**: a run with words but no verb is refused rather
 than treated as a hook event (`wildcard-perms gates status` used to rewrite settings.json),
 `--learn` checks its subcommand before it saves `--mode`, the hidden-character set is Unicode's
@@ -380,20 +384,23 @@ It judges a `Write`, `Edit` or `MultiEdit` of `<config>/projects/<project>/memor
 `<config>` is `CLAUDE_CONFIG_DIR` or `~/.claude`, or of `MEMORY.md` in the `autoMemoryDirectory`
 your `settings.json` names. Any other file is let through without being read. It replays
 the edit and blocks only when a measure **ends past its budget and is worse than it was**
-(`src/memory-index-guard.js:223#verdict`):
+(`src/memory-index-guard.js:225#verdict`):
 
 | Measure | Budget |
 |---|---|
 | lines | 140 |
 | bytes | 12,000 |
 | longest line, in characters (any line, not only entries) | 300 |
-| resident `- ` entries | 16 |
 | broken HTML comments: a `<!--` inside an open comment, an orphan `-->`, a `<!--` never closed | 0 |
+
+The number of `- ` entries is counted and shown, never a budget. From 1.9.1 to 1.9.4 it was held
+to 16, a figure taken from one index after it was cut down and never measured, and an index that
+gives every memory its own line could not get under it. The size budgets above already bound what
+a long index costs.
 
 The worse-than-before half is what makes it safe over an index that is already too big. It also
 means the first step past a budget is refused: 140 lines to 141 is worse and ends past it. Deleting
-whole lines can only lower the first four, so compacting by deletion gets through, and at 16
-entries a new one has to replace an old one. A deletion that breaks an HTML comment or a code
+whole lines can only lower the first three, so compacting by deletion gets through. A deletion that breaks an HTML comment or a code
 fence is refused: removing only a comment's `<!--` or `-->` line, or the fence that kept a `<!--`
 from being a comment, would load the comment's body into every session. A smaller file is not
 automatically a pass either: joining two lines into one longer than 300 characters makes the

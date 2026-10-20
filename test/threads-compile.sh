@@ -333,7 +333,7 @@ echo "ok: zero threads and a healthy index write the header and the heading, nev
 # ------------------------------------------------------------------------------- the INDEX line
 # Lines, bytes and the longest line, each at its budget (no line) and one past it (a line), alone
 # and together, CRLF and LF alike. Mutations, each failing here: `>=` for `>` (140 lines prints);
-# a line counted for the final newline (140 lines reads 141); the 16-entry ceiling reported;
+# a line counted for the final newline (140 lines reads 141); an entry count reported;
 # bytes counted from decoded text (CRLF undercounts); the longest line counted in bytes (the
 # e-acute line of 151 characters reads 302) or with its CR; the INDEX line after the threads;
 # the phrases joined with anything but "; ".
@@ -360,10 +360,11 @@ recall --threads-compile
 index_lines 141 crlf
 recall --threads-compile
 index_line | grep -qF '141 lines (budget 140)' || fail "a CRLF index is counted differently: $(index_line)"
-# 17 entries is past the 16-entry ceiling, and within every budget here.
+# 17 entries, within every budget here: an entry count is never an INDEX line (and since 1.9.5
+# never a finding anywhere).
 index_lines 17
 recall --threads-compile
-lines | grep -q 'INDEX' && fail "the entry ceiling produced an INDEX line"
+lines | grep -q 'INDEX' && fail "an entry count produced an INDEX line"
 # Bytes: 12000 on disk is within; 12001 is past. CRLF counts its CRs (120 lines of 100 bytes).
 "$PY" -c 'import sys; open(sys.argv[1], "wb").write((b"- " + b"x" * 96 + b"\r\n") * 120)' "$MEM/MEMORY.md"
 recall --threads-compile
@@ -521,7 +522,7 @@ lint_case() {  # lint_case <label> <heading substring>; the store is already see
   printf '%s\n' "$OUT" | grep -qF "$2" || fail "$1: --lint does not report it:
 $OUT"
   printf '%s\n' "$OUT" | grep -q 'clean:' && fail "$1: --lint printed clean: over a finding"
-  printf '%s\n' "$OUT" | grep -qE 'STALE|over budget|not compiled|over the attention ceiling' \
+  printf '%s\n' "$OUT" | grep -qE 'STALE|over budget|not compiled' \
     && fail "$1: --lint used a phrase verify-release.ps1 fails on:
 $OUT"
   printf '%s\n' "$OUT" | grep -qE '^[[:space:]]*!' && fail "$1: --lint printed a ! line:

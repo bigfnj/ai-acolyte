@@ -18,8 +18,10 @@ const os = require('os');
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 // The MEMORY.md guard's own rules, shared rather than restated (2026-10-19): the comment-defect
-// scanner, the 140-line target the guard blocks growth past, and (2026-10-20) its 16-entry
-// ceiling. The guard hook uses fixed budgets; this lint's window-scoped memory.* settings tune the
+// scanner and the 140-line target the guard blocks growth past. The entry count is the guard's
+// measure too, but since 1.9.5 it is reported and never a budget: the 16-entry ceiling was one
+// corpus's floor, never measured, and nagged forever on an index that gives every memory a line.
+// The guard hook uses fixed budgets; this lint's window-scoped memory.* settings tune the
 // gauge only. Found in `./src/` in a packaged extension and `../src/` in the repository, as
 // autoLearnUi.js explains, by a resolve rather than a try/catch, so test/dead-exports.test.js can
 // see which names this file uses.
@@ -29,13 +31,12 @@ const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
 const GATES_MANAGE_MODULE = require.resolve('./gates-manage.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
 const { isHidden } = require(GATES_MANAGE_MODULE);
 const LINES_TARGET = GUARD_BUDGETS.lines;
-const ENTRIES_CEILING = GUARD_BUDGETS.entries;
 
 // recall.py's EXCLUDE (recall.py:233#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:268-269#GATE_BEGIN), and the pattern
+// recall.py's gate markers (recall.py:267-268#GATE_BEGIN), and the pattern
 // _compile_gates_text actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one
@@ -303,8 +304,8 @@ function threadOf(raw) {
 }
 
 // recall.py _index_health's three budgets (LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN), and
-// its phrases, over a fastLint result: [] when MEMORY.md is within all three. Not the 16-entry
-// ceiling, which is a soft attention target. `longestLine` is in code points, as Python counts.
+// its phrases, over a fastLint result: [] when MEMORY.md is within all three. Not the entry count,
+// which is reported and never a budget (1.9.5). `longestLine` is in code points, as Python counts.
 // Taken from the guard's BUDGETS rather than restated (2026-10-20): the numbers were written out
 // here a second time, beside the import they equal, and test/memory-guard-parity.test.js pins
 // recall.py's constants to BUDGETS, so one source holds all three places together.
@@ -441,15 +442,11 @@ function fastLint(dir, conf, names = null, text = null) {
   const over = [];
   const broken = [];
   // The resident "- " entries, the guard's measure (a line of the LF-or-CRLF split that starts
-  // with "- "), and the line of the first one past its ceiling, which is where the warning goes.
+  // with "- "). Counted for the tooltip and the report, never judged (1.9.5).
   let entries = 0;
-  let entryPastCeiling = null;
   const linkRe = /\]\(([^)]+\.md)(#[^)]*)?\)/g;
   lines.forEach((ln, i) => {
-    if (ln.startsWith('- ')) {
-      entries += 1;
-      if (entries === ENTRIES_CEILING + 1) entryPastCeiling = { line: i, end: ln.length };
-    }
+    if (ln.startsWith('- ')) entries += 1;
     // EVERY line, in code points (2026-10-19), the guard's and recall.py's rule. This read only
     // "- " lines and measured UTF-16 units, so a 300-character heading passed and a line of 160
     // emoji read as 320. `end` is the UTF-16 length, which is what a Range column counts.
@@ -476,12 +473,8 @@ function fastLint(dir, conf, names = null, text = null) {
     // still loads whole, and every addition should now take a line out.
     linesTarget: LINES_TARGET,
     linesOverTarget: lineCount > LINES_TARGET,
-    // The entry ceiling the guard and recall.py --lint hold the index to (2026-10-20). Past it
-    // the index still loads; "one in, one out" is what the guard then enforces.
+    // A count, not a budget (1.9.5): the bytes and lines above are what a long index costs.
     entries,
-    entriesCeiling: ENTRIES_CEILING,
-    entriesOver: entries > ENTRIES_CEILING,
-    entryPastCeiling,
     // A `<!--` inside an open comment, an orphan `-->`, a comment never closed: Claude Code
     // strips comments from the index, so each one leaks text into every session or hides it.
     comments: commentDefectList(text),
@@ -618,7 +611,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1497#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1492#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.
@@ -1036,21 +1029,20 @@ class MemoryLint {
     this.status.text = `$(book) mem: ${tok} tok`
       + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines`
         : r.linesOverTarget ? ` · ${r.lineCount} lines, over the ${r.linesTarget}-line target` : '')
-      + (r.entriesOver ? ` · ${r.entries}/${r.entriesCeiling} entries` : '')
       + (issues ? ` · ${issues} to fix` : '');
     this.status.tooltip =
       `MEMORY.md: ${r.bytes} bytes (~${r.tokens} tokens/session, budget ${conf.totalBudget / 4 | 0})\n` +
       `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest; `
         + `the target is ${r.linesTarget}\n` +
-      `${r.entries} resident "- " entries, ceiling ${r.entriesCeiling}\n` +
+      `${r.entries} resident "- " entries\n` +
       `${r.over.length} over-budget line(s), ${r.broken.length} broken index link(s), `
         + `${r.comments.length} broken HTML comment(s)\n` +
       `${path.dirname(r.memPath).replace(os.homedir(), '~')}\nClick for the full report.`;
     // linesOver joins totalOver here rather than the count: neither has a line to point
     // at, and both are worse than anything that does. Past the target is a warning too: the
-    // index still loads, and the next addition should take a line out. Past the entry ceiling
-    // likewise (2026-10-20): a state, so it is named in the text and not counted "to fix".
-    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget || r.entriesOver)
+    // index still loads, and the next addition should take a line out. The entry count never
+    // colours it (1.9.5): it is not a budget.
+    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget)
       ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.status.show();
   }
@@ -1064,18 +1056,6 @@ class MemoryLint {
         `the memory file or the project repo and leave a one-line hook.`,
         vscode.DiagnosticSeverity.Warning
       );
-      d.source = 'claude-memory';
-      out.push(d);
-    }
-    // One warning for the entry ceiling, on the first entry past it: the index has no single
-    // line at fault, and one squiggle per surplus entry would read as that many faults.
-    if (r.entryPastCeiling) {
-      const at = r.entryPastCeiling;
-      const d = new vscode.Diagnostic(new vscode.Range(at.line, 0, at.line, at.end),
-        `The index holds ${r.entries} resident "- " entries, past the ${r.entriesCeiling}-entry ceiling `
-        + 'the MEMORY.md guard and recall.py --lint hold it to; this is the first one past it. Take an '
-        + 'entry out for each one you add, and move detail into the memory files.',
-        vscode.DiagnosticSeverity.Warning);
       d.source = 'claude-memory';
       out.push(d);
     }
@@ -1149,10 +1129,7 @@ class MemoryLint {
       ch.appendLine(`  ! ${r.lineCount - r.linesTarget} line(s) past the ${r.linesTarget}-line target:`
         + ' still loaded, but every addition should now take a line out');
     }
-    ch.appendLine(`  ${r.entries} resident index entries, ceiling ${r.entriesCeiling}`);
-    if (r.entriesOver) {
-      ch.appendLine(`  ! ${r.entries - r.entriesCeiling} entries past the ceiling: take one out for each one you add`);
-    }
+    ch.appendLine(`  ${r.entries} resident index entries`);
     ch.appendLine(`  ${r.fileCount} memory files in the dir`);
     ch.appendLine('');
     if (r.over.length) {

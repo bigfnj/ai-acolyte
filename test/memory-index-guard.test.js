@@ -49,6 +49,7 @@ const GUARD_SHAS = {
   2: 'f337571b7e2ec599f0dfcaea7849bea771b24725b215e51b7b9725233136780a',
   3: 'dc9d953cfb58067db51541d50e9ff83b44ad0a2c4df0af6b1e0708e1bbc3a13b',
   4: 'f5b307182e501cd09dad0c0e57dd0ce77f4c96ddf48715539c7daa5a5a357d81',
+  5: '326946576c633f01d749935b1a4d79c6fadf86075e15490ccc2dc64c9c46cb64',
 };
 test('the guard source is pinned to its GUARD_REVISION, so a change without a bump fails', () => {
   const text = fs.readFileSync(GUARD, 'utf8').replace(/\r\n/g, '\n');
@@ -168,7 +169,6 @@ const AT_BUDGET = {
   lines: [Array.from({ length: 140 }, (_, i) => `l${i}`).join('\n') + '\n', 'one more line\n'],
   bytes: [('b'.repeat(299) + '\n').repeat(40), 'd'],
   lineChars: ['x'.repeat(300) + '\n', 'y'],
-  entries: [Array.from({ length: 16 }, (_, i) => `- e${i}`).join('\n') + '\n', '- one more\n'],
   commentDefects: ['- clean\n', '-->\n'],
 };
 test('each budget blocks on its own measure, one step past it, and not at it', () => {
@@ -181,7 +181,7 @@ test('each budget blocks on its own measure, one step past it, and not at it', (
     assert.deepEqual(result.reasons.map((r) => r.metric), [metric], `${metric} one step past its budget blocks on it alone`);
     assert.equal(result.reasons[0].after, BUDGETS[metric] + 1);
   }
-  assert.deepEqual(BUDGETS, { lines: 140, bytes: 12000, lineChars: 300, entries: 16, commentDefects: 0 });
+  assert.deepEqual(BUDGETS, { lines: 140, bytes: 12000, lineChars: 300, commentDefects: 0 });
 });
 
 // THE rule: past the budget is allowed when the edit does not make that measure worse.
@@ -197,16 +197,20 @@ test('an index already past a budget accepts edits that do not make that measure
   assert.equal(verdict('', over).block, true, 'a new file written past the budget is worse than no file');
 });
 
-// "One in, one out": with the entry count at its budget, adding an entry is refused and swapping
-// one for another is not.
-test('the entry budget makes the index one in, one out', () => {
-  const full = Array.from({ length: 16 }, (_, i) => `- e${i}`).join('\n') + '\n';
-  assert.equal(verdict(full, full + '- e16\n').block, true);
-  assert.equal(verdict(full, full.replace('- e0\n', '') + '- e16\n').block, false);
+// The entry count is measured and never judged (revision 5, 1.9.5): an index that gives each
+// memory one line grows by one entry with every memory, and the size budgets already bound what
+// that costs. 100 short entries sit inside lines, bytes and the longest line.
+// MUTATION: put `entries: 16` back in BUDGETS and the hundred-and-first entry is refused.
+test('the entry count is never a budget: an index of 100 entries takes one more', () => {
+  const many = Array.from({ length: 100 }, (_, i) => `- e${i}`).join('\n') + '\n';
+  assert.equal(measure(many).entries, 100, 'precondition: the count is still measured');
+  const grown = verdict(many, many + '- e100\n');
+  assert.equal(grown.block, false, JSON.stringify(grown.reasons));
+  assert.equal(Object.hasOwn(BUDGETS, 'entries'), false, 'no entry budget');
 });
 
-// Compaction always gets through. Deleting lines can only lower lines, bytes, the longest line
-// and the entry count, so from any index without comments, however far past every budget, any
+// Compaction always gets through. Deleting lines can only lower lines, bytes and the longest
+// line, so from any index without comments, however far past every budget, any
 // deletion passes. Seeded, so a failure is reproducible.
 test('deleting lines from an index past every budget is never blocked', () => {
   let seed = 7;
@@ -239,7 +243,6 @@ test('the block message names each failed measure with value and budget, and the
     { metric: 'lines', before: 9998, after: 9999, budget: 140 },
     { metric: 'bytes', before: 999998, after: 999999, budget: 12000 },
     { metric: 'lineChars', before: 99998, after: 99999, budget: 300 },
-    { metric: 'entries', before: 9998, after: 9999, budget: 16 },
     { metric: 'commentDefects', before: 98, after: 99, budget: 0 },
   ];
   const message = blockMessage(reasons);
@@ -447,7 +450,7 @@ test('the hook exits 2 with the reason on stderr when an edit grows an index alr
     { CLAUDE_CONFIG_DIR: f.config });
   assert.equal(run.status, 2, run.stderr);
   assert.match(run.stderr, /lines 151 \(budget 140, was 150\)/);
-  assert.match(run.stderr, /"- " entries 151 \(budget 16, was 150\)/);
+  assert.doesNotMatch(run.stderr, /entries/, 'the entry count is never a reason (revision 5)');
   assert.equal(fs.readFileSync(f.index, 'utf8'), OVER, 'the guard never writes the file');
 });
 

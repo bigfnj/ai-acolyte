@@ -77,6 +77,10 @@ echo "== CLI status verbs"
 check "--gates status"    'gates \[claude\]'                          "$(node "$CLI" --gates status 2>&1)"
 check "--guidance status" 'guidance \[claude\]'                       "$(node "$CLI" --guidance status 2>&1)"
 check "--bypass status"   'bypass: (ON|OFF)'                          "$(node "$CLI" --bypass status 2>&1)"
+# The guard's status names a closed set of states and always states the hook policy line,
+# so a crash, a usage error or a verb that fell into hook mode cannot pass.
+check "--memory-guard status" 'memory-guard: (OFF|ON|on \(copy outdated\)|on \(needs repair\)|foreign|unreadable).*policy:' \
+  "$(node "$CLI" --memory-guard status 2>&1 | tr '\n' ' ')"
 # --learn status emits the state file as JSON, not prose. Pin the one field whose
 # value set is closed, so a malformed or empty state cannot pass.
 check "--learn status"    '"mode": *"(observe|recommend|auto-safe)"'  "$(node "$CLI" --learn status 2>&1)"

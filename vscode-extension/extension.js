@@ -53,7 +53,7 @@ const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const { memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable } = require('./src/memory-guard-install');
 const {
-  openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath,
+  openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath, readCompiled: readCompiledThreads,
 } = require('./src/agent-open-threads');
 const {
   MODELLED_VERSION: STRIP_MODEL_MODELLED, checkOffThread: checkStripModelOffThread, defaultBinary: findClaudeCodeBinary,
@@ -3381,7 +3381,7 @@ function activate(context) {
 // unwatched until a window reload, and a store that went away left a dead watcher until
 // deactivate().
 const memoryCardWatchers = new Map();    // dir -> MEMORY.md watcher, keeps the Memory card live
-const gatesCorpusWatchers = new Map();   // dir -> *.md watcher, triggers the gate recompile
+const gatesCorpusWatchers = new Map();   // dir -> *.md watcher, hands each event to the gate AND the threads recompile (memoryCorpusChanged)
 
 // Every store on disk, read from the LIVE configuration on each call -- which is half of
 // what makes a reconcile a reconcile, since memory.* can change at runtime.
@@ -3477,12 +3477,15 @@ function threadsMayChange(file) {
   } catch { return false; }
 }
 
-// Whether open-threads.generated.md's heading counts any thread. A torn or missing file reads as
-// none: the next status-mentioning edit or MEMORY.md change compiles it again.
+// Whether open-threads.generated.md lists a thread, by src/agent-open-threads.js's own reading
+// (header, sha and heading), not a third parse of it (2026-10-20). A compile that reading refuses
+// (torn, or edited by hand) also answers yes: any edit in the store may as well recompile it,
+// since nothing installs it as it is. A missing file is none: the next status-mentioning edit or
+// MEMORY.md change compiles one.
 function compiledListsThreads() {
   try {
-    const heading = /^## Open threads \((\d+), managed\)$/m.exec(fs.readFileSync(threadsCompiledPath(), 'utf8'));
-    return !!heading && Number(heading[1]) > 0;
+    const compiled = readCompiledThreads(os.homedir());
+    return compiled.state === 'refused' || (compiled.state === 'whole' && compiled.count > 0);
   } catch { return false; }
 }
 

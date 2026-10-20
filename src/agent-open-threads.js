@@ -144,6 +144,8 @@ function setOpenThreadsAll(on, options = {}) {
     .map((row) => ({ ...row, threads: compiled.count, index: compiled.index, wanted: compiled.wanted }));
 }
 
+// readCompiled is exported for the extension's corpus watcher, so the question "does the compile
+// list a thread" is answered by this one reading, sha check included (2026-10-20).
 module.exports = {
-  THREADS_BEGIN, THREADS_END, compiledPath, openThreadsStatusAll, setOpenThreadsAll,
+  THREADS_BEGIN, THREADS_END, compiledPath, readCompiled, openThreadsStatusAll, setOpenThreadsAll,
 };

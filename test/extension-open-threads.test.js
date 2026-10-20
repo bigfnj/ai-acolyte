@@ -352,6 +352,23 @@ test('the corpus watcher hands every change to both the gates and the threads, a
   // arm nothing; drop the store check and the other store arms one.
 });
 
+// ONE READING OF THE COMPILED FILE (2026-10-20). Whether the compile lists a thread was a third
+// parse of it, the heading alone with no sha check; it is src/agent-open-threads.js readCompiled
+// now. A compile that reading refuses arms the recompile on any edit, since nothing installs it.
+test('the watcher asks the install\'s own reader whether a thread is listed, and a refused compile recompiles', async (t) => {
+  const tornNone = NONE.replace('(0, managed)', '(0, managed)\n- **OPEN** Pasted in by hand. (x)');
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, tornNone) });
+  app.held.length = 0;
+  app.fireCorpus(app.store, 'extra.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'an edit with no status recompiles a compile the install refuses');
+  await app.fireTimers();
+  // A whole compile that lists none: the same edit arms nothing.
+  fs.writeFileSync(app.threadsFile, NONE);
+  app.fireCorpus(app.store, 'extra.md');
+  assert.deepEqual(app.live(), [], 'a whole compile listing none, and an edit with no status: nothing');
+  // MUTATION: put back the heading regex in compiledListsThreads and the first assertion fails.
+});
+
 test('the gates still recompile through the dispatcher', async (t) => {
   const app = await threadsWindow(t, { prepare: (box) => {
     const gate = '---\nname: g\nscope: global\n---\n<!-- gate -->\n- A gate.\n<!-- /gate -->\n';

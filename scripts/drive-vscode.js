@@ -131,6 +131,12 @@ fs.writeFileSync(path.join(home, '.claude', 'gates.generated.md'),
   '## Fixture standing order\nVerify the requested behavior before reporting it.\n');
 fs.writeFileSync(path.join(home, '.claude', 'settings.json'),
   JSON.stringify({ permissions: { allow: [], deny: [], ask: [] } }, null, 2) + '\n');
+// A Claude memory store, so the dashboard shows the Claude memory card and its 1.9.0 lines (the
+// MEMORY.md guard and open threads). A short, healthy index and no status memory: open threads
+// then have nothing to compile, so no block lands in the instruction files other groups assert on.
+const memoryStore = path.join(home, '.claude', 'projects', 'drive', 'memory');
+fs.mkdirSync(memoryStore, { recursive: true });
+fs.writeFileSync(path.join(memoryStore, 'MEMORY.md'), '# Memory Index\n\n- Fixture entry for the real-editor drive.\n');
 const rulesFile = path.join(codexHome, 'rules', 'permission-wildcarding.rules');
 const originalRules = '# Fixture user policy remains owned by the user\n';
 fs.writeFileSync(rulesFile, originalRules);

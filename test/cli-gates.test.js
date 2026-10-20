@@ -236,15 +236,22 @@ test('CLI --gates rejects an unknown verb with usage', (t) => {
 });
 
 // Whatever followed `--gates on` was dropped. A second VERB there is the dispatch chain's
-// refusal (the test after this one); this one is the stray words gates() itself refuses.
+// refusal (the test after this one), and so is an option the verb does not take (exit 2, named);
+// this one is the stray words gates() itself refuses.
 // MUTATION: remove the extra-argument refusal in gates() and `on` installs, exit 0.
 test('CLI --gates on|off|status|refresh refuse an extra argument and write nothing', (t) => {
   const home = tempHome(t);
-  for (const args of [['--gates', 'on', '--verbose'], ['--gates', 'on', 'extra'],
-    ['--gates', 'refresh', '--json'], ['extra', '--gates', 'status']]) {
+  for (const args of [['--gates', 'on', 'extra'], ['extra', '--gates', 'status']]) {
     const bad = runCli(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
     assert.match(bad.stderr, /usage: wildcard-perms --gates on\|off\|status\|refresh/, args.join(' '));
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  for (const [args, option] of [[['--gates', 'on', '--verbose'], '--verbose'], [['--gates', 'refresh', '--json'], '--json']]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: unrecognized option ${option} for --gates; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
     assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
   }
   assert.equal(runCli(home, ['--gates', 'on']).status, 0, 'precondition: the same verb alone runs');
@@ -287,14 +294,21 @@ test('CLI refuses two verbs in one run, names them, and runs neither', (t) => {
 // with the shell-style block installed.
 test('CLI --guidance on|off|status refuse an extra argument and write nothing', (t) => {
   const home = tempHome(t);
-  for (const args of [['--guidance', 'on', 'now'], ['--guidance', 'on', '--verbose'],
-    ['--guidance', 'status', 'extra'], ['extra', '--guidance', 'off'], ['--guidance', 'off', '--json']]) {
+  for (const args of [['--guidance', 'on', 'now'], ['--guidance', 'status', 'extra'], ['extra', '--guidance', 'off']]) {
     const bad = runCli(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
     assert.equal(bad.stderr, 'usage: wildcard-perms --guidance on|off|status\n'
       + '       wildcard-perms --guidance derived\n'
       + '       wildcard-perms --guidance accept|decline|reset <id>\n', args.join(' '));
     assert.equal(bad.stdout, '', args.join(' '));
+    assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
+  }
+  // An option the switches do not take is the dispatch chain's refusal, exit 2, naming it.
+  for (const [args, option] of [[['--guidance', 'on', '--verbose'], '--verbose'], [['--guidance', 'off', '--json'], '--json']]) {
+    const bad = runCli(home, args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: unrecognized option ${option} for --guidance; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
     assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
   }
   const derived = runCli(home, ['--guidance', 'derived', '--workspace', home]);
@@ -1141,6 +1155,49 @@ test('CLI --gates retire takes a dashed name only after "--", and never reads a 
   // MUTATIONS: emit the spaced `--gates-retire -dash.md` in gateSteps and the retire exits 1 on
   // the stand-in's argparse usage error, as the real recall.py did; drop the `takesNames` branch
   // in the dispatch chain and `--gates retire --seed` runs --seed (exit 0, settings.json rewritten).
+});
+
+// What stands BEFORE `--gates retire|restore` is not a name, so it is held to the rules of every
+// other verb: `--bypass on --gates retire x` retired x and dropped the bypass, exit 0, and `--seed
+// --gates retire` printed the gates usage. A verb there is a second verb, a dashed word an
+// unrecognized option, a bare word a usage error, as `extra --gates status` is.
+// MUTATION: replace the lead check in the `takesNames` branch with a bare `gates(argv)` and
+// `--bypass on --gates retire feedback_gadget` retires the gate, exit 0.
+test('CLI --gates retire|restore refuse a verb or a word before --gates, and run nothing', (t) => {
+  const s = storeHome(t, MEMORIES);
+  const settingsPath = path.join(s.home, '.claude', 'settings.json');
+  const settings = fs.readFileSync(settingsPath, 'utf8');
+  for (const [args, named] of [
+    [['--bypass', 'on', '--gates', 'retire', 'feedback_gadget'], '--gates --bypass'],
+    [['--seed', '--gates', 'retire'], '--seed --gates'],
+    [['--learn', 'status', '--gates', 'restore', 'feedback_old_rule'], '--learn --gates'],
+  ]) {
+    const bad = s.run(args);
+    assert.equal(bad.status, 2, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
+    assert.ok(bad.stderr.startsWith(`wildcard-perms: one verb at a time, got ${named}; nothing was run\n\n`),
+      `${args.join(' ')}: ${bad.stderr}`);
+    assert.equal(bad.stdout, '', `${args.join(' ')} ran a verb`);
+  }
+  const option = s.run(['--verbose', '--gates', 'retire', 'feedback_gadget']);
+  assert.equal(option.status, 2, option.stderr);
+  assert.ok(option.stderr.startsWith('wildcard-perms: unrecognized option --verbose for --gates; nothing was run\n\n'),
+    option.stderr);
+  const word = s.run(['extra', '--gates', 'restore', 'feedback_old_rule']);
+  assert.equal(word.status, 1, word.stderr);
+  assert.equal(word.stderr, 'usage: wildcard-perms --gates on|off|status|refresh\n'
+    + '       wildcard-perms --gates list [--json]\n'
+    + '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n');
+  assert.deepEqual(s.calls(), [], 'no refused run reached recall.py');
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), settings, 'no verb wrote settings.json');
+  assert.match(s.memory('feedback_gadget.md'), /scope: global/);
+  assert.match(s.memory('feedback_old_rule.md'), /scope: retired/);
+
+  // After the verb a verb's spelling is still a name, refused as an option and never dispatched,
+  // and the same retire alone runs.
+  assert.match(s.run(['--gates', 'retire', '--bypass']).stderr, /^wildcard-perms: unrecognized option --bypass\n/);
+  const retire = s.run(['--gates', 'retire', 'feedback_gadget']);
+  assert.equal(retire.status, 0, retire.stderr);
+  assert.match(s.memory('feedback_gadget.md'), /scope: retired/, 'precondition: the retire alone runs');
 });
 
 test('CLI --gates retire of a name that starts with a space retires it as spelled, never its twin', (t) => {

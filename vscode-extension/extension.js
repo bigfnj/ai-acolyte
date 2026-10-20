@@ -3796,7 +3796,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:493-502#NEGATIVE — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:525-534#NEGATIVE — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -3960,7 +3960,7 @@ function localDrainEnabled() {
 // promoting them into user scope from a parent window is the same trust problem the
 // gate below exists for. A Claude session running in a subfolder is covered anyway:
 // the CLI hook drains each session's own cwd on every tool call
-// (bin/wildcard-perms:537-546#hookCwd, `hookCwd(input)`).
+// (bin/wildcard-perms:563-572#hookCwd, `hookCwd(input)`).
 //
 // A folder on another file system (a virtual workspace, or a non-file scheme mixed
 // into a multi-root workspace) has an fsPath that names no file on this disk, so

@@ -463,8 +463,64 @@ test('a tree kill of the asynchronous worker ends the codex it started, on every
   // its own, the host's group signal misses it, and it is still running here.
   // Confirmed 2026-10-14.
   assert.equal(await waitFor(() => gone(pid), 3000), true, 'the codex under the worker was ended with it');
+  // Whatever the worker printed while the kill reached it: under load it answered "exited
+  // early" first (the next test drives that order on purpose).
   assert.match(await outcome, /^Codex config RPC is unavailable: Command failed: the worker exited/,
     'a killed worker reads as unavailable, the way the execFile route reported it');
+});
+
+// AN ASK ITS CALLER ENDS READS AS ENDED, WHATEVER ITS WORKER SAID MEANWHILE (2026-10-20). The
+// test above failed in 1 of 3 loaded full runs reading "Codex config RPC refused: Codex config
+// server exited early". taskkill /T ends the leaves first and the root last (10 of 10 trees
+// here), and under load the capture showed the gap: the worker saw its cmd.exe die, answered,
+// and exited on its own 3 ms later, before taskkill reached it. That order is forced here: the
+// tree kill's taskkill is intercepted, the stand-in is ended first, and the real taskkill runs
+// only once the worker has answered. Windows only: on POSIX the group signal reaches the whole
+// tree at once.
+test('an ask its caller ends reads as unavailable even when its worker answers inside the kill', { skip: process.platform !== 'win32' }, async t => {
+  const childProcess = require('node:child_process');
+  const { endProcessTree } = require('../src/exec-resolve');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-order-'));
+  t.after(async () => {
+    await waitFor(() => { try { fs.rmSync(root, { recursive: true, force: true }); return true; } catch { return false; } }, 5000);
+  });
+  const home = path.join(root, 'home'), codexHome = path.join(home, '.codex');
+  fs.mkdirSync(codexHome, { recursive: true });
+  const codex = hangingCodex(t);
+  const tracked = [];
+  const outcome = api.readCodexConfigLayersAsync({ home, codexHome, workspaceRoot: root, codexExecutable: codex.executable,
+    timeoutMs: 40000, track: child => tracked.push(child) }).then(() => 'answered', error => error.message);
+  t.after(() => { for (const child of tracked) { if (child.exitCode === null && child.signalCode === null) { try { child.kill('SIGKILL'); } catch {} } } });
+  assert.ok(await waitFor(() => fs.existsSync(codex.pidFile) && fs.readFileSync(codex.pidFile, 'utf8').trim(), 10000),
+    'precondition: the worker started the stand-in codex');
+  const pid = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  const worker = tracked[0];
+  let said = '';
+  worker.stdout.on('data', chunk => { said += chunk; });
+  const realExecFile = childProcess.execFile;
+  let intercepted = 0;
+  childProcess.execFile = function (file, args, ...rest) {
+    if (!/taskkill\.exe$/i.test(String(file)) || args[1] !== String(worker.pid)) return realExecFile.call(this, file, args, ...rest);
+    childProcess.execFile = realExecFile;
+    intercepted += 1;
+    const done = rest.find(item => typeof item === 'function');
+    process.kill(pid);
+    // Never a taskkill to a PID that has been freed: a worker that has exited is left alone.
+    waitFor(() => said.includes('\n') && (worker.exitCode !== null || worker.signalCode !== null), 10000).then(() => {
+      if (worker.exitCode === null && worker.signalCode === null) realExecFile.call(childProcess, file, args, ...rest);
+      else done(null, '', '');
+    });
+    return null;
+  };
+  try { await endProcessTree(worker); } finally { childProcess.execFile = realExecFile; }
+  assert.equal(intercepted, 1, 'precondition: the tree kill ran taskkill on the worker');
+  assert.match(said, /exited early/, 'precondition: the worker answered inside the kill, as it did under load');
+  // MUTATION: drop `endedByCaller()` from nativeRpcAsync's stdout handler and from `finish`. The
+  // worker's own line is taken as the answer and this reads "refused: ... exited early".
+  // Confirmed 2026-10-20.
+  assert.match(await outcome, /^Codex config RPC is unavailable: Command failed: the worker exited/,
+    'an ask its caller ended read as Codex\'s own answer');
 });
 
 // A WORKER WHOSE HOST DIES ENDS ITS CODEX AND EXITS (2026-10-14). The tree kill

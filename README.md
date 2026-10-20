@@ -246,6 +246,13 @@ Names are case-insensitive, and a block list (`- codex` lines under `agents:`) w
 own count, such as "Claude 13 · Codex 14", and a gate moved from one agent to the other leaves
 the first on the next compile.
 
+A gate compiles as a person reading it sees it. Hidden characters in its block are removed on the
+way into `CLAUDE.md` and `AGENTS.md`, the same set thread text loses (section 6), plus the vertical
+tab, form feed, carriage return, U+001C-U+001F and NEL; line breaks and tabs stay. `recall.py
+--lint` names each gate memory that held any, with how many. The memory itself is not changed:
+the gates panel shows each hidden character in its text as `?`, and `wildcard-perms --gates
+list` does the same in names and titles.
+
 To set one standing order aside without losing it, retire it. **Manage gates…** on the card, or
 **AI Acolyte: Manage memory gates…** from the palette, lists every gate memory in the store that
 compiles, with the agents each one is for. Uncheck a gate and apply: its memory's `scope: global`
@@ -286,9 +293,11 @@ Waiting on the owner's choice between the two layouts.
 Each open memory is one line of the block, `- **AWAITING** <text> (<file stem>)`, the stem being
 the memory's file name without `.md`. Lines are sorted by status (open, awaiting, blocked,
 deferred) and then by stem. The text is the status block's, on one line, with control characters,
-bidirectional controls and invisible format characters (the soft hyphen, the zero-width space,
-joiners and invisible operators U+200B-U+200D and U+2060-U+2064, U+FEFF, and the tag block
-U+E0000-U+E007F) removed, cut at 240 characters. At most ten are listed, and one more line
+bidirectional controls and invisible format characters (the soft hyphen, U+034F, U+180E, the
+zero-width space, joiners and invisible operators U+200B-U+200D and U+2060-U+2065, U+FEFF, the tag
+block U+E0000-U+E007F and the variation selectors U+E0100-U+E01EF) removed, and of a run of
+variation selectors U+FE00-U+FE0F only the first after a character kept, so the one in a warning
+sign stays; cut at 240 characters. At most ten are listed, and one more line
 counts the rest and points at `recall "status"`. `done`, `closed`, `live`,
 `shelved`, `deleted`, `dropped` and `shipped` close a thread: the memory stays, and its line
 leaves the block on the next compile. Any other value, two `status:` lines, or a listed status

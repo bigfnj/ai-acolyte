@@ -591,6 +591,8 @@ function storeRecall(args) {
     if (process.env.ACOLYTE_STUB_EDIT === 'warn') {
       process.stderr.write('[recall] could not prune old snapshot 20200101T000000Z-retire (PermissionError: denied); it is kept.\n');
     }
+    // A warning that carries terminal control, as a memory's own text can (2026-10-20).
+    if (process.env.ACOLYTE_STUB_EDIT === 'warn-esc') process.stderr.write(`[recall] edit ${String.fromCharCode(27)}]0;PWNED${String.fromCharCode(7)}\r\n`);
     // os.EOL: a real Python's print() writes CRLF on Windows.
     process.stdout.write(`${out.join(os.EOL)}${os.EOL}`);
     process.exit(0);
@@ -621,6 +623,7 @@ function storeRecall(args) {
     }
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
+    if (process.env.ACOLYTE_STUB_COMPILE === 'warn-esc') process.stderr.write(`[recall] compile ${String.fromCharCode(27)}[2J${String.fromCharCode(155)}31m\r\n`);
     process.stdout.write(`compiled ${gates.length} gate(s)${os.EOL}`);
     process.exit(0);
   }
@@ -918,6 +921,32 @@ test('CLI --gates retire or restore that is refused changes nothing and exits 1'
   // MUTATIONS: skip the `plan.error` refusal in gatesChange and the mixed case dies inside
   // gateSteps with a stack trace instead of the three lines; drop the `!names.length` usage
   // check and the last case lists the gates first (calls() is not empty).
+});
+
+test('CLI --gates passes memory text to the terminal with its control characters shown as ?', (t) => {
+  // The third audit pass (2026-10-20): an `agents:` line holding ESC ] 0 ; ... BEL ESC [ 2 J retitled and
+  // cleared the terminal through the restore refusal, and recall.py's stderr was passed on raw.
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const s = storeHome(t, { ...MEMORIES, 'feedback_evil.md': { scope: 'global', gate: 'Evil gate.', agents: `[claude, ${ESC}]0;PWNED${BEL}${ESC}[2J]` } });
+  const raw = (text) => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(text);
+
+  const refused = s.run(['--gates', 'restore', 'feedback_evil']);
+  assert.equal(refused.status, 1);
+  assert.equal(raw(refused.stderr), false, JSON.stringify(refused.stderr));
+  assert.match(refused.stderr, /cannot be read \(`agents:` names an agent this compiler does not know: \?\]0;pwned\?\?\[2j\), and a restore/);
+
+  const retired = s.run(['--gates', 'retire', 'feedback_gadget'], { ACOLYTE_STUB_EDIT: 'warn-esc', ACOLYTE_STUB_COMPILE: 'warn-esc' });
+  assert.equal(retired.status, 0, retired.stderr);
+  assert.equal(raw(retired.stderr), false, JSON.stringify(retired.stderr));
+  assert.ok(retired.stderr.includes('[recall] edit ?]0;PWNED?\n'), JSON.stringify(retired.stderr));
+  assert.ok(retired.stderr.includes('[recall] compile ?[2J?31m\n'), JSON.stringify(retired.stderr));
+
+  const refresh = s.run(['--gates', 'refresh'], { ACOLYTE_STUB_COMPILE: 'warn-esc' });
+  assert.equal(raw(refresh.stderr), false, JSON.stringify(refresh.stderr));
+  assert.ok(refresh.stderr.includes('[recall] compile ?[2J?31m\n'), JSON.stringify(refresh.stderr));
+  // MUTATIONS: make terminalText return its input and every assertion on raw() fails; drop it from
+  // refuse(), from the edit's or the compile's passthrough, or from refresh's, and that case fails alone.
 });
 
 test('CLI --gates retire whose compile fails after the edit says the memories changed, names the snapshot, and exits 1', (t) => {

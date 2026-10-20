@@ -38,6 +38,13 @@ A gate memory can name the agents it is for with `agents:` beside `scope:` (`[co
 `[claude]`, `[claude, codex]`, or a bare name). Once one does, the compile writes one section per
 agent into the same file, and each agent installs only its own. A name it does not know is never
 guessed at: that gate is left out for every agent, and the compile (on stderr) and `--lint` name it.
+Such a name, or a `status:` value, that holds a control character is printed as a Python escape
+(`'\x1b]0;T\x07'`), never as the character.
+
+A gate block compiles without its hidden characters (the controls other than the line feed and the
+tab, the bidi controls, the invisible format characters, the tag block and runs of variation
+selectors), and `--lint` names each gate memory that held any, with how many. `--gates-list` keeps
+the text as written, so the gates panel can show where they are.
 
 Ranked output is `score  file  cos N  lex N  description  > best-matching line`.
 

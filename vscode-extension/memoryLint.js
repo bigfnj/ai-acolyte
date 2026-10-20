@@ -55,7 +55,9 @@ function escapeRe(s) {
 // block, with gateAgents' reading of `agents:`. `state` is "active", "excluded" (scope: global,
 // `agents:` unreadable, so left out for every agent) or "retired"; for a retired gate `agents`
 // is who a restore returns it to. The ONE reading of scope and agents here, so the card's
-// retired count and its gate count cannot disagree about a file (2026-10-14).
+// retired count and its gate count cannot disagree about a file (2026-10-14). `body` is what
+// recall.py _gate compiles (the fourth pass): universal newlines, the gate strip, then Python's
+// strip, whose edge set is not trim()'s (U+001C-U+001F and NEL, but not U+FEFF).
 function gateEntryOf(raw) {
   const scope = frontmatter(raw, 'scope');
   if (scope !== 'global' && scope !== 'retired') return null;
@@ -63,7 +65,7 @@ function gateEntryOf(raw) {
   if (!m) return null;
   const { agents, problem } = gateAgents(raw);
   const state = scope === 'retired' ? 'retired' : problem === null ? 'active' : 'excluded';
-  return { scope, state, body: m[1].trim(), agents, problem };
+  return { scope, state, body: pyStrip(stripHidden(m[1].replace(/\r\n?/g, '\n'), { gate: true })), agents, problem };
 }
 
 // The gate a memory is, or null: recall.py's _gate. `scope: global` in the frontmatter plus a
@@ -258,17 +260,18 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _strip_hidden over _THREAD_STRIP (2026-10-20): the hidden set removed before anything
-// else, one code point at a time (Array.from), so a tag character is one step, with Python's
-// whitespace kept for the collapse that follows. The set and the selector rule are
+// recall.py _strip_hidden (2026-10-20): the hidden set removed before anything else, one code point
+// at a time (Array.from), so a tag character is one step. The set and the selector rule are
 // src/gates-manage.js isHidden's, recall.py's ranges written once for this file and the displays
-// both.
-function stripHidden(raw) {
+// both. `gate` false is recall.py _THREAD_STRIP, which keeps Python's whitespace for the collapse
+// that follows; `gate` true is _GATE_STRIP, a gate body's, which removes it too (the fourth pass:
+// a body that differs only by a ZWSP is one gate to the census, as it is to recall.py).
+function stripHidden(raw, { gate = false } = {}) {
   const out = [];
   let last = null;   // the last code point kept
   for (const ch of Array.from(raw)) {
     const cp = ch.codePointAt(0);
-    if (isHidden(cp, last) && !PY_SPACE.includes(ch)) continue;
+    if (isHidden(cp, last) && (gate || !PY_SPACE.includes(ch))) continue;
     out.push(ch);
     last = cp;
   }

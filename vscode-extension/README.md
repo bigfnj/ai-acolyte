@@ -513,7 +513,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 38 commands under AI Acolyte in the
+The manifest registers 39 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -547,6 +547,7 @@ dashboard title-bar buttons.
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
 | Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit after which a `MEMORY.md` index ends past a budget and is worse than before; asks before adding it, and says when managed policy will stop Claude Code running it |
+| Check whether Claude Code runs user hooks | Ask the installed Claude Code, once, whether managed policy stops it running user hooks (the MEMORY.md guard among them); asks first, because where hooks are allowed it is one short real Claude Code turn, and reads Claude Code's own answer as restricted, not restricted or unknown |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
 | Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line while `MEMORY.md` is past a budget |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |

@@ -172,7 +172,12 @@ function readJson(file) {
 // administrator's managed-settings.json, the cached copy of server-delivered policy
 // (remote-settings.json), and the user's own disableAllHooks. A server-delivered policy that has
 // not been cached is invisible, so "nothing found" is reported as unknown, never as "runs".
-function hookPolicy({ home, config, settings, managedPaths, platform }) {
+//
+// THE WAY TO ASK NAMES WHAT THE READER HAS (2026-10-20). A VSIX ships no bin/, so the extension's
+// line names its palette command and the CLI's names the CLI verb. `surface` is 'extension' or
+// anything else (the CLI).
+const PROBE_COMMAND_TITLE = 'AI Acolyte: Check whether Claude Code runs user hooks';
+function hookPolicy({ home, config, settings, managedPaths, platform, surface }) {
   const managed = [];
   const files = Array.isArray(managedPaths) ? managedPaths : managedSettingsPaths(platform || process.platform, home);
   for (const file of [...files, path.join(config, 'remote-settings.json')]) {
@@ -190,9 +195,10 @@ function hookPolicy({ home, config, settings, managedPaths, platform }) {
     return { restricted: true, sources: ['settings.json sets disableAllHooks'],
       line: 'Claude Code will not run it here (disableAllHooks is set in settings.json).' };
   }
+  const ask = surface === 'extension' ? `"${PROBE_COMMAND_TITLE}"` : '`wildcard-perms --memory-guard probe`';
   return { restricted: null, sources: [],
     line: 'Claude Code skips user hooks when managed policy restricts them; remotely delivered policy '
-      + 'is not visible locally, so run `wildcard-perms --memory-guard probe` to check.' };
+      + `is not visible locally, so run ${ask} to check.` };
 }
 
 function labelFor(status, copyOutdated) {
@@ -230,7 +236,8 @@ function memoryGuardStatus(options = {}) {
     copyOutdated,
     node: inspected.node,
     nodeExists: inspected.node ? isFile(inspected.node) : null,
-    policy: hookPolicy({ home, config, settings: state.settings, managedPaths: options.managedSettingsPaths, platform }),
+    policy: hookPolicy({ home, config, settings: state.settings, managedPaths: options.managedSettingsPaths, platform,
+      surface: options.surface }),
   };
 }
 

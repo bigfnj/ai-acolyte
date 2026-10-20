@@ -919,6 +919,24 @@ printf '%s\n' "$OUT" | grep -q 'other memory stores' && fail "--lint counted a l
 rm -rf "$AHOME/.claude/projects"
 echo "ok: a gate naming an unknown agent is left out for every agent, and both the compile and --lint name it"
 
+# An `agents:` name or a `status:` value that carries terminal control reaches the terminal as an
+# escape, never as the character (_shown, 2026-10-20): ESC ] 0 ; ... BEL retitles a terminal.
+# Mutations: drop map(_shown, ...) in _gate_agents -> "the compile's stderr" and "--lint" lines;
+# drop _shown from --lint's status line -> "an unknown status value".
+ESC="$(printf '\033')"
+rm -f "$AMEM"/*.md; printf -- '# Memory Index\n' > "$AMEM/MEMORY.md"
+agate shared '' 'Shared rule, for both agents.'
+agate termctl "$(printf '[codex, \033]0;T\007]')" 'A rule whose agents: line retitles the terminal.'
+printf -- '---\nname: odd\nstatus: \033[2J\n---\n<!-- status -->\nx\n<!-- /status -->\n' > "$AMEM/odd.md"
+OUT="$(acompile)" || fail "a compile with a control character in an agents: line failed outright: $OUT"
+case "$OUT" in *"$ESC"*) fail "the compile's stderr carries a raw ESC: $(printf '%s' "$OUT" | od -c | head -5)";; esac
+printf '%s\n' "$OUT" | grep -qF "does not know: '\\x1b]0;T\\x07'" || fail "the compile's stderr does not show the name as an escape: $OUT"
+OUT="$(alint)"
+case "$OUT" in *"$ESC"*) fail "--lint prints a raw ESC: $(printf '%s' "$OUT" | grep -a "$ESC" | od -c | head -5)";; esac
+printf '%s\n' "$OUT" | grep -qF "does not know: '\\x1b]0;T\\x07')" || fail "--lint does not show the agents: name as an escape: $OUT"
+printf '%s\n' "$OUT" | grep -qxF "    odd  ('\\x1b[2J')" || fail "--lint does not show an unknown status value as an escape: $OUT"
+echo "ok: an agents: name or a status: value holding terminal control is printed as an escape, by the compile and by --lint"
+
 # ------------------------------------------- hidden characters never reach a compiled gate (2026-10-20)
 # A gate body loses what thread text loses (_GATE_STRIP and the selector rule in _strip_hidden):
 # the tag block, which spells words a person cannot see, the bidi controls, the zero-width and

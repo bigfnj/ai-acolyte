@@ -900,7 +900,10 @@ def _gate_agents(text):
         return GATE_AGENTS, None
     unknown = [n for n in names if n.lower() not in GATE_AGENTS]
     if unknown:
-        return (), "`agents:` names an agent this compiler does not know: " + ", ".join(unknown)
+        # Each name through _shown (2026-10-20): it is the memory's own text, and this string is
+        # printed to a terminal by --lint and by the compile's stderr, where an ESC in a name
+        # retitled or cleared the terminal.
+        return (), "`agents:` names an agent this compiler does not know: " + ", ".join(map(_shown, unknown))
     wanted = {n.lower() for n in names}
     return tuple(a for a in GATE_AGENTS if a in wanted), None
 
@@ -1276,7 +1279,7 @@ def lint():
         print(f"  `status:` value that is neither listed ({', '.join(THREAD_STATUSES)}) nor closed "
               f"({', '.join(THREAD_CLOSED)}) -- left out of the open threads:")
         for stem, value in thread_findings["unknown"]:
-            print(f"    {stem}  ({value or 'empty'})")
+            print(f"    {stem}  ({_shown(value) if value else 'empty'})")
         print()
     if thread_findings["no-block"]:
         print(f"  listed `status:` with no {STATUS_BEGIN} ... {STATUS_END} block outside code "
@@ -1806,6 +1809,14 @@ def _strip_hidden(text, table=_THREAD_STRIP):
             continue
         out.append(ch)
     return "".join(out)
+
+
+def _shown(name):
+    """A name from a memory, as a terminal may be shown it: unchanged when every character of it
+    is printable, else ascii() of it, so an ESC, a BEL or a bidi control arrives as an escape and
+    not as the character (2026-10-20). For an `agents:` name, which a problem string carries to
+    --lint, to the compile's stderr, to --gates-list and from there to `wildcard-perms`."""
+    return name if name.isprintable() else ascii(name)
 
 
 def _thread_text(raw):

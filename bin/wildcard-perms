@@ -961,7 +961,16 @@ function runRecallCaptured(args) {
 }
 
 function recallFailure(run) {
-  return (run.error && run.error.message) || (run.stderr || '').trim() || `exit ${run.status}`;
+  return terminalText((run.error && run.error.message) || (run.stderr || '').trim() || `exit ${run.status}`);
+}
+
+// recall.py's stderr, and every problem that quotes a memory, reach the terminal through this
+// (2026-10-20): they carry memory text, and an ESC or a BEL in a memory's `agents:` line could
+// retitle or clear the terminal, or move the cursor over the lines above. The one hidden set
+// (src/gates-manage.js markHidden), with line feeds and tabs kept and CRLF made a line feed.
+function terminalText(text) {
+  const { markHidden } = require('../src/gates-manage');
+  return markHidden(String(text || '').replace(/\r\n/g, '\n'), { keepLines: true });
 }
 
 // `recall.py --gates-list`, parsed. Null after saying why on stderr. A successful run's stderr
@@ -974,7 +983,7 @@ function listGates(label) {
     process.stderr.write(`${label}: recall.py --gates-list failed (${recallFailure(run)})\n`);
     return null;
   }
-  if (run.stderr) process.stderr.write(run.stderr);
+  if (run.stderr) process.stderr.write(terminalText(run.stderr));
   try { return { stdout: run.stdout, ...parseGatesList(run.stdout) }; }
   catch (error) {
     process.stderr.write(`${label}: ${error.message}\n`);
@@ -1010,7 +1019,7 @@ function gatesChange(cmd, rest) {
   const { gatesStatusAll, setGatesAll } = require('../src/agent-gates');
   const label = `wildcard-perms --gates ${cmd}`;
   const refuse = (why) => {
-    process.stderr.write(`${label}: ${why}\n${label}: refused, nothing was changed\n`);
+    process.stderr.write(`${label}: ${terminalText(why)}\n${label}: refused, nothing was changed\n`);
     process.exitCode = 1;
   };
   // A dashed word before `--` is an option this verb does not take. After it, a name.
@@ -1034,7 +1043,7 @@ function gatesChange(cmd, rest) {
 
   const plan = planGateChanges(listing.gates, { [cmd]: names });
   if (plan.error) {
-    for (const problem of plan.problems.slice(0, -1)) process.stderr.write(`${label}: ${problem}\n`);
+    for (const problem of plan.problems.slice(0, -1)) process.stderr.write(`${label}: ${terminalText(problem)}\n`);
     refuse(plan.problems[plan.problems.length - 1]);
     return;
   }
@@ -1056,7 +1065,7 @@ function gatesChange(cmd, rest) {
   const edited = runRecallCaptured(edit);
   const done = parseEditOutput(edited.stdout);
   const failed = (stage, detail) => {
-    process.stderr.write(`${label}: ${changedButFailed({ stage, detail, ...done, plan, gatesOn, recall })}\n`);
+    process.stderr.write(`${label}: ${terminalText(changedButFailed({ stage, detail, ...done, plan, gatesOn, recall }))}\n`);
     process.exitCode = 1;
   };
   if (edited.error || edited.status !== 0) {
@@ -1077,16 +1086,16 @@ function gatesChange(cmd, rest) {
     return;
   }
   // What recall.py says it wrote, not what was asked for.
-  for (const file of done.retired) process.stdout.write(`wildcard-perms gates: retired ${file}\n`);
-  for (const file of done.restored) process.stdout.write(`wildcard-perms gates: restored ${file}\n`);
+  for (const file of done.retired) process.stdout.write(`wildcard-perms gates: retired ${terminalText(file)}\n`);
+  for (const file of done.restored) process.stdout.write(`wildcard-perms gates: restored ${terminalText(file)}\n`);
   process.stdout.write(`wildcard-perms gates: snapshot of the memory folder: ${done.snapshot || '(recall.py named none)'}\n`);
   // A successful edit's stderr is a warning, a snapshot it could not prune among them, and is
   // passed on as the compile's is.
-  if (edited.stderr) process.stderr.write(edited.stderr);
+  if (edited.stderr) process.stderr.write(terminalText(edited.stderr));
 
   const compiled = runRecallCaptured(compile);
   if (compiled.error || compiled.status !== 0) { failed('compile', recallFailure(compiled)); return; }
-  if (compiled.stderr) process.stderr.write(compiled.stderr);
+  if (compiled.stderr) process.stderr.write(terminalText(compiled.stderr));
 
   const retired = listing.gates.filter((gate) => gate.state === 'retired').length + plan.retire.length - plan.restore.length;
   const leftOut = listing.gates.filter((gate) => gate.state === 'excluded').length - plan.retiredLeftOut.length
@@ -1165,7 +1174,7 @@ function gates(args) {
       // a slightly stale block, and `recall.py --lint` still reports the staleness (--gates
       // status cannot: the block and gates.generated.md go stale together). Reported after
       // the install below, which decides which of two things is true to say.
-      compileFailure = compile.error?.message || (compile.stderr || '').trim() || `exit ${compile.status}`;
+      compileFailure = terminalText(compile.error?.message || (compile.stderr || '').trim() || `exit ${compile.status}`);
     } else if (compile.stderr) {
       // A compile over a readable store writes nothing to stderr, so anything here is a
       // warning about the run (no ~/.claude/projects at all, for one), and it is passed
@@ -1173,7 +1182,7 @@ function gates(args) {
       // a "cannot read <store>" warning once went unseen while gates were installed from a
       // fallback store; recall.py now refuses that compile, and this keeps the next
       // warning visible. The SessionStart contract is a quiet STDOUT, and this is stderr.
-      process.stderr.write(compile.stderr);
+      process.stderr.write(terminalText(compile.stderr));
     }
   }
 
@@ -1288,7 +1297,7 @@ function openThreads(args) {
   if (cmd === 'refresh') {
     const compile = runRecallCaptured(['--threads-compile']);
     if (compile.error || compile.status !== 0) compileFailure = recallFailure(compile);
-    else if (compile.stderr) process.stderr.write(compile.stderr);
+    else if (compile.stderr) process.stderr.write(terminalText(compile.stderr));
   }
 
   const results = setOpenThreadsAll(cmd !== 'off', { inPlaceFallback: cmd !== 'refresh' });

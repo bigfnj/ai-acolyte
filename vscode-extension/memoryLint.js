@@ -1150,9 +1150,10 @@ function memoryStoreDir() {
 // `fullReport` is deliberately NOT exported: its only callers are showReport() and
 // memoryReport(), both in this file, and a dead export entry is a standing invitation to
 // import a function no consumer has ever exercised. The function stays; the entry goes.
-// `fastLint` and `pickPrimaryDir` look similar and are NOT the same case -- they have no
-// production importer either, but test/memory-line-cap.test.js and
-// test/memory-lint-watchers.test.js call them directly, and those calls are the
-// mutation-killing assertions for the line cap and the store-selection rule.
+// `pickPrimaryDir` looks similar and is NOT the same case -- it has no production importer
+// either, but test/memory-lint-watchers.test.js calls it directly, and those calls are the
+// mutation-killing assertions for the store-selection rule. `fastLint` was the same until
+// 2026-10-20, when extension.js began measuring MEMORY.md with it (indexEventMayChange);
+// test/memory-line-cap.test.js still calls it for the line cap.
 module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf,
   threadOf, indexHealth, memoryStoreDir };

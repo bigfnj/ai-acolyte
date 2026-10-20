@@ -76,7 +76,7 @@ const {
 // the open threads' watcher compares with. The default is only for a test harness that stubs this
 // module with an older export list, and gives memoryReport()'s answer at its old cost.
 const {
-  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, cfg: memoryConf,
+  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, fastLint, cfg: memoryConf,
   memoryStoreDir = () => memoryReport().dir,
 } = require('./memoryLint');
 
@@ -3460,7 +3460,8 @@ function memoryCorpusChanged(uri) {
 
 // Recompile the open threads when a change can move them. Never while openThreads.enabled is
 // off (switched off stays off; turning it on compiles), and only when one of these holds:
-//   * the file is MEMORY.md, whose budgets the INDEX line reports;
+//   * the file is MEMORY.md, whose budgets the INDEX line reports, and the INDEX line may move
+//     (indexEventMayChange);
 //   * the compiled file currently lists a thread, so any edit, a deletion included, may be the
 //     one that closes it, and a closed thread has to leave the block;
 //   * the file mentions `status:` or a status marker, so it may be opening one.
@@ -3475,12 +3476,26 @@ function threadsCorpusBump(uri) {
 }
 
 function threadsMayChange(file) {
-  if (path.basename(file) === 'MEMORY.md') return true;
+  if (path.basename(file) === 'MEMORY.md') return indexEventMayChange(path.dirname(file));
   if (compiledListsThreads()) return true;
   try {
     const text = fs.readFileSync(file, 'utf8');
     return /status\s*:/.test(text) || text.includes('<!-- status -->') || text.includes('<!-- /status -->');
   } catch { return false; }
+}
+
+// MEMORY.md moves only the INDEX line: recall.py leaves the index out of the threads (EXCLUDE), so
+// a healthy index's every save used to spawn a compile that could change nothing (2026-10-20). Its
+// event compiles when the compile is not whole, when it carries an INDEX line (which may now go,
+// or say a different number), or when the index is past a budget by memoryLint.js indexHealth over
+// fastLint, which test/threads-compile.sh holds to recall.py's _index_health. A reader that throws
+// (a harness stub without fastLint among them) compiles.
+function indexEventMayChange(dir) {
+  try {
+    const compiled = readCompiledThreads(os.homedir());
+    if (compiled.state !== 'whole' || compiled.index !== null) return true;
+    return indexHealth(fastLint(dir, memoryConf())).length > 0;
+  } catch { return true; }
 }
 
 // Whether open-threads.generated.md lists a thread, by src/agent-open-threads.js's own reading

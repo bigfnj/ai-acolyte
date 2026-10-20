@@ -407,6 +407,34 @@ test('twenty corpus events and their compile read no memory report, and the comp
   // autoSyncRecallIfStale, and the count is 1.
 });
 
+// MEMORY.md MOVES ONLY THE INDEX LINE (2026-10-20). recall.py leaves the index out of the threads,
+// so while the index is healthy and the compile carries no INDEX line, its save cannot change the
+// compile, and every one of them used to spawn Python for nothing.
+test('a MEMORY.md save compiles only when the INDEX line could move', async (t) => {
+  const index = (n) => Array.from({ length: n }, (_, i) => `- line ${i}`).join('\n') + '\n';
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, ONE) });
+  app.held.length = 0;
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live(), [], 'a healthy index and a compile with no INDEX line: nothing armed');
+  fs.writeFileSync(path.join(app.store, 'MEMORY.md'), index(141));
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'past the 140-line budget: armed');
+  app.state.compileWrites = compiled({ threads: ['- **AWAITING** The owner decides. (a)'], index: 'MEMORY.md is 141 lines (budget 140): compact it.' });
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1);
+  fs.writeFileSync(path.join(app.store, 'MEMORY.md'), index(10));
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'healthy again while the compile still carries INDEX: armed, so it goes');
+  app.state.compileWrites = ONE;
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 2);
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live(), [], 'and once it has gone, nothing again');
+  // MUTATION: return true for MEMORY.md in threadsMayChange and the first assertion fails; drop
+  // the `compiled.index !== null` check and the "healthy again" one does; return false from
+  // indexHealth's branch and the 141-line one does.
+});
+
 // One timer serves activation's check and the corpus bursts, so an event from another store in
 // activation's first seconds joins the check instead of replacing it.
 test('an event from another store during activation\'s delay does not cancel activation\'s compile', async (t) => {

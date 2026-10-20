@@ -442,9 +442,14 @@ Two lessons that outrank the rest:
    zero PowerShell rules, so every PowerShell family this tool learns is a real
    grant. When measuring value, weight the PowerShell half.
 
-Also: where `allowManagedHooksOnly` is set and `PreToolUse` is not among the
-events the policy itself defines, **a user `PreToolUse` hook is silently
-dropped**. Any local hook-based permission strategy must account for that
+Also: where `allowManagedHooksOnly` is set, **a user hook is silently dropped,
+on every event**. This used to read "where `PreToolUse` is not among the events
+the policy itself defines", the per-event reading. On 2026-10-19, with Claude
+Code 2.1.293 and 2.1.301 under a managed policy that sets it, no user, project
+or `--settings` hook ran on `PreToolUse`, `PostToolUse` or `UserPromptSubmit`,
+and `claude -p "/goal x"` refused with "/goal can't run while hooks are
+restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by
+policy)". Any local hook-based permission strategy must account for that
 managed-policy boundary.
 
 `src/managed-policy.js` reads this file so the tool can act on it:
@@ -453,8 +458,9 @@ every command it would match, `partial` when the grant is broader than such a
 rule, `redundant` when a managed allow already covers it, and `effective`
 otherwise. An `inert` family is withheld from the Claude review list **and from
 the write**, because writing that rule cannot stop the prompt.
-`hookEventAllowed` answers the hook question for diagnostics that inspect
-whether a user event can run.
+`hookEventAllowed` still encodes the per-event reading corrected above, so it
+answers "allowed" for a user hook on an event the policy defines, which the
+2026-10-19 measurement contradicts. No production caller reads it today.
 
 The "and from the write" half was a documentation claim before it was true.
 `clone` dropped `claude` from `eligibleTargets` for an inert family, but the
@@ -535,7 +541,8 @@ pattern **[docs: hooks-guide]**:
 An `allow` decision skips the prompt but **does not** override deny rules,
 including enterprise managed deny lists, and cannot suppress the prompt for MCP
 tools marked `requiresUserInteraction` **[docs]**. Unavailable where
-`allowManagedHooksOnly` excludes the `PreToolUse` event.
+`allowManagedHooksOnly` is set: on 2026-10-19 no user hook of any event ran under
+it (Claude Code 2.1.293 and 2.1.301), not only events the policy leaves out.
 
 This is the interesting one for a learner. A hook can reuse the same
 classification the exporters already run and answer per command, which sidesteps

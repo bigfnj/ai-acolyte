@@ -3071,3 +3071,83 @@ This is the same lesson as the release-note claim about validating the deployed 
 keeps arriving from a different direction: **a patch script that asserts `count === 1` proves
 its pattern was unique, not that the pattern was the only place the thing was said.** Uniqueness
 of a string is not coverage of a concept. Grep the artefact for the CONCEPT afterwards.
+
+## The MEMORY.md guard, and `allowManagedHooksOnly` read as "no user hooks" (2026-10-19)
+
+**Built in 1.9.0, default off.** A real Claude Code memory index grew to 157 lines one reasonable
+hook at a time, past the point where the lint's after-the-fact report helped, and a header
+comment carrying a second `<!--` leaked its tail into every session. `src/memory-index-guard.js`
+is a `PreToolUse` hook on `Write|Edit|MultiEdit` that replays the edit against
+`<config>/projects/<slug>/memory/MEMORY.md` and exits 2 only when a measure ends past its budget
+and is worse than before: 140 lines, 12,000 bytes, 300 code points on any line, 16 `- ` entries,
+0 broken HTML comments. `wildcard-perms --memory-guard on|off|status|probe` and the extension's
+**Toggle MEMORY.md guard** install it; `memoryLint.js` and `recall.py --lint` apply the same line,
+width and comment rules, and `test/memory-guard-parity.test.js` measures one set of fixtures with
+all three.
+
+**The per-event reading of `allowManagedHooksOnly` is out of date, and was corrected in the README
+and `docs/claude-code-permissions.md`.** Both said a user hook still runs on an event the managed
+policy itself defines, from a `PostToolUse` canary that fired 4 of 4 under such a policy on
+2026-08-24 and left no artefact. Measured on the development box on 2026-10-19 with Claude Code
+2.1.293 and 2.1.301, under a managed policy that sets `allowManagedHooksOnly`: `claude -p "/goal x"`
+printed "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is
+set in settings or by policy)", and no user, project or `--settings` hook ran on `PreToolUse`,
+`PostToolUse` or `UserPromptSubmit`. A headless run alone cannot tell "policy blocks hooks" from
+anything else that keeps a hook from firing; the `/goal` refusal names the policy, and that is
+what carries the conclusion. Left for whoever owns them: `hookEventAllowed` in
+`src/managed-policy.js` still answers per event (no production caller), and a comment in
+`scripts/verify-release.ps1` restates the per-event claim.
+
+So on that box the guard is installed and inert, and it has to say so. Every status, the card and
+the enable modal carry a policy line read from what is local: a `managed-settings.json`, the cached
+`~/.claude/remote-settings.json`, the user's own `disableAllHooks`. Nothing found reads as "cannot
+tell", never as "runs", because a server-delivered policy can leave no local trace. `--memory-guard
+probe` asks the client: it runs `claude -p "/goal probe"` once in an empty temporary directory and
+reads the refusal text. A reworded message reads as unknown; where hooks are allowed the probe
+is one short real turn.
+
+**Decisions, with the reason each one is not the obvious choice:**
+
+- *No `if` field on the hook.* `if` would spare a node start on every Write that is not to a
+  `MEMORY.md`, but its semantics for `Write` could not be checked on a box that runs no user hook.
+  The path filter runs first in-process instead, before any read. Correctness over latency.
+- *A stable copy, refreshed by revision.* The hook runs `<home>/.claude/wildcarding/
+  memory-index-guard.js`, never a checkout or the versioned extension directory (a VSIX has no
+  `bin/`, and `.../ai-acolyte-1.9.0/src` stops being ours on the next upgrade). Bytes would
+  flip-flop between a CRLF tree and an LF build, so the copy is replaced only when the packaged
+  `GUARD_REVISION` is higher, and a test pins the CRLF-normalised sha to the revision. The guard
+  may require `fs` and `path` only; a test parses its require calls.
+- *Block only when worse.* Deleting lines can only lower lines, bytes, the longest line and the
+  entry count, so compaction always passes and the guard is safe to turn on over an index already
+  past every budget. The one deletion refused is half of a comment, which would leak its body. An
+  orphan `-->` counts as a defect, an arrow written that way in prose included.
+- *Fail open.* Exit 2 only for a confirmed violation; an 8 MiB stdin cap, an unreadable file, or
+  an edit it cannot replay (an `old_string` not found, even after LF to CRLF; an ambiguous single
+  replace) let the write through. Claude Code's own quote normalisation is not replayed, so an edit
+  that matches only after it reads as not found and passes.
+- *The hook command* is `"<node>" "<copy>"` with forward slashes, for the `sh` / Git Bash that
+  Claude Code runs hook commands through. A shell that is PowerShell would not start it, which
+  Claude Code treats as a non-blocking error, so that too fails open. `node` is resolved on PATH
+  at install time, `node.exe` only on Windows, absolute entries only; never `process.execPath`,
+  which in the extension host is Electron.
+- *Off leaves the copy.* Claude Code reads hooks at session start, so a running session keeps
+  invoking the command; a deleted script would turn every one of its writes into an error.
+- *settings.json.* Written through `writeTransform` under the policy lock derived from the home in
+  use, then re-read, and a write that did not stick throws. `writeTransform` writes LF, so a CRLF
+  `settings.json` keeps every value and comes back LF; `settings.json.pre-memory-guard` keeps the
+  bytes from before the first change, CRLF and all, and is written once.
+
+**Mutation record.** 58 mutants over the guard, planner, installer, CLI, extension, `memoryLint.js`,
+`recall.py` and the shared constants, each restored and sha-checked. Four survived the first pass
+and each became a stronger test: a copy refresh by bytes (masked by the refresh's own revision
+check, now also exercised through `on`), a backup rewritten on every change (masked because `off`
+restored the same bytes), and a `recall.py` fence skip (the fixture's fenced text was a well-formed
+comment, so skipping it or not gave one answer). The fourth was a mutation pattern matching twice,
+fixed in the harness. A workstation crash at 23:59 killed the run of the last `recall-py.sh`
+mutant with that mutant still applied to `recall.py`; it was found by diff and reverted before the
+first commit.
+
+**Follow-ups.** Add the `if` filter once its `Write` semantics are verified on a box where hooks
+run, and measure the node start it saves there. Verify the hook end to end on such a box: the
+exit-2 message reaching the model, and the per-call cost. Decide what `hookEventAllowed` should
+answer now. The editor gauge has no entry-count rule; the guard and `recall.py --lint` do.

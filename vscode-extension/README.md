@@ -292,13 +292,27 @@ works under a managed policy.
 - A **status-bar gauge** (`$(book) mem: 1.9k tok · N to fix`) shows the always-loaded
   token cost and, warning-tinted, how many issues it found. Click it for the full
   report (an output channel: over-budget lines, broken links, unresolved `[[links]]`).
-- **Editor diagnostics** squiggle each `MEMORY.md` hook line over the budget and any
-  index link pointing at a missing file.
+- **Editor diagnostics** squiggle each `MEMORY.md` line over the width budget (any line, counted
+  in characters), any index link pointing at a missing file, and any broken HTML comment: a
+  `<!--` inside an open comment, an orphan `-->`, or a `<!--` never closed. Claude Code strips
+  comments from the index, so each of those leaks text into every session or hides it.
+- Past **140 lines** (the MEMORY.md guard's target, below the 200-line load cap) the gauge
+  turns to a warning and names the target: the index still loads whole, and each addition
+  should now take a line out.
 - It auto-discovers every `~/.claude/projects/*/memory/MEMORY.md`, updates on save and
   on external edits, and can be pinned or tuned via the `permissionWildcarding.memory.*`
   settings (`enabled`, `dir`, `lineBudget` for one hook's width, `maxLines` for how many lines
   Claude Code actually loads, `totalBudget`, `recallScript`). Command:
   `Acolyte: Lint memory index`.
+
+The lint is not a hook and needs none. The optional **MEMORY.md guard** is: a Claude Code
+`PreToolUse` hook that refuses an edit leaving the index worse on a measure already past its
+budget (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken comment),
+and lets every shrinking edit through. It uses those fixed budgets; the `memory.*` settings tune
+this gauge, not the hook. Turn it on with **Toggle MEMORY.md guard**, which asks first. Where a
+managed policy sets `allowManagedHooksOnly` or `disableAllHooks`, Claude Code runs no user hook,
+so the guard is installed and inert there, and the card says so. The root README section "The
+MEMORY.md guard" has the rule, the install and the policy caveat.
 
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
@@ -334,6 +348,10 @@ the model asset and the venv, and never runs Python.
 - **⟳ Rebuild recall index** — the one button. It runs `recall.py --rebuild` in the
   DevToolbox venv to force a full CPU re-embed (model + corpus pinned via env so the
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
+- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`
+  or `foreign`, followed every time by whether Claude Code will run it here. The button turns the
+  guard on (after a confirmation naming the hook and the `node` it runs), repairs it, or turns it
+  off.
 
 Python does run unattended in two other places, both gated on your having opted in.
 `autoSyncRecallIfStale` (`extension.js:1130#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
@@ -474,7 +492,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 35 commands under AI Acolyte in the
+The manifest registers 36 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -506,6 +524,7 @@ dashboard title-bar buttons.
 | Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
+| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit leaving a `MEMORY.md` index worse on a measure already past its budget; asks before adding it, and says when managed policy will stop Claude Code running it |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |

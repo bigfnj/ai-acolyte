@@ -4,7 +4,8 @@
 // script that turned its files into them. Committed 2026-10-20 so those figures have an
 // artefact. This runs one node process that spawns one node child, with the preload loaded the
 // way it was used (through NODE_OPTIONS, so the child loads it too) and no load of any kind,
-// then checks the records it wrote and what the summary makes of them.
+// then checks the records it wrote and what the summary makes of them. On Windows it also runs
+// scripts/measure/taskkill-tree-order.js for one round, and once with a leaf that never starts.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -80,4 +81,40 @@ test('the summary counts that one spawn and its child start', (t) => {
   assert.match(summary.stdout, /^spawn\(\) held, node child: n=1 min=\d+ p50=\d+ p90=\d+ max=\d+$/m);
   assert.match(summary.stdout, /^spawn\(\) held, cmd\.exe: n=0 /m);
   assert.match(summary.stdout, /^node child JS running after spawn\(\) returned: n=1 min=\d+ /m);
+});
+
+// scripts/measure/taskkill-tree-order.js, the tree-kill row's artefact (Windows only). Its
+// temporary directory goes under TEMP, pointed into a fixture, so what it leaves can be seen.
+const TREE_ORDER = path.join(ROOT, 'scripts', 'measure', 'taskkill-tree-order.js');
+function treeOrder(t, args, extraEnv = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-tree-order-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(comspec|temp|tmp)$/i.test(key)));
+  Object.assign(env, { ComSpec: process.env.ComSpec, TEMP: temp, TMP: temp }, extraEnv);
+  const run = spawnSync(process.execPath, [TREE_ORDER, ...args], { encoding: 'utf8', timeout: 25000, windowsHide: true, env });
+  return { run, temp };
+}
+const windowsOnly = { skip: process.platform !== 'win32' && 'taskkill is Windows only' };
+
+test('taskkill-tree-order: one round reports the order taskkill ended the tree, and cleans up', windowsOnly, (t) => {
+  const { run, temp } = treeOrder(t, ['1']);
+  assert.equal(run.status, 0, run.stderr);
+  // At least root, cmd.exe and leaf; console hosts may add more (5 PIDs on the development box).
+  const round = run.stdout.match(/^round 1: root saw its child exit first: (?:true|false); taskkill order: (\d+(?: > \d+)+) \(root (\d+)\)$/m);
+  assert.ok(round, run.stdout);
+  assert.ok(round[1].split(' > ').length >= 3 && round[1].split(' > ').includes(round[2]), `the root is not among the ended PIDs: ${round[0]}`);
+  assert.match(run.stdout, /^root observed the child's death before its own in [01] of 1$/m);
+  assert.deepEqual(fs.readdirSync(temp), [], 'its temporary directory was left behind');
+});
+
+// A leaf that never starts (here, a ComSpec that does not exist) used to be waited for forever,
+// and a round that failed left the temporary directory, which was removed only after the last.
+// MUTATION: drop the deadline and this times out; take the rmSync out of the finally and the
+// directory is left.
+test('taskkill-tree-order: a leaf that never writes its pid fails the round in bounded time and still cleans up', windowsOnly, (t) => {
+  const { run, temp } = treeOrder(t, ['3'], { ComSpec: path.join(os.tmpdir(), 'acolyte-no-such-cmd.exe'), TREEORDER_LEAF_WAIT_MS: '1500' });
+  assert.notEqual(run.signal, 'SIGTERM', 'the script was still waiting when the test gave up');
+  assert.equal(run.status, 1, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stderr, /^taskkill-tree-order\.js: round 1: the leaf wrote no pid within 1500 ms$/m);
+  assert.deepEqual(fs.readdirSync(temp), [], 'a failed round left its temporary directory');
 });

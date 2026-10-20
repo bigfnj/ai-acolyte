@@ -159,9 +159,17 @@ function canaryMain() {
 }
 const CANARY_SOURCE = `'use strict';\n// Written by scripts/probe-user-hooks.js.\n(${canaryMain.toString()})();\n`;
 
-function probePaths(tmp = os.tmpdir()) {
-  const work = path.join(tmp, WORK_DIR_NAME);
-  return { cwd: path.join(tmp, PROBE_DIR_NAME), work, canary: path.join(work, 'canary.js'), report: path.join(work, 'report.json') };
+// A per-user base, never the shared temp directory: on Linux os.tmpdir() is /tmp, where another
+// local user could pre-create these fixed directories with a planted .claude/settings.json or
+// CLAUDE.md that `claude -p` would then load as this user. The guard's own probe moved off
+// os.tmpdir() for the same reason in 1.9.1 (src/memory-guard-install.js).
+function defaultProbeBase() {
+  return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'wildcarding');
+}
+
+function probePaths(base = defaultProbeBase()) {
+  const work = path.join(base, WORK_DIR_NAME);
+  return { cwd: path.join(base, PROBE_DIR_NAME), work, canary: path.join(work, 'canary.js'), report: path.join(work, 'report.json') };
 }
 
 function planRuns(options, paths, node = process.execPath, platform = process.platform) {

@@ -69,13 +69,34 @@ function fixture(t) {
   return { tmp, temp, claude, mark: path.join(tmp, 'calls.jsonl') };
 }
 
-// The probe as a child process, its os.tmpdir() pointed into the fixture.
+// The probe as a child process, its base (CLAUDE_CONFIG_DIR, and os.tmpdir() for anything else)
+// pointed into the fixture.
 function runProbe(f, args, mode) {
   return spawnSync(process.execPath, [SCRIPT, '--claude', f.claude, ...args], {
     cwd: ROOT, encoding: 'utf8', timeout: 90000, windowsHide: true,
-    env: { ...process.env, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark },
+    env: { ...process.env, CLAUDE_CONFIG_DIR: f.temp, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark },
   });
 }
+
+// The default base is per user, never the shared temp directory (on Linux /tmp, where another
+// local user could plant the fixed probe directory with a .claude/settings.json).
+// MUTATION: default probePaths' base back to os.tmpdir() and this fails.
+test('the probe directories default to <config>/wildcarding, never the shared temp directory', () => {
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  const config = path.join(os.tmpdir(), 'acolyte-probe-config-witness');
+  try {
+    process.env.CLAUDE_CONFIG_DIR = config;
+    const paths = probe.probePaths();
+    assert.ok(paths.cwd.startsWith(path.join(config, 'wildcarding') + path.sep), paths.cwd);
+    assert.ok(paths.work.startsWith(path.join(config, 'wildcarding') + path.sep), paths.work);
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const home = probe.probePaths();
+    assert.ok(home.cwd.startsWith(path.join(os.homedir(), '.claude', 'wildcarding') + path.sep), home.cwd);
+    assert.ok(!home.cwd.startsWith(os.tmpdir() + path.sep), 'the default must not be the shared temp directory');
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
+});
 
 const verdictLines = (stdout) => stdout.split(/\r?\n/).filter((line) => /^(settings-flag|project-local) /.test(line));
 
@@ -167,7 +188,7 @@ test('against a restricted stub: /goal reads restricted, every canary silent whi
   const lines = verdictLines(run.stdout);
   assert.equal(lines.length, 6, run.stdout);
   for (const line of lines) assert.match(line, /: not fired \(Write landed: yes; claude exit 0\)$/);
-  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
+  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'wildcarding', 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
   assert.equal(report.version, '9.9.9 (Claude Code)');
   assert.equal(report.runs.length, 8);
   assert.equal(fs.readFileSync(f.mark, 'utf8').trim().split('\n').length, 8, 'one stub call per planned run');
@@ -181,7 +202,7 @@ test('against an unrestricted stub: every canary fires and names the event Claud
   const lines = verdictLines(run.stdout);
   assert.equal(lines.length, 6, run.stdout);
   for (const line of lines) assert.match(line, /: fired \(Write landed: yes/);
-  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
+  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'wildcarding', 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
   for (const row of report.runs.filter((r) => r.kind === 'hook')) {
     assert.deepEqual(row.fires.map((fire) => [fire.event, fire.hookEventName]), [[row.event, row.event]], row.label);
   }

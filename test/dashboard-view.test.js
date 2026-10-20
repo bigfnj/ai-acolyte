@@ -485,6 +485,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['manageGates', 'permission-wildcarding.manageGates'],
       // The Claude memory card's open-threads toggle (2026-10-19).
       ['toggleOpenThreads', 'permission-wildcarding.toggleOpenThreads'],
+      // Its Refresh button (2026-10-20): the same command, asked to refresh (args checked below).
+      ['refreshOpenThreads', 'permission-wildcarding.toggleOpenThreads'],
       // showWildcards left with its switch arm on 2026-10-14 (no sender since c09daab):
       // the reverse census at the bottom of this test is what would have caught it.
       ['codexHook', 'permission-wildcarding.codexHook'],
@@ -511,6 +513,11 @@ test('every dashboard message reaches its command, and nothing else does', async
     assert.deepEqual(app.executedArgs.at(-1), {
       id: 'permission-wildcarding.viewPermissions', args: [selection],
     }, 'a Codex sidebar row reaches the shared picker with its native rule identity');
+    ui.on.message({ type: 'refreshOpenThreads' });
+    assert.deepEqual(app.executedArgs.at(-1), { id: 'permission-wildcarding.toggleOpenThreads', args: [{ refresh: true }] },
+      'the card\'s Refresh asks the toggle command to refresh, not to toggle');
+    ui.on.message({ type: 'toggleOpenThreads' });
+    assert.deepEqual(app.executedArgs.at(-1), { id: 'permission-wildcarding.toggleOpenThreads', args: [] });
 
     // The old ids remain unadvertised cleanup aliases for installations that
     // carried MAX state across the upgrade. They must not regain a dashboard
@@ -1158,6 +1165,7 @@ test('the Claude memory card says how many open threads are installed where, war
     assert.deepEqual(threads.installed, ['claude'], 'this home has no Codex, so Claude alone');
     assert.equal(threads.current, true);
     assert.equal(threads.index, 'MEMORY.md is 152 lines (budget 140): compact it.');
+    assert.equal(threads.refresh, false, 'a settled install offers no Refresh');
     // MUTATION: drop `threads: threadsCardData(memory)` from the push and this fails.
 
     const panel = runPanelScript(ui.view.webview.html);
@@ -1182,11 +1190,27 @@ test('the Claude memory card says how many open threads are installed where, war
     assert.equal(text('claudeMemoryThreads'), 'Turn on open threads');
     deliver({ ...threads, compile: 'refused', reason: 'it does not match the sha in its own header' });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: the compiled file was refused (it does not match the sha in its own header).');
-    deliver({ ...threads, compile: 'missing', declared: 4, listed: 2, installed: [] });
+    deliver({ ...threads, compile: 'missing', declared: 4, listed: 2, installed: [], refresh: true });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: 2 open, not compiled yet.');
+    // THE LABEL SAYS WHAT THE CLICK DOES (2026-10-20). While on, the toggle turns the feature off in
+    // every install state (test/extension-open-threads.test.js holds the command to that), so it
+    // reads Turn off even here, where nothing is compiled; Refresh sits beside it, shown exactly
+    // when the payload's `refresh` (the command's threadsNeedRefresh) says the install is not current.
+    assert.equal(text('claudeMemoryThreads'), 'Turn off open threads');
+    assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, false, 'a stale install offers Refresh');
     panel.posted.length = 0;
     panel.dom.byId.get('claudeMemoryThreads').click();
     assert.deepEqual(panel.posted, [{ type: 'toggleOpenThreads' }]);
+    panel.posted.length = 0;
+    panel.dom.byId.get('claudeMemoryThreadsRefresh').click();
+    assert.deepEqual(panel.posted, [{ type: 'refreshOpenThreads' }]);
+    deliver({ ...threads, refresh: false });
+    assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, true, 'a current install offers none');
+    deliver({ ...threads, enabled: false, refresh: true, installed: [] });
+    assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, true, 'nor does a switched-off one');
+    // MUTATION: show the Refresh button whenever the feature is on (drop `t.refresh`) and the
+    // current-install assertion fails; drop `refresh` from threadsCardData and the builder's
+    // `threads.refresh` assertion above does.
   } finally {
     await app.dispose();
   }

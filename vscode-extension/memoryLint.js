@@ -251,10 +251,17 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _thread_text: Python's str.split() whitespace collapsed, comment markers neutralised,
-// a leading `#` escaped. Uncapped, as Python's is.
+// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, and the bidi controls,
+// removed before anything else. Code points, as recall.py writes them.
+const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
+const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
+  ...span(0x86, 0xa0), 0x061c, 0x200e, 0x200f, ...span(0x202a, 0x202f), ...span(0x2066, 0x206a)]);
+
+// recall.py _thread_text: THREAD_STRIP removed, Python's str.split() whitespace collapsed, comment
+// markers neutralised, a leading `#` escaped. Uncapped, as Python's is.
 function threadText(raw) {
-  const text = raw.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
+  const kept = Array.from(raw).filter((ch) => !THREAD_STRIP.has(ch.codePointAt(0))).join('');
+  const text = kept.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
     .split('<!--').join('&lt;!--').split('-->').join('--&gt;');
   return text.startsWith('#') ? String.fromCharCode(92) + text : text;
 }
@@ -1138,12 +1145,22 @@ function memoryReport() {
   return { conf, dir, report: dir ? fullReport(dir, conf, files) : null };
 }
 
+// The store memoryReport() reports, chosen the same way and without reading it (2026-10-20). The
+// extension's recall.py spawns pin it as RECALL_MEMORY_DIR, and the open threads' corpus watcher
+// compares an event's store with it; each took only `.dir` from memoryReport(), which reads every
+// file in the store (171 files, 24-29 ms warm, on the development box), on paths that run unattended for every *.md event
+// burst and every compile.
+function memoryStoreDir() {
+  return pickPrimary(discoverDirs(cfg())).dir;
+}
+
 // `fullReport` is deliberately NOT exported: its only callers are showReport() and
 // memoryReport(), both in this file, and a dead export entry is a standing invitation to
 // import a function no consumer has ever exercised. The function stays; the entry goes.
-// `fastLint` and `pickPrimaryDir` look similar and are NOT the same case -- they have no
-// production importer either, but test/memory-line-cap.test.js and
-// test/memory-lint-watchers.test.js call them directly, and those calls are the
-// mutation-killing assertions for the line cap and the store-selection rule.
+// `pickPrimaryDir` looks similar and is NOT the same case -- it has no production importer
+// either, but test/memory-lint-watchers.test.js calls it directly, and those calls are the
+// mutation-killing assertions for the store-selection rule. `fastLint` was the same until
+// 2026-10-20, when extension.js began measuring MEMORY.md with it (indexEventMayChange);
+// test/memory-line-cap.test.js still calls it for the line cap.
 module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf,
-  threadOf, indexHealth };
+  threadOf, indexHealth, memoryStoreDir };

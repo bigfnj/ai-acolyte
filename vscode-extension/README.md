@@ -39,7 +39,9 @@ the last activity, and the subagents that are working.
 Each shows the CPU model status, its folder, four figures, an issues line, **Search**, **Rebuild**
 and **Inspect memory sources**, its gates, and the agent version. The Claude card also has an
 open-threads line ("Open threads: 2 installed (Claude, Codex)"), the INDEX warning while
-`MEMORY.md` is past a budget, and **Turn on / Turn off open threads**.
+`MEMORY.md` is past a budget, **Turn on / Turn off open threads**, and **Refresh open threads**
+while the install is not current. The whole card is hidden while `memory.enabled` is off; the
+open threads keep running, and the palette command still reaches them.
 
 Version **1.9.0** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
@@ -383,13 +385,17 @@ memories hold, which is how a change whose compile or install failed is finished
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`
 and `AGENTS.md` carry, so all three are read from user settings only.
-The open-threads compiler spawns `recall.py --threads-compile` after a memory edit that can
-change its list (a file that mentions `status:` or a status marker, any edit while a thread is
-listed, and every `MEMORY.md` change, for the INDEX line), a few seconds after activation when
-a memory declares `status:`, a compile already exists or `MEMORY.md` is past a budget, and when
-`openThreads.enabled` is turned on. Only edits in the store that compiles count. While the
-setting is off it compiles nothing. `openThreads.enabled` is machine-scoped for the same reason
-as `gates.enabled`.
+The open-threads compiler, on by default, spawns `recall.py --threads-compile` after a memory
+edit that can change its list (a file that mentions `status:` or a status marker, any edit while
+a thread is listed or while the compile is one the install refuses, and a `MEMORY.md` change when
+the INDEX line could move: the compile carries one, or the index is past a budget), a few seconds
+after activation when a memory declares `status:`, a compile already exists or `MEMORY.md` is
+past a budget, and when `openThreads.enabled` is turned on. Only edits in the store that compiles
+count, asked once per burst. One compile runs at a time, started from a worker thread rather than
+the extension host thread, and a compile asked for meanwhile runs once after it. An identical
+compile leaves `open-threads.generated.md` untouched. While the setting is off it compiles
+nothing, and a compile armed before it went off is dropped. `openThreads.enabled` is
+machine-scoped for the same reason as `gates.enabled`.
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
@@ -547,7 +553,7 @@ dashboard title-bar buttons.
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
 | Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit leaving a `MEMORY.md` index worse on a measure already past its budget; asks before adding it, and says when managed policy will stop Claude Code running it |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
-| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line while `MEMORY.md` is past a budget |
+| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line naming the index while `MEMORY.md` is past a budget. While on it always turns it off, after asking; when the install is not current the same prompt offers **Refresh**, which compiles and installs |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |
 | Rebuild recall index | Force a full CPU bge-small re-embed |

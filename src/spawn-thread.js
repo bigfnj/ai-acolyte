@@ -258,7 +258,9 @@ function runTask(task) {
 
 if (!isMainThread && workerData && workerData[TASK]) runTask(workerData[TASK]);
 
-// Two doors, one per caller: src/codex-version.js takes the execFile form for its
-// version probe, src/codex-mcp-config.js the config RPC for the trust ask. Each is
-// chosen by the caller's `offThread: true`, which only the extension passes.
+// Two doors: src/codex-version.js takes the execFile form for its version probe, and
+// src/codex-mcp-config.js the config RPC for the trust ask, each chosen by the caller's
+// `offThread: true`, which only the extension passes. Since 2026-10-20 the extension
+// also calls the execFile form itself, for the open-threads compile (spawnThreadsCompile),
+// which runs unattended after edits.
 module.exports = { execFileOffThread, configRpcOffThread };

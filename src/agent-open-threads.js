@@ -85,8 +85,10 @@ function makeThreadsBlock(body) {
 
 // Why `on` cannot proceed, as a refusal row, or null. A missing compile is "nothing to do":
 // the row carries no `error`, so an unattended caller logs nothing, and `refusal` lets a person's
-// command say why nothing happened.
-function refusalRow(compiled, home) {
+// command say why nothing happened. `hint` is how this caller recompiles: the CLI's own command by
+// default, and the extension passes its own, because a VSIX ships no `bin/` (2026-10-20).
+const CLI_REFRESH_HINT = 'recompile with `wildcard-perms --open-threads refresh`';
+function refusalRow(compiled, home, hint = CLI_REFRESH_HINT) {
   if (compiled.state === 'whole') return null;
   const file = compiledPath(home);
   if (compiled.state === 'missing') {
@@ -95,7 +97,7 @@ function refusalRow(compiled, home) {
   }
   return { agent: 'all', changed: false, path: file, on: false, refusal: compiled.kind,
     reason: `${compiled.reason}: nothing was written`,
-    error: `${compiled.reason}: nothing was written; recompile with \`wildcard-perms --open-threads refresh\`` };
+    error: `${compiled.reason}: nothing was written; ${hint}` };
 }
 
 // Every agent's file, from one read of the compiled file. Each row adds what that compile says:
@@ -125,21 +127,25 @@ function openThreadsStatusAll(homeOrOptions) {
 // installs the compile it read, removes the block when that compile lists nothing, and refuses
 // a missing, unreadable or torn compile with every instruction file left as it was.
 // `options.inPlaceFallback: false` is for the unattended callers (the extension's ensure and
-// `--open-threads refresh`), as it is for the gates.
+// `--open-threads refresh`), as it is for the gates. `options.refreshHint` replaces the CLI wording
+// in a refused compile's error (refusalRow).
 function setOpenThreadsAll(on, options = {}) {
   const home = options.home ?? os.homedir();
-  const shared = { ...options, backupSuffix: 'pre-open-threads' };
+  const { refreshHint, ...rest } = options;
+  const shared = { ...rest, backupSuffix: 'pre-open-threads' };
   if (!on) {
     return setGuidanceAll(false, { ...shared, block: makeThreadsBlock('') })
       .map((row) => ({ ...row, threads: 0, index: null, wanted: false }));
   }
   const compiled = readCompiled(home);
-  const refused = refusalRow(compiled, home);
+  const refused = refusalRow(compiled, home, refreshHint);
   if (refused) return [refused];
   return setGuidanceAll(compiled.wanted, { ...shared, block: makeThreadsBlock(compiled.body) })
     .map((row) => ({ ...row, threads: compiled.count, index: compiled.index, wanted: compiled.wanted }));
 }
 
+// readCompiled is exported for the extension's corpus watcher, so the question "does the compile
+// list a thread" is answered by this one reading, sha check included (2026-10-20).
 module.exports = {
-  THREADS_BEGIN, THREADS_END, compiledPath, openThreadsStatusAll, setOpenThreadsAll,
+  THREADS_BEGIN, THREADS_END, compiledPath, readCompiled, openThreadsStatusAll, setOpenThreadsAll,
 };

@@ -201,8 +201,9 @@ const TEST_ONLY = {
   // fullReport calls it inside the module, for the card's count and activation's check.
   // fastLint joined the same day, off HELD: test/memory-line-cap.test.js reaches it by path (its
   // calls are what make the line-cap off-by-one falsifiable), and test/open-threads-reading.test.js
-  // holds its code-point count of the longest line, which indexHealth reads.
-  'vscode-extension/memoryLint.js': ['fastLint', 'gateEntryOf', 'gateOf', 'pickPrimaryDir', 'threadOf'],
+  // holds its code-point count of the longest line, which indexHealth reads. It left this list on
+  // 2026-10-20: extension.js indexEventMayChange measures MEMORY.md with it, through indexHealth.
+  'vscode-extension/memoryLint.js': ['gateEntryOf', 'gateOf', 'pickPrimaryDir', 'threadOf'],
   // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
   // drives a command-line tool through; the tools themselves are run by hand or by CI.
   'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],

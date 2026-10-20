@@ -1731,11 +1731,23 @@ def _status_block(text):
     return None
 
 
+# Removed from thread text, the stem and the INDEX line's path before anything else (2026-10-20):
+# the C0 and C1 controls and DEL that str.split() does not already treat as whitespace, and the
+# bidirectional controls (ALM, LRM, RLM, the embeddings and overrides U+202A-U+202E, the isolates
+# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Code points, not
+# escapes, so no writer can turn them into the characters themselves. memoryLint.js THREAD_STRIP is
+# the same set, held to it by test/threads-compile.sh.
+_THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
+                               *range(0x86, 0xA0), 0x061C, 0x200E, 0x200F,
+                               *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
+
+
 def _thread_text(raw):
-    """One line of thread text: whitespace collapsed, every `<!--` and `-->` neutralised (Claude
-    Code strips HTML comments, so a stray one would swallow the lines after it), and a leading
-    `#` escaped. Not capped: _cap does that, so --lint can say how long it was."""
-    text = " ".join(raw.split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    """One line of thread text: control and bidi characters removed (_THREAD_STRIP), whitespace
+    collapsed, every `<!--` and `-->` neutralised (Claude Code strips HTML comments, so a stray one
+    would swallow the lines after it), and a leading `#` escaped. Not capped: _cap does that, so
+    --lint can say how long it was."""
+    text = " ".join(raw.translate(_THREAD_STRIP).split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
     return BACKSLASH + text if text.startswith("#") else text
 
 
@@ -1831,6 +1843,21 @@ def _index_health():
     return over
 
 
+def _home_relative(path):
+    """`path` with forward slashes and the home directory written `~`, as the INDEX line names
+    the index: the same on every OS, and no user name in a file every session loads. A path
+    outside the home (another drive included) is written whole."""
+    full = os.path.normpath(os.path.abspath(path))
+    home = os.path.normpath(os.path.expanduser("~"))
+    try:
+        rel = os.path.relpath(full, home)
+    except ValueError:
+        rel = None
+    if rel is None or rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return full.replace(os.sep, "/")
+    return "~/" + rel.replace(os.sep, "/")
+
+
 def _compile_threads_text(texts=None):
     """(file text, threads, findings, health) without writing. The file is a header line holding
     the first 16 hex digits of the SHA-256 of everything below it, then `## Open threads (N,
@@ -1840,10 +1867,15 @@ def _compile_threads_text(texts=None):
     could not tell from a torn one."""
     threads, findings, _ = _collect_threads(texts)
     health = _index_health()
-    clean = lambda s: " ".join(s.split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    clean = lambda s: (" ".join(s.translate(_THREAD_STRIP).split())
+                       .replace("<!--", "&lt;!--").replace("-->", "--&gt;"))
     lines = []
     if health:
-        lines.append(f"- **INDEX** MEMORY.md is {'; '.join(health)}: compact it before adding "
+        # The index is NAMED (2026-10-20): this line reaches every session's CLAUDE.md and
+        # AGENTS.md, in every project, and "MEMORY.md" alone let an agent elsewhere prune its own
+        # healthy index.
+        index = clean(_home_relative(os.path.join(MEMORY_DIR, "MEMORY.md")))
+        lines.append(f"- **INDEX** {index} is {'; '.join(health)}: compact it before adding "
                      f"anything, and move detail into the memory files.")
     for status, stem, text in threads[:THREAD_LINES_CAP]:
         lines.append(f"- **{status.upper()}** {_cap(text)} ({clean(stem)})")
@@ -1875,7 +1907,16 @@ def compile_threads():
     except OSError as e:
         sys.exit(f"[recall] refusing to compile open threads: cannot list {MEMORY_DIR} "
                  f"({type(e).__name__}); nothing was written.")
-    _replace_file_text(THREADS_OUT, out)
+    # Written only when the bytes differ (2026-10-20). Every open VS Code window watches this file
+    # and reinstalls on each change, and most recompiles change nothing, so an identical compile
+    # leaves the file, its id and its mtime as they were.
+    try:
+        with open(THREADS_OUT, "rb") as f:
+            unchanged = f.read() == out.encode("utf-8")
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        _replace_file_text(THREADS_OUT, out)
     # On stderr, as the gates' are, so `wildcard-perms --open-threads refresh` passes them on.
     for stem, problem in findings["duplicate"]:
         print(f"[recall] open thread left out: {stem}.md: {problem}", file=sys.stderr)
@@ -1884,7 +1925,7 @@ def compile_threads():
     for stem, status in findings["no-block"]:
         print(f"[recall] open thread left out: {stem}.md: status {status} with no "
               f"{STATUS_BEGIN} block", file=sys.stderr)
-    print(f"\n  compiled {len(threads)} open thread(s)\n  -> {THREADS_OUT}")
+    print(f"\n  compiled {len(threads)} open thread(s)\n  -> {THREADS_OUT}{' (unchanged)' if unchanged else ''}")
     if health:
         print(f"  MEMORY.md: {'; '.join(health)}")
     print()

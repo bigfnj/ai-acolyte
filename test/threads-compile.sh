@@ -216,6 +216,34 @@ else:
 PY
 echo "ok: thread text is collapsed, its comment markers neutralised, a leading # escaped, and capped at 240 characters"
 
+# ------------------------------------------------- control and bidi characters never reach the block
+# The C0 and C1 controls and DEL that split() keeps, and the bidi controls (U+061C, U+200E, U+200F,
+# U+202A-U+202E, U+2066-U+2069), can reorder how a line of CLAUDE.md or AGENTS.md reads (2026-10-20).
+# Mutations, each failing here: drop the _THREAD_STRIP translate from _thread_text (the text keeps
+# U+202E); drop it from the stem's clean (the stem keeps it); strip after the collapse instead of
+# before (the stripped run between two spaces leaves two).
+fresh
+"$PY" - "$MEM" <<'PY'
+import os, sys
+NL = chr(10)
+bad = "".join(chr(c) for c in (0x00, 0x07, 0x1b, 0x7f, 0x80, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069))
+text = "Left" + chr(0x202e) + "right " + bad + " end" + chr(0x2066) + "."
+body = NL.join(["---", "name: x", "description: synthetic", "status: open", "---", "", "<!-- status -->", text, "<!-- /status -->", ""])
+open(os.path.join(sys.argv[1], "evil" + chr(0x202e) + "txt.md"), "w", encoding="utf-8", newline="").write(body)
+PY
+recall --threads-compile
+[ "$RC" = "0" ] || fail "the control corpus did not compile: exit $RC, stderr: $ERR"
+lines | grep -qxF -- "- **OPEN** Leftright end. (eviltxt)" || fail "control or bidi characters survive in the thread line:
+$(lines | "$PY" -c 'import sys; print(ascii(sys.stdin.read()))')"
+"$PY" - "$THREADS" <<'PY' || fail "the compiled file holds a control or bidi character"
+import sys
+data = open(sys.argv[1], encoding="utf-8").read()
+banned = [*range(0x00, 0x09), *range(0x0B, 0x1C), *range(0x7F, 0xA0), 0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]
+found = sorted({hex(ord(ch)) for ch in data if ord(ch) in banned})
+assert not found, found
+PY
+echo "ok: control and bidi characters are removed from the thread text and the stem"
+
 # ----------------------------------------------------------------------- at most ten thread lines
 # Mutations: the cap removed (twelve lines); the cap at 9 or 11; the count line counting the
 # listed lines; the heading counting the listed lines (it must say 12); "threads" for one.
@@ -276,7 +304,7 @@ recall --threads-compile
 lines | grep -q 'INDEX' && fail "140 lines is within the budget, and an INDEX line was written"
 index_lines 141
 recall --threads-compile
-[ "$(index_line)" = '- **INDEX** MEMORY.md is 141 lines (budget 140): compact it before adding anything, and move detail into the memory files.' ] \
+[ "$(index_line)" = '- **INDEX** ~/memory/MEMORY.md is 141 lines (budget 140): compact it before adding anything, and move detail into the memory files.' ] \
   || fail "141 lines: $(index_line)"
 [ "$(lines | sed -n 4p)" = '- **OPEN** A thread. (a)' ] || fail "the thread does not follow the INDEX line"
 [ "$(lines | sed -n 2p)" = '## Open threads (1, managed)' ] || fail "the INDEX line was counted as a thread"
@@ -293,27 +321,40 @@ recall --threads-compile
 lines | grep -q 'INDEX' && fail "12000 bytes is within the budget"
 "$PY" -c 'import sys; open(sys.argv[1], "wb").write((b"- " + b"x" * 96 + b"\r\n") * 120 + b"x")' "$MEM/MEMORY.md"
 recall --threads-compile
-index_line | grep -qF 'MEMORY.md is 12001 bytes (budget 12000):' || fail "12001 bytes: $(index_line)"
+index_line | grep -qF '~/memory/MEMORY.md is 12001 bytes (budget 12000):' || fail "12001 bytes: $(index_line)"
 # The longest line in characters, its CR excluded: 300 e-acutes (600 bytes) is within, 301 past.
 "$PY" -c 'import sys; open(sys.argv[1], "wb").write(("\u00e9" * 300 + "\r\n").encode())' "$MEM/MEMORY.md"
 recall --threads-compile
 lines | grep -q 'INDEX' && fail "a 300-character line is within the budget"
 "$PY" -c 'import sys; open(sys.argv[1], "wb").write(("short\n" + "\u00e9" * 301 + "\r\n").encode())' "$MEM/MEMORY.md"
 recall --threads-compile
-index_line | grep -qF 'MEMORY.md is 301 characters on its longest line (budget 300):' || fail "301 characters: $(index_line)"
+index_line | grep -qF '~/memory/MEMORY.md is 301 characters on its longest line (budget 300):' || fail "301 characters: $(index_line)"
 # All three at once, in the documented order, and with no thread the INDEX line still stands.
 # 150 x (800 + 1 + 100 + 1) bytes.
 "$PY" -c 'import sys; open(sys.argv[1], "wb").write((("\u00e9" * 400 + "\n" + "- " + "y" * 98 + "\n") * 150).encode())' "$MEM/MEMORY.md"
 mem a.md 'status: done' 'Closed.'
 recall --threads-compile
 [ "$(lines | sed -n 2p)" = '## Open threads (0, managed)' ] || fail "the INDEX line is counted with no thread"
-[ "$(index_line)" = '- **INDEX** MEMORY.md is 300 lines (budget 140); 135300 bytes (budget 12000); 400 characters on its longest line (budget 300): compact it before adding anything, and move detail into the memory files.' ] \
+[ "$(index_line)" = '- **INDEX** ~/memory/MEMORY.md is 300 lines (budget 140); 135300 bytes (budget 12000); 400 characters on its longest line (budget 300): compact it before adding anything, and move detail into the memory files.' ] \
   || fail "three budgets at once: $(index_line)"
+# The INDEX line NAMES the index (2026-10-20): it reaches every session in every project, and a
+# bare "MEMORY.md" let an agent elsewhere prune its own healthy one. Under the home it is written
+# home-relative (the cases above, ~/memory/MEMORY.md); outside it, whole, with forward slashes.
+# Mutations: write "MEMORY.md" again (every case above fails); drop the home-relative form (the
+# cases above read an absolute path); write the outside path relative ("~/../...", here).
+OUTSIDE="$(mktemp -d)"
+index_lines 141
+cp "$MEM/MEMORY.md" "$OUTSIDE/MEMORY.md"
+RECALL_MEMORY_DIR="$OUTSIDE" recall --threads-compile
+rm -rf "$OUTSIDE"
+[ "$RC" = "0" ] || fail "a store outside the home did not compile: $ERR"
+index_line | grep -qE '^- \*\*INDEX\*\* [^~ ][^ ]*/MEMORY\.md is 141 lines \(budget 140\): ' || fail "a store outside the home is not named by its whole path: $(index_line)"
+index_line | grep -qF '\' && fail "the INDEX path holds a backslash: $(index_line)"
 rm "$MEM/MEMORY.md"
 recall --threads-compile
 [ "$RC" = "0" ] || fail "a store with no MEMORY.md must still compile: $ERR"
 lines | grep -q 'INDEX' && fail "a missing MEMORY.md produced an INDEX line"
-echo "ok: the INDEX line names each budget MEMORY.md is past (140 lines, 12000 bytes, 300 characters), and nothing else"
+echo "ok: the INDEX line names the index and each budget it is past (140 lines, 12000 bytes, 300 characters), and nothing else"
 
 # ------------------------------------------------------------------- refusals write nothing at all
 # Mutations: delete the _DISCOVERY_ERRORS refusal (the store compiles, the file changes); turn the
@@ -396,6 +437,21 @@ for residue in "$TMP/.claude"/open-threads.generated.md.*.tmp; do
 done
 echo "ok: the threads write replaces the file rather than truncating it, and leaves no .tmp residue"
 
+# ------------------------------------------- an identical compile leaves the file alone (2026-10-20)
+# Every open VS Code window watches this file and reinstalls on each change, and most recompiles
+# change nothing. Mutation: replace the file whatever its bytes (the id and the mtime move).
+mtime_of() { "$PY" -c "import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)" "$1" | tr -d '\r'; }
+ID_BEFORE="$(file_id "$THREADS")"
+MTIME_BEFORE="$(mtime_of "$THREADS")"
+SHA_BEFORE="$(sha_of "$THREADS")"
+recall --threads-compile
+[ "$RC" = "0" ] || fail "an identical recompile failed: $ERR"
+[ "$(sha_of "$THREADS")" = "$SHA_BEFORE" ] || fail "precondition: the recompile was not identical"
+[ "$(file_id "$THREADS")" = "$ID_BEFORE" ] || fail "an identical compile replaced the file"
+[ "$(mtime_of "$THREADS")" = "$MTIME_BEFORE" ] || fail "an identical compile touched the file"
+printf '%s\n' "$OUT" | grep -qF '(unchanged)' || fail "an identical compile does not say it was unchanged: $OUT"
+echo "ok: an identical compile leaves the file, its id and its mtime as they were"
+
 # ---------------------------------------------------- --threads-compile runs on its own
 # Mutation: drop the `mixed` check (the compile runs, half of what was asked), or drop
 # --threads-compile from the gate verbs' list (the retire runs and the compile is ignored).
@@ -455,7 +511,8 @@ echo "ok: --lint counts the threads, names each kind of left-out or cut memory, 
 # in the text, comment markers and a leading # in the text. Then indexHealth against
 # _index_health over generated indexes.
 #
-# Mutations, each failing here: threadOf trimming with JavaScript's trim(), or collapsing with
+# Mutations, each failing here: threadText not removing THREAD_STRIP, or removing it after the
+# collapse; threadOf trimming with JavaScript's trim(), or collapsing with
 # \s; `.` for `[^\n]` in FENCE_OPEN (killed only by a fence whose info string holds U+2028, which
 # the first version of this generator never wrote); no universal newlines in memoryBody; the fence skip, the
 # backtick-info rule or the unclosed-fence rule dropped; `status :` not the key; the value not
@@ -471,6 +528,8 @@ def pick(seq):
     return seq[(state >> 33) % len(seq)]
 SPACES = [chr(c) for c in (0x09, 0x0b, 0x0c, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2007, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000)]
 NOT_SPACE = [chr(0xfeff), chr(0x200b), chr(0x180e)]
+# Removed by both readers (recall.py _THREAD_STRIP, memoryLint.js THREAD_STRIP), each range's ends.
+STRIP = [chr(c) for c in (0x00, 0x08, 0x0e, 0x1b, 0x7f, 0x84, 0x86, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069)]
 values = ["open", "OPEN", "Awaiting", "blocked", "deferred", "done", "Shipped", "live", "wip", "", "open-ish",
           "awaiting " + chr(0xa0), chr(0x1c) + "blocked", chr(0xfeff) + "open", "deferred" + chr(0x200b)]
 keys = ["status:", "status :", "  status:", "    status:", "status" + chr(0xa0) + ":", "statuses:", "status_note:", "Status:"]
@@ -488,7 +547,8 @@ for i in range(700):
     indent_b = pick(["", "", " ", "   ", "    ", "\t"])
     indent_e = pick(["", "", "   ", "    "])
     after = pick(["", "", "  ", "\t", " x"])
-    word = lambda: pick(["word", "<!--", "-->", "#tag", "a" + pick(SPACES) + "b", pick(NOT_SPACE) + "z", "`x`", "~"])
+    word = lambda: pick(["word", "<!--", "-->", "#tag", "a" + pick(SPACES) + "b", pick(NOT_SPACE) + "z", "`x`", "~",
+                         "c" + pick(STRIP) + "d", pick(STRIP)])
     text_lines = [pick(["", "#", "  #", pick(SPACES)]) + " ".join(word() for _ in range(pick([1, 3, 6]))) for _ in range(pick([1, 2, 3]))]
     block = [indent_b + "<!-- status -->" + after] + text_lines + [indent_e + "<!-- /status -->" + pick(["", " ", " y"])]
     shape = pick(["plain", "plain", "fenced", "tilde", "unclosed", "info-backtick", "end-first", "two-begins", "none", "after-fence",
@@ -559,6 +619,12 @@ for kind in ("none", "listed", "closed", "duplicate", "unknown", "no-block"):
 listed = [v[2] for v in py.values() if v and v[0] == "listed"]
 for marker, what in (("&lt;!--", "a neutralised <!--"), ("--&gt;", "a neutralised -->"), (chr(92) + "#", "an escaped #")):
     assert any(marker in t for t in listed), f"no listed text holds {what}"
+# The strip axis is real: listed memories whose block held a removed character, and none kept one.
+STRIP = [chr(c) for c in (0x00, 0x08, 0x0e, 0x1b, 0x7f, 0x84, 0x86, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069)]
+held = sum(1 for n, v in py.items() if v and v[0] == "listed"
+           and any(s in open(os.path.join(sys.argv[3], n), encoding="utf-8", errors="replace").read() for s in STRIP))
+assert held >= 5, f"only {held} listed memories hold a character the readers remove"
+assert not any(s in t for t in listed for s in STRIP), "a listed text kept a character the readers remove"
 wrong = [n for n in sorted(py) if py[n] != js[n]]
 for n in wrong[:8]:
     raw = open(os.path.join(sys.argv[3], n), "rb").read()

@@ -35,6 +35,9 @@ const {
 } = require('./src/policy-guard');
 const { extractInvocations, candidateKey } = require('./src/auto-learn');
 const { resolvedLaunch, npmShimLaunch, BATCH_ARGUMENT_REFUSED_CODE, endProcessTree, endTreeAfter } = require('./src/exec-resolve');
+// execFile's signature, run on a worker thread under the shared spawn gate, so CreateProcess never
+// holds the extension host thread. The open-threads compile uses it (spawnThreadsCompile).
+const { execFileOffThread } = require('./src/spawn-thread');
 const { dashboardCodexVersion, abandonCodexVersionProbes } = require('./src/codex-version');
 const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
@@ -53,7 +56,7 @@ const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const { memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable } = require('./src/memory-guard-install');
 const {
-  openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath,
+  openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath, readCompiled: readCompiledThreads,
 } = require('./src/agent-open-threads');
 const {
   MODELLED_VERSION: STRIP_MODEL_MODELLED, checkOffThread: checkStripModelOffThread, defaultBinary: findClaudeCodeBinary,
@@ -72,7 +75,13 @@ const {
 // memoryReport() also backs the dashboard Memory card (stats only, still pure Node).
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
-const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, cfg: memoryConf } = require('./memoryLint');
+// memoryStoreDir is memoryReport()'s store without the report: what every recall.py spawn pins and
+// the open threads' watcher compares with. The default is only for a test harness that stubs this
+// module with an older export list, and gives memoryReport()'s answer at its old cost.
+const {
+  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, fastLint, cfg: memoryConf,
+  memoryStoreDir = () => memoryReport().dir,
+} = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP_DIR    = path.join(os.homedir(), '.claude', 'backups');
@@ -119,6 +128,9 @@ let lastRun = null;          // timestamp of the last write we made
 let memBounce = null;        // debounce for MEMORY.md-driven dashboard refreshes
 let gatesBounce = null;      // debounce for corpus-driven gate recompiles
 let threadsBounce = null;    // debounce for the open-threads recompile (corpus, activation, setting)
+// What armed that recompile: { anyStore } once anything but a corpus event did, else the stores
+// the burst's events came from (scheduleThreadsCompile). Reset when the timer fires or is dropped.
+let threadsBurst = null;
 let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gate)
 let autoLearnBounce = null;  // debounce for Claude/Codex transcript writes
 let autoLearnTimer = null;   // periodic reconciliation timer
@@ -1006,7 +1018,7 @@ function downloadRecallModel() {
 // venv python directly (so recall.py doesn't need to re-exec) with the model + corpus
 // pinned via env, so the cache and the card's stats always agree on the same dir.
 async function rebuildRecall() {
-  const { dir } = memoryReport();
+  const dir = memoryStoreDir();
   if (!dir) {
     vscode.window.showInformationMessage('ai-acolyte: no MEMORY.md found to index.');
     return;
@@ -1068,7 +1080,7 @@ async function rebuildRecall() {
 // tree-killed after two minutes like every child here, so a teardown cannot leave it running.
 function runClaudeMemorySearch(query) {
   return new Promise((resolve) => {
-    const { dir } = memoryReport();
+    const dir = memoryStoreDir();
     if (!dir) { resolve({ unavailable: 'no Claude memory store (a folder with MEMORY.md) was found.' }); return; }
     const script = recallScriptPath();
     if (!script) { resolve({ unavailable: 'recall.py was not found. Set its path with memory.recallScript.' }); return; }
@@ -1138,7 +1150,7 @@ function autoSyncRecallIfStale() {
     // teardown is one killLiveChildren() has already been past.
     if (deactivated) return;
     if (Date.now() - recallRebuildAt < RECALL_AUTO_COOLDOWN_MS) return;
-    const { dir } = memoryReport();
+    const dir = memoryStoreDir();
     if (!dir) return;
     const script = recallScriptPath();
     const st = recallStatus();
@@ -2818,9 +2830,11 @@ function registerLocalWatchers(context) {
       if (event.affectsConfiguration('permissionWildcarding.gates')) ensureGates(true);
       // Off removes the block at once; on installs what was compiled and recompiles, because
       // nothing compiles while it is off (threadsCorpusBump), so the last compile may be stale.
+      // Off also drops a recompile already armed, which would otherwise compile after the switch.
       if (event.affectsConfiguration('permissionWildcarding.openThreads')) {
         ensureOpenThreads(true);
         if (openThreadsEnabled()) scheduleThreadsCompile();
+        else cancelThreadsCompile();
       }
       if (event.affectsConfiguration('permissionWildcarding.memory')) {
         // BOTH, and in this order. Refreshing only the dashboard was worse than
@@ -3293,8 +3307,9 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.toggleMemoryGuard', () => toggleMemoryGuard()),
     // Retire or restore one memory gate at a time, from the card's Manage gates… or the palette.
     vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates()),
-    // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card.
-    vscode.commands.registerCommand('permission-wildcarding.toggleOpenThreads', () => toggleOpenThreads())
+    // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card;
+    // the card's Refresh button passes `{ refresh: true }`.
+    vscode.commands.registerCommand('permission-wildcarding.toggleOpenThreads', (request) => toggleOpenThreads(request))
   );
   try {
     registerLocalWatchers(context);
@@ -3357,13 +3372,23 @@ function activate(context) {
 
   // The initial build of both memory-store watcher sets. Every later rebuild comes through
   // the reconcile subscriber above.
+  //
+  // A RE-ACTIVATE BUILDS ITS OWN (2026-10-20). The two maps are module-level, and VS Code drains a
+  // predecessor's subscriptions only after its deactivate settles, which a pending Auto Learn
+  // drain can hold past a same-realm activate. The successor's reconcile then found the
+  // predecessor's live watchers and built none, and the predecessor's disposer emptied both maps
+  // afterwards: no *.md watcher, so no gate or threads recompile, until a reconcile 5 minutes
+  // later. So whatever is in the maps is disposed here before the build, and a predecessor's
+  // disposer is a no-op once a successor has activated.
   try {
+    disposeMemoryWatchers();
     reconcileMemoryWatchers();
     // ONE disposer for both sets, not one subscription per watcher. The sets churn as
     // stores come and go, and pushing each watcher would grow context.subscriptions for the
     // life of the window with entries that reconcileMemoryWatchers has already disposed --
     // the same leak shape the folder-change watchers were fixed for.
-    context.subscriptions.push({ dispose: () => disposeMemoryWatchers() });
+    const generation = activationGeneration;
+    context.subscriptions.push({ dispose: () => { if (generation === activationGeneration) disposeMemoryWatchers(); } });
   } catch (err) {
     console.error('ai-acolyte: memory-store watchers failed —', err);
   }
@@ -3378,7 +3403,7 @@ function activate(context) {
 // unwatched until a window reload, and a store that went away left a dead watcher until
 // deactivate().
 const memoryCardWatchers = new Map();    // dir -> MEMORY.md watcher, keeps the Memory card live
-const gatesCorpusWatchers = new Map();   // dir -> *.md watcher, triggers the gate recompile
+const gatesCorpusWatchers = new Map();   // dir -> *.md watcher, hands each event to the gate AND the threads recompile (memoryCorpusChanged)
 
 // Every store on disk, read from the LIVE configuration on each call -- which is half of
 // what makes a reconcile a reconcile, since memory.* can change at runtime.
@@ -3448,25 +3473,23 @@ function memoryCorpusChanged(uri) {
 
 // Recompile the open threads when a change can move them. Never while openThreads.enabled is
 // off (switched off stays off; turning it on compiles), and only when one of these holds:
-//   * the file is MEMORY.md, whose budgets the INDEX line reports;
+//   * the file is MEMORY.md, whose budgets the INDEX line reports, and the INDEX line may move
+//     (indexEventMayChange);
 //   * the compiled file currently lists a thread, so any edit, a deletion included, may be the
 //     one that closes it, and a closed thread has to leave the block;
 //   * the file mentions `status:` or a status marker, so it may be opening one.
-// A change in a store that does not compile is skipped: the compile reads one store.
+// A change in a store that does not compile is skipped: the compile reads one store. Which store
+// compiles is asked once per burst, when its timer fires (threadsBurstCompiles), not per event:
+// every save fires this, and the answer cannot move faster than the debounce.
 function threadsCorpusBump(uri) {
   if (deactivated || !openThreadsEnabled()) return;
   const file = uri?.fsPath;
   if (file && !threadsMayChange(file)) return;
-  if (file) {
-    let store = null;
-    try { store = memoryReport().dir; } catch { /* unknown: compile, the compile pins its own */ }
-    if (store && gateEditKey(path.dirname(file)) !== gateEditKey(store)) return;
-  }
-  scheduleThreadsCompile();
+  scheduleThreadsCompile(THREADS_BOUNCE_MS, file ? path.dirname(file) : null);
 }
 
 function threadsMayChange(file) {
-  if (path.basename(file) === 'MEMORY.md') return true;
+  if (path.basename(file) === 'MEMORY.md') return indexEventMayChange(path.dirname(file));
   if (compiledListsThreads()) return true;
   try {
     const text = fs.readFileSync(file, 'utf8');
@@ -3474,12 +3497,29 @@ function threadsMayChange(file) {
   } catch { return false; }
 }
 
-// Whether open-threads.generated.md's heading counts any thread. A torn or missing file reads as
-// none: the next status-mentioning edit or MEMORY.md change compiles it again.
+// MEMORY.md moves only the INDEX line: recall.py leaves the index out of the threads (EXCLUDE), so
+// a healthy index's every save used to spawn a compile that could change nothing (2026-10-20). Its
+// event compiles when the compile is not whole, when it carries an INDEX line (which may now go,
+// or say a different number), or when the index is past a budget by memoryLint.js indexHealth over
+// fastLint, which test/threads-compile.sh holds to recall.py's _index_health. A reader that throws
+// (a harness stub without fastLint among them) compiles.
+function indexEventMayChange(dir) {
+  try {
+    const compiled = readCompiledThreads(os.homedir());
+    if (compiled.state !== 'whole' || compiled.index !== null) return true;
+    return indexHealth(fastLint(dir, memoryConf())).length > 0;
+  } catch { return true; }
+}
+
+// Whether open-threads.generated.md lists a thread, by src/agent-open-threads.js's own reading
+// (header, sha and heading), not a third parse of it (2026-10-20). A compile that reading refuses
+// (torn, or edited by hand) also answers yes: any edit in the store may as well recompile it,
+// since nothing installs it as it is. A missing file is none: the next status-mentioning edit or
+// MEMORY.md change compiles one.
 function compiledListsThreads() {
   try {
-    const heading = /^## Open threads \((\d+), managed\)$/m.exec(fs.readFileSync(threadsCompiledPath(), 'utf8'));
-    return !!heading && Number(heading[1]) > 0;
+    const compiled = readCompiledThreads(os.homedir());
+    return compiled.state === 'refused' || (compiled.state === 'whole' && compiled.count > 0);
   } catch { return false; }
 }
 
@@ -4512,10 +4552,43 @@ function openThreadsEnabled() {
 const THREADS_BOUNCE_MS = 2500;       // after a corpus edit or the setting; not the gates' 2000
 const THREADS_ACTIVATION_MS = 4000;   // after activation, once the host has settled
 
+// ONE COMPILE AT A TIME (2026-10-20). A compile asked for while one runs waits for it and then runs
+// once, however many asked in between: the later ask may follow an edit the running compile did not
+// read, and two compiles at once could finish in either order, the older writing last. The one
+// queued compile is quiet only if every ask it stands for was, so a person's click still hears why
+// it failed. Resolves as spawnThreadsCompile does.
+let threadsCompiling = null;   // the compile running now
+let threadsQueued = null;      // { promise, quiet }: the one that runs after it
+function compileThreads({ quiet = false } = {}) {
+  if (!threadsCompiling) {
+    threadsCompiling = spawnThreadsCompile({ quiet }).finally(() => { threadsCompiling = null; });
+    return threadsCompiling;
+  }
+  if (threadsQueued) {
+    threadsQueued.quiet = threadsQueued.quiet && quiet;
+    return threadsQueued.promise;
+  }
+  const queued = { quiet, promise: null };
+  queued.promise = threadsCompiling.then(() => {
+    threadsQueued = null;
+    return compileThreads({ quiet: queued.quiet });
+  });
+  threadsQueued = queued;
+  return queued.promise;
+}
+
 // compileGates for `--threads-compile`: the same Python, the same pinned store, the same tracked
 // and tree-killed child with a 60 s deadline. Resolves false when it could not run, having said
 // why: a modal for a person's action, the console and the output channel for an unattended one.
-function compileThreads({ quiet = false } = {}) {
+//
+// OFF THE HOST THREAD (2026-10-20). Unlike the gate compile this one runs unattended and often,
+// so it is started by src/spawn-thread.js execFileOffThread: CreateProcess holds a worker thread
+// rather than the extension host (74-465 ms per spawn, p50, on the development box; the figures
+// are in src/spawn-thread.js's header, and python was not among them), under the gate
+// every spawn thread shares. trackChild and endTreeAfter take the ThreadChild it returns, and
+// deactivate ends its tree through the thread (src/exec-resolve.js END_TREE). compileGates and
+// the other host-thread spawns are unchanged: their harnesses record the host's execFile.
+function spawnThreadsCompile({ quiet = false } = {}) {
   const say = (msg) => {
     if (!quiet) { vscode.window.showWarningMessage('ai-acolyte: ' + msg); return; }
     console.error('ai-acolyte: ' + msg);
@@ -4528,7 +4601,7 @@ function compileThreads({ quiet = false } = {}) {
   if (!st.venv) { say(`DevToolbox venv python not found at ${st.py}, so open threads cannot be compiled.`); return Promise.resolve(false); }
   const env = gateCompileEnv();
   return new Promise((resolve) => {
-    endTreeAfter(trackChild(execFile(st.py, [script, '--threads-compile'], { env }, (err, _out, stderr) => {
+    endTreeAfter(trackChild(execFileOffThread(st.py, [script, '--threads-compile'], { env, windowsHide: true }, (err, _out, stderr) => {
       if (deactivated) { resolve(false); return; }
       if (err) {
         const detail = (stderr || err.message || '').trim().slice(0, 300);
@@ -4543,28 +4616,59 @@ function compileThreads({ quiet = false } = {}) {
 }
 
 // One debounced compile and install, shared by the corpus watcher, activation and the setting.
-function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS) {
+// The switch is asked again when the timer fires, not only when it was armed: turned off in
+// between, nothing compiles (2026-10-20). `dir` is the store a corpus event came from; null (the
+// setting) compiles whatever store it is; THREADS_IF_WORTH is activation's deferred check. One
+// timer serves them all, so what each asked for is kept together (threadsBurst) and judged once.
+const THREADS_IF_WORTH = Symbol('activation: compile if a compile could say something');
+function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS, dir = null) {
   if (deactivated) return;
+  if (!threadsBurst) threadsBurst = { anyStore: false, ifWorth: false, dirs: new Set() };
+  if (dir === null) threadsBurst.anyStore = true;
+  else if (dir === THREADS_IF_WORTH) threadsBurst.ifWorth = true;
+  else threadsBurst.dirs.add(gateEditKey(dir));
   clearTimeout(threadsBounce);
   threadsBounce = setTimeout(() => {
     threadsBounce = null;
+    const burst = threadsBurst;
+    threadsBurst = null;
+    if (deactivated || !openThreadsEnabled()) return;
+    if (!threadsBurstCompiles(burst)) return;
     compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
   }, delay);
+}
+
+// Whether a burst compiles: anything but a corpus event asked, or an event came from the store
+// that compiles (memoryStoreDir(), memoryReport()'s choice without reading the store, asked once
+// per burst; unknown compiles, since the compile pins its own), or activation's check says a
+// compile could say something.
+function threadsBurstCompiles(burst) {
+  if (!burst || burst.anyStore) return true;
+  if (burst.dirs.size) {
+    let store = null;
+    try { store = memoryStoreDir(); } catch { /* unknown: compile */ }
+    if (!store || burst.dirs.has(gateEditKey(store))) return true;
+  }
+  return burst.ifWorth && threadsWorthCompiling();
+}
+
+// The armed recompile, dropped: the switch went off, a person's compile is about to cover it, or
+// the host is going down.
+function cancelThreadsCompile() {
+  clearTimeout(threadsBounce);
+  threadsBounce = null;
+  threadsBurst = null;
 }
 
 // After activation, a compile only when one could say something: a memory declares `status:`,
 // the compiled file exists (a thread may have closed while the window was shut), or MEMORY.md is
 // past a budget. A machine that never uses the feature never spawns Python for it. The question
 // is asked in the deferred timer, not here: it reads the whole store (memoryReport), and
-// activation itself reads none of it.
+// activation itself reads none of it. A corpus event in those seconds joins the same burst, so an
+// event from another store cannot cancel the check.
 function activationThreadsCompile() {
   if (deactivated || !openThreadsEnabled()) return;
-  clearTimeout(threadsBounce);
-  threadsBounce = setTimeout(() => {
-    threadsBounce = null;
-    if (deactivated || !openThreadsEnabled() || !threadsWorthCompiling()) return;
-    compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
-  }, THREADS_ACTIVATION_MS);
+  scheduleThreadsCompile(THREADS_ACTIVATION_MS, THREADS_IF_WORTH);
 }
 
 function threadsWorthCompiling() {
@@ -4593,7 +4697,7 @@ function ensureOpenThreads(announce = false) {
     const wants = (state) => want && state.wanted;
     if (states.every((state) => (want ? state.compile === 'whole' : true) && state.on === wants(state)
         && (wants(state) ? state.current : !state.shadowedPaths?.length))) return;
-    const results = setOpenThreadsAll(want, { inPlaceFallback: false });
+    const results = setOpenThreadsAll(want, { inPlaceFallback: false, refreshHint: THREADS_REFRESH_HINT });
     const failed = results.filter((result) => result.error);
     if (failed.length) {
       const channel = sharedChannel();
@@ -4619,55 +4723,96 @@ function ensureOpenThreads(announce = false) {
   }
 }
 
-// `permission-wildcarding.toggleOpenThreads`: the user-tier setting, as toggleGates writes
-// gates.enabled. On (or a stale install) compiles and installs; a settled install is turned off,
-// after a confirmation, which removes the block from every agent.
-async function toggleOpenThreads() {
-  const config = vscode.workspace.getConfiguration('permissionWildcarding');
-  const enabled = !!openThreadsEnabled();
-  const states = openThreadsStatusAll();
-  const settled = (state) => state.readable && state.compile === 'whole'
+// One agent's install is what the setting and the compile ask for: the compile is whole, and the
+// block is in, and current, exactly when that compile wants one. threadsNeedRefresh is the one
+// predicate the toggle's modal and the card's Refresh button read, so the button offers what the
+// command would do.
+function threadsSettled(state) {
+  return state.readable && state.compile === 'whole'
     && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
-  const next = !(enabled && states.length && states.every(settled));
-  if (!next) {
+}
+function threadsNeedRefresh(states) {
+  return states.length > 0 && !states.every(threadsSettled);
+}
+
+// What the extension says where src/agent-open-threads.js would name the CLI's refresh, which a
+// VSIX install does not have.
+const THREADS_REFRESH_HINT = 'click Refresh open threads on the Claude memory card, or run '
+  + 'AI Acolyte: Toggle open threads and choose Refresh';
+
+// `permission-wildcarding.toggleOpenThreads`: the user-tier setting, as toggleGates writes
+// gates.enabled. While it is on, a click turns it off, after a confirmation, whatever state the
+// install is in: an off switch that can install instead is not one (2026-10-20). When the install
+// is not current the same modal also offers Refresh, which compiles and installs and leaves the
+// setting on. While it is off, a click turns it on, compiles and installs. `{ refresh: true }`
+// is the card's Refresh button, the same refresh without the modal.
+async function toggleOpenThreads(request = null) {
+  const enabled = !!openThreadsEnabled();
+  if (request?.refresh === true) {
+    if (enabled) await refreshOpenThreads();
+    else vscode.window.showInformationMessage('ai-acolyte: open threads are off; Turn on open threads compiles and installs them.');
+    return;
+  }
+  if (enabled) {
+    const states = openThreadsStatusAll();
+    const stale = threadsNeedRefresh(states);
     const files = states.filter((state) => state.on).map((state) => state.path.replace(os.homedir(), '~')).join(', ');
     const choice = await vscode.window.showWarningMessage('Turn off open threads?', {
       modal: true,
       detail: (files ? `Removes the managed block from ${files}. ` : '')
         + 'The memories keep their status; nothing is compiled or installed while this is off, and '
-        + 'MEMORY.md\'s health is no longer reported to new sessions. Sets openThreads.enabled to false.',
-    }, 'Turn off');
+        + 'MEMORY.md\'s health is no longer reported to new sessions. Sets openThreads.enabled to false.'
+        + (stale ? ' The install is not current: Refresh compiles and installs it instead, and leaves this on.' : ''),
+    }, 'Turn off', ...(stale ? ['Refresh'] : []));
+    if (choice === 'Refresh') { await refreshOpenThreads(); return; }
     if (choice !== 'Turn off') return;
   }
+  const next = !enabled;
   try {
-    await config.update('openThreads.enabled', next, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration('permissionWildcarding')
+      .update('openThreads.enabled', next, vscode.ConfigurationTarget.Global);
   } catch (err) {
     vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
     return;
   }
   if (deactivated) return;
-  // The setting's own listener has just armed a recompile; this one covers it, so it is dropped
-  // rather than run a second time two seconds later.
-  if (next) {
-    clearTimeout(threadsBounce);
-    threadsBounce = null;
-    await compileThreads();
-  }
+  if (next) { await refreshOpenThreads(); return; }
+  // An armed recompile was dropped by the setting's own listener (cancelThreadsCompile), and the
+  // timer asks the switch again if it fires regardless.
+  reportThreadsInstall(setOpenThreadsAll(false), false);
+}
+
+// Compile, then install what is compiled, for a person's click: the toggle turning it on, and
+// Refresh. The setting's own listener may just have armed a recompile; this one covers it, so it
+// is dropped rather than run a second time two seconds later.
+// A compile that failed still installs what was compiled before, as the CLI's refresh does, and
+// every message then says so: "ON" over an old compile reads as a fresh one (2026-10-20).
+async function refreshOpenThreads() {
+  cancelThreadsCompile();
+  const compiled = await compileThreads();
   if (deactivated) return;
-  const results = setOpenThreadsAll(next);
+  reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true, compiled);
+}
+
+function reportThreadsInstall(results, next, compiled = true) {
   const refused = results.length === 1 && results[0].refusal ? results[0] : null;
   const failed = results.filter((result) => result.error);
+  const stale = next && !compiled;
   if (refused && !refused.error) {
-    vscode.window.showWarningMessage(`ai-acolyte: open threads are on, and nothing is installed: ${refused.reason}.`);
+    vscode.window.showWarningMessage('ai-acolyte: open threads are on, and nothing is installed: '
+      + `${stale ? 'the compile failed, and ' : ''}${refused.reason}.`);
   } else if (failed.length) {
-    vscode.window.showErrorMessage(`ai-acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
+    vscode.window.showErrorMessage(`ai-acolyte: ${stale ? 'open threads: the compile failed; ' : ''}`
+      + failed.map((result) => `${result.agent}: ${result.error}`).join('; '));
   } else if (!results.length) {
     vscode.window.showWarningMessage('ai-acolyte: open threads: no agent instruction file to write.');
   } else if (next && !results.some((result) => result.on)) {
-    vscode.window.showInformationMessage('ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its '
-      + 'budgets, so no block is installed until something is.');
+    vscode.window.showInformationMessage(stale
+      ? 'ai-acolyte: open threads ON — the compile failed, and the last compile lists nothing open, so no block is installed.'
+      : 'ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its budgets, so no block is installed until something is.');
   } else {
     vscode.window.showInformationMessage(`ai-acolyte: open threads ${next ? 'ON' : 'OFF'} — `
+      + (stale ? 'the compile failed, so the last compile is installed: ' : '')
       + results.map((result) => result.path.replace(os.homedir(), '~')).join(', ')
       + (next ? ' (applies from each agent’s next session)' : ''));
   }
@@ -4705,6 +4850,8 @@ function threadsCardData(precomputed = null) {
       index: states.find((state) => state.index)?.index || null,
       installed: states.filter((state) => state.on).map((state) => state.agent),
       current: states.every((state) => (state.wanted ? state.on && state.current : !state.on)),
+      // Whether the card offers Refresh: the toggle's own predicate.
+      refresh: threadsNeedRefresh(states),
       reason: first.reason,
       declared,
       listed,
@@ -5149,6 +5296,7 @@ class WildcardingViewProvider {
         case 'toggleMemoryGuard': vscode.commands.executeCommand('permission-wildcarding.toggleMemoryGuard'); break;
         case 'manageGates': vscode.commands.executeCommand('permission-wildcarding.manageGates'); break;
         case 'toggleOpenThreads': vscode.commands.executeCommand('permission-wildcarding.toggleOpenThreads'); break;
+        case 'refreshOpenThreads': vscode.commands.executeCommand('permission-wildcarding.toggleOpenThreads', { refresh: true }); break;
         // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
         // c09daab (the shared Saved permissions picker replaced that button), and the
         // two synthetic test rows posting it directly were all that kept it alive. The
@@ -5666,6 +5814,7 @@ class WildcardingViewProvider {
         <div class="muted sub" id="claudeMemoryThreadsStatus"></div>
         <div class="sub" id="claudeMemoryThreadsIndex" hidden></div>
         <button class="managed-action" id="claudeMemoryThreads" title="The open-threads block: every memory whose status: is still open, in CLAUDE.md and AGENTS.md">Turn on open threads</button>
+        <button class="managed-action" id="claudeMemoryThreadsRefresh" hidden title="Compile the open threads and install them, leaving the setting on">Refresh open threads</button>
         <div class="muted sub" id="claudeCodeVersion"></div>
       </div>
     </div>
@@ -6373,7 +6522,10 @@ class WildcardingViewProvider {
     index.hidden = !(t && t.enabled && t.index);
     index.textContent = t && t.index ? '⚠ INDEX: ' + t.index : '';
     index.style.color = 'var(--vscode-charts-yellow, #d29922)';
+    // While on, the toggle turns it off whatever the install's state; Refresh is offered beside it
+    // exactly when threadsNeedRefresh says the install is not current, the command's own test.
     $('claudeMemoryThreads').textContent = t && t.enabled ? 'Turn off open threads' : 'Turn on open threads';
+    $('claudeMemoryThreadsRefresh').hidden = !(t && t.enabled && t.refresh);
   }
 
   // One wording for both memory cards' CPU LLM line: the Claude and Codex searches run the same
@@ -6712,6 +6864,7 @@ class WildcardingViewProvider {
   $('claudeMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'manageGates' }));
   $('memoryGuardBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleMemoryGuard' }));
   $('claudeMemoryThreads').addEventListener('click', () => vscode.postMessage({ type: 'toggleOpenThreads' }));
+  $('claudeMemoryThreadsRefresh').addEventListener('click', () => vscode.postMessage({ type: 'refreshOpenThreads' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));
@@ -6751,8 +6904,7 @@ async function deactivate() {
   clearTimeout(gatesBounce);
   // The open-threads recompile, armed by the corpus watcher, activation or the setting: its
   // callback spawns Python and then writes the instruction files.
-  clearTimeout(threadsBounce);
-  threadsBounce = null;
+  cancelThreadsCompile();
   clearTimeout(recallSyncTimer);
   clearTimeout(dashboardBounce);
   // The strip-model check: its timer, and a scan already running on its thread.
@@ -6897,7 +7049,7 @@ const FINISH_ADVICE = 'Click Compile and install in the gates panel to finish: i
 // pinned to memoryReport()'s store (memory.dir from user settings only, else the store with the
 // most memory files), so the list, the edit and the compile all act on the store that compiles.
 function gateCompileEnv() {
-  const { dir } = memoryReport();
+  const dir = memoryStoreDir();
   return { ...process.env, RECALL_REEXEC: '1', ...(dir ? { RECALL_MEMORY_DIR: dir } : {}) };
 }
 

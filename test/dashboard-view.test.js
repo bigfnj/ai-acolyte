@@ -1237,29 +1237,32 @@ test('the Claude memory card says how many open threads are installed where, war
     assert.equal(threads.refresh, false, 'a settled install offers no Refresh');
     // MUTATION: drop `threads: threadsCardData(memory)` from the push and this fails.
 
+    // Two riders on the line depend on this machine (a DevToolbox here, none in CI), so every
+    // render below starts from neither, and the last ones add each.
+    const base = { ...threads, unavailable: null, unreadable: [] };
     const panel = runPanelScript(ui.view.webview.html);
     // A memory card to draw into: this harness reports no corpus, and the card renders only with one.
     const memory = { dir: '~/.claude/projects/p/memory', llm: 'ready', tokens: 2600, budgetTokens: 3000, files: 59,
       indexable: 58, embedded: 58, lines: 152, maxLines: 200, over: 0, broken: 0, unresolved: 0 };
     const deliver = (t2) => { panel.deliver({ ...ui.posted.at(-1), memory, threads: t2 }); };
     const text = (id) => panel.dom.byId.get(id).textContent;
-    deliver({ ...threads, installed: ['claude', 'codex'] });
+    deliver({ ...base, installed: ['claude', 'codex'] });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: 2 installed (Claude, Codex).');
     assert.equal(text('claudeMemoryThreadsIndex'), '⚠ INDEX: MEMORY.md is 152 lines (budget 140): compact it.');
     assert.equal(panel.dom.byId.get('claudeMemoryThreadsIndex').hidden, false);
     assert.equal(text('claudeMemoryThreads'), 'Turn off open threads');
-    deliver({ ...threads, current: false });
+    deliver({ ...base, current: false });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: 2 installed (Claude); update pending.');
-    deliver({ ...threads, count: 0, index: null, installed: [] });
+    deliver({ ...base, count: 0, index: null, installed: [] });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: none open.');
     assert.equal(panel.dom.byId.get('claudeMemoryThreadsIndex').hidden, true, 'no INDEX line, no warning');
-    deliver({ ...threads, enabled: false, declared: 5, listed: 3, installed: [] });
+    deliver({ ...base, enabled: false, declared: 5, listed: 3, installed: [] });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: off. 3 of 5 status memories would be listed.');
     assert.equal(panel.dom.byId.get('claudeMemoryThreadsIndex').hidden, true, 'off says nothing about the index');
     assert.equal(text('claudeMemoryThreads'), 'Turn on open threads');
-    deliver({ ...threads, compile: 'refused', reason: 'it does not match the sha in its own header' });
+    deliver({ ...base, compile: 'refused', reason: 'it does not match the sha in its own header' });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: the compiled file was refused (it does not match the sha in its own header).');
-    deliver({ ...threads, compile: 'missing', declared: 4, listed: 2, installed: [], refresh: true });
+    deliver({ ...base, compile: 'missing', declared: 4, listed: 2, installed: [], refresh: true });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: 2 open, not compiled yet.');
     // THE LABEL SAYS WHAT THE CLICK DOES (2026-10-20). While on, the toggle turns the feature off in
     // every install state (test/extension-open-threads.test.js holds the command to that), so it
@@ -1273,13 +1276,25 @@ test('the Claude memory card says how many open threads are installed where, war
     panel.posted.length = 0;
     panel.dom.byId.get('claudeMemoryThreadsRefresh').click();
     assert.deepEqual(panel.posted, [{ type: 'refreshOpenThreads' }]);
-    deliver({ ...threads, refresh: false });
+    deliver({ ...base, refresh: false });
     assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, true, 'a current install offers none');
-    deliver({ ...threads, enabled: false, refresh: true, installed: [] });
+    deliver({ ...base, enabled: false, refresh: true, installed: [] });
     assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, true, 'nor does a switched-off one');
+    // What every install skips and why nothing can compile here ride on the line, since the card
+    // offers no Refresh for either (2026-10-20); a switched-off line carries neither.
+    deliver({ ...base, compile: 'missing', declared: 0, installed: [], refresh: false,
+      unavailable: 'the DevToolbox venv python was not found at ~/toolbox/python.exe' });
+    assert.equal(text('claudeMemoryThreadsStatus'),
+      'Open threads: none compiled yet. They cannot be compiled here: the DevToolbox venv python was not found at ~/toolbox/python.exe.');
+    deliver({ ...base, unreadable: ['~/.codex/AGENTS.md is not UTF-8 text'] });
+    assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: 2 installed (Claude). Skipped: ~/.codex/AGENTS.md is not UTF-8 text.');
+    deliver({ ...base, enabled: false, declared: 0, installed: [], unavailable: 'x', unreadable: ['y'] });
+    assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: off.');
     // MUTATION: show the Refresh button whenever the feature is on (drop `t.refresh`) and the
     // current-install assertion fails; drop `refresh` from threadsCardData and the builder's
     // `threads.refresh` assertion above does.
+    // MUTATION: drop either rider from renderThreads and its render fails; show them while off and
+    // the last one does.
   } finally {
     await app.dispose();
   }

@@ -40,7 +40,8 @@ Each shows the CPU model status, its folder, four figures, an issues line, **Sea
 and **Inspect memory sources**, its gates, and the agent version. The Claude card also has an
 open-threads line ("Open threads: 2 installed (Claude, Codex)"), the INDEX warning while
 `MEMORY.md` is past a budget, **Turn on / Turn off open threads**, and **Refresh open threads**
-while the install is not current. The whole card is hidden while `memory.enabled` is off; the
+while the install is not current and a compile can run (with no DevToolbox venv the line says so
+instead). The whole card is hidden while `memory.enabled` is off; the
 open threads keep running, and the palette command still reaches them.
 
 Version **1.9.1** supports Codex history-based learning, reviewed rule changes, recovery,
@@ -560,7 +561,7 @@ dashboard title-bar buttons.
 | Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit after which a `MEMORY.md` index ends past a budget and is worse than before; asks before adding it, and says when managed policy will stop Claude Code running it |
 | Check whether Claude Code runs user hooks | Ask the installed Claude Code, once, whether managed policy stops it running user hooks (the MEMORY.md guard among them); asks first, because where hooks are allowed it is one short real Claude Code turn, and reads Claude Code's own answer as restricted, not restricted or unknown |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
-| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line naming the index while `MEMORY.md` is past a budget. While on it always turns it off, after asking; when the install is not current the same prompt offers **Refresh**, which compiles and installs |
+| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line naming the index while `MEMORY.md` is past a budget. While on it always turns it off, after asking; when the install is not current and a compile can run, the same prompt offers **Refresh**, which compiles and installs |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |
 | Rebuild recall index | Force a full CPU bge-small re-embed |

@@ -307,10 +307,12 @@ To turn it off, click **Turn off open threads** on the Claude memory card, run *
 Toggle open threads**, or set `permissionWildcarding.openThreads.enabled` to `false` in user
 settings. Turning it off always turns it off, whatever state the install is in; while it is off
 the extension neither compiles nor installs it. When the install is not current (nothing compiled
-yet, a compile it refused, an instruction file it cannot read, or a block that differs from the
-compile), the card also shows
+yet, a compile it refused, or a block that differs from the compile), the card also shows
 **Refresh open threads**, and the toggle's confirmation offers **Refresh**: both compile and
-install and leave the setting on. The Claude memory card is hidden while
+install and leave the setting on. An instruction file it cannot read (one that is not UTF-8, say)
+is skipped by every install, so it never holds Refresh up; the card's line names it and why. The
+compile needs `recall.py` and the DevToolbox venv's Python: without either, nothing is compiled
+or retried, Refresh is not offered, and the line says which one is missing. The Claude memory card is hidden while
 `permissionWildcarding.memory.enabled` is `false`, and the open-threads line and buttons with it;
 the feature keeps running, and the palette command and the setting still reach it. From a
 terminal, `wildcard-perms --open-threads on|off|status|refresh`.

@@ -75,7 +75,8 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const infos = [];
   const channel = [];
   const configListeners = [];
-  const state = { compileWrites, warningAnswer: undefined, hold: false, holding: [] };
+  const providers = [];  // the dashboard's view provider, for the card's real payload (cardThreads)
+  const state ={ compileWrites, warningAnswer: undefined, hold: false, holding: [] };
   const counters = { memoryReport: 0 };
   const disposable = () => ({ dispose() {} });
   const vscode = {
@@ -89,7 +90,8 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     window: {
       createOutputChannel() { return { appendLine: (line) => channel.push(String(line)), append() {}, show() {}, clear() {}, dispose() {} }; },
       createStatusBarItem() { return { show() {}, hide() {}, dispose() {} }; },
-      registerWebviewViewProvider() { return disposable(); }, onDidChangeActiveTextEditor() { return disposable(); },
+      registerWebviewViewProvider(_id, provider) { providers.push(provider); return disposable(); },
+      onDidChangeActiveTextEditor() { return disposable(); },
       withProgress(options, task) { return task({ report() {} }); },
       setStatusBarMessage() { return disposable(); }, showErrorMessage(message) { warnings.push(String(message)); },
       showWarningMessage(message, ...rest) {
@@ -236,6 +238,21 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
       const watcher = watchers.find((w) => w.pattern?.pattern === 'open-threads.generated.md');
       assert.ok(watcher, 'precondition: the compiled file is watched');
       for (const fn of watcher.handlers[kind]) fn({ fsPath: threadsFile });
+    },
+    // The Claude memory card's open-threads payload, from the real builder: a view resolved and
+    // pushed at once, never through a timer.
+    cardThreads() {
+      assert.equal(providers.length, 1, 'precondition: the dashboard registered its view provider');
+      const posted = [];
+      const view = { visible: true,
+        webview: { options: null, html: null, onDidReceiveMessage() { return disposable(); },
+          postMessage(payload) { posted.push(payload); return Promise.resolve(true); } },
+        onDidDispose() { return disposable(); }, onDidChangeVisibility() { return disposable(); } };
+      providers[0].resolveWebviewView(view);
+      providers[0]._push();
+      const data = posted.filter((payload) => payload?.type === 'data').at(-1);
+      assert.ok(data, 'precondition: the card was pushed');
+      return data.threads;
     },
     // Run every live threads timer, then let the recorded compile answer and the install run.
     async fireTimers() {
@@ -818,6 +835,94 @@ test('a compile queued behind a running one spawns nothing once the switch is of
   assert.equal(installedIn(app.codex()), false, 'nor into AGENTS.md');
   // MUTATION: drop `|| !openThreadsEnabled()` from spawnThreadsCompile and the spawn count is 2;
   // drop it from refreshOpenThreads (after the compile) and the block is back in CLAUDE.md.
+});
+
+// NO TOOLBOX, NO COMPILE, AND NOTHING RETRIED (2026-10-20). Open threads are on by default, and a
+// VSIX user without the DevToolbox venv can never compile: with nothing compiled every MEMORY.md
+// save armed a compile (indexEventMayChange: not whole) whose spawn logged the missing venv, once
+// per burst, forever. Now nothing is armed and the log says it once per activation.
+const noVenv = (box) => fs.rmSync(box.python);
+test('with no DevToolbox venv nothing is armed, nothing spawns, and the reason is logged once', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => {
+    noVenv(box);
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+  } });
+  const said = () => app.channel.filter((line) => /open threads: .*cannot be compiled/.test(line));
+  assert.deepEqual(app.held, [], 'activation armed nothing');
+  assert.deepEqual(said(), [], 'and said nothing: activation asked for no compile');
+  for (let burst = 0; burst < 3; burst += 1) {
+    app.fireCorpus(app.store, 'MEMORY.md');
+    app.fireCorpus(app.store, 'a.md');
+    await app.fireTimers();
+  }
+  assert.deepEqual(app.live(), [], 'no MEMORY.md or status edit armed a compile');
+  assert.deepEqual(app.compiles(), [], 'and nothing spawned');
+  assert.equal(said().length, 1, `the reason is logged once: ${JSON.stringify(app.channel)}`);
+  assert.match(said()[0], /the DevToolbox venv python was not found at .*python\.exe, so open threads cannot be compiled/);
+  // The toolbox arrives: the next edit compiles, with no reload.
+  fs.writeFileSync(app.python, '');
+  app.fireCorpus(app.store, 'a.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'once the venv is there, an edit arms the compile again');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1);
+  // And gone again between the arm and the timer: the spawn's own check is the same once-only log.
+  app.fireCorpus(app.store, 'a.md');
+  assert.equal(app.live().length, 1, 'precondition: armed while the venv was there');
+  fs.rmSync(app.python);
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'the timer spawned nothing');
+  assert.equal(said().length, 1, `and logged nothing more: ${JSON.stringify(app.channel)}`);
+  // MUTATION: drop the `blocked` return from scheduleThreadsCompile and the MEMORY.md edits arm
+  // compiles; drop `if (threadsBlockedSaid) return;` from noteThreadsBlocked and the count is 6;
+  // log through say() on spawnThreadsCompile's quiet path and the last count is 2.
+});
+
+// The card's half: Refresh could only fail there, so it is not offered, and the line says why. A
+// person's turn-on says why in one message, where the spawn's warning and the install's were two.
+test('with no DevToolbox venv the card offers no Refresh, says why, and turning it on gives one message', async (t) => {
+  const app = await threadsWindow(t, { prepare: noVenv });
+  const card = app.cardThreads();
+  assert.equal(card.compile, 'missing', 'precondition: nothing is compiled');
+  assert.equal(card.refresh, false, 'no Refresh: no compile can run');
+  assert.match(card.unavailable, /^the DevToolbox venv python was not found at ~[\\/]toolbox[\\/]python[\\/]\.venv[\\/]Scripts[\\/]python\.exe$/,
+    'the line is told why, home-relative');
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.deepEqual(app.modals.at(-1).items, ['Turn off'], 'the toggle\'s modal offers no Refresh either');
+  app.state.warningAnswer = 'Turn off';
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.equal(app.tiers['openThreads.enabled'].globalValue, false, 'precondition: off');
+  const before = app.warnings.length;
+  app.state.warningAnswer = undefined;
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  await app.settle();
+  assert.equal(app.tiers['openThreads.enabled'].globalValue, true, 'precondition: on again');
+  const told = app.warnings.slice(before);
+  assert.equal(told.length, 1, `one message for the turn-on: ${JSON.stringify(told)}`);
+  assert.match(told[0], /nothing is installed: the compile cannot run \(the DevToolbox venv python was not found at .*\), and nothing compiled yet/);
+  assert.deepEqual(app.compiles(), [], 'and nothing spawned');
+  // MUTATION: drop `if (blocked) return false;` from threadsNeedRefresh and the card's refresh is
+  // true; drop `unavailable` from threadsCardData and its match fails; compile regardless in
+  // refreshOpenThreads and the turn-on gives two messages.
+});
+
+// AN UNREADABLE TARGET NEVER SETTLES, SO IT DOES NOT HOLD REFRESH UP (2026-10-20). Every install
+// skips a target it cannot read (ensureOpenThreads), and the Refresh predicate counted it, so a
+// UTF-16 AGENTS.md kept Refresh on the card after every click. The line names it instead.
+test('an unreadable AGENTS.md does not keep Refresh up, and the card names it', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => {
+    fs.writeFileSync(box.threadsFile, ONE);
+    fs.writeFileSync(box.agentsMd, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('# Codex mine\n', 'utf16le')]));
+  } });
+  assert.ok(installedIn(app.claude()), 'precondition: activation installed the readable target');
+  const card = app.cardThreads();
+  assert.equal(card.refresh, false, 'the readable install is settled, so no Refresh');
+  assert.equal(card.current, true, 'and it is current: the skipped file is not "update pending"');
+  assert.equal(card.unreadable.length, 1, `one file skipped: ${JSON.stringify(card.unreadable)}`);
+  assert.match(card.unreadable[0], /^~[\\/]\.codex[\\/]AGENTS\.md is not UTF-8 text/, 'named, home-relative, with the reason');
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.deepEqual(app.modals.at(-1).items, ['Turn off'], 'the toggle\'s modal offers no Refresh');
+  // MUTATION: count every target in threadsNeedRefresh again and refresh is true; judge `current`
+  // over every target and it is false; drop `unreadable` from threadsCardData and its count fails.
 });
 
 test('deactivate clears the pending recompile, so a torn-down host never compiles', async (t) => {

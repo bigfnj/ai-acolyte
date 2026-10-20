@@ -110,6 +110,17 @@ test('--memory-guard on and status use $CLAUDE_CONFIG_DIR/settings.json when it 
   assert.match(run(home, ['--memory-guard', 'status']).stdout, /^wildcard-perms memory-guard: OFF - ~[\\/]\.claude/);
 });
 
+// The policy line says hooks are restricted; the source lines say which file says so.
+// MUTATION: drop the source loop from memoryGuard in bin/wildcard-perms and this fails.
+test('--memory-guard status names the file that restricts hooks', (t) => {
+  const home = tempHome(t);
+  fs.writeFileSync(path.join(home, '.claude', 'remote-settings.json'), JSON.stringify({ allowManagedHooksOnly: true }));
+  const status = run(home, ['--memory-guard', 'status']);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /\n {2}policy: Claude Code will not run it here \(managed policy blocks user hooks\)\.\n/);
+  assert.match(status.stdout, /\n {2}source: ~[\\/]\.claude[\\/]remote-settings\.json sets allowManagedHooksOnly\n/);
+});
+
 test('a bad sub-verb or an extra argument is a usage error that writes nothing', (t) => {
   const home = tempHome(t);
   const before = settingsText(home);

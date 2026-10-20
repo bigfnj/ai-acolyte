@@ -1517,6 +1517,8 @@ function memoryGuard(args) {
       process.stdout.write(`  backup: none needed, settings.json did not exist before the guard's first change (${tilde(status.backupAbsent)})\n`);
     }
     process.stdout.write(`  policy: ${status.policy.line}\n`);
+    // Which file restricts hooks, so the reader can see the policy rather than take it on trust.
+    if (status.policy.restricted) for (const source of status.policy.sources) process.stdout.write(`  source: ${tilde(source)}\n`);
     if (cmd === 'status' && status.status === 'unreadable') process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`wildcard-perms --memory-guard ${cmd}: ${error.message}\n`);

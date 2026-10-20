@@ -208,7 +208,6 @@ function memoryGuardStatus(options = {}) {
     label: labelFor(inspected.status, copyOutdated),
     on,
     reason: inspected.reason,
-    foreign: inspected.foreign,
     configDir: config,
     settingsPath,
     scriptPath,

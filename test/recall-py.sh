@@ -1177,6 +1177,36 @@ OUT="$(RECALL_MEMORY_DIR="$MEMJ" RECALL_MEMORY_DIRS= "$PY" "$RECALL" --lexical-o
 echo "$OUT" | grep -q "kettle" || fail "a query with -k 2 and --lexical-only found nothing: $OUT"
 echo "ok: --json, -k, --vector-only and --lexical-only are refused beside a mode that runs alone"
 
+# ------------------------------------------- --selftest, --list and a bare --rebuild run alone too
+# The same silent drop, in the three modes the lists above never covered (2026-10-20): --selftest
+# and --list returned with a query and its flags unread, `--list --rebuild` rebuilt and never
+# listed, and `--rebuild --json` with no query had no search to give the flag to. `--rebuild
+# <query>` is one request (rebuild, then search with the flags), so it stays legal.
+# Mutation: disable the --selftest refusal ("recall.py --selftest --json must be a usage error",
+# exit 1 on the missing model), the --list one ("--list --json ... exited 0") or the bare
+# --rebuild one ("--rebuild --json ... exited 1").
+COMBOS=("--selftest --json" "--selftest -k 3" "--selftest --vector-only" "--selftest some query"
+        "--selftest --rebuild" "--selftest --list" "--list --json" "--list -k 3"
+        "--list --lexical-only" "--list some query" "--list --rebuild" "--rebuild --json"
+        "--rebuild -k 3" "--rebuild --vector-only")
+for combo in "${COMBOS[@]}"; do
+  # shellcheck disable=SC2086  # the combination is split into its words on purpose
+  ERR="$("$PY" "$RECALL" $combo 2>&1 >/dev/null)"
+  RC=$?
+  [ "$RC" = "2" ] || fail "recall.py $combo must be a usage error, exited $RC: $ERR"
+  printf '%s\n' "$ERR" | grep -qE "on its own" || fail "recall.py $combo: the usage error does not say why: $ERR"
+done
+# Witness: with a query, --rebuild and the query's flags are one request. The rebuild runs and the
+# search is reached with them (an empty store, so it ends on "nothing indexed", never the model).
+REB="$TMP/memory-rebuild"
+mkdir -p "$REB"
+ERR="$(RECALL_MEMORY_DIR="$REB" RECALL_MEMORY_DIRS= "$PY" "$RECALL" --rebuild --lexical-only -k 2 kettle 2>&1 >/dev/null)"
+RC=$?
+[ "$RC" != "2" ] || fail "--rebuild with a query and its flags was refused as a usage error: $ERR"
+printf '%s\n' "$ERR" | grep -q "rebuilt" || fail "--rebuild with a query did not rebuild: $ERR"
+printf '%s\n' "$ERR" | grep -q "nothing indexed" || fail "--rebuild with a query never reached the search: $ERR"
+echo "ok: --selftest, --list and a bare --rebuild refuse what they would drop; --rebuild <query> still runs"
+
 # ---------------------------------------------------------------- the heavy imports stay lazy
 # numpy and onnxruntime used to be imported at module scope, and _ensure_runtime imported both
 # again just to ask whether they were installed. onnxruntime is reached at exactly one line in

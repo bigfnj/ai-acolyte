@@ -1743,12 +1743,17 @@ def _status_block(text):
 # Removed from thread text, the stem and the INDEX line's path before anything else (2026-10-20):
 # the C0 and C1 controls and DEL that str.split() does not already treat as whitespace, and the
 # bidirectional controls (ALM, LRM, RLM, the embeddings and overrides U+202A-U+202E, the isolates
-# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Code points, not
-# escapes, so no writer can turn them into the characters themselves. memoryLint.js THREAD_STRIP is
-# the same set, held to it by test/threads-compile.sh.
+# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Then the invisible
+# format characters, which a person reading the file cannot see and a model reading it still does:
+# the soft hyphen U+00AD, the zero-width space, non-joiner and joiner U+200B-U+200D, the word joiner
+# and invisible operators U+2060-U+2064, U+FEFF, and the tag block U+E0000-U+E007F, whose
+# characters spell out ASCII text that renders as nothing. Code points, not escapes, so no writer
+# can turn them into the characters themselves. memoryLint.js THREAD_STRIP is the same set, held to
+# it by test/threads-compile.sh.
 _THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
-                               *range(0x86, 0xA0), 0x061C, 0x200E, 0x200F,
-                               *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
+                               *range(0x86, 0xA0), 0x00AD, 0x061C, *range(0x200B, 0x2010),
+                               *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A),
+                               0xFEFF, *range(0xE0000, 0xE0080)])
 
 
 def _thread_text(raw):
@@ -2702,7 +2707,28 @@ def main():
         # It qualifies the compile and nothing else, so alone it was dropped in silence too.
         ap.error("--gates-allow-empty applies only to --gates-compile.")
     if args.selftest:
+        # Alone too (2026-10-20). It checked the embedder and returned, so a query and its flags,
+        # --rebuild and --list were dropped without a word.
+        mixed = [flag for flag, on in (("--rebuild", args.rebuild), ("--list", args.list),
+                                       ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--selftest runs on its own, not with {', '.join(mixed)}.")
         selftest(); return
+    if args.list:
+        # Alone as well, refused before the rebuild below can start: --list printed the index and
+        # returned, dropping a query and its flags, and beside --rebuild with no query the rebuild
+        # returned first and the list never printed.
+        mixed = [flag for flag, on in (("--rebuild", args.rebuild), ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--list runs on its own, not with {', '.join(mixed)}.")
+    if args.rebuild and not args.query:
+        # `--rebuild <query>` rebuilds and then searches, and -k, --json and the ranking flags
+        # apply to that search. With no query there is no search, so they were dropped.
+        mixed = [flag for flag, on in query_flags if on]
+        if mixed:
+            ap.error(f"--rebuild without a query runs on its own, not with {', '.join(mixed)}.")
     if args.rebuild:
         # Spans MEMORY_DIRS. Rebuilding only the primary while search covers several corpora
         # meant there was no way to force a re-embed of a secondary one: after an EMBED_ID bump

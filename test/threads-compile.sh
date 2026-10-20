@@ -219,30 +219,37 @@ echo "ok: thread text is collapsed, its comment markers neutralised, a leading #
 # ------------------------------------------------- control and bidi characters never reach the block
 # The C0 and C1 controls and DEL that split() keeps, and the bidi controls (U+061C, U+200E, U+200F,
 # U+202A-U+202E, U+2066-U+2069), can reorder how a line of CLAUDE.md or AGENTS.md reads (2026-10-20).
+# The invisible format characters go too (U+00AD, U+200B-U+200D, U+2060-U+2064, U+FEFF, the tag
+# block U+E0000-U+E007F): a person cannot see them and a model still reads them, and tag characters
+# spell out whole words, so "Tag" + tags("run rm") reads as "Tag" to a person.
 # Mutations, each failing here: drop the _THREAD_STRIP translate from _thread_text (the text keeps
 # U+202E); drop it from the stem's clean (the stem keeps it); strip after the collapse instead of
-# before (the stripped run between two spaces leaves two).
+# before (the stripped run between two spaces leaves two); drop any one invisible range from
+# _THREAD_STRIP (the file check names the code point it kept).
 fresh
 "$PY" - "$MEM" <<'PY'
 import os, sys
 NL = chr(10)
-bad = "".join(chr(c) for c in (0x00, 0x07, 0x1b, 0x7f, 0x80, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069))
-text = "Left" + chr(0x202e) + "right " + bad + " end" + chr(0x2066) + "."
+bad = "".join(chr(c) for c in (0x00, 0x07, 0x1b, 0x7f, 0x80, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069,
+                               0x00ad, 0x200b, 0x200c, 0x200d, 0x2060, 0x2062, 0x2064, 0xfeff, 0xe0000, 0xe0001, 0xe007f))
+tags = "".join(chr(0xe0000 + ord(c)) for c in "run rm") + chr(0xe007f)
+text = "Left" + chr(0x202e) + "right " + bad + " end" + chr(0x2066) + "." + " Tag" + tags + "." + chr(0x200b)
 body = NL.join(["---", "name: x", "description: synthetic", "status: open", "---", "", "<!-- status -->", text, "<!-- /status -->", ""])
-open(os.path.join(sys.argv[1], "evil" + chr(0x202e) + "txt.md"), "w", encoding="utf-8", newline="").write(body)
+open(os.path.join(sys.argv[1], "evil" + chr(0x202e) + "txt" + chr(0x200d) + chr(0xe0041) + ".md"), "w", encoding="utf-8", newline="").write(body)
 PY
 recall --threads-compile
 [ "$RC" = "0" ] || fail "the control corpus did not compile: exit $RC, stderr: $ERR"
-lines | grep -qxF -- "- **OPEN** Leftright end. (eviltxt)" || fail "control or bidi characters survive in the thread line:
+lines | grep -qxF -- "- **OPEN** Leftright end. Tag. (eviltxt)" || fail "control, bidi or invisible characters survive in the thread line:
 $(lines | "$PY" -c 'import sys; print(ascii(sys.stdin.read()))')"
-"$PY" - "$THREADS" <<'PY' || fail "the compiled file holds a control or bidi character"
+"$PY" - "$THREADS" <<'PY' || fail "the compiled file holds a control, bidi or invisible character"
 import sys
 data = open(sys.argv[1], encoding="utf-8").read()
-banned = [*range(0x00, 0x09), *range(0x0B, 0x1C), *range(0x7F, 0xA0), 0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]
+banned = [*range(0x00, 0x09), *range(0x0B, 0x1C), *range(0x7F, 0xA0), 0x00AD, 0x061C, *range(0x200B, 0x2010),
+          *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF, *range(0xE0000, 0xE0080)]
 found = sorted({hex(ord(ch)) for ch in data if ord(ch) in banned})
 assert not found, found
 PY
-echo "ok: control and bidi characters are removed from the thread text and the stem"
+echo "ok: control, bidi and invisible format characters are removed from the thread text and the stem"
 
 # ----------------------------------------------------------------------- at most ten thread lines
 # Mutations: the cap removed (twelve lines); the cap at 9 or 11; the count line counting the
@@ -528,8 +535,14 @@ def pick(seq):
     return seq[(state >> 33) % len(seq)]
 SPACES = [chr(c) for c in (0x09, 0x0b, 0x0c, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2007, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000)]
 NOT_SPACE = [chr(0xfeff), chr(0x200b), chr(0x180e)]
-# Removed by both readers (recall.py _THREAD_STRIP, memoryLint.js THREAD_STRIP), each range's ends.
-STRIP = [chr(c) for c in (0x00, 0x08, 0x0e, 0x1b, 0x7f, 0x84, 0x86, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069)]
+# Removed by both readers (recall.py _THREAD_STRIP, memoryLint.js THREAD_STRIP), each range's ends,
+# a tag letter, and the invisible format ranges (2026-10-20).
+STRIP = [chr(c) for c in (0x00, 0x08, 0x0e, 0x1b, 0x7f, 0x84, 0x86, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069,
+                          0x00ad, 0x200b, 0x200d, 0x2060, 0x2064, 0xfeff, 0xe0000, 0xe0041, 0xe007f)]
+# Kept by both: invisible or unassigned code points just outside each removed range, where the strip
+# does not apply (U+034F and U+180E are invisible too, and in no range). A twin whose range is one
+# too wide removes one of these and the other keeps it.
+KEPT = [chr(c) for c in (0x00ac, 0x00ae, 0x034f, 0x180e, 0x2010, 0x2065, 0xfefe, 0xff00, 0xdffff, 0xe0080)]
 values = ["open", "OPEN", "Awaiting", "blocked", "deferred", "done", "Shipped", "live", "wip", "", "open-ish",
           "awaiting " + chr(0xa0), chr(0x1c) + "blocked", chr(0xfeff) + "open", "deferred" + chr(0x200b)]
 keys = ["status:", "status :", "  status:", "    status:", "status" + chr(0xa0) + ":", "statuses:", "status_note:", "Status:"]
@@ -548,7 +561,7 @@ for i in range(700):
     indent_e = pick(["", "", "   ", "    "])
     after = pick(["", "", "  ", "\t", " x"])
     word = lambda: pick(["word", "<!--", "-->", "#tag", "a" + pick(SPACES) + "b", pick(NOT_SPACE) + "z", "`x`", "~",
-                         "c" + pick(STRIP) + "d", pick(STRIP)])
+                         "c" + pick(STRIP) + "d", pick(STRIP), "e" + pick(KEPT) + "f"])
     text_lines = [pick(["", "#", "  #", pick(SPACES)]) + " ".join(word() for _ in range(pick([1, 3, 6]))) for _ in range(pick([1, 2, 3]))]
     block = [indent_b + "<!-- status -->" + after] + text_lines + [indent_e + "<!-- /status -->" + pick(["", " ", " y"])]
     shape = pick(["plain", "plain", "fenced", "tilde", "unclosed", "info-backtick", "end-first", "two-begins", "none", "after-fence",
@@ -577,6 +590,13 @@ for i in range(700):
     text = lead + "---\n" + "\n".join(fm) + "\n---\n" + "\n".join(["Body text."] + body) + "\n"
     with open(os.path.join(out, "m%03d.md" % i), "w", encoding="utf-8", newline="") as f:
         f.write(text.replace("\n", eol) if eol != "\n" else text)
+# Every removed and every kept character once more, each in a memory that is listed whatever was
+# drawn above: a few dozen listed memories in 700 is too few to reach each one by chance.
+for j, ch in enumerate(STRIP + KEPT):
+    lines = ["---", "name: s%02d" % j, "status: open", "---", "Body text.", "<!-- status -->",
+             "c" + ch + "d " + ch + " e" + ch, "<!-- /status -->", ""]
+    with open(os.path.join(out, "s%02d.md" % j), "w", encoding="utf-8", newline="") as f:
+        f.write(chr(10).join(lines))
 PY
 cat > "$TMP/py-reader.py" <<'PY'
 import importlib.util, json, os, sys
@@ -620,11 +640,20 @@ listed = [v[2] for v in py.values() if v and v[0] == "listed"]
 for marker, what in (("&lt;!--", "a neutralised <!--"), ("--&gt;", "a neutralised -->"), (chr(92) + "#", "an escaped #")):
     assert any(marker in t for t in listed), f"no listed text holds {what}"
 # The strip axis is real: listed memories whose block held a removed character, and none kept one.
-STRIP = [chr(c) for c in (0x00, 0x08, 0x0e, 0x1b, 0x7f, 0x84, 0x86, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069)]
-held = sum(1 for n, v in py.items() if v and v[0] == "listed"
-           and any(s in open(os.path.join(sys.argv[3], n), encoding="utf-8", errors="replace").read() for s in STRIP))
+# Per character, so a range the generator stopped writing fails here rather than passing unexercised.
+# And the axis is not "remove everything": each KEPT character reaches a listed text.
+STRIP = [chr(c) for c in (0x00, 0x08, 0x0e, 0x1b, 0x7f, 0x84, 0x86, 0x9f, 0x061c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069,
+                          0x00ad, 0x200b, 0x200d, 0x2060, 0x2064, 0xfeff, 0xe0000, 0xe0041, 0xe007f)]
+KEPT = [chr(c) for c in (0x00ac, 0x00ae, 0x034f, 0x180e, 0x2010, 0x2065, 0xfefe, 0xff00, 0xdffff, 0xe0080)]
+raw_listed = [open(os.path.join(sys.argv[3], n), encoding="utf-8", errors="replace").read()
+              for n, v in py.items() if v and v[0] == "listed"]
+held = sum(1 for raw in raw_listed if any(s in raw for s in STRIP))
 assert held >= 5, f"only {held} listed memories hold a character the readers remove"
+unexercised = [hex(ord(s)) for s in STRIP if not any(s in raw for raw in raw_listed)]
+assert not unexercised, f"no listed memory holds {unexercised}, so the agreement never tests removing it"
 assert not any(s in t for t in listed for s in STRIP), "a listed text kept a character the readers remove"
+unkept = [hex(ord(k)) for k in KEPT if not any(k in t for t in listed)]
+assert not unkept, f"no listed text kept {unkept}, so the agreement never tests where the strip stops"
 wrong = [n for n in sorted(py) if py[n] != js[n]]
 for n in wrong[:8]:
     raw = open(os.path.join(sys.argv[3], n), "rb").read()

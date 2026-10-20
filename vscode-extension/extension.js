@@ -1227,14 +1227,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:756-764#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:759-767#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
     // (memoryLint.js:1094-1098#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:991#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:994#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -3796,7 +3796,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:483-492#NEGATIVE — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:493-502#NEGATIVE — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -3960,7 +3960,7 @@ function localDrainEnabled() {
 // promoting them into user scope from a parent window is the same trust problem the
 // gate below exists for. A Claude session running in a subfolder is covered anyway:
 // the CLI hook drains each session's own cwd on every tool call
-// (bin/wildcard-perms:527-536#hookCwd, `hookCwd(input)`).
+// (bin/wildcard-perms:537-546#hookCwd, `hookCwd(input)`).
 //
 // A folder on another file system (a virtual workspace, or a non-file scheme mixed
 // into a multi-root workspace) has an fsPath that names no file on this disk, so

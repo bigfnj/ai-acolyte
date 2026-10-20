@@ -140,6 +140,8 @@ mem indented.md 'status: open' '' $'    <!-- status -->\nIndented.\n    <!-- /st
 mem trailing.md 'status: open' '' $'<!-- status --> and more\nTrailing.\n<!-- /status -->\n'
 mem spaces-ok.md 'status: open' '' $'   <!-- status -->  \nThree spaces is a marker.\n<!-- /status -->\t\n'
 mem after-fence.md 'status: open' '' $'```js\nconst x = 1;\n```\n<!-- status -->\nAfter a closed fence.\n<!-- /status -->\n'
+# A closer shorter than its opener closes nothing, so the block below it is still fenced.
+mem shortclose.md 'status: open' '' $'~~~~\ncode\n~~~\n<!-- status -->\nInside the fence still.\n<!-- /status -->\n~~~~\n'
 mem wip.md 'status: wip' 'Unknown.'
 mem empty.md 'status:' 'Empty value.'
 mem noblock.md 'status: blocked' ''
@@ -148,7 +150,10 @@ mem note.md 'status_note: open' 'Not the key either.'
 for closed in done closed live shelved deleted dropped shipped; do
   mem "closed-$closed.md" "status: ${closed^^}" 'Closed.'
 done
-printf -- '---\nstatus: open\n---\n<!-- status -->\nThe index itself.\n<!-- /status -->\n' >> "$MEM/MEMORY.md"
+# The index with a frontmatter of its own, at the TOP, where _frontmatter_block reads one. Appended
+# below the index lines, as the first version of this test did, it declared nothing, and the
+# EXCLUDE mutation survived.
+printf -- '---\nstatus: open\n---\n<!-- status -->\nThe index itself.\n<!-- /status -->\n- [x](x.md) - hook\n' > "$MEM/MEMORY.md"
 recall --threads-compile
 [ "$RC" = "0" ] || fail "the selection corpus did not compile: exit $RC, stderr: $ERR"
 EXPECTED='## Open threads (5, managed)
@@ -163,7 +168,7 @@ $(lines | tail -n +2)"
 for want in 'dup.md: more than one `status:` line' "wip.md: unknown status 'wip'" "empty.md: unknown status ''" \
     'noblock.md: status blocked with no <!-- status --> block' 'fenced.md: status open with no' \
     'tilde.md: status open with no' 'unclosed.md: status open with no' 'indented.md: status open with no' \
-    'trailing.md: status open with no'; do
+    'trailing.md: status open with no' 'shortclose.md: status open with no'; do
   printf '%s\n' "$ERR" | grep -qF "[recall] open thread left out: $want" || fail "stderr does not name: $want
 stderr was: $ERR"
 done
@@ -184,6 +189,9 @@ LONG="$("$PY" -c 'import sys; sys.stdout.buffer.write(("\u00e9" * 300).encode())
 mem long.md 'status: open' "$LONG"
 EXACT="$("$PY" -c 'import sys; sys.stdout.buffer.write(("x" * 240).encode())')"
 mem exact.md 'status: open' "$EXACT"
+# 240 characters and 480 bytes: the cap counts characters, so this is not cut either.
+EXACTE="$("$PY" -c 'import sys; sys.stdout.buffer.write((chr(0xe9) * 240).encode())')"
+mem exacte.md 'status: open' "$EXACTE"
 recall --threads-compile
 [ "$RC" = "0" ] || fail "the text corpus did not compile: exit $RC"
 lines | grep -qxF -- "- **OPEN** Lots of space, over two lines. (spaced)" || fail "whitespace is not collapsed:
@@ -194,6 +202,7 @@ $(lines)"
 lines | grep -qxF -- '- **OPEN** \# Looks like a heading. (hash)' || fail "a leading # is not escaped:
 $(lines)"
 lines | grep -qxF -- "- **OPEN** $EXACT (exact)" || fail "a text of exactly 240 characters was cut"
+lines | grep -qxF -- "- **OPEN** $EXACTE (exacte)" || fail "240 characters of 480 bytes were cut: the cap is counting bytes"
 "$PY" - "$THREADS" <<'PY' || fail "the long text is not 239 characters plus an ellipsis"
 import sys
 for line in open(sys.argv[1], encoding="utf-8").read().split("\n"):
@@ -447,7 +456,8 @@ echo "ok: --lint counts the threads, names each kind of left-out or cut memory, 
 # _index_health over generated indexes.
 #
 # Mutations, each failing here: threadOf trimming with JavaScript's trim(), or collapsing with
-# \s; `.` for `[^\n]` in FENCE_OPEN; no universal newlines in memoryBody; the fence skip, the
+# \s; `.` for `[^\n]` in FENCE_OPEN (killed only by a fence whose info string holds U+2028, which
+# the first version of this generator never wrote); no universal newlines in memoryBody; the fence skip, the
 # backtick-info rule or the unclosed-fence rule dropped; `status :` not the key; the value not
 # uncommented; indexHealth counting UTF-16 units, or `>=`.
 GEN="$TMP/gen"; mkdir -p "$GEN"
@@ -481,11 +491,13 @@ for i in range(700):
     word = lambda: pick(["word", "<!--", "-->", "#tag", "a" + pick(SPACES) + "b", pick(NOT_SPACE) + "z", "`x`", "~"])
     text_lines = [pick(["", "#", "  #", pick(SPACES)]) + " ".join(word() for _ in range(pick([1, 3, 6]))) for _ in range(pick([1, 2, 3]))]
     block = [indent_b + "<!-- status -->" + after] + text_lines + [indent_e + "<!-- /status -->" + pick(["", " ", " y"])]
-    shape = pick(["plain", "plain", "fenced", "tilde", "unclosed", "info-backtick", "end-first", "two-begins", "none", "after-fence"])
+    shape = pick(["plain", "plain", "fenced", "tilde", "unclosed", "info-backtick", "end-first", "two-begins", "none", "after-fence",
+                  "short-closer"])
     if shape == "plain":
         body += block
     elif shape == "fenced":
-        body += ["```" + pick(["", "md"])] + block + [pick(["```", "````", "``", " ```"])]
+        # U+2028 in the info string: Python's `.` takes it, JavaScript's does not.
+        body += ["```" + pick(["", "md", chr(0x2028) + "x"])] + block + [pick(["```", "````", "``", " ```"])]
     elif shape == "tilde":
         body += ["~~~~"] + block + [pick(["~~~~", "~~~", "~~~~~"])]
     elif shape == "unclosed":
@@ -496,6 +508,9 @@ for i in range(700):
         body += ["<!-- /status -->"] + block
     elif shape == "two-begins":
         body += ["<!-- status -->", "dropped"] + block
+    elif shape == "short-closer":
+        # A shorter closer before the block closes nothing; a longer one, or the same, does.
+        body += [pick(["~~~~", "````"]), "code", pick(["~~~", "```", "~~~~~", "`````"])] + block + ["~~~~"]
     elif shape == "after-fence":
         body += ["```", "code", "```"] + block
     lead = pick(["", "", chr(0xfeff), "\n\n", " \t\n"])

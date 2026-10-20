@@ -170,6 +170,9 @@ function message(kind, m, options, ...choices) {
   if (kind === 'warning' && ['Retire 1 gate?', 'Restore 1 gate?'].includes(m) && choices.includes('Apply')) {
     return Promise.resolve('Apply');
   }
+  if (kind === 'warning' && m === 'Turn on the MEMORY.md guard?' && choices.includes('Turn on')) {
+    return Promise.resolve('Turn on');
+  }
   return Promise.resolve(kind === 'warning' &&
     ['Remove shell-style guidance?', 'Remove memory gates?'].includes(m) && choices.includes('Remove')
     ? 'Remove' : undefined);
@@ -340,6 +343,8 @@ Module._load = function load(request, parent, isMain) {
     'permission-wildcarding.drainLocal',
     'permission-wildcarding.toggleGuidance',
     'permission-wildcarding.toggleGates',
+    'permission-wildcarding.toggleAutoLearn',
+    'permission-wildcarding.toggleMemoryGuard',
   ];
   const missing = expected.filter((id) => !commands.has(id));
   if (missing.length) bad('the real command handlers registered', `missing: ${missing.join(', ')}`);
@@ -534,6 +539,49 @@ Module._load = function load(request, parent, isMain) {
     assert.ok(fs.readFileSync(codexInstructions, 'utf8').includes('Fixture Codex-only gate.'));
     assert.ok(fs.readFileSync(instructionFiles[0]).equals(claudeBefore), 'restoring a Codex-only gate changed CLAUDE.md');
     return retired.slice(0, 160);
+  });
+  // The MEMORY.md guard (1.9.0), end to end through the packaged artefact: the command installs the
+  // stable copy and the PreToolUse handler, the COPY (not the source tree) refuses an over-budget
+  // index write and allows a shrink and a non-index file, and the command takes the handler out
+  // again leaving every other settings field as it was.
+  await check('the MEMORY.md guard installs through the packaged command, its copy blocks and allows as specified, and it turns off', async () => {
+    const { memoryGuardStatus } = require(path.join(INSTALLED, 'src', 'memory-guard-install.js'));
+    const settingsFile = path.join(home, '.claude', 'settings.json');
+    const before = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, 'utf8')) : {};
+    assert.equal(memoryGuardStatus({ home }).on, false, 'precondition: the guard starts off');
+    await invoke('toggleMemoryGuard');
+    const on = memoryGuardStatus({ home });
+    assert.equal(on.status, 'configured', `the command left the guard ${on.status}`);
+    assert.ok(on.copy.exists && on.copy.revision === on.packagedRevision, 'the stable copy is missing or not the packaged revision');
+    assert.ok(on.scriptPath.startsWith(path.join(home, '.claude', 'wildcarding')), `copy outside the sandbox: ${on.scriptPath}`);
+    const handlers = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse.flatMap((group) => group.hooks);
+    const ours = handlers.filter((h) => String(h.command).includes('memory-index-guard.js'));
+    assert.equal(ours.length, 1, 'expected exactly one guard handler');
+    assert.ok(!ours[0].async, 'the guard handler must not be async (an async hook cannot block)');
+    const store = path.join(home, '.claude', 'projects', 'guard-drive', 'memory');
+    fs.mkdirSync(store, { recursive: true });
+    const index = path.join(store, 'MEMORY.md');
+    fs.writeFileSync(index, '# Memory Index\n' + Array.from({ length: 9 }, (_, i) => `- entry ${i}\n`).join(''));
+    const lines = (n) => Array.from({ length: n }, (_, i) => `line ${i}`).join('\n') + '\n';
+    const run = (filePath, content) => spawnSync(process.execPath, [on.scriptPath], {
+      input: JSON.stringify({ session_id: 'drive', hook_event_name: 'PreToolUse', tool_name: 'Write', cwd: home,
+        tool_input: { file_path: filePath, content } }),
+      env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }, encoding: 'utf8', timeout: 20000, windowsHide: true,
+    });
+    const grow = run(index, lines(150));
+    assert.equal(grow.status, 2, `an over-budget index write was not refused (exit ${grow.status}): ${grow.stderr}`);
+    assert.match(grow.stderr, /140/, 'the refusal does not name the line budget');
+    const shrink = run(index, lines(5));
+    assert.equal(shrink.status, 0, `a shrinking index write was refused: ${shrink.stderr}`);
+    const other = run(path.join(store, 'other.md'), lines(150));
+    assert.equal(other.status, 0, `a non-index memory file was refused: ${other.stderr}`);
+    await invoke('toggleMemoryGuard');
+    const off = memoryGuardStatus({ home });
+    assert.equal(off.on, false, `the command left the guard ${off.status}`);
+    const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    const strip = (s) => { const c = JSON.parse(JSON.stringify(s)); delete c.hooks; return c; };
+    assert.deepEqual(strip(after), strip(before), 'turning the guard on and off changed settings outside hooks');
+    return `copy r${on.copy.revision}: over-budget write exit 2, shrink 0, non-index 0; off leaves settings as they were`;
   });
 
   try {

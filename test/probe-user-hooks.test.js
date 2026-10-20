@@ -24,6 +24,43 @@ const args = process.argv.slice(2);
 if (process.env.STUB_MARK) fs.appendFileSync(process.env.STUB_MARK, JSON.stringify(args) + '\\n');
 const mode = process.env.STUB_MODE || 'restricted';
 if (args[0] === '--version') { process.stdout.write('9.9.9 (Claude Code)\\n'); process.exit(0); }
+// hang: never answers, and starts a grandchild in the same directory that holds the output pipes,
+// as claude.exe under cmd.exe does. linger: answers and exits 0, leaving a detached grandchild
+// running in the directory. Grandchildren's pids go to STUB_MARK.pids and a hanging stub's own to
+// STUB_MARK.stubs, so the test can check and clean up.
+// escape: never answers, and leaves a process holding the output pipes whose own parent has
+// exited, so a tree kill from the top cannot find it (on POSIX nothing would). It runs in the home
+// directory: not the probe's, so only the pipes are at stake, and not the fixture's, whose removal
+// it held up on Windows after it was killed (measured: EPERM until the test process ended).
+// Its pid goes to .pids.
+if (mode === 'escape') {
+  const inner = "const g = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], "
+    + "{ detached: true, stdio: 'inherit', cwd: process.argv[2], windowsHide: true }); "
+    + "require('fs').appendFileSync(process.argv[1], g.pid + ' '); process.exit(0);";
+  require('child_process').spawn(process.execPath, ['-e', inner, process.env.STUB_MARK + '.pids', require('os').homedir()],
+    { stdio: 'inherit', windowsHide: true });
+  fs.appendFileSync(process.env.STUB_MARK + '.stubs', process.pid + ' ');
+  setInterval(() => {}, 1000);
+  return;
+}
+if (mode === 'hang' || mode === 'linger') {
+  const pids = process.env.STUB_MARK + '.pids';
+  const linger = mode === 'linger';
+  const sleeper = "require('fs').appendFileSync(process.argv[1], process.pid + ' '); setInterval(() => {}, 1000);";
+  const grandchild = require('child_process').spawn(process.execPath, ['-e', sleeper, pids],
+    { cwd: process.cwd(), stdio: linger ? 'ignore' : 'inherit', detached: linger, windowsHide: true });
+  if (linger) {
+    grandchild.unref();
+    process.stdout.write('done\\n');
+    setTimeout(() => process.exit(0), 500);
+  } else {
+    fs.appendFileSync(process.env.STUB_MARK + '.stubs', process.pid + ' ');
+    // The cmd.exe above, for the cleanup only. Never on POSIX, where the parent is the caller.
+    if (process.platform === 'win32') fs.appendFileSync(process.env.STUB_MARK + '.parents', process.ppid + ' ');
+    setInterval(() => {}, 1000);
+  }
+  return;
+}
 const prompt = args[args.indexOf('-p') + 1];
 if (prompt === '/goal x') {
   if (mode === 'open') { process.stdout.write('Goal set: x\\n'); process.exit(0); }
@@ -48,9 +85,24 @@ if (mode !== 'nowrite') {
 process.stdout.write('done\\n');
 `;
 
+// The pids a hang or linger stub recorded, and whether each is still running.
+const recordedPids = (f, suffix = 'pids') => (fs.existsSync(`${f.mark}.${suffix}`)
+  ? fs.readFileSync(`${f.mark}.${suffix}`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number) : []);
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+};
+
 function fixture(t) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-probe-hooks-'));
-  t.after(() => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const mark = path.join(tmp, 'calls.jsonl');
+  t.after(async () => {
+    // Anything a stub left running holds its directory on Windows, so it goes first, and the
+    // directory only once it is gone: a kill returns before the process has let go.
+    const pids = ['pids', 'stubs', 'parents'].flatMap((suffix) => recordedPids({ mark }, suffix));
+    for (const pid of pids) try { process.kill(pid); } catch { /* already gone */ }
+    for (const until = Date.now() + 10000; pids.some(alive) && Date.now() < until;) await new Promise((r) => setTimeout(r, 50));
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
   const bin = path.join(tmp, 'bin');
   fs.mkdirSync(bin);
   const stub = path.join(bin, 'claude-stub.js');
@@ -66,35 +118,50 @@ function fixture(t) {
   }
   const temp = path.join(tmp, 'temp');
   fs.mkdirSync(temp);
-  return { tmp, temp, claude, mark: path.join(tmp, 'calls.jsonl') };
+  return { tmp, temp, claude, mark };
 }
 
-// The probe as a child process, its base (CLAUDE_CONFIG_DIR, and os.tmpdir() for anything else)
-// pointed into the fixture.
-function runProbe(f, args, mode) {
+// The probe as a child process, its base (AI_ACOLYTE_PROBE_BASE, and os.tmpdir() for anything
+// else) pointed into the fixture.
+function runProbe(f, args, mode, extraEnv = {}, timeout = 90000) {
   return spawnSync(process.execPath, [SCRIPT, '--claude', f.claude, ...args], {
-    cwd: ROOT, encoding: 'utf8', timeout: 90000, windowsHide: true,
-    env: { ...process.env, CLAUDE_CONFIG_DIR: f.temp, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark },
+    cwd: ROOT, encoding: 'utf8', timeout, windowsHide: true,
+    env: { ...process.env, AI_ACOLYTE_PROBE_BASE: f.temp, TEMP: f.temp, TMP: f.temp, TMPDIR: f.temp, STUB_MODE: mode, STUB_MARK: f.mark, ...extraEnv },
   });
 }
+const reportPath = (f) => path.join(f.temp, 'ai-acolyte-user-hook-probe-work', 'report.json');
 
 // The default base is per user, never the shared temp directory (on Linux /tmp, where another
-// local user could plant the fixed probe directory with a .claude/settings.json).
-// MUTATION: default probePaths' base back to os.tmpdir() and this fails.
-test('the probe directories default to <config>/wildcarding, never the shared temp directory', () => {
-  const saved = process.env.CLAUDE_CONFIG_DIR;
-  const config = path.join(os.tmpdir(), 'acolyte-probe-config-witness');
+// local user could plant the fixed probe directory with a .claude/settings.json), and has no
+// `.claude` segment: Claude Code asks before editing inside one, and `-p` cannot answer, so the
+// Write the tool events need would not land.
+// MUTATION: default the base back to <CLAUDE_CONFIG_DIR or ~/.claude>/wildcarding and this fails;
+// back to os.tmpdir() and it fails too.
+test('the probe directories default to a per-user state directory with no .claude segment', () => {
+  const winHome = 'C:\\Users\\u';
+  assert.equal(probe.defaultProbeBase({ LOCALAPPDATA: 'D:\\Local' }, 'win32', winHome), 'D:\\Local\\ai-acolyte');
+  assert.equal(probe.defaultProbeBase({}, 'win32', winHome), 'C:\\Users\\u\\AppData\\Local\\ai-acolyte');
+  assert.equal(probe.defaultProbeBase({ LOCALAPPDATA: 'Local' }, 'win32', winHome), 'C:\\Users\\u\\AppData\\Local\\ai-acolyte',
+    'a relative LOCALAPPDATA is not a base');
+  assert.equal(probe.defaultProbeBase({ XDG_STATE_HOME: '/s/state' }, 'linux', '/home/u'), '/s/state/ai-acolyte');
+  assert.equal(probe.defaultProbeBase({}, 'linux', '/home/u'), '/home/u/.local/state/ai-acolyte');
+  assert.equal(probe.defaultProbeBase({ XDG_STATE_HOME: 'state' }, 'darwin', '/Users/u'), '/Users/u/.local/state/ai-acolyte',
+    'a relative XDG_STATE_HOME is ignored, as the XDG spec says');
+  const override = path.join(os.tmpdir(), 'acolyte-probe-base-witness');
+  for (const platform of ['win32', 'linux']) {
+    assert.equal(probe.defaultProbeBase({ AI_ACOLYTE_PROBE_BASE: override, LOCALAPPDATA: 'D:\\Local', XDG_STATE_HOME: '/s' }, platform, '/h'), override);
+  }
+  const saved = process.env.AI_ACOLYTE_PROBE_BASE;
   try {
-    process.env.CLAUDE_CONFIG_DIR = config;
+    delete process.env.AI_ACOLYTE_PROBE_BASE;
     const paths = probe.probePaths();
-    assert.ok(paths.cwd.startsWith(path.join(config, 'wildcarding') + path.sep), paths.cwd);
-    assert.ok(paths.work.startsWith(path.join(config, 'wildcarding') + path.sep), paths.work);
-    delete process.env.CLAUDE_CONFIG_DIR;
-    const home = probe.probePaths();
-    assert.ok(home.cwd.startsWith(path.join(os.homedir(), '.claude', 'wildcarding') + path.sep), home.cwd);
-    assert.ok(!home.cwd.startsWith(os.tmpdir() + path.sep), 'the default must not be the shared temp directory');
+    for (const dir of [paths.cwd, paths.work]) {
+      assert.equal(dir.split(/[\\/]/).includes('.claude'), false, `a .claude segment in ${dir}`);
+      assert.ok(!dir.startsWith(os.tmpdir() + path.sep), `${dir} is in the shared temp directory`);
+      assert.ok(dir.startsWith(probe.defaultProbeBase() + path.sep), dir);
+    }
   } finally {
-    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+    if (saved === undefined) delete process.env.AI_ACOLYTE_PROBE_BASE; else process.env.AI_ACOLYTE_PROBE_BASE = saved;
   }
 });
 
@@ -188,7 +255,7 @@ test('against a restricted stub: /goal reads restricted, every canary silent whi
   const lines = verdictLines(run.stdout);
   assert.equal(lines.length, 6, run.stdout);
   for (const line of lines) assert.match(line, /: not fired \(Write landed: yes; claude exit 0\)$/);
-  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'wildcarding', 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
+  const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
   assert.equal(report.version, '9.9.9 (Claude Code)');
   assert.equal(report.runs.length, 8);
   assert.equal(fs.readFileSync(f.mark, 'utf8').trim().split('\n').length, 8, 'one stub call per planned run');
@@ -202,7 +269,7 @@ test('against an unrestricted stub: every canary fires and names the event Claud
   const lines = verdictLines(run.stdout);
   assert.equal(lines.length, 6, run.stdout);
   for (const line of lines) assert.match(line, /: fired \(Write landed: yes/);
-  const report = JSON.parse(fs.readFileSync(path.join(f.temp, 'wildcarding', 'ai-acolyte-user-hook-probe-work', 'report.json'), 'utf8'));
+  const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
   for (const row of report.runs.filter((r) => r.kind === 'hook')) {
     assert.deepEqual(row.fires.map((fire) => [fire.event, fire.hookEventName]), [[row.event, row.event]], row.label);
   }
@@ -228,4 +295,93 @@ test('a turn that failed or never finished is inconclusive for every event', () 
   }
   assert.equal(probe.judgeGoal({ status: 1, stdout: '/goal can\u2019t run while hooks are restricted (x)' }), 'restricted');
   assert.equal(probe.judgeGoal({ status: 1, stdout: 'Invalid API key' }), 'unknown');
+});
+
+// A claude that never answers is ended with everything under it. The fixture's claude.cmd runs
+// the stub under cmd.exe, the shape of Claude Code's own npm shim, and the stub's grandchild sits
+// in the probe directory holding the pipes, as claude.exe does. spawnSync's timeout ended cmd.exe
+// alone, so the next run could not empty the directory and the probe died. On POSIX the deadline
+// ends the child alone (no process group), so 'close' never comes and the grace settles the run.
+// MUTATION: put the spawnSync runClaude back, or skip the endProcessTree call, and this fails.
+test('a claude that never answers is ended with its tree, and every later run still runs', (t) => {
+  const f = fixture(t);
+  const run = runProbe(f, ['--run-claude', '--variants', 'settings-flag', '--events', 'UserPromptSubmit', '--timeout-seconds', '1'], 'hang');
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /^\/goal x: unknown \(claude did not finish: ETIMEDOUT\)/m);
+  assert.deepEqual(verdictLines(run.stdout), ['settings-flag UserPromptSubmit: inconclusive (claude did not finish: ETIMEDOUT) (Write landed: no; claude exit null)']);
+  const stubs = recordedPids(f, 'stubs');
+  const grandchildren = recordedPids(f);
+  assert.equal(stubs.length, 2, `expected one stub per hanging run, got ${stubs.join(' ')}`);
+  assert.equal(grandchildren.length, 2, `expected one grandchild per hanging run, got ${grandchildren.join(' ')}`);
+  assert.deepEqual(stubs.filter(alive), [], 'a timed-out claude is still running');
+  if (process.platform === 'win32') {
+    assert.deepEqual(grandchildren.filter(alive), [], 'a process under the timed-out claude.cmd is still running');
+  }
+});
+
+// The grace: a run whose 'close' never comes (a process the kill did not reach still holds a
+// pipe) settles anyway. The tree kill is replaced by one that does nothing, so the stub and its
+// grandchild live on, as such a process would.
+// MUTATION: drop the grace timer and the run never settles (the test times out).
+test('a run whose close never comes still settles, as timed out, after the deadline and the grace', { timeout: 30000 }, async (t) => {
+  const f = fixture(t);
+  const cwd = path.join(f.tmp, 'cwd');
+  fs.mkdirSync(cwd);
+  const saved = { STUB_MODE: process.env.STUB_MODE, STUB_MARK: process.env.STUB_MARK };
+  Object.assign(process.env, { STUB_MODE: 'hang', STUB_MARK: f.mark });
+  let result;
+  const started = Date.now();
+  try {
+    result = await probe.runClaude({ claude: f.claude, timeoutMs: 500 }, ['-p', 'x'], cwd, async () => {});
+  } finally {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  assert.equal(result.error && result.error.code, 'ETIMEDOUT', JSON.stringify(result));
+  assert.equal(result.status, null);
+  assert.ok(Date.now() - started >= 500, 'settled before the deadline');
+  assert.ok(recordedPids(f, 'stubs').some(alive), 'the stand-in tree kill ended the stub, so this did not test the grace');
+});
+
+// Settling is not finishing: a survivor's pipes kept the probe's own loop alive, so it printed
+// its report and never exited. On Ubuntu that is every timed-out run with a grandchild.
+// MUTATION: settle on the grace without letting go of the pipes and the probe never exits.
+test('a process the tree kill cannot reach does not keep the probe from finishing', (t) => {
+  const f = fixture(t);
+  const run = runProbe(f, ['--run-claude', '--variants', 'settings-flag', '--events', 'UserPromptSubmit', '--timeout-seconds', '1'],
+    'escape', {}, 30000);
+  assert.notEqual(run.signal, 'SIGTERM', 'the probe was still running at 30 s');
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /^\/goal x: unknown \(claude did not finish: ETIMEDOUT\)/m);
+  assert.match(run.stdout, /^settings-flag UserPromptSubmit: inconclusive \(claude did not finish: ETIMEDOUT\)/m);
+  assert.match(run.stdout, /^report: /m);
+  const survivors = recordedPids(f);
+  assert.equal(survivors.length, 2, `expected one survivor per run, got ${survivors.join(' ')}`);
+  assert.ok(survivors.every(alive), 'a survivor was ended after all, so this did not reach the grace');
+});
+
+// A directory the probe cannot empty is a message and exit 3, not an uncaught throw. Two ways in:
+// a base that is a file (every platform), and on Windows a process left running in the probe
+// directory by a claude that exited, which is what made rmSync fail before.
+// MUTATION: drop execute()'s catch, or freshDirectory's, and these fail.
+test('a probe directory that cannot be emptied stops the probe with exit 3 and names it', (t) => {
+  const f = fixture(t);
+  const file = path.join(f.tmp, 'not-a-directory');
+  fs.writeFileSync(file, 'x');
+  const run = runProbe(f, ['--run-claude'], 'open', { AI_ACOLYTE_PROBE_BASE: file });
+  assert.equal(run.status, 3, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stderr, /^probe-user-hooks: could not empty and recreate .*ai-acolyte-user-hook-probe-work \(\w+\)\. A process may still be running in it/m);
+  assert.doesNotMatch(run.stderr, /^\s+at /m, 'a stack trace');
+  assert.equal(fs.existsSync(f.mark), false, 'claude ran although the work directory failed');
+});
+
+test('a process left running in the probe directory stops the next run with exit 3', { skip: process.platform !== 'win32' && 'POSIX removes a directory a process is in' }, (t) => {
+  const f = fixture(t);
+  const run = runProbe(f, ['--run-claude', '--variants', 'settings-flag', '--events', 'UserPromptSubmit'], 'linger');
+  assert.equal(run.status, 3, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /^claude --version: 9\.9\.9/m);
+  assert.match(run.stderr, /^probe-user-hooks: could not empty and recreate .*ai-acolyte-user-hook-probe \((EBUSY|EPERM|ENOTEMPTY)\)/m);
+  assert.doesNotMatch(run.stderr, /^\s+at /m, 'a stack trace');
+  const report = JSON.parse(fs.readFileSync(reportPath(f), 'utf8'));
+  assert.match(report.stopped, /could not empty and recreate/);
+  assert.equal(report.runs.length, 2, 'the version and goal rows, then the stop');
 });

@@ -8,8 +8,8 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
-**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer passes a flag
-that made Claude Code misreport restricted hooks as allowed, **AI Acolyte: Check whether Claude Code
+**Version 1.9.1 fixes what an audit of 1.9.0 found**: the guard's probe no longer reads any exit 0
+as hooks being allowed, **AI Acolyte: Check whether Claude Code
 runs user hooks** asks on demand, open threads compile off the extension host and a healthy
 MEMORY.md's saves no longer start a compile, Turn off open threads works in every state, and the
 INDEX line names the index it measured.

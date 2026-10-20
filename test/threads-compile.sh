@@ -513,7 +513,7 @@ echo "ok: --lint counts the threads, names each kind of left-out or cut memory, 
 #
 # Mutations, each failing here: threadText not removing THREAD_STRIP, or removing it after the
 # collapse; threadOf trimming with JavaScript's trim(), or collapsing with
-# \s; `.` for `[^\n]` in FENCE_OPEN (killed only by a fence whose info string holds U+2028, which
+# \s; `.` for `[^\n]` in COMMONMARK_FENCE_OPEN (killed only by a fence whose info string holds U+2028, which
 # the first version of this generator never wrote); no universal newlines in memoryBody; the fence skip, the
 # backtick-info rule or the unclosed-fence rule dropped; `status :` not the key; the value not
 # uncommented; indexHealth counting UTF-16 units, or `>=`.

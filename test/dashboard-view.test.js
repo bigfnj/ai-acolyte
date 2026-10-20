@@ -264,8 +264,10 @@ function harness(tempHome, opts = {}) {
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
-        // COUNTED, not just stubbed. The real memoryReport is 6.99 ms and 25 fs
-        // syscalls against a live corpus, and _push used to call it twice for two
+        // COUNTED, not just stubbed. The real memoryReport was 6.99 ms and 25 fs
+        // syscalls against a live corpus when this was written, and grows with the store
+        // (docs/engineering-record.md, the 2026-10-20 dated note under the refuted rows of
+        // "Optimizations measured and DECLINED"); _push used to call it twice for two
         // cards that need disjoint parts of one result. How many times it is
         // called is the whole property, and nothing else in the suite can see it.
         memoryReport: () => {
@@ -572,12 +574,32 @@ test('every dashboard message reaches its command, and nothing else does', async
     // the script itself on load, and `remove` by the per-row prune button.
     // MUTATION: restore `case 'showWildcards': ...` and its row above. This fails
     // naming showWildcards. Confirmed 2026-10-14.
-    const panelScript = source.slice(source.indexOf('<script nonce='));
-    const senders = new Set((panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [])
-      .map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
+    //
+    // The DASHBOARD's script only (2026-10-20): from its `<script nonce=` to the `</script>` that
+    // closes it. Sliced to the end of the file, as it was, the gates panel's script (a second
+    // webview with a handler of its own) counted as dashboard senders, so a dashboard arm whose
+    // only sender sat in the gates panel passed.
+    const scriptAt = source.indexOf('<script nonce=');
+    const scriptEnd = source.indexOf('</script>', scriptAt);
+    assert.ok(scriptAt > 0 && scriptEnd > scriptAt, 'the dashboard\'s <script> block was not found');
+    const panelScript = source.slice(scriptAt, scriptEnd);
+    assert.ok(!panelScript.includes('<script', 1), 'precondition: the slice holds one script block, not two');
+    const sends = panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [];
+    const senders = new Set(sends.map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
     assert.ok(senders.size > 10, `precondition: the sender scan found only ${senders.size} senders`);
+    // Every post names its type as a literal, or the census cannot read it and must say so.
+    assert.equal(sends.length, (panelScript.match(/postMessage\(/g) || []).length,
+      'a postMessage in the dashboard script does not name its type as a literal, so this census cannot read it');
     const unsent = labels.filter((label) => !senders.has(label));
     assert.deepEqual(unsent, [], `dashboard routes with no sender in the webview: ${unsent.join(', ')}`);
+
+    // AND SENDER -> ARM (2026-10-20). The direction above asks whether every arm has a button;
+    // nothing asked whether every button has an arm, so a new button posting a type the switch
+    // does not handle passed and did nothing when clicked.
+    // MUTATION: add `$('runNow').addEventListener('click', () => vscode.postMessage({ type:
+    // 'notARoute' }));` to the dashboard script. This fails naming notARoute. Confirmed 2026-10-20.
+    const unhandled = [...senders].filter((type) => !labels.includes(type));
+    assert.deepEqual(unhandled, [], `the dashboard posts types its switch does not handle: ${unhandled.join(', ')}`);
 
     // The two that are handled in-process rather than dispatched.
     app.executed.length = 0;
@@ -895,6 +917,45 @@ test('the panel template contains no backtick that would end it early', () => {
     if (lines[index].includes('`')) offenders.push(`${index + 1}: ${lines[index].trim()}`);
   }
   assert.deepEqual(offenders, [], 'no backticks between the template delimiters');
+});
+
+// THE CSS CENSUS (2026-10-20). `.listhead` and its two descendant rules outlived their markup by
+// weeks (d6b9e6e removed the last element carrying the class), because nothing compares a style
+// sheet with the page it styles. Every class and id a selector names in each <style> block must
+// occur in the same file outside that block: in the markup, or in the script or code that sets it.
+// A token is a whole word there (`[\w$-]` on neither side), so `listhead` inside `listheader`
+// does not count. Short names (`.h`, `.x`) match almost anywhere; the census cannot clear those
+// and does not pretend to, but a dead rule with a distinctive name, the shape `.listhead` had, fails.
+// MUTATION: add `.zzunusedcensus { color: red; }` to the dashboard's <style>. This fails naming
+// it. Confirmed 2026-10-20.
+test('every class and id the panels\' style sheets name is used outside them', () => {
+  const dir = path.dirname(require.resolve('../vscode-extension/extension'));
+  const files = fs.readdirSync(dir).filter((name) => name.endsWith('.js')).map((name) => path.join(dir, name));
+  let blocks = 0;
+  let selectorsSeen = 0;
+  const unused = [];
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    for (const match of source.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+      blocks += 1;
+      const outside = source.slice(0, match.index) + '\n' + source.slice(match.index + match[0].length);
+      const css = match[1].replace(/\/\*[\s\S]*?\*\//g, ' ');
+      const names = new Set();
+      for (const rule of css.matchAll(/([^{}]+)\{/g)) {
+        const selector = rule[1].trim();
+        if (!selector || selector.startsWith('@')) continue;
+        selectorsSeen += 1;
+        for (const token of selector.matchAll(/([.#])(-?[_a-zA-Z][\w-]*)/g)) names.add(token[2]);
+      }
+      for (const name of names) {
+        const word = new RegExp(`(?<![\\w$-])${name.replace(/[$-]/g, '\\$&')}(?![\\w$-])`);
+        if (!word.test(outside)) unused.push(`${path.basename(file)}: ${name}`);
+      }
+    }
+  }
+  assert.ok(blocks >= 2, `precondition: only ${blocks} <style> block(s) found; the dashboard and the gates panel have one each`);
+  assert.ok(selectorsSeen > 50, `precondition: only ${selectorsSeen} selectors were read; the CSS scan has stopped matching`);
+  assert.deepEqual(unused, [], 'a style sheet names a class or id that nothing outside it uses');
 });
 
 // The Memory card used two different definitions of "issue": the badge counted
@@ -1633,7 +1694,9 @@ test('the saved-permissions card names over-broad wildcard grants and links to t
 
 // The memory report is the most expensive thing one push does: measured 6.99 ms
 // and 25 fs syscalls (12 readFileSync + 11 existsSync + 2 readdirSync) against a
-// live corpus. _push called it TWICE — once for the Memory card, once for a
+// live corpus at the time; it has grown with the store since (a warm 29.4 ms p50 at
+// 171 files: docs/engineering-record.md, the 2026-10-20 dated note under the refuted
+// rows of "Optimizations measured and DECLINED"). _push called it TWICE — once for the Memory card, once for a
 // one-integer `gateSources` lookup in the Gates card that the first call had
 // already computed. Two calls measured 9.92 ms, so the duplicate cost 2.93 ms of
 // every refresh, and a refresh fires on every settings.json change.

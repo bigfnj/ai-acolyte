@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   managedSettingsPaths, permissionMatches, missingFromLive, shadowedByManaged,
-  managedCapabilities, assessPolicy,
+  assessPolicy,
   policyLimitsPath, policySignalPaths, policyRestrictions, isBulkLoss,
 } = require('../src/policy-guard');
 
@@ -90,19 +90,6 @@ test('the two halves are assessed separately, and only one of them writes', () =
   // Not recoverable: managed policy outranks a user allow entry by design, so
   // re-asserting Bash(rm *) would change nothing.
   assert.deepEqual(assessment.shadowed.map((entry) => entry.permission), ['Bash(rm *)']);
-
-  assert.equal(assessment.capabilities.userHooksDisabled, true);
-});
-
-test('managed capabilities name what a policy can switch off under MAX', () => {
-  assert.deepEqual(managedCapabilities({
-    allowManagedHooksOnly: true,
-    permissions: { defaultMode: 'default', disableBypassPermissionsMode: true },
-  }), { userHooksDisabled: true, bypassDisabled: true, forcedDefaultMode: 'default' });
-  assert.deepEqual(managedCapabilities({}),
-    { userHooksDisabled: false, bypassDisabled: false, forcedDefaultMode: null });
-  assert.deepEqual(managedCapabilities(undefined),
-    { userHooksDisabled: false, bypassDisabled: false, forcedDefaultMode: null });
 });
 
 // The original guard watched only for an admin-dropped managed-settings.json.

@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { readPolicy, assessPermission, overridingRule, hookEventAllowed } = require('../src/managed-policy');
+const { readPolicy, assessPermission, overridingRule } = require('../src/managed-policy');
 const { createAutoLearnManager } = require('../src/auto-learn-manager');
 
 function policyHome(t, policy) {
@@ -395,19 +395,7 @@ test('a permission truncated past the state cap assesses as unknown, not as effe
     'a rule the cap made unparseable must be reported as unknown, never guessed at');
 });
 
-// hookEventAllowed lost its last assertion in d947565 (2026-09-24, the MAX retirement),
-// and the import above outlived it: the export census counted that unused binding as a
-// consumer until 2026-10-14, when it learned that an import is not a use. This is the
-// question the function answers, restored: under `allowManagedHooksOnly` a user hook
-// runs only on an event the managed policy itself defines (which is why the extension
-// recompiles gates on a file watcher rather than a SessionStart hook).
-test('a user hook on an event the managed policy does not define is dropped, and only then', (t) => {
-  const managed = readPolicy({ home: policyHome(t, MANAGED) });
-  assert.equal(hookEventAllowed(managed, 'PostToolUse'), true, 'the policy defines PostToolUse');
-  assert.equal(hookEventAllowed(managed, 'PreToolUse'), false, 'and nothing else');
-  assert.equal(hookEventAllowed(managed, 'SessionStart'), false);
-  const unrestricted = readPolicy({ home: policyHome(t, { ...MANAGED, allowManagedHooksOnly: false }) });
-  assert.equal(hookEventAllowed(unrestricted, 'PreToolUse'), true, 'without the flag every event runs');
-  assert.equal(hookEventAllowed(readPolicy({ home: policyHome(t, undefined) }), 'PreToolUse'), true,
-    'and with no managed policy at all');
-});
+// The per-event hook test that stood here went with hookEventAllowed on 2026-10-20. It asserted
+// that under `allowManagedHooksOnly` a user hook still runs on an event the managed policy
+// defines, and the 2026-10-19 measurement disproved that: no user hook ran on any event. The
+// measured rule is tested where it is read, test/memory-guard-install.test.js (hookPolicy).

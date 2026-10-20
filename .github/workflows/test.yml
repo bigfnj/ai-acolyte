@@ -136,6 +136,17 @@ jobs:
           TOOLBOX_PYTHON: ${{ steps.py.outputs.python-path }}
         run: bash test/threads-compile.sh
 
+      # The recall.py half of test/memory-guard-parity.test.js (2026-10-20): recall.py --lint and
+      # --threads-compile measure the same synthetic indexes as the MEMORY.md guard and the
+      # editor lint. The node matrix above has no Python with numpy and onnxruntime, so that half
+      # skips there, loudly; here it runs, and ACOLYTE_REQUIRE_PYTHON turns a missing interpreter
+      # into a failure rather than the same skip.
+      - name: test/memory-guard-parity.test.js
+        env:
+          ACOLYTE_REQUIRE_PYTHON: "1"
+          TOOLBOX_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: node --test test/memory-guard-parity.test.js
+
   # A separate job, because it needs a shell the matrix above cannot give it.
   #
   # install.ps1 once replaced the user's whole settings.json with nothing but its

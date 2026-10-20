@@ -2789,10 +2789,21 @@ above says what it says.
 
 | claim | measured figure | truth |
 |---|---|---|
-| `fullReport` re-reads the whole memory corpus every push | 6.98 / 7.96 ms | **0.56 ms.** Read 1.46 ms p50 against stat 0.90 ms over 17 files is a 1.6x ratio, not 10.3x. The growth argument was wrong too: a stat stamp scales with the corpus exactly as the reads do |
+| `fullReport` re-reads the whole memory corpus every push | 6.98 / 7.96 ms | **0.56 ms.** Read 1.46 ms p50 against stat 0.90 ms over 17 files is a 1.6x ratio, not 10.3x. The growth argument was wrong too: a stat stamp scales with the corpus exactly as the reads do. *Dated note below, 2026-10-20: the 0.56 ms is a 17-file figure* |
 | 44 KB of verb bodies compiled on every hook call | 1.12 / 2.50 ms | **0.00 ms.** The real 44.4 KB file is 43.87 / 48.54 ms; a 1.8 KB stub is 44.00 / 48.73; a 212-byte floor is 43.01 / 48.48. V8 pre-parses and lazily compiles, so unexecuted verb code is free. **Do not re-derive this**: it proposed a 30 KB refactor of the most safety-critical file in the project for nothing |
 | `gates.generated.md` read 5x per push | 1.55 / 1.69 ms | **~0.34 ms** |
 | `CLAUDE.md` and `~/.codex/AGENTS.md` read twice each | ~0.89 ms | **~0.17 ms** |
+
+**Dated note on the first row, 2026-10-20.** The 0.56 ms was measured over a 17-file store and
+is out of date. A 1.9.0 audit measured `memoryReport` over a 171-file store at **23.9 ms min /
+29.4 ms p50**: read 13.6 / 17.0, stat 6.7 / 8.4, `threadOf` 1.4 / 1.7, `gateEntryOf` 1.6 / 1.8.
+Method: warm, n=40, in ONE process, which is NOT this section's cold protocol, so treat it as a
+size estimate rather than a decision figure. The row's conclusion stands on these numbers:
+read against stat is 2.0x (17.0 / 8.4 p50), not 10.3x, and a stat-stamped cache would still pay
+the stat, so at most about the 8.6 ms p50 difference is available to save. What has changed is
+the size of the whole: about 29 ms per dashboard push at 171 files, and it grows with the store.
+Re-measure cold, in fresh interleaved processes, against a variant with the reads removed,
+before anyone decides on it in either direction.
 
 ### From the hook and extension profiling pass
 
@@ -2880,6 +2891,19 @@ the noise, necessarily, because nothing is memoised yet. NTFS mtime granularity 
 no extra resolution and `{ bigint: true }` was not added. What is cached is a projection,
 not the parse: the full parse retains 486 KB, the projection 16 KB, because `vec` is 384
 floats per memory and no caller reads it.
+
+**`summarizeRuleUsage` hashing the allow list twice per push. DECLINED, 2026-10-20.**
+`src/rule-usage.js` `summarizeRuleUsage` runs on every dashboard push. It hashes each tracked
+rule with `ruleKey` to find its record, then `allowFingerprint` hashes every rule again, plus
+the sorted keys, to tell whether the saved count belongs to this list. A 1.9.0 audit measured
+**1.89 ms min / 3.16 ms p50 for 470 rules**. Method: warm, n=30, in ONE process, which is NOT
+this section's cold protocol, and it was not re-measured cold. Declined on that number: the
+most a fix could save is the second pass, which by construction is about half the total (one
+SHA-256 per rule in each pass), so 1 to 2 ms per push, the same size as the 1.54 ms fs-dedupe
+package declined above. The fix (reuse the per-rule keys for the fingerprint, or cache it per
+list) would give the fingerprint's definition a second home that `test/rule-usage.test.js` then
+has to hold to the first. What reopens it: a cold measurement, fresh interleaved processes,
+against a variant with the second pass removed, showing more than that.
 
 ---
 

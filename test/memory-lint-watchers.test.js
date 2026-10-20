@@ -279,6 +279,43 @@ test('the status bar warns past the 140-line target, below the cap, and counts a
   }
 });
 
+// The entry ceiling the guard holds (2026-10-20): past 16 resident "- " entries the gauge warns
+// and names the count, and one diagnostic marks the first entry past it.
+// MUTATION: drop `|| r.entriesOver` from the background condition in refresh() and the gauge stays
+// neutral at 17 entries; drop the entryPastCeiling block in toDiagnostics and no warning is made.
+test('the status bar warns past the 16-entry ceiling, and one diagnostic marks the first entry past it', () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-entries-'));
+  const dir = path.join(tempHome, '.claude', 'projects', 'd---work', 'memory');
+  const entries = (n) => '# Index\n' + Array.from({ length: n }, (_, i) => `- hook ${i}\n`).join('');
+  writeStore(dir, entries(16));
+  const h = harness(tempHome);
+  try {
+    const lint = new h.loaded.MemoryLint();
+    lint.activate({ subscriptions: [] });
+    lint.refresh();
+    let text = h.statusText[h.statusText.length - 1];
+    assert.ok(!/entries/.test(text), `16 entries is at the ceiling, not past it: ${text}`);
+    assert.equal(lint.status.backgroundColor, undefined);
+    assert.match(lint.status.tooltip, /16 resident "- " entries, ceiling 16/);
+
+    writeStore(dir, entries(17));
+    lint.refresh();
+    text = h.statusText[h.statusText.length - 1];
+    assert.match(text, /17\/16 entries/, text);
+    assert.ok(!/to fix/.test(text), 'the ceiling is a state, not an issue to count');
+    assert.equal(lint.status.backgroundColor?.id, 'statusBarItem.warningBackground');
+
+    const r = h.loaded.fastLint(dir, { lineBudget: 300, totalBudget: 12000, maxLines: 200 });
+    const ceiling = lint.toDiagnostics(r, { lineBudget: 300 }).filter((d) => /entry ceiling/.test(d.message));
+    assert.equal(ceiling.length, 1, 'one warning for the ceiling, not one per surplus entry');
+    assert.deepEqual([ceiling[0].range.a, ceiling[0].range.c], [17, 17], 'on the 17th entry, line 18');
+    assert.match(ceiling[0].message, /17 resident "- " entries, past the 16-entry ceiling/);
+  } finally {
+    h.restore();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
 // memoryLint.js pickPrimaryDir and recall.py:126#_discover_memory_dir answer the same
 // question, and extension.js pins memoryLint's answer into RECALL_MEMORY_DIR at three spawn
 // sites -- so a disagreement was resolved in favour of the copy that is NOT the authority.

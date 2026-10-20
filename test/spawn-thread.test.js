@@ -81,6 +81,14 @@ test('execFile on a thread answers in execFile\'s shape, and its handle closes w
   assert.ok(Date.now() - started < 100, 'a closed thread child is not asked to end anything');
 });
 
+// A hold taken at least 10 s ago on whatever clock the gate keeps: `base` (when the gate was
+// made) moved back 60 s and the hold stamped 50 s after it, in the gate's tenths of a second.
+// Relative to `base`, so the test reads no clock of its own.
+function staleHold(shared) {
+  new Float64Array(shared, 8, 1)[0] -= 60000;
+  Atomics.store(new Int32Array(shared, 0, 1), 0, 1 + (60000 - 10000) / 100);
+}
+
 // THE GATE EVERY SPAWN THREAD SHARES (2026-10-20, src/spawn-thread.js "ONE SPAWN AT A TIME").
 // Driven from here, through the process-wide slot the module keeps it in: while this thread
 // holds the gate no spawn thread starts its child, and a hold older than GATE_STALE_MS (5 s)
@@ -98,8 +106,10 @@ test('a thread spawns only while no other holds the gate, and takes over a hold 
   assert.ok(shared instanceof SharedArrayBuffer, 'precondition: the threads were handed the process\'s gate');
   const lock = new Int32Array(shared, 0, 1);
   const base = new Float64Array(shared, 8, 1);
-  const stamp = (at) => 1 + Math.floor((at - base[0]) / 100);
-  assert.equal(Atomics.compareExchange(lock, 0, 0, stamp(Date.now())), 0, 'precondition: the gate was free');
+  // The test never reads a clock of its own (2026-10-20): the gate's is the module's monotonic
+  // one, and every hold below is written RELATIVE to `base`, so it means the same thing on any
+  // clock the module might use. A hold stamped far ahead of `base` is never stale.
+  assert.equal(Atomics.compareExchange(lock, 0, 0, 0x7fffffff), 0, 'precondition: the gate was free');
   const held = run();
   // No clock in the claim: nothing releases the gate but this test. MUTATION: make `gated`
   // run its spawn at once. The answer lands during this wait and this fails. Confirmed 2026-10-20.
@@ -111,9 +121,8 @@ test('a thread spawns only while no other holds the gate, and takes over a hold 
   assert.ok(await waitFor(() => held.at, 15000), 'the spawn ran once the gate was released');
   assert.equal(held.error, null);
   assert.ok(held.at >= releasedAt);
-  // A hold taken "10 s ago": `base` is moved back, which only this process's threads read.
-  base[0] = Date.now() - 60000;
-  Atomics.store(lock, 0, stamp(Date.now() - 10000));
+  // A hold taken "at least 10 s ago" (staleHold): only this process's threads read `base`.
+  staleHold(shared);
   const stale = run();
   try {
     // MUTATION: drop the stale takeover in `gated`. The thread waits on the stale hold and
@@ -124,6 +133,44 @@ test('a thread spawns only while no other holds the gate, and takes over a hold 
   } finally {
     // So a failure here fails by name instead of leaving that thread waiting with the file open.
     if (stale.at === null) { Atomics.store(lock, 0, 0); Atomics.notify(lock, 0); }
+  }
+});
+
+// THE GATE'S CLOCK DOES NOT MOVE WITH THE WALL CLOCK (2026-10-20). A spawn thread whose wall
+// clock has been set back an hour still sees a 10 s-old hold as stale and takes it over. The
+// thread is started here by hand, through the module's own worker entry (workerData carrying
+// the task and the process's gate), with Date.now stepped back before the module loads: that is
+// the injected clock, and the thread's only view of the wall.
+// MUTATION: put Date.now() back as the gate's clock in src/spawn-thread.js. The thread then reads
+// the hold as an hour in the future, waits on it, and this times out. Confirmed 2026-10-20.
+test('a spawn thread whose wall clock went back an hour still takes over a stale hold', async () => {
+  const { Worker } = require('node:worker_threads');
+  const warm = { done: false };
+  execFileOffThread(process.execPath, ['-e', ''], { windowsHide: true }, () => { warm.done = true; });
+  assert.ok(await waitFor(() => warm.done, 15000), 'precondition: a thread spawned and answered');
+  const shared = globalThis[Symbol.for('ai-acolyte.spawn-gate')];
+  assert.ok(shared instanceof SharedArrayBuffer, 'precondition: the process has its gate');
+  const lock = new Int32Array(shared, 0, 1);
+  assert.equal(Atomics.load(lock, 0), 0, 'precondition: the gate is free');
+  staleHold(shared);
+  const entry = path.join(__dirname, '..', 'src', 'spawn-thread.js');
+  const code = 'const realNow = Date.now; Date.now = () => realNow() - 3600 * 1000;\n'
+    + `require(${JSON.stringify(entry)});\n`;
+  const worker = new Worker(code, { eval: true, workerData: {
+    'ai-acolyte.spawn-thread': { kind: 'execFile', file: process.execPath, args: ['-e', ''], options: { windowsHide: true } },
+    'ai-acolyte.spawn-gate': shared,
+  } });
+  const answer = { at: null, error: undefined };
+  worker.on('message', (message) => { if (message?.op === 'result') { answer.at = Date.now(); answer.error = message.error; } });
+  try {
+    assert.ok(await waitFor(() => answer.at, 15000), 'a wall clock set back an hour kept a stale hold from being taken over');
+    assert.equal(answer.error, null);
+    assert.equal(Atomics.load(lock, 0), 0, 'the thread that took the stale hold over released it');
+  } finally {
+    // Ended first, then the hold cleared: cleared first, the thread could take the gate and be
+    // terminated holding it, and every later spawn in this file would wait on a dead hold.
+    await worker.terminate();
+    if (answer.at === null) { Atomics.store(lock, 0, 0); Atomics.notify(lock, 0); }
   }
 });
 

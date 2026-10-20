@@ -64,8 +64,8 @@ const TEST_DIR = path.join(ROOT, 'test') + path.sep;
 //
 // 2026-10-14: pickPrimaryDir, and extension.js's activate and deactivate, left this list
 // for TEST_ONLY, because the census now follows a require through a path.join and so sees
-// the tests that load them that way. fastLint is still reached only through a loader that
-// takes the module path as an argument.
+// the tests that load them that way. fastLint stayed, then reached only through a loader
+// that takes the module path as an argument.
 //
 // 2026-10-19: memoryLint.js's fastLint left this list for TEST_ONLY. test/memory-line-cap.test.js
 // still reaches it through loadLint(), which no scan can follow, and
@@ -118,105 +118,233 @@ const PENDING_REMOVAL = {};
 // usually the seam that makes a unit assertion able to fail — but enumerated, so that
 // adding one is a deliberate act and so that a name QUIETLY losing its last production
 // caller shows up here instead of looking unchanged.
+//
+// A REASON PER NAME, like HELD (2026-10-20). This was a list of names, so a seam encoding a
+// disproved model looked exactly as healthy as one pinning a live rule: hookEventAllowed sat
+// here for weeks after the measurement that disproved it. Each name now says what its test
+// holds it to, and the test below fails on a name with no reason. A reason that no longer
+// holds is the cue to delete the name, the test, or both.
 const TEST_ONLY = {
-  // 2026-10-16, both new. rule-usage.js: production enters through countOffThread (the thread
-  // runs countRuleUsage inside the module) and summarizeRuleUsage; these are the seams
-  // test/rule-usage.test.js uses to hold the index to a full scan, pin the crediting rules and
-  // drive a pass with an injected scanner. agent-sessions.js: the tests age fixtures by the window.
-  'src/rule-usage.js': ['analyzeRuleUsage', 'countRuleUsage', 'createRuleIndex', 'creditsFor', 'probesFor', 'ruleKey', 'trackedRule'],
-  'src/agent-sessions.js': ['WINDOW_MS'],
-  // 2026-10-19, the MEMORY.md guard. memory-index-guard.js runs as a hook from its stable copy,
-  // so production enters at `require.main === module`; these are the seams its test drives the
-  // rule, the edit replay and the path filter through. memoryGuardDefinition is what the planner
-  // writes and the tests compare against; classifyProbe and guardRevision are the probe's reading
-  // of Claude Code's message and the installer's reading of a copy's revision.
-  'src/memory-index-guard.js': ['GUARD_REVISION', 'applyEdit', 'blockMessage', 'commentDefects', 'decide', 'isIndexPath', 'measure', 'verdict'],
-  'src/claude-hook-config.js': ['memoryGuardDefinition'],
-  'src/memory-guard-install.js': ['classifyProbe', 'guardRevision'],
-  // 2026-10-14: agent-gates.js left this list, and agent-guidance.js, derived-guidance.js
-  // and history-adapters.js shrank, when the census learned to follow a require through a
-  // path.join. scripts/check-codex-runtime.js and scripts/vscode-acceptance/ load the STAGED
-  // copies of these modules that way (`require(path.join(extensionDir, 'src', ...))`),
-  // and nothing used to see them.
-  'src/agent-guidance.js': ['guidanceBlock', 'guidanceStatus', 'instructionLockPath', 'setGuidance'],
-  // readCompiled joined 2026-10-14: the dashboard's gate count now rides on gatesStatusAll's
-  // per-agent rows, so extension.js no longer reads the compiled file a second time.
-  'src/agent-gates.js': ['readCompiled'],
-  // 2026-10-19: the open-threads markers, which test/agent-open-threads.test.js pins to the
-  // strings docs/acolyte-rename-migration.md lists; production builds its block inside the module.
-  'src/agent-open-threads.js': ['THREADS_BEGIN', 'THREADS_END'],
-  'src/auto-learn-manager.js': ['migrateStateTo'],
-  'src/auto-learn-worker.js': ['run'],
-  // These are exercised inside their own production modules; exporting them
-  // lets tests pin command quoting and the standalone stdin adapter separately.
-  'src/codex-hook-config.js': ['codexStopHookDefinition'],
-  'src/codex-stop-hook.js': ['runCodexStopHook'],
-  // Production wraps this read-only primitive in the reviewed proposal API.
-  'src/codex-mcp-config.js': ['inspectCodexMcpTool'],
-  // classifyInvocation came off 2026-10-13: src/permission-summary.js
-  // overBroadShellGrants calls it for a wildcard head that has no invocation at all.
-  // splitCommandSegments came off 2026-10-16: src/rule-usage.js splits each counted call with it.
-  'src/auto-learn.js': ['AUTO_SAFE_GIT', 'AUTO_SUFFIX_CLOSED_ROOTS', 'BASH_RESERVED', 'POWERSHELL_RESERVED', 'isLearnableTool', 'tokenizeCommand', 'toolInvocation'],
-  // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production
-  // consumer when the managed-requirements parser was rewritten on 2026-09-24:
-  // production now asks enterprisePolicyAssessment, which answers with the degraded
-  // state as well as the decision. Both are kept as a stable surface and both are
-  // exercised; this census is what noticed, on the merge.
-  'src/codex-policy.js': ['allowedSandboxModes', 'enterpriseDecisionFor', 'enterprisePrefixRules', 'enterpriseRequirements'],
-  'src/derived-guidance.js': ['cleanRule', 'installedDerivedIds', 'reconcileDerived'],
-  // resolveExecutable left this list 2026-10-13 (src/codex-version.js keys its cache on it); taskkillPath joined 2026-10-14 (the config worker's grace kill is endProcessTree's now).
-  'src/exec-resolve.js': ['quoteForCommandProcessor', 'taskkillPath'],
-  'src/fixed-point-cache.js': ['CACHE_VERSION', 'cachePath', 'codeFiles', 'fnv1a32', 'readFixedPoint'],
-  'src/history-adapters.js': ['READ_CHUNK_BYTES', 'cursorKeyForFile', 'extractNestedShellCommands', 'parseClaudeJsonl'],
-  'src/legacy-backup-cleanup.js': ['parseBackupText'],
-  'src/legacy-max-cleanup.js': ['LEGACY_ALLOW_CORE', 'legacyApproveCommandFor', 'legacyGeneratedAllow'],
-  'src/local-settings.js': ['localBackupPath', 'partitionLocal', 'planPromotions', 'promotionFor', 'redundantUnder'],
-  'src/managed-policy.js': ['coversPrefix', 'hookEventAllowed', 'rulePrefix'],
-  'src/permission-match.js': ['MATCH_CACHE_LIMIT', 'matchCacheStats'],
-  // readBypassState joined on 2026-09-25 off PENDING_REMOVAL: see the note above that
-  // list. test/bypass-round-trip.test.js is the only caller and is the whole reason the
-  // `--bypass off` restore can fail a build.
-  // RENAME_RETRY_ATTEMPTS and renameRetryDelayMs joined 2026-10-14: the shared rename-retry
-  // budget, read inside permissions.js and held against the other writers' own numbers by
-  // test/rename-retry-policy.test.js. RETRYABLE_RENAME_CODES has production importers.
-  'src/permissions.js': ['RENAME_RETRY_ATTEMPTS', 'coverIndexKeyCacheStats', 'coverKeyCacheStats', 'readBypassState', 'renameRetryDelayMs'],
-  // The shared Codex claims reader now consumes CODEX_BEGIN_MARKER in production.
-  'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
-  'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
-  'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
-  // Test-only since 2026-10-14: the extension's import of it was unused (since 000e5b0) and
-  // was what made the census count it as a production consumer.
-  'src/settings-write.js': ['SETTINGS_ABSENT'],
-  'vscode-extension/autoLearnUi.js': ['candidateEligibleTargets', 'permissionMatches'],
-  // extension.js's activate and deactivate left this list 2026-10-14: the VS Code host is their real consumer (package.json
-  // `main`), and scripts/measure-push-host-thread.js now loads a tree's extension.js by path and calls both, which the
-  // census counts. Before that only the lifecycle tests did, which is why they were here.
-  // Off HELD 2026-10-14, same reason: test/memory-lint-watchers.test.js loads it by path.
-  // gateOf joined 2026-10-14: test/gate-agents.test.js holds it to recall.py's _gate file by
-  // file; in production it is called inside the module, by fullReport and the census.
-  // gateEntryOf joined the same day for the same reason, held to recall.py's _gate_entry (the
-  // card's retired count against the list the gates panel shows).
-  // threadOf joined 2026-10-19: test/open-threads-reading.test.js pins its documented forms, and
-  // test/threads-compile.sh holds it to recall.py's _thread memory by memory; in production
-  // fullReport calls it inside the module, for the card's count and activation's check.
-  // fastLint joined the same day, off HELD: test/memory-line-cap.test.js reaches it by path (its
-  // calls are what make the line-cap off-by-one falsifiable), and test/open-threads-reading.test.js
-  // holds its code-point count of the longest line, which indexHealth reads. It left this list on
-  // 2026-10-20: extension.js indexEventMayChange measures MEMORY.md with it, through indexHealth.
-  'vscode-extension/memoryLint.js': ['gateEntryOf', 'gateOf', 'pickPrimaryDir', 'threadOf'],
-  // scripts/, audited as subjects since 2026-10-14. Each of these is the seam a test
-  // drives a command-line tool through; the tools themselves are run by hand or by CI.
-  'scripts/assert-retired-max-absent.mjs': ['assertNoRetiredMaxEntries', 'inspectVsix'],
-  'scripts/auto-mode-audit.js': ['audit', 'main', 'parseArgs', 'readAllow', 'render', 'stripCredentials'],
-  // check and defaultBinary moved to src/claude-strip-model.js on 2026-10-15, where the script
-  // and the extension consume them; the script exports only its main.
-  'scripts/check-claude-strip-model.js': ['main'],
-  'scripts/check-codex-runtime.js': ['PROVENANCE_ROOTS', 'localRequireClosure'],
-  'scripts/check-line-refs.js': ['anchorLines', 'anchorsFrom', 'checkBounds', 'checkVacuous', 'collectRefs', 'fixAnchored', 'isVacuousSpan', 'stripRefs', 'tracked'],
-  'scripts/mirror-pack.js': ['NEVER_MIRROR', 'mirrorTargets'],
+  // 2026-10-16. Production enters through countOffThread (the thread runs countRuleUsage
+  // inside the module) and summarizeRuleUsage.
+  'src/rule-usage.js': {
+    analyzeRuleUsage: 'drives one counting pass with an injected scanner in test/rule-usage.test.js',
+    countRuleUsage: 'the thread body, run in-process by test/rule-usage.test.js to hold the index to a full scan',
+    createRuleIndex: 'test/rule-usage.test.js holds the index to a full scan of every rule',
+    creditsFor: 'pins which rules a counted call credits',
+    probesFor: 'pins the probes a call is matched through',
+    ruleKey: 'the stable per-rule key the dashboard and picker tests build saved results with',
+    trackedRule: 'pins which rules can be credited at all (the card\'s "untracked")',
+  },
+  'src/agent-sessions.js': {
+    WINDOW_MS: 'test/agent-sessions.test.js ages its fixtures by the active-session window',
+  },
+  // 2026-10-19, the MEMORY.md guard. It runs as a hook from its stable copy, so production
+  // enters at `require.main === module`; these are the seams its tests drive it through.
+  'src/memory-index-guard.js': {
+    GUARD_REVISION: 'test/memory-index-guard.test.js pins the file\'s sha to it, so an edit without a bump fails',
+    applyEdit: 'the Edit/MultiEdit replay the guard judges, pinned case by case',
+    blockMessage: 'the refusal text the model is shown',
+    commentDefects: 'the comment-defect count the guard compares before and after',
+    decide: 'the whole hook decision over a payload, without a process',
+    isIndexPath: 'the path filter: which files are a MEMORY.md the guard owns',
+    measure: 'the measures test/memory-guard-parity.test.js holds the lint and recall.py to',
+    verdict: 'the per-measure rule: blocked only when over budget AND worse',
+  },
+  'src/claude-hook-config.js': {
+    memoryGuardDefinition: 'what the planner writes into settings.json, compared by the install tests',
+  },
+  'src/memory-guard-install.js': {
+    classifyProbe: 'the reading of Claude Code\'s /goal refusal, pinned without running claude',
+    guardRevision: 'the installer\'s reading of an installed copy\'s revision',
+  },
+  // 2026-10-14: scripts/check-codex-runtime.js and scripts/vscode-acceptance/ load the STAGED
+  // copies of these modules through a path.join, which the census now follows.
+  'src/agent-guidance.js': {
+    guidanceBlock: 'the managed block text test/agent-guidance.test.js compares byte for byte',
+    guidanceStatus: 'the one-file reading; production calls guidanceStatusAll',
+    instructionLockPath: 'where the instruction-file lock lives, so tests can hold it',
+    setGuidance: 'the one-file install and remove; production calls setGuidanceAll',
+  },
+  'src/agent-gates.js': {
+    readCompiled: 'reads the compiled gates file; the dashboard now counts from gatesStatusAll (2026-10-14)',
+  },
+  'src/agent-open-threads.js': {
+    THREADS_BEGIN: 'pinned to the marker docs/acolyte-rename-migration.md lists',
+    THREADS_END: 'pinned to the marker docs/acolyte-rename-migration.md lists',
+  },
+  'src/auto-learn-manager.js': {
+    migrateStateTo: 'the state-file migration test/auto-learn-state-hygiene.test.js drives directly',
+  },
+  'src/auto-learn-worker.js': {
+    run: 'the worker body, run in-process by the Auto Learn tests instead of on a thread',
+  },
+  // Exercised inside their own production modules; exported so tests can pin command
+  // quoting and the standalone stdin adapter separately.
+  'src/codex-hook-config.js': {
+    codexStopHookDefinition: 'pins the Stop hook command and its quoting',
+  },
+  'src/codex-stop-hook.js': {
+    runCodexStopHook: 'the standalone stdin adapter, driven without a Codex',
+  },
+  'src/codex-mcp-config.js': {
+    inspectCodexMcpTool: 'the read-only primitive production wraps in the reviewed proposal API',
+  },
+  'src/auto-learn.js': {
+    AUTO_SAFE_GIT: 'held equal to policy-exporters.js AUTO_SAFE_GIT_SUBCOMMANDS',
+    AUTO_SUFFIX_CLOSED_ROOTS: 'held equal to the policy exporters\' copy',
+    BASH_RESERVED: 'test/permissions-keywords.test.js pins the Bash keyword list',
+    POWERSHELL_RESERVED: 'test/permissions-keywords.test.js pins the PowerShell keyword list',
+    isLearnableTool: 'pins which tools Auto Learn learns from',
+    tokenizeCommand: 'pins the shell tokenizer case by case',
+    toolInvocation: 'pins how a tool call becomes an invocation',
+  },
+  // enterpriseDecisionFor and enterprisePrefixRuleHealth lost their last production consumer
+  // when the managed-requirements parser was rewritten on 2026-09-24; production asks
+  // enterprisePolicyAssessment, which answers with the degraded state as well.
+  'src/codex-policy.js': {
+    allowedSandboxModes: 'pins the sandbox modes a requirements file allows',
+    enterpriseDecisionFor: 'kept as a stable surface over enterprisePolicyAssessment, and exercised',
+    enterprisePrefixRules: 'pins the managed prefix rules parsed from a requirements file',
+    enterpriseRequirements: 'pins the requirements parse itself',
+  },
+  'src/derived-guidance.js': {
+    cleanRule: 'pins how a derived rule is cleaned before it is written',
+    installedDerivedIds: 'reads which derived blocks are installed',
+    reconcileDerived: 'the reconcile step the CLI and extension reach through wrappers',
+  },
+  // taskkillPath joined 2026-10-14: the config worker's grace kill is endProcessTree's now.
+  'src/exec-resolve.js': {
+    quoteForCommandProcessor: 'pins cmd.exe quoting for a .cmd shim launch',
+    taskkillPath: 'pins which taskkill endProcessTree runs',
+  },
+  'src/fixed-point-cache.js': {
+    CACHE_VERSION: 'the format number that leads every cache key',
+    cachePath: 'where the cache lives, so tests can corrupt or remove it',
+    codeFiles: 'the files whose content keys the cache',
+    fnv1a32: 'pins the content hash',
+    readFixedPoint: 'the cache read, driven directly by the hook and cache tests',
+  },
+  'src/history-adapters.js': {
+    READ_CHUNK_BYTES: 'held under the int32 ceiling readSync enforces',
+    cursorKeyForFile: 'pins the per-transcript cursor key',
+    extractNestedShellCommands: 'pins the nested-shell extraction case by case',
+    parseClaudeJsonl: 'the Claude transcript parser, driven over fixtures',
+  },
+  'src/legacy-backup-cleanup.js': {
+    parseBackupText: 'pins the legacy backup parse',
+  },
+  'src/legacy-max-cleanup.js': {
+    LEGACY_ALLOW_CORE: 'the retired MAX allow entries the cleanup must find',
+    legacyApproveCommandFor: 'pins the retired approve-hook command the cleanup recognises',
+    legacyGeneratedAllow: 'pins the retired generated allow list the cleanup recognises',
+  },
+  'src/local-settings.js': {
+    localBackupPath: 'where the project-local backup lives',
+    partitionLocal: 'pins the split of a local list into promotable and kept',
+    planPromotions: 'the promotion plan, compared without writing',
+    promotionFor: 'pins one entry\'s promotion',
+    redundantUnder: 'pins which local entries a user entry already covers',
+  },
+  'src/managed-policy.js': {
+    coversPrefix: 'pins the token-prefix rule assessPermission is built on',
+    rulePrefix: 'pins how a Bash or PowerShell rule becomes a tool and fixed tokens',
+  },
+  'src/permission-match.js': {
+    MATCH_CACHE_LIMIT: 'pins the match cache\'s bound, which matchCacheStats reports',
+    matchCacheStats: 'reads the match cache\'s size and hits',
+  },
+  // readBypassState joined on 2026-09-25 off PENDING_REMOVAL. RENAME_RETRY_ATTEMPTS and
+  // renameRetryDelayMs joined 2026-10-14: the shared rename-retry budget.
+  'src/permissions.js': {
+    RENAME_RETRY_ATTEMPTS: 'held against the other writers\' numbers by test/rename-retry-policy.test.js',
+    coverIndexKeyCacheStats: 'reads the cover-index key cache, for test/cover-index.test.js',
+    coverKeyCacheStats: 'reads the cover key cache, for test/cover-index.test.js',
+    readBypassState: 'the only reader of the bypass toggle; test/bypass-round-trip.test.js turns it off',
+    renameRetryDelayMs: 'held against the other writers\' numbers by test/rename-retry-policy.test.js',
+  },
+  'src/policy-exporters.js': {
+    AUTO_SAFE_GIT_SUBCOMMANDS: 'held equal to auto-learn.js AUTO_SAFE_GIT',
+    AUTO_SUFFIX_CLOSED_ROOTS: 'held equal to auto-learn.js AUTO_SUFFIX_CLOSED_ROOTS',
+    normalizePermissionSpelling: 'pins the spelling normaliser the exporters apply',
+  },
+  'src/policy-guard.js': {
+    isBulkLoss: 'pins the bulk-loss threshold',
+    missingFromLive: 'pins what counts as lost from the live list',
+    shadowedByManaged: 'pins which entries a managed ask or deny outranks',
+  },
+  'src/recall-index.js': {
+    MEMORY_INDEX_NAME: 'the index file name the fixtures write',
+    RECALL_EMBED_ID: 'the embedder id the fixtures stamp their cache with',
+    RECALL_INDEX_NAME: 'the cache file name the fixtures write and read back',
+    indexableMemories: 'pins which memory files recall indexes',
+  },
+  // Test-only since 2026-10-14: the extension's import of it was unused (since 000e5b0).
+  'src/settings-write.js': {
+    SETTINGS_ABSENT: 'the state readSettingsState reports for a missing settings.json',
+  },
+  'vscode-extension/autoLearnUi.js': {
+    candidateEligibleTargets: 'its branch is reached only by a candidate with no pendingTargets, which a test builds',
+    permissionMatches: 'held equal to policy-guard.js permissionMatches',
+  },
+  // In production each is called inside the module (fullReport, the census, refresh()).
+  // fastLint left this list in 1.9.1: extension.js's threads corpus bump calls it (the MEMORY.md
+  // event check), so it has a production consumer.
+  'vscode-extension/memoryLint.js': {
+    gateEntryOf: 'held to recall.py _gate_entry file by file',
+    gateOf: 'held to recall.py _gate file by file',
+    pickPrimaryDir: 'pins the store-selection rule against two stores',
+    threadOf: 'held to recall.py _thread memory by memory',
+  },
+  // scripts/, audited as subjects since 2026-10-14. Each is the seam a test drives a
+  // command-line tool through; the tools themselves are run by hand or by CI.
+  'scripts/assert-retired-max-absent.mjs': {
+    assertNoRetiredMaxEntries: 'the release gate, driven over a built package',
+    inspectVsix: 'reads a .vsix the way the gate does',
+  },
+  'scripts/auto-mode-audit.js': {
+    audit: 'the audit over an injected allow list',
+    main: 'the CLI entry, run in-process',
+    parseArgs: 'pins the argument parse',
+    readAllow: 'pins how the allow list is read',
+    render: 'pins the report text',
+    stripCredentials: 'pins the credential scrub on everything the report prints',
+  },
+  'scripts/check-claude-strip-model.js': {
+    main: 'the CLI entry, run in-process; the check itself is src/claude-strip-model.js',
+  },
+  'scripts/check-codex-runtime.js': {
+    PROVENANCE_ROOTS: 'where the runtime provenance check looks',
+    localRequireClosure: 'the require closure the provenance check walks',
+  },
+  'scripts/check-line-refs.js': {
+    anchorLines: 'the whole-token rule that makes an anchored reference exact',
+    anchorsFrom: 'pins anchor recovery from prose (the backtick-stripping regression)',
+    checkBounds: 'the BROKEN half test/line-refs.test.js gates the tree on',
+    checkVacuous: 'the blank-line and bare-brace check over the tree',
+    collectRefs: 'the extractor, held to the corpus it polices',
+    fixAnchored: 'drives the fixer against a throwaway checkout',
+    isVacuousSpan: 'pins the vacuous-line predicate',
+    stripRefs: 'pins the backtick-stripping regression',
+    tracked: 'the file enumeration, checked for unmerged paths',
+  },
+  'scripts/mirror-pack.js': {
+    NEVER_MIRROR: 'the pack entries exempt from the Bash to PowerShell mirror',
+    mirrorTargets: 'pins the mirror each pack entry needs',
+  },
   // 2026-10-20. The probe runs real Claude Code turns, so test/probe-user-hooks.test.js drives
   // its argument handling, canary settings, plan and verdicts through these.
-  'scripts/probe-user-hooks.js': ['EVENTS', 'VARIANTS', 'canarySettings', 'hookCommand', 'judgeGoal', 'judgeHook', 'parseArgs', 'planRuns', 'probePaths'],
+  'scripts/probe-user-hooks.js': {
+    EVENTS: 'the three hook events the reproducer tries',
+    VARIANTS: 'the settings sources it registers each canary in',
+    canarySettings: 'the canary settings JSON, pinned per event',
+    hookCommand: 'the canary command quoting',
+    judgeGoal: 'reads the /goal restriction text',
+    judgeHook: 'reads a canary log into fired, not fired or inconclusive',
+    parseArgs: 'the opt-in flag and its refusal',
+    planRuns: 'the run plan printed before anything runs',
+    probePaths: 'where each run starts and where its logs go',
+  },
 };
 
 // The tree as git sees it, repo-relative with forward slashes: tracked files, plus new ones
@@ -561,6 +689,30 @@ const declaredFor = (moduleFile) => ({
   ...(PENDING_REMOVAL[moduleFile] || {}),
 });
 
+// Every declaration carries its reason (2026-10-20). TEST_ONLY was a bare list until then, so a
+// seam encoding a disproved model read exactly like one pinning a live rule. The three lists
+// share one shape, { module: { name: reason } }, and a missing or blank reason fails here.
+// MUTATION: blank one TEST_ONLY reason (`ruleKey: ''`). This fails naming
+// src/rule-usage.js ruleKey. Confirmed 2026-10-20.
+test('every held, pending and test-only export says why', () => {
+  const missing = [];
+  let names = 0;
+  for (const [list, entries] of Object.entries({ HELD, PENDING_REMOVAL, TEST_ONLY })) {
+    for (const [moduleFile, declared] of Object.entries(entries)) {
+      if (!declared || typeof declared !== 'object' || Array.isArray(declared)) {
+        missing.push(`${list} ${moduleFile}: not a { name: reason } map`);
+        continue;
+      }
+      for (const [name, why] of Object.entries(declared)) {
+        names += 1;
+        if (typeof why !== 'string' || !why.trim()) missing.push(`${list} ${moduleFile} ${name}`);
+      }
+    }
+  }
+  assert.ok(names > 50, `precondition: only ${names} declared names were read; the lists moved`);
+  assert.deepEqual(missing, [], 'a declared export with no reason');
+});
+
 // Global preconditions, ahead of every per-module verdict. A scan that silently stopped
 // matching reports every export in the tree as dead — or, if the declarations were written
 // against that broken scan, reports everything as fine. Either way the number below moves a
@@ -625,7 +777,7 @@ for (const moduleFile of censusModules()) {
 
     // Consumed only by test/. Same both-directions rule, so a production caller quietly
     // disappearing shows up here rather than looking unchanged.
-    assert.deepEqual(testOnly.sort(), [...(TEST_ONLY[moduleFile] || [])].sort(),
+    assert.deepEqual(testOnly.sort(), Object.keys(TEST_ONLY[moduleFile] || {}).sort(),
       `${moduleFile}: the set of TEST-ONLY exports has moved. An extra found name lost its last\n`
       + '  production consumer, or is a new test-only seam that has to be listed. An extra\n'
       + '  listed name gained a production consumer and should come off the list.');
@@ -641,7 +793,7 @@ for (const moduleFile of censusModules()) {
       assert.ok(exported.includes(name),
         `${moduleFile} no longer exports ${name}, which is still declared here`);
     }
-    for (const name of TEST_ONLY[moduleFile] || []) {
+    for (const name of Object.keys(TEST_ONLY[moduleFile] || {})) {
       assert.ok(exported.includes(name),
         `${moduleFile} no longer exports ${name}, which is still listed as test-only`);
     }

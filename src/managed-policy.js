@@ -82,7 +82,6 @@ function readPolicy(options = {}) {
       unreadable: error.code !== 'ENOENT',
       error: error.code === 'ENOENT' ? null : error.message,
       ask: [], allow: [], deny: [], raw: { ask: [], allow: [], deny: [] },
-      hookEvents: [], managedHooksOnly: false,
     };
   }
   const permissions = raw && typeof raw.permissions === 'object' && raw.permissions ? raw.permissions : {};
@@ -102,8 +101,6 @@ function readPolicy(options = {}) {
       allow: texts(permissions.allow),
       deny: texts(permissions.deny),
     },
-    hookEvents: raw && typeof raw.hooks === 'object' && raw.hooks ? Object.keys(raw.hooks) : [],
-    managedHooksOnly: raw ? raw.allowManagedHooksOnly === true : false,
   };
 }
 
@@ -211,15 +208,15 @@ function overridingRule(policy, permission) {
   return ask ? { decision: 'ask', rule: ask.text } : null;
 }
 
-// True when a user hook on this event is silently dropped, which is how a
-// PreToolUse auto-approve hook can be registered and never run.
-function hookEventAllowed(policy, event) {
-  if (!policy || !policy.present || !policy.managedHooksOnly) return true;
-  return policy.hookEvents.includes(String(event));
-}
-
+// No hook question is answered here (2026-10-20). `hookEventAllowed` answered "does a user hook
+// on this event run?" per event, from the policy's own `hooks` keys and allowManagedHooksOnly;
+// its last production caller went in d947565 (2026-09-24), and the 2026-10-19 measurement
+// disproved the per-event model: under allowManagedHooksOnly no user hook ran on any event.
+// The function and the two readPolicy fields only it read are gone. The live reading is
+// hookPolicy in src/memory-guard-install.js: allowManagedHooksOnly or disableAllHooks in any
+// managed source, or disableAllHooks in settings.json, means no user hook runs.
 module.exports = {
   defaultPolicyPath, readPolicy, rulePrefix, coversPrefix,
-  assessPermission, overridingRule, hookEventAllowed,
+  assessPermission, overridingRule,
   coversPermission, toolOf,
 };

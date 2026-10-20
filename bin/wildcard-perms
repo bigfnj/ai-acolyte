@@ -1501,7 +1501,8 @@ function memoryGuard(args) {
   }
   try {
     const status = cmd === 'status' ? install.memoryGuardStatus() : install.setMemoryGuard(cmd === 'on');
-    const head = status.label === 'off' ? 'OFF' : status.label.toUpperCase();
+    // scripts/smoke.sh matches this head against every label, uppercased (test/cli-memory-guard.test.js).
+    const head = status.label.toUpperCase();
     const changed = cmd === 'status' ? '' : status.changed ? '' : ' (already)';
     process.stdout.write(`wildcard-perms memory-guard: ${head}${changed} - ${tilde(status.settingsPath)}\n`);
     if (status.on) {

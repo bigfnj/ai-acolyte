@@ -121,6 +121,50 @@ test('--memory-guard status names the file that restricts hooks', (t) => {
   assert.match(status.stdout, /\n {2}source: ~[\\/]\.claude[\\/]remote-settings\.json sets allowManagedHooksOnly\n/);
 });
 
+// scripts/smoke.sh greps `--memory-guard status` for a closed set of heads. Its alternatives were
+// lowercase while the CLI prints the label uppercased, so FOREIGN and UNREADABLE could never
+// match and smoke failed on such a box (audit 2026-10-20). Here the pattern is read out of
+// smoke.sh and run against the real CLI output, joined as smoke joins it, for every label
+// labelFor can return, and the label list is read out of labelFor so a new one needs a case.
+// MUTATION: put the lowercase `foreign|unreadable` alternatives back in smoke.sh and this fails
+// naming those states.
+test('smoke.sh\'s --memory-guard status pattern matches the CLI\'s output for every label', (t) => {
+  const smoke = fs.readFileSync(path.resolve(__dirname, '..', 'scripts', 'smoke.sh'), 'utf8');
+  const line = /^check "--memory-guard status" '([^']+)'/m.exec(smoke);
+  assert.ok(line, 'precondition: smoke.sh has the --memory-guard status check');
+  const pattern = new RegExp(line[1]);
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'memory-guard-install.js'), 'utf8');
+  const body = /function labelFor\([^)]*\) \{([\s\S]*?)\n\}/.exec(source)[1];
+  const labels = new Set(body.split(/\r?\n/).filter((text) => /\breturn\b/.test(text))
+    .flatMap((text) => [...text.slice(text.indexOf('return')).matchAll(/'([^']+)'/g)].map((match) => match[1])));
+  assert.deepEqual([...labels].sort(), ['foreign', 'off', 'on', 'on (copy outdated)', 'on (needs repair)', 'unreadable']);
+
+  const home = tempHome(t);
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  const ours = memoryGuardDefinition({ home, nodeExecutable: process.execPath });
+  const states = {
+    off: () => {},
+    on: () => run(home, ['--memory-guard', 'on']),
+    'on (copy outdated)': () => fs.writeFileSync(script(home), 'const GUARD_REVISION = 0;\n'),
+    'on (needs repair)': () => fs.writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [{ ...ours, hooks: [{ ...ours.hooks[0], timeout: 99 }] }] } })),
+    foreign: () => fs.writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node /x/memory-index-guard.js' }] }] } })),
+    unreadable: () => fs.writeFileSync(settingsPath, '{ "half": '),
+  };
+  const seen = new Set();
+  for (const [label, arrange] of Object.entries(states)) {
+    arrange();
+    const status = run(home, ['--memory-guard', 'status']);
+    const joined = `${status.stdout}${status.stderr}`.replace(/\n/g, ' ');
+    assert.ok(joined.startsWith(`wildcard-perms memory-guard: ${label.toUpperCase()} - `), `precondition, ${label}: ${joined}`);
+    assert.match(joined, pattern, `smoke's pattern misses the ${label} state`);
+    seen.add(label);
+  }
+  fs.writeFileSync(settingsPath, JSON.stringify({ hooks: [] }));
+  assert.match(`${run(home, ['--memory-guard', 'status']).stdout}`.replace(/\n/g, ' '), pattern, 'an unsupported shape (UNREADABLE)');
+  assert.deepEqual([...seen].sort(), [...labels].sort(), 'every label labelFor returns was run');
+});
+
 test('a bad sub-verb or an extra argument is a usage error that writes nothing', (t) => {
   const home = tempHome(t);
   const before = settingsText(home);

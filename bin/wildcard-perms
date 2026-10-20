@@ -60,8 +60,8 @@ const WORKSPACE_RULES_USAGE =
   'usage: wildcard-perms --codex-workspace-rules status|remove [--workspace <path>]\n';
 const DRAIN_USAGE = 'usage: wildcard-perms --drain [--workspace <path>] [--dry-run]\n';
 const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
-  '       wildcard-perms --guidance derived\n' +
-  '       wildcard-perms --guidance accept|decline|reset <id>\n';
+  '       wildcard-perms --guidance derived [--workspace <path>]\n' +
+  '       wildcard-perms --guidance accept|decline|reset <id> [--workspace <path>]\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n' +
   '       wildcard-perms --gates list [--json]\n' +
   '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';

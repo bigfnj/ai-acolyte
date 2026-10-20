@@ -68,8 +68,8 @@ function tree(home) {
 }
 
 const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n'
-  + '       wildcard-perms --guidance derived\n'
-  + '       wildcard-perms --guidance accept|decline|reset <id>\n';
+  + '       wildcard-perms --guidance derived [--workspace <path>]\n'
+  + '       wildcard-perms --guidance accept|decline|reset <id> [--workspace <path>]\n';
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n'
   + '       wildcard-perms --gates list [--json]\n'
   + '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';
@@ -286,6 +286,58 @@ test('a --learn with a missing or mistyped subcommand prints its usage before --
   assert.equal(JSON.parse(ok.stdout).mode, 'auto-safe', 'precondition: --learn status --mode saves the mode');
   assert.equal(JSON.parse(ok.stdout).threshold, 2, 'precondition: and the threshold');
   assert.notDeepEqual(tree(home), before, 'precondition: the state file was written');
+});
+
+// The table dispatch refuses from: bin/wildcard-perms verbOptions(), read out of the source and
+// run, so the test holds whatever the file holds.
+function verbOptionsOfCli() {
+  const source = fs.readFileSync(CLI, 'utf8').replace(/\r\n/g, '\n');
+  const start = source.indexOf('\nfunction verbOptions() {\n');
+  assert.notEqual(start, -1, 'verbOptions() not found in bin/wildcard-perms');
+  const end = source.indexOf('\n}\n', start);
+  return new Function(`${source.slice(start, end + 2)}\nreturn verbOptions();`)();
+}
+
+// 1.9.4. Since 1.9.3 refuses any option a verb does not take, the usage is the only map of the
+// ones it does, and GUIDANCE_USAGE left out `[--workspace <path>]` for derived, accept, decline
+// and reset. Each usage line in --help must name exactly the options verbOptions() gives that
+// verb (and that line's subcommands): an option added to the table without the usage fails here,
+// and so does a usage that names one the dispatch would refuse.
+// MUTATIONS: drop `[--workspace <path>]` from the --guidance derived usage line; add a '--force'
+// flag to --drain in verbOptions(). Each fails here, naming the line.
+test('every verb\'s usage names exactly the options its verbOptions entry accepts', (t) => {
+  const home = tempHome(t);
+  const help = run(home, ['--help']);
+  assert.equal(help.status, 0, help.stderr);
+  const table = verbOptionsOfCli();
+  const seen = new Map();
+  for (const line of help.stdout.split('\n')) {
+    const match = /^(?:usage: | +)wildcard-perms (--[a-z-]+)(?: (.*))?$/.exec(line);
+    if (!match || !table[match[1]]) continue;
+    const [, verb, rest = ''] = match;
+    const entry = table[verb];
+    const head = rest.split(' ')[0];
+    const subs = head && !/^[[<-]/.test(head) ? head.split('|') : [];
+    if (!seen.has(verb)) seen.set(verb, new Set());
+    for (const sub of subs) seen.get(verb).add(sub);
+    const specs = (subs.length ? subs : [null]).map((sub) => {
+      const spec = { ...entry, ...((sub !== null && entry.subs && entry.subs[sub]) || {}) };
+      return [...(spec.values || []), ...(spec.flags || [])].sort();
+    });
+    assert.ok(specs.every((spec) => JSON.stringify(spec) === JSON.stringify(specs[0])),
+      `${line.trim()}: its subcommands take different options, so one line cannot document them`);
+    const named = [...new Set(rest.match(/--[a-z][a-z-]*/g) || [])].sort();
+    assert.deepEqual(named, specs[0], `${line.trim()}: names ${named.join(' ') || 'nothing'}, the verb takes ${specs[0].join(' ') || 'nothing'}`);
+  }
+  for (const [verb, entry] of Object.entries(table)) {
+    assert.ok(seen.has(verb), `${verb} has no usage line in --help`);
+    for (const sub of Object.keys(entry.subs || {})) {
+      assert.ok(seen.get(verb).has(sub), `${verb} ${sub} takes its own options but no usage line names it`);
+    }
+  }
+  // Witness: the table is the real one, with the options K4 was about.
+  assert.deepEqual(table['--guidance'].subs.derived.values, ['--workspace']);
+  assert.ok(seen.size >= 10, `only ${seen.size} verbs found in --help`);
 });
 
 // 1.9.4. codexWorkspaceRules called learnOption outside any try, so `--codex-workspace-rules

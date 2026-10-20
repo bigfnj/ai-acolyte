@@ -298,8 +298,8 @@ test('CLI --guidance on|off|status refuse an extra argument and write nothing', 
     const bad = runCli(home, args);
     assert.equal(bad.status, 1, `${args.join(' ')}: ${bad.stdout}${bad.stderr}`);
     assert.equal(bad.stderr, 'usage: wildcard-perms --guidance on|off|status\n'
-      + '       wildcard-perms --guidance derived\n'
-      + '       wildcard-perms --guidance accept|decline|reset <id>\n', args.join(' '));
+      + '       wildcard-perms --guidance derived [--workspace <path>]\n'
+      + '       wildcard-perms --guidance accept|decline|reset <id> [--workspace <path>]\n', args.join(' '));
     assert.equal(bad.stdout, '', args.join(' '));
     assert.equal(claudeMd(home), '# Mine\n', `${args.join(' ')} wrote CLAUDE.md`);
   }

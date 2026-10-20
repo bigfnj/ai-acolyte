@@ -356,22 +356,21 @@ if (-not (Test-Path $py)) {
     Check 'recall.py --lint ran and produced output' `
         (($lintCode -eq 0) -and ($lint.Length -gt 0)) "exit $lintCode, $($lint.Length) chars"
 
-    # The positive check the four negatives rest on, and it replaces one that could not hold.
+    # The positive check the three negatives rest on, and it replaces one that could not hold.
     #
-    # `clean:` prints only when the corpus has NO finding of ANY kind (memory/recall.py:1327-1330#over_budget):
-    # not over budget, not over the entry ceiling, no over-long index line, no broken link, no
+    # `clean:` prints only when the corpus has NO finding of ANY kind (memory/recall.py:1322-1325#over_budget):
+    # not over budget, no over-long index line, no broken link, no
     # unresolved [[link]], no unscoped feedback, no gate edited without a recompile, no gate left
     # in another memory store (reported, never compiled, and worded so the 'not compiled' check
     # below does not fire on it: the user's own arrangement is not a release defect). A corpus
     # carrying one long index line is perfectly releasable and still never prints it, so on
     # this box the one positive check failed on every single run -- which is how a check gets
     # read as noise and then ignored. These two lines are printed UNCONDITIONALLY by _lint
-    # (memory/recall.py:1012#MEMORY.md, memory/recall.py:1052#resident) before any finding is evaluated,
+    # (memory/recall.py:1011#MEMORY.md, memory/recall.py:1051#resident) before any finding is evaluated,
     # so they are what a healthy run looks like, and empty or truncated output cannot satisfy them.
     Check 'lint reported its index census' `
         (($lint -match 'MEMORY\.md: \d+ bytes') -and ($lint -match '\d+ resident index entries')) ''
     Check 'index is within its byte budget' (-not ($lint -match 'over budget')) ''
-    Check 'resident entries within the ceiling' (-not ($lint -match 'over the attention ceiling')) ''
     Check 'every standing order is compiled' (-not ($lint -match 'not compiled')) ''
     # Source drift: a gate edited but never recompiled. `--gates status` cannot see this, so
     # lint is the only guard, and a release must not ship with the resident block behind source.

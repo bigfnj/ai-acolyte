@@ -279,37 +279,30 @@ test('the status bar warns past the 140-line target, below the cap, and counts a
   }
 });
 
-// The entry ceiling the guard holds (2026-10-20): past 16 resident "- " entries the gauge warns
-// and names the count, and one diagnostic marks the first entry past it.
-// MUTATION: drop `|| r.entriesOver` from the background condition in refresh() and the gauge stays
-// neutral at 17 entries; drop the entryPastCeiling block in toDiagnostics and no warning is made.
-test('the status bar warns past the 16-entry ceiling, and one diagnostic marks the first entry past it', () => {
+// The entry count is shown and never warned about (1.9.5). From 1.9.1 to 1.9.4, past 16 resident
+// "- " entries turned the gauge to the warning colour and put a diagnostic on the 17th entry, on
+// an index that gives every memory a line and so could never clear it.
+// MUTATION: put `|| r.entries > 16` back in refresh()'s background condition and the 60-entry
+// gauge turns to the warning colour; put back a diagnostic for the count and the empty-list
+// assertion fails.
+test('the status bar names the entry count in its tooltip only, with no colour and no diagnostic', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lint-entries-'));
   const dir = path.join(tempHome, '.claude', 'projects', 'd---work', 'memory');
   const entries = (n) => '# Index\n' + Array.from({ length: n }, (_, i) => `- hook ${i}\n`).join('');
-  writeStore(dir, entries(16));
+  writeStore(dir, entries(60));
   const h = harness(tempHome);
   try {
     const lint = new h.loaded.MemoryLint();
     lint.activate({ subscriptions: [] });
     lint.refresh();
-    let text = h.statusText[h.statusText.length - 1];
-    assert.ok(!/entries/.test(text), `16 entries is at the ceiling, not past it: ${text}`);
-    assert.equal(lint.status.backgroundColor, undefined);
-    assert.match(lint.status.tooltip, /16 resident "- " entries, ceiling 16/);
-
-    writeStore(dir, entries(17));
-    lint.refresh();
-    text = h.statusText[h.statusText.length - 1];
-    assert.match(text, /17\/16 entries/, text);
-    assert.ok(!/to fix/.test(text), 'the ceiling is a state, not an issue to count');
-    assert.equal(lint.status.backgroundColor?.id, 'statusBarItem.warningBackground');
+    const text = h.statusText[h.statusText.length - 1];
+    assert.ok(!/entries/.test(text), `the status bar text does not name the count: ${text}`);
+    assert.equal(lint.status.backgroundColor, undefined, '60 entries inside every size budget is not a warning');
+    assert.match(lint.status.tooltip, /60 resident "- " entries\n/);
+    assert.doesNotMatch(lint.status.tooltip, /ceiling/);
 
     const r = h.loaded.fastLint(dir, { lineBudget: 300, totalBudget: 12000, maxLines: 200 });
-    const ceiling = lint.toDiagnostics(r, { lineBudget: 300 }).filter((d) => /entry ceiling/.test(d.message));
-    assert.equal(ceiling.length, 1, 'one warning for the ceiling, not one per surplus entry');
-    assert.deepEqual([ceiling[0].range.a, ceiling[0].range.c], [17, 17], 'on the 17th entry, line 18');
-    assert.match(ceiling[0].message, /17 resident "- " entries, past the 16-entry ceiling/);
+    assert.deepEqual(lint.toDiagnostics(r, { lineBudget: 300 }), [], 'no diagnostic for the count');
   } finally {
     h.restore();
     fs.rmSync(tempHome, { recursive: true, force: true });
@@ -712,7 +705,7 @@ test('a gate source is counted only when recall.py would compile it', () => {
   const fm = (scope) => `---\ntype: feedback\nscope: ${scope}\n---\n\n`;
   const block = '<!-- gate -->\n- **A standing order.** Do the thing.\n<!-- /gate -->\n';
 
-  // The index itself. recall.py:1497#EXCLUDE skips EXCLUDE before it looks at anything
+  // The index itself. recall.py:1492#EXCLUDE skips EXCLUDE before it looks at anything
   // else, so a MEMORY.md carrying frontmatter and a gate block is still not a gate source.
   fs.writeFileSync(path.join(dir, 'MEMORY.md'),
     fm('global') + '# Memory Index\n\n' + block, 'utf8');

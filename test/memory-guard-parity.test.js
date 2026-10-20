@@ -33,7 +33,7 @@ function loadLint() {
   finally { Module._load = originalLoad; delete require.cache[modulePath]; }
 }
 
-// MUTATION: change LINT_LINES_WARN to 150 in recall.py (or any of the four), or a default in
+// MUTATION: change LINT_LINES_WARN to 150 in recall.py (or any of the three), or a default in
 // package.json, or a BUDGETS value: this fails naming the pair that moved apart.
 test('the guard budgets, recall.py\'s lint constants and the extension defaults are the same numbers', () => {
   const source = fs.readFileSync(RECALL, 'utf8');
@@ -45,7 +45,10 @@ test('the guard budgets, recall.py\'s lint constants and the extension defaults 
   assert.equal(constant('LINT_LINES_WARN'), BUDGETS.lines);
   assert.equal(constant('LINT_TOTAL_WARN'), BUDGETS.bytes);
   assert.equal(constant('LINT_LINE_WARN'), BUDGETS.lineChars);
-  assert.equal(constant('LINT_ENTRY_WARN'), BUDGETS.entries);
+  // The entry count is a count everywhere since 1.9.5: no ceiling in recall.py or the guard.
+  // MUTATION: put `LINT_ENTRY_WARN = 16` back at the start of a line in recall.py and this fails.
+  assert.doesNotMatch(source, /^LINT_ENTRY_WARN = /m, 'recall.py has no entry ceiling');
+  assert.equal(Object.hasOwn(BUDGETS, 'entries'), false, 'the guard has no entry budget');
   const properties = require('../vscode-extension/package.json').contributes.configuration.properties;
   assert.equal(properties['permissionWildcarding.memory.totalBudget'].default, BUDGETS.bytes);
   assert.equal(properties['permissionWildcarding.memory.lineBudget'].default, BUDGETS.lineChars);
@@ -65,7 +68,7 @@ test('the guard budgets, recall.py\'s lint constants and the extension defaults 
 // MUTATION: write `lines: 140` back into INDEX_BUDGETS and the moved line budget is not followed.
 test('the editor lint\'s INDEX budgets follow the guard\'s BUDGETS', () => {
   const realGuard = require('../src/memory-index-guard');
-  const moved = Object.freeze({ ...realGuard.BUDGETS, lines: 5, bytes: 50, lineChars: 7, entries: 2 });
+  const moved = Object.freeze({ ...realGuard.BUDGETS, lines: 5, bytes: 50, lineChars: 7 });
   const modulePath = require.resolve('../vscode-extension/memoryLint');
   const originalLoad = Module._load;
   Module._load = function load(request, parent, isMain) {
@@ -144,7 +147,6 @@ test('the editor lint reads every fixture exactly as the guard does', () => {
       assert.equal(r.linesTarget, BUDGETS.lines);
       assert.equal(r.linesOverTarget, g.lines > BUDGETS.lines, `${name}: the 140-line target`);
       assert.equal(r.entries, g.entries, `${name}: resident entries`);
-      assert.equal(r.entriesOver, g.entries > BUDGETS.entries, `${name}: the entry ceiling`);
       // The open threads' INDEX line, from fastLint, against the guard's own verdicts.
       assert.deepEqual(indexVerdicts(indexHealth(r)), g.index, `${name}: the INDEX line\n${indexHealth(r).join('; ')}`);
     } finally {
@@ -157,7 +159,6 @@ test('the editor lint reads every fixture exactly as the guard does', () => {
   assert.ok(views.some((v) => v.longLines) && views.some((v) => !v.longLines));
   assert.ok(views.some((v) => v.lines > BUDGETS.lines) && views.some((v) => v.lines <= BUDGETS.lines));
   assert.ok(views.some((v) => v.index.lineChars) && views.some((v) => !v.index.lineChars));
-  assert.ok(views.some((v) => v.entries > BUDGETS.entries) && views.some((v) => v.entries <= BUDGETS.entries));
   assert.deepEqual(guardView(BODIES.astral).longLines, 1, '300 emoji pass, 301 do not');
   assert.deepEqual(guardView(BODIES.crlfNestedHeader).comments, ['2:nested', '3:orphan']);
   assert.deepEqual(guardView(BODIES.fencedMarkers).comments, ['7:unclosed']);

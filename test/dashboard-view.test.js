@@ -3766,12 +3766,14 @@ test('turning the MEMORY.md guard on asks first, writes the hook, and the card n
       'the modal names the node it found on PATH');
     assert.match(asked.options.detail, POLICY_LINE, 'and says whether Claude Code will run it here');
     // The budgets it names are the guard's own, and the rule is the rule the guard applies.
-    // MUTATION: write a literal 15 for the entry budget in the modal and this fails.
+    // MUTATION: write a literal 139 for the line budget in the modal and this fails.
     const { BUDGETS } = require('../src/memory-index-guard');
     for (const phrase of [`${BUDGETS.lines} lines`, `${BUDGETS.bytes} bytes`, `${BUDGETS.lineChars} characters on one line`,
-      `${BUDGETS.entries} "- " entries`, `${BUDGETS.commentDefects} broken HTML comments`]) {
+      `${BUDGETS.commentDefects} broken HTML comments`]) {
       assert.ok(asked.options.detail.includes(phrase), `the modal names "${phrase}": ${asked.options.detail}`);
     }
+    // No entry budget since 1.9.5, so the modal names none.
+    assert.doesNotMatch(asked.options.detail, /entries/);
     assert.match(asked.options.detail, /ends past a budget and is worse on it than before/);
     assert.doesNotMatch(asked.options.detail, /already past|always pass/);
     const settings = env.read();

@@ -1138,6 +1138,15 @@ function memoryReport() {
   return { conf, dir, report: dir ? fullReport(dir, conf, files) : null };
 }
 
+// The store memoryReport() reports, chosen the same way and without reading it (2026-10-20). The
+// extension's recall.py spawns pin it as RECALL_MEMORY_DIR, and the open threads' corpus watcher
+// compares an event's store with it; each took only `.dir` from memoryReport(), which reads every
+// file in the store (171 files, 24-29 ms warm, on the development box), on paths that run unattended for every *.md event
+// burst and every compile.
+function memoryStoreDir() {
+  return pickPrimary(discoverDirs(cfg())).dir;
+}
+
 // `fullReport` is deliberately NOT exported: its only callers are showReport() and
 // memoryReport(), both in this file, and a dead export entry is a standing invitation to
 // import a function no consumer has ever exercised. The function stays; the entry goes.
@@ -1146,4 +1155,4 @@ function memoryReport() {
 // test/memory-lint-watchers.test.js call them directly, and those calls are the
 // mutation-killing assertions for the line cap and the store-selection rule.
 module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf,
-  threadOf, indexHealth };
+  threadOf, indexHealth, memoryStoreDir };

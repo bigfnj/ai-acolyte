@@ -72,7 +72,13 @@ const {
 // memoryReport() also backs the dashboard Memory card (stats only, still pure Node).
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
-const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, cfg: memoryConf } = require('./memoryLint');
+// memoryStoreDir is memoryReport()'s store without the report: what every recall.py spawn pins and
+// the open threads' watcher compares with. The default is only for a test harness that stubs this
+// module with an older export list, and gives memoryReport()'s answer at its old cost.
+const {
+  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, cfg: memoryConf,
+  memoryStoreDir = () => memoryReport().dir,
+} = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP_DIR    = path.join(os.homedir(), '.claude', 'backups');
@@ -119,6 +125,9 @@ let lastRun = null;          // timestamp of the last write we made
 let memBounce = null;        // debounce for MEMORY.md-driven dashboard refreshes
 let gatesBounce = null;      // debounce for corpus-driven gate recompiles
 let threadsBounce = null;    // debounce for the open-threads recompile (corpus, activation, setting)
+// What armed that recompile: { anyStore } once anything but a corpus event did, else the stores
+// the burst's events came from (scheduleThreadsCompile). Reset when the timer fires or is dropped.
+let threadsBurst = null;
 let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gate)
 let autoLearnBounce = null;  // debounce for Claude/Codex transcript writes
 let autoLearnTimer = null;   // periodic reconciliation timer
@@ -1006,7 +1015,7 @@ function downloadRecallModel() {
 // venv python directly (so recall.py doesn't need to re-exec) with the model + corpus
 // pinned via env, so the cache and the card's stats always agree on the same dir.
 async function rebuildRecall() {
-  const { dir } = memoryReport();
+  const dir = memoryStoreDir();
   if (!dir) {
     vscode.window.showInformationMessage('ai-acolyte: no MEMORY.md found to index.');
     return;
@@ -1068,7 +1077,7 @@ async function rebuildRecall() {
 // tree-killed after two minutes like every child here, so a teardown cannot leave it running.
 function runClaudeMemorySearch(query) {
   return new Promise((resolve) => {
-    const { dir } = memoryReport();
+    const dir = memoryStoreDir();
     if (!dir) { resolve({ unavailable: 'no Claude memory store (a folder with MEMORY.md) was found.' }); return; }
     const script = recallScriptPath();
     if (!script) { resolve({ unavailable: 'recall.py was not found. Set its path with memory.recallScript.' }); return; }
@@ -1138,7 +1147,7 @@ function autoSyncRecallIfStale() {
     // teardown is one killLiveChildren() has already been past.
     if (deactivated) return;
     if (Date.now() - recallRebuildAt < RECALL_AUTO_COOLDOWN_MS) return;
-    const { dir } = memoryReport();
+    const dir = memoryStoreDir();
     if (!dir) return;
     const script = recallScriptPath();
     const st = recallStatus();
@@ -3455,17 +3464,14 @@ function memoryCorpusChanged(uri) {
 //   * the compiled file currently lists a thread, so any edit, a deletion included, may be the
 //     one that closes it, and a closed thread has to leave the block;
 //   * the file mentions `status:` or a status marker, so it may be opening one.
-// A change in a store that does not compile is skipped: the compile reads one store.
+// A change in a store that does not compile is skipped: the compile reads one store. Which store
+// compiles is asked once per burst, when its timer fires (threadsBurstCompiles), not per event:
+// every save fires this, and the answer cannot move faster than the debounce.
 function threadsCorpusBump(uri) {
   if (deactivated || !openThreadsEnabled()) return;
   const file = uri?.fsPath;
   if (file && !threadsMayChange(file)) return;
-  if (file) {
-    let store = null;
-    try { store = memoryReport().dir; } catch { /* unknown: compile, the compile pins its own */ }
-    if (store && gateEditKey(path.dirname(file)) !== gateEditKey(store)) return;
-  }
-  scheduleThreadsCompile();
+  scheduleThreadsCompile(THREADS_BOUNCE_MS, file ? path.dirname(file) : null);
 }
 
 function threadsMayChange(file) {
@@ -4550,36 +4556,58 @@ function compileThreads({ quiet = false } = {}) {
 
 // One debounced compile and install, shared by the corpus watcher, activation and the setting.
 // The switch is asked again when the timer fires, not only when it was armed: turned off in
-// between, nothing compiles (2026-10-20).
-function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS) {
+// between, nothing compiles (2026-10-20). `dir` is the store a corpus event came from; null (the
+// setting) compiles whatever store it is; THREADS_IF_WORTH is activation's deferred check. One
+// timer serves them all, so what each asked for is kept together (threadsBurst) and judged once.
+const THREADS_IF_WORTH = Symbol('activation: compile if a compile could say something');
+function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS, dir = null) {
   if (deactivated) return;
+  if (!threadsBurst) threadsBurst = { anyStore: false, ifWorth: false, dirs: new Set() };
+  if (dir === null) threadsBurst.anyStore = true;
+  else if (dir === THREADS_IF_WORTH) threadsBurst.ifWorth = true;
+  else threadsBurst.dirs.add(gateEditKey(dir));
   clearTimeout(threadsBounce);
   threadsBounce = setTimeout(() => {
     threadsBounce = null;
+    const burst = threadsBurst;
+    threadsBurst = null;
     if (deactivated || !openThreadsEnabled()) return;
+    if (!threadsBurstCompiles(burst)) return;
     compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
   }, delay);
 }
 
-// The armed recompile, dropped: the switch went off, or a person's compile is about to cover it.
+// Whether a burst compiles: anything but a corpus event asked, or an event came from the store
+// that compiles (memoryStoreDir(), memoryReport()'s choice without reading the store, asked once
+// per burst; unknown compiles, since the compile pins its own), or activation's check says a
+// compile could say something.
+function threadsBurstCompiles(burst) {
+  if (!burst || burst.anyStore) return true;
+  if (burst.dirs.size) {
+    let store = null;
+    try { store = memoryStoreDir(); } catch { /* unknown: compile */ }
+    if (!store || burst.dirs.has(gateEditKey(store))) return true;
+  }
+  return burst.ifWorth && threadsWorthCompiling();
+}
+
+// The armed recompile, dropped: the switch went off, a person's compile is about to cover it, or
+// the host is going down.
 function cancelThreadsCompile() {
   clearTimeout(threadsBounce);
   threadsBounce = null;
+  threadsBurst = null;
 }
 
 // After activation, a compile only when one could say something: a memory declares `status:`,
 // the compiled file exists (a thread may have closed while the window was shut), or MEMORY.md is
 // past a budget. A machine that never uses the feature never spawns Python for it. The question
 // is asked in the deferred timer, not here: it reads the whole store (memoryReport), and
-// activation itself reads none of it.
+// activation itself reads none of it. A corpus event in those seconds joins the same burst, so an
+// event from another store cannot cancel the check.
 function activationThreadsCompile() {
   if (deactivated || !openThreadsEnabled()) return;
-  clearTimeout(threadsBounce);
-  threadsBounce = setTimeout(() => {
-    threadsBounce = null;
-    if (deactivated || !openThreadsEnabled() || !threadsWorthCompiling()) return;
-    compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
-  }, THREADS_ACTIVATION_MS);
+  scheduleThreadsCompile(THREADS_ACTIVATION_MS, THREADS_IF_WORTH);
 }
 
 function threadsWorthCompiling() {
@@ -6815,8 +6843,7 @@ async function deactivate() {
   clearTimeout(gatesBounce);
   // The open-threads recompile, armed by the corpus watcher, activation or the setting: its
   // callback spawns Python and then writes the instruction files.
-  clearTimeout(threadsBounce);
-  threadsBounce = null;
+  cancelThreadsCompile();
   clearTimeout(recallSyncTimer);
   clearTimeout(dashboardBounce);
   // The strip-model check: its timer, and a scan already running on its thread.
@@ -6961,7 +6988,7 @@ const FINISH_ADVICE = 'Click Compile and install in the gates panel to finish: i
 // pinned to memoryReport()'s store (memory.dir from user settings only, else the store with the
 // most memory files), so the list, the edit and the compile all act on the store that compiles.
 function gateCompileEnv() {
-  const { dir } = memoryReport();
+  const dir = memoryStoreDir();
   return { ...process.env, RECALL_REEXEC: '1', ...(dir ? { RECALL_MEMORY_DIR: dir } : {}) };
 }
 

@@ -75,6 +75,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const channel = [];
   const configListeners = [];
   const state = { compileWrites, warningAnswer: undefined };
+  const counters = { memoryReport: 0 };
   const disposable = () => ({ dispose() {} });
   const vscode = {
     StatusBarAlignment: { Left: 1, Right: 2 }, ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -168,6 +169,12 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => home };
     if ((request === 'child_process' || request === 'node:child_process') && parent?.filename === extensionPath) return recorded;
+    // The REAL memoryLint, with the extension's memoryReport() calls counted: it reads every file
+    // in the store, and the unattended paths must not.
+    if (request === './memoryLint' && parent?.filename === extensionPath) {
+      const real = originalLoad.call(this, request, parent, isMain);
+      return { ...real, memoryReport: (...args) => { counters.memoryReport += 1; return real.memoryReport(...args); } };
+    }
     if (parent?.filename === extensionPath && request.startsWith('./src/')) {
       return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
     }
@@ -200,7 +207,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const settle = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
   const live = () => held.filter((entry) => !entry.cleared && !entry.fired);
   return {
-    ...box, extension, watchers, spawns, held, commands, warnings, modals, infos, channel, state, tiers, close, settle, live,
+    ...box, extension, watchers, spawns, held, commands, warnings, modals, infos, channel, state, counters, tiers, close, settle, live,
     claude: () => fs.readFileSync(box.claudeMd, 'utf8'),
     codex: () => fs.readFileSync(box.agentsMd, 'utf8'),
     compiles: () => spawns.filter((spawn) => spawn.args.includes('--threads-compile')),
@@ -341,11 +348,14 @@ test('the corpus watcher hands every change to both the gates and the threads, a
   app.fireCorpus(app.store, 'extra.md', 'delete');
   assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'a deletion is recompiled while a thread is listed');
   await app.fireTimers();
-  // A store that does not compile: no recompile, whatever changed in it.
+  // A store that does not compile: no recompile, whatever changed in it. Which store compiles is
+  // asked once per burst, when the timer fires, so the burst arms and then compiles nothing.
+  const compiledBefore = app.compiles().length;
   fs.writeFileSync(path.join(app.other, 'x.md'), memory('open'));
   app.fireCorpus(app.other, 'x.md');
   app.fireCorpus(app.other, 'MEMORY.md');
-  assert.deepEqual(app.live(), [], 'another store\'s change is skipped: the compile reads one store');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, compiledBefore, 'another store\'s change is skipped: the compile reads one store');
   // MUTATION: in memoryCorpusChanged, call only gatesCorpusBump and nothing here arms; route the
   // threads through gatesCorpusBump's early returns (MEMORY.md, gatesEnabled) and the index edit
   // arms nothing; drop compiledListsThreads from threadsMayChange and the closure and deletion
@@ -367,6 +377,49 @@ test('the watcher asks the install\'s own reader whether a thread is listed, and
   app.fireCorpus(app.store, 'extra.md');
   assert.deepEqual(app.live(), [], 'a whole compile listing none, and an edit with no status: nothing');
   // MUTATION: put back the heading regex in compiledListsThreads and the first assertion fails.
+});
+
+// THE UNATTENDED PATHS DO NOT READ THE STORE (2026-10-20). memoryReport() reads every file in it
+// (24-29 ms warm on the development box) and threadsCorpusBump (per *.md event), gateCompileEnv
+// (per compile) and autoSyncRecallIfStale (per MEMORY.md burst) took only `.dir` from it. They ask
+// memoryLint.js memoryStoreDir() now, the same choice without the report, and the threads ask it
+// once per burst.
+test('twenty corpus events and their compile read no memory report, and the compile still pins the store', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'precondition: activation compiled');
+  const before = app.counters.memoryReport;
+  for (let i = 0; i < 20; i += 1) app.fireCorpus(app.store, 'a.md');
+  app.fireCorpus(app.other, 'MEMORY.md');
+  assert.equal(app.live().length, 1, 'one burst');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 2, 'one compile for the burst');
+  assert.equal(path.resolve(app.compiles().at(-1).env.RECALL_MEMORY_DIR), path.resolve(app.store),
+    'the compile is still pinned to the store with the most memory files');
+  // The Memory card's MEMORY.md watcher (and the linter's own, which watches the same file): the
+  // card's 350 ms bump runs the recall sync check.
+  const cards = app.watchers.filter((w) => w.pattern?.pattern === 'MEMORY.md' && w.pattern.base?.fsPath === app.store && !w.disposed);
+  assert.ok(cards.length, 'precondition: the card watches the store\'s MEMORY.md');
+  for (const card of cards) for (const fn of card.handlers.change) fn({ fsPath: path.join(app.store, 'MEMORY.md') });
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(app.counters.memoryReport - before, 0, 'no memoryReport() on the events, the burst, the compile or the sync check');
+  // MUTATION: put `memoryReport().dir` back in gateCompileEnv, in threadsBurstCompiles, or in
+  // autoSyncRecallIfStale, and the count is 1.
+});
+
+// One timer serves activation's check and the corpus bursts, so an event from another store in
+// activation's first seconds joins the check instead of replacing it.
+test('an event from another store during activation\'s delay does not cancel activation\'s compile', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => {
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('awaiting'));
+    fs.writeFileSync(path.join(box.other, 'x.md'), memory('open'));
+  } });
+  assert.deepEqual(app.live().map((entry) => entry.ms), [4000], 'precondition: activation\'s check is armed');
+  app.fireCorpus(app.other, 'x.md');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'activation\'s check still compiled');
+  // MUTATION: drop `burst.ifWorth && threadsWorthCompiling()` from threadsBurstCompiles (return
+  // false) and the count is 0.
 });
 
 test('the gates still recompile through the dispatcher', async (t) => {

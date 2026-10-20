@@ -40,7 +40,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const GUARD_REVISION = 3;
+const GUARD_REVISION = 4;
 
 // Shared with the lint: memory/recall.py LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN and
 // LINT_ENTRY_WARN, and the extension's memory.totalBudget / memory.lineBudget defaults. A test
@@ -303,12 +303,15 @@ function autoMemoryDirectory(config, env, platform, readFile) {
   return path.isAbsolute(target) ? target : null;
 }
 
-// A name as the file system reads it. On Windows a name is matched without case, and Win32 drops
-// the trailing dots and spaces of the last component, so `memory.md` and `MEMORY.md.` open the
-// index itself. Other aliases (an 8.3 short name, a `::$DATA` stream, a `\\?\` or UNC spelling,
-// a junction) are not resolved here: they fail open, as docs/engineering-record.md records.
+// A name as the file system reads it. On Windows a name is matched without case, so `memory.md`
+// opens the index itself. Trailing dots and spaces are NOT folded (revision 4): Win32 drops them,
+// but Node reads a Win32 path through its `\\?\` form, which keeps them, so `MEMORY.md.` would
+// read as missing and be judged against an empty index. Claude Code itself asks a person before
+// writing such a path. Like the other aliases (an 8.3 short name, a `::$DATA` stream, a `\\?\`
+// or UNC spelling, a junction), they are not resolved here and fail open, as
+// docs/engineering-record.md records.
 function nameOf(name, platform) {
-  return platform === 'win32' ? name.replace(/[. ]+$/, '').toLowerCase() : name;
+  return platform === 'win32' ? name.toLowerCase() : name;
 }
 
 // Basename first, `MEMORY.md` as the file system reads that name, so every other file in the

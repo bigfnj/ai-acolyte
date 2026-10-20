@@ -5,12 +5,15 @@
 // the settings writer's compare-and-swap writeTransform, which runs it against a fresh read.
 // Modelled on src/codex-hook-config.js.
 //
-// OWNERSHIP IS THE PATH. A handler is ours when its command names the guard's stable copy,
-// `<home>/.claude/wildcarding/memory-index-guard.js`, exactly. Ours with any other field
-// changed (another node, another timeout, another matcher) is `outdated`, and turning the
-// guard on repairs it. A handler that runs a `memory-index-guard.js` from somewhere else is a
-// near match and `foreign`: turning the guard on refuses rather than run two guards, and
-// turning it off leaves that handler alone, because a near match is not proof of authorship.
+// OWNERSHIP IS THE WHOLE COMMAND (2026-10-20). A handler is ours when its command is the shape
+// this module writes and nothing more: a node, then the guard's stable copy,
+// `<config>/wildcarding/memory-index-guard.js`, each quoted or bare, and no other token. Ours
+// with any other field changed (another node, another timeout, another matcher) is `outdated`,
+// and turning the guard on repairs it. Any other command that runs a `memory-index-guard.js`
+// is a near match and `foreign`: one from somewhere else, and also the user's own wrapper
+// around our copy (`timeout 5 node "<copy>"`), which `on` would otherwise have replaced and
+// `off` deleted. Turning the guard on refuses rather than run two guards, and turning it off
+// leaves that handler alone, because a near match is not proof of authorship.
 //
 // NO `if` FIELD (2026-10-19). Claude Code's hook `if` would let the process skip spawning for
 // every Write that is not to a MEMORY.md, but its semantics for Write could not be checked on
@@ -63,15 +66,19 @@ function memoryGuardDefinition({ home, nodeExecutable, platform = process.platfo
     hooks: [{ type: 'command', command: `"${node}" "${script}"`, timeout: MEMORY_GUARD_TIMEOUT }] };
 }
 
-const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const TWO_TOKENS = /^\s*("[^"]*"|'[^']*'|[^\s"']+)\s+("[^"]*"|'[^']*'|[^\s"']+)\s*$/;
+const unquote = (token) => token.replace(/^(["'])([\s\S]*)\1$/, '$2');
 
-// Does this command name our stable copy, as a whole path? Case and separators fold on
-// Windows, so a hand-written backslash spelling of the same file is still recognised.
+// Is this command ours: a node and our stable copy, as whole tokens, and nothing else? Case and
+// separators fold on Windows, so a hand-written backslash spelling of the same file is still
+// recognised.
 function namesOurScript(command, home, platform) {
   if (typeof command !== 'string') return false;
   const fold = (text) => (platform === 'win32' ? text.replace(/\\/g, '/').toLowerCase() : text);
+  const tokens = TWO_TOKENS.exec(fold(command));
+  if (!tokens) return false;
   const script = fold(spelled(memoryGuardScriptPath(home), platform));
-  return new RegExp(`(?:^|["'\\s])${escapeRe(script)}(?=["'\\s]|$)`).test(fold(command));
+  return unquote(tokens[2]) === script && /(?:^|\/)node(?:\.exe)?$/.test(unquote(tokens[1]));
 }
 
 function namesAGuard(command) {
@@ -88,8 +95,9 @@ function nodeFromCommand(command) {
 //   missing      no handler of ours
 //   configured   exactly one, byte for byte what memoryGuardDefinition writes, in a group
 //                matching Write|Edit|MultiEdit
-//   outdated     ours (it names our stable path) but some field differs, or there are several
-//   foreign      another hook runs a memory-index-guard.js from a different path
+//   outdated     ours (a node and our stable copy) but some field differs, or there are several
+//   foreign      another command runs a memory-index-guard.js: from a different path, or ours
+//                inside a wrapper or with other arguments
 //   unsupported  the hooks shape cannot be read safely
 // `options.nodeExecutable` says which node the expected definition uses; without it, the node
 // our own registered command names, which is how status reads an install it did not make.
@@ -119,7 +127,7 @@ function inspectMemoryGuard(settings, options = {}) {
   const found = { ...base, ours, foreign, node };
   if (foreign.length) {
     return { ...found, status: 'foreign',
-      reason: `another hook already runs a MEMORY.md guard from a different path: ${foreign[0]}` };
+      reason: `another hook already runs a MEMORY.md guard, with a command this tool did not write: ${foreign[0]}` };
   }
   if (!ours.length) return found;
   let expected = null;

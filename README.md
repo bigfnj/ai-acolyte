@@ -354,9 +354,10 @@ installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index
 registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
 (`src/claude-hook-config.js:56#memoryGuardDefinition`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
-`~/.claude/backups/settings.json.pre-memory-guard`. If another hook already runs a
-`memory-index-guard.js` from a different path, turning the guard on refuses, and that hook is
-never touched.
+`~/.claude/backups/settings.json.pre-memory-guard`. A hook is the guard's own only when its
+command is a `node` and that copy and nothing else. If another hook already runs a
+`memory-index-guard.js`, from a different path or wrapped in a command of your own (`timeout 5
+node "<copy>"`), turning the guard on refuses, and that hook is never touched.
 
 **Managed policy can stop it running.** Where a managed policy sets `allowManagedHooksOnly` or
 `disableAllHooks`, current Claude Code runs no user hook at all (see the correction under

@@ -53,6 +53,9 @@ const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const { memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable } = require('./src/memory-guard-install');
 const {
+  openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath,
+} = require('./src/agent-open-threads');
+const {
   MODELLED_VERSION: STRIP_MODEL_MODELLED, checkOffThread: checkStripModelOffThread, defaultBinary: findClaudeCodeBinary,
 } = require('./src/claude-strip-model');
 const {
@@ -69,7 +72,7 @@ const {
 // memoryReport() also backs the dashboard Memory card (stats only, still pure Node).
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
-const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, cfg: memoryConf } = require('./memoryLint');
+const { MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, cfg: memoryConf } = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP_DIR    = path.join(os.homedir(), '.claude', 'backups');
@@ -115,6 +118,7 @@ let dashboard = null;        // WildcardingViewProvider instance
 let lastRun = null;          // timestamp of the last write we made
 let memBounce = null;        // debounce for MEMORY.md-driven dashboard refreshes
 let gatesBounce = null;      // debounce for corpus-driven gate recompiles
+let threadsBounce = null;    // debounce for the open-threads recompile (corpus, activation, setting)
 let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gate)
 let autoLearnBounce = null;  // debounce for Claude/Codex transcript writes
 let autoLearnTimer = null;   // periodic reconciliation timer
@@ -2812,6 +2816,12 @@ function registerLocalWatchers(context) {
       // memory.enabled once at activation, so its four keys were picked up only
       // by the 5-minute reconcile or a save event.
       if (event.affectsConfiguration('permissionWildcarding.gates')) ensureGates(true);
+      // Off removes the block at once; on installs what was compiled and recompiles, because
+      // nothing compiles while it is off (threadsCorpusBump), so the last compile may be stale.
+      if (event.affectsConfiguration('permissionWildcarding.openThreads')) {
+        ensureOpenThreads(true);
+        if (openThreadsEnabled()) scheduleThreadsCompile();
+      }
       if (event.affectsConfiguration('permissionWildcarding.memory')) {
         // BOTH, and in this order. Refreshing only the dashboard was worse than
         // refreshing nothing: memoryCardData() re-reads the configuration and
@@ -3123,6 +3133,20 @@ function activate(context) {
     context.subscriptions.push(gatesWatcher);
   } catch { /* never block activation */ }
 
+  // The compiled open threads, the same way: whoever compiles (the corpus watcher below, the CLI's
+  // `--open-threads refresh`) only writes this file, and this installs it. ensureOpenThreads is a
+  // no-op when the install is already settled.
+  try {
+    const threadsFile = threadsCompiledPath();
+    const threadsWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(threadsFile)), path.basename(threadsFile))
+    );
+    threadsWatcher.onDidChange(() => ensureOpenThreads());
+    threadsWatcher.onDidCreate(() => ensureOpenThreads());
+    threadsWatcher.onDidDelete(() => dashboard?.refresh());
+    context.subscriptions.push(threadsWatcher);
+  } catch { /* never block activation */ }
+
   // Sidebar dashboard (Activity Bar → webview).
   dashboard = new WildcardingViewProvider(context);
   context.subscriptions.push(
@@ -3268,7 +3292,9 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.toggleGates', () => toggleGates()),
     vscode.commands.registerCommand('permission-wildcarding.toggleMemoryGuard', () => toggleMemoryGuard()),
     // Retire or restore one memory gate at a time, from the card's Manage gates… or the palette.
-    vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates())
+    vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates()),
+    // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card.
+    vscode.commands.registerCommand('permission-wildcarding.toggleOpenThreads', () => toggleOpenThreads())
   );
   try {
     registerLocalWatchers(context);
@@ -3290,6 +3316,11 @@ function activate(context) {
   // The MEMORY.md guard's stable copy, after an upgrade: replaced only when our hook is
   // registered and this build's GUARD_REVISION is higher. settings.json is never written here.
   try { refreshMemoryGuardCopy({ home: os.homedir() }); } catch (err) { console.error('ai-acolyte: MEMORY.md guard copy refresh failed —', err); }
+  // Open threads: install what was last compiled now, then recompile a few seconds in when a
+  // compile could say something new (activationThreadsCompile), because an agent may have edited
+  // MEMORY.md or closed a thread while this window was closed.
+  ensureOpenThreads();
+  activationThreadsCompile();
   // A retire or restore a reload or a crash cut short, reported once (pending-gates.<pid>.json).
   try { reportInterruptedGateChanges(); } catch (err) { console.error('ai-acolyte: pending gate change check failed —', err); }
   startAutoLearn(context);
@@ -3406,6 +3437,52 @@ function gatesCorpusBump(uri) {
   }, 2000);
 }
 
+// Every *.md event of every store, handed to both consumers. Each decides for itself, so the
+// open threads inherit none of the gates' skips: they compile while gates are off, they do not
+// skip a gate edit this host made (its `status:` may have changed too), and they DO react to
+// MEMORY.md, whose health is their INDEX line. One throwing never starves the other.
+function memoryCorpusChanged(uri) {
+  try { gatesCorpusBump(uri); } catch (err) { console.error('ai-acolyte: gate recompile not scheduled —', err); }
+  try { threadsCorpusBump(uri); } catch (err) { console.error('ai-acolyte: open threads recompile not scheduled —', err); }
+}
+
+// Recompile the open threads when a change can move them. Never while openThreads.enabled is
+// off (switched off stays off; turning it on compiles), and only when one of these holds:
+//   * the file is MEMORY.md, whose budgets the INDEX line reports;
+//   * the compiled file currently lists a thread, so any edit, a deletion included, may be the
+//     one that closes it, and a closed thread has to leave the block;
+//   * the file mentions `status:` or a status marker, so it may be opening one.
+// A change in a store that does not compile is skipped: the compile reads one store.
+function threadsCorpusBump(uri) {
+  if (deactivated || !openThreadsEnabled()) return;
+  const file = uri?.fsPath;
+  if (file && !threadsMayChange(file)) return;
+  if (file) {
+    let store = null;
+    try { store = memoryReport().dir; } catch { /* unknown: compile, the compile pins its own */ }
+    if (store && gateEditKey(path.dirname(file)) !== gateEditKey(store)) return;
+  }
+  scheduleThreadsCompile();
+}
+
+function threadsMayChange(file) {
+  if (path.basename(file) === 'MEMORY.md') return true;
+  if (compiledListsThreads()) return true;
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    return /status\s*:/.test(text) || text.includes('<!-- status -->') || text.includes('<!-- /status -->');
+  } catch { return false; }
+}
+
+// Whether open-threads.generated.md's heading counts any thread. A torn or missing file reads as
+// none: the next status-mentioning edit or MEMORY.md change compiles it again.
+function compiledListsThreads() {
+  try {
+    const heading = /^## Open threads \((\d+), managed\)$/m.exec(fs.readFileSync(threadsCompiledPath(), 'utf8'));
+    return !!heading && Number(heading[1]) > 0;
+  } catch { return false; }
+}
+
 // Add watchers for dirs that appeared, drop the ones whose dir went away. memoryLint.js's
 // syncWatchers, applied to a second and third set.
 function syncWatcherSet(watchers, dirs, glob, handler) {
@@ -3433,7 +3510,7 @@ function reconcileMemoryWatchers() {
   // reconcile and could hand the two sets different answers if a store appeared between them.
   const dirs = new Set(memoryStoreDirs());
   syncWatcherSet(memoryCardWatchers, dirs, 'MEMORY.md', memoryCardBump);
-  syncWatcherSet(gatesCorpusWatchers, dirs, '*.md', gatesCorpusBump);
+  syncWatcherSet(gatesCorpusWatchers, dirs, '*.md', memoryCorpusChanged);
 }
 
 function disposeMemoryWatchers() {
@@ -4412,6 +4489,191 @@ async function toggleMemoryGuard() {
   dashboard?.refresh();
 }
 
+// ── open threads (2026-10-19) ──────────────────────────────────────────────────────
+// `recall.py --threads-compile` lists every memory whose `status:` is open, awaiting, blocked or
+// deferred, from the store compileGates pins, in ~/.claude/open-threads.generated.md, with an
+// INDEX line when MEMORY.md is past a budget; src/agent-open-threads.js installs it as its own
+// managed block in CLAUDE.md and AGENTS.md. The index stays a list of hooks, and the status that
+// bloated it has a home that every session still reads. A separate block from the gates, with a
+// separate switch, so neither can take the other with it.
+//
+// Unlike the gates, the compile runs unattended from the start, because the INDEX line has to
+// reach a box whose managed policy keeps the MEMORY.md guard hook from running: on a corpus
+// change that can move the block (threadsCorpusBump), on activation when there is anything to
+// say (activationThreadsCompile), and when the setting is turned on. Never while it is off.
+
+// USER settings only (machine-scoped), read as gatesEnabled reads its key: it decides what the
+// user's global instruction files say, so a workspace may neither install the block nor strip it.
+// Switched off stays off: ensure removes the block, and nothing compiles or installs it.
+function openThreadsEnabled() {
+  return userSetting('openThreads.enabled', true);
+}
+
+const THREADS_BOUNCE_MS = 2500;       // after a corpus edit or the setting; not the gates' 2000
+const THREADS_ACTIVATION_MS = 4000;   // after activation, once the host has settled
+
+// compileGates for `--threads-compile`: the same Python, the same pinned store, the same tracked
+// and tree-killed child with a 60 s deadline. Resolves false when it could not run, having said
+// why: a modal for a person's action, the console and the output channel for an unattended one.
+function compileThreads({ quiet = false } = {}) {
+  const say = (msg) => {
+    if (!quiet) { vscode.window.showWarningMessage('ai-acolyte: ' + msg); return; }
+    console.error('ai-acolyte: ' + msg);
+    sharedChannel()?.appendLine(`[${new Date().toISOString()}] open threads: ${msg}`);
+  };
+  if (deactivated) return Promise.resolve(false);
+  const script = recallScriptPath();
+  if (!script) { say('recall.py not found, so open threads cannot be compiled.'); return Promise.resolve(false); }
+  const st = recallStatus();
+  if (!st.venv) { say(`DevToolbox venv python not found at ${st.py}, so open threads cannot be compiled.`); return Promise.resolve(false); }
+  const env = gateCompileEnv();
+  return new Promise((resolve) => {
+    endTreeAfter(trackChild(execFile(st.py, [script, '--threads-compile'], { env }, (err, _out, stderr) => {
+      if (deactivated) { resolve(false); return; }
+      if (err) {
+        const detail = (stderr || err.message || '').trim().slice(0, 300);
+        if (quiet) say(`compile failed — ${detail}`);
+        else vscode.window.showErrorMessage(`ai-acolyte: open threads compile failed — ${detail}`);
+        resolve(false);
+        return;
+      }
+      resolve(true);
+    })), 60000);
+  });
+}
+
+// One debounced compile and install, shared by the corpus watcher, activation and the setting.
+function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS) {
+  if (deactivated) return;
+  clearTimeout(threadsBounce);
+  threadsBounce = setTimeout(() => {
+    threadsBounce = null;
+    compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
+  }, delay);
+}
+
+// After activation, a compile only when one could say something: a memory declares `status:`,
+// the compiled file exists (a thread may have closed while the window was shut), or MEMORY.md is
+// past a budget. A machine that never uses the feature never spawns Python for it. The question
+// is asked in the deferred timer, not here: it reads the whole store (memoryReport), and
+// activation itself reads none of it.
+function activationThreadsCompile() {
+  if (deactivated || !openThreadsEnabled()) return;
+  clearTimeout(threadsBounce);
+  threadsBounce = setTimeout(() => {
+    threadsBounce = null;
+    if (deactivated || !openThreadsEnabled() || !threadsWorthCompiling()) return;
+    compileThreads({ quiet: true }).then((ok) => { if (ok) ensureOpenThreads(); });
+  }, THREADS_ACTIVATION_MS);
+}
+
+function threadsWorthCompiling() {
+  try {
+    try { if (fs.statSync(threadsCompiledPath()).size > 0) return true; } catch { /* none yet */ }
+    const { report } = memoryReport();
+    if (!report) return false;
+    return report.threadDeclared > 0 || (typeof indexHealth === 'function' && indexHealth(report).length > 0);
+  } catch (err) {
+    console.error('ai-acolyte: open threads compile not scheduled —', err);
+    return false;
+  }
+}
+
+// Keep the instruction files in step with the setting and the compiled file. Silent and
+// write-free when already settled. Unattended (activation, the compiled-file watcher, the
+// recompile), so no in-place fallback, and every failed target goes to the output channel.
+function ensureOpenThreads(announce = false) {
+  try {
+    if (deactivated) return;
+    const want = !!openThreadsEnabled();
+    const states = openThreadsStatusAll().filter((state) => state.readable);
+    if (!states.length) return;
+    // Nothing compiled yet is nothing to do, and never a reason to touch a file.
+    if (want && states[0].compile === 'missing') return;
+    const wants = (state) => want && state.wanted;
+    if (states.every((state) => (want ? state.compile === 'whole' : true) && state.on === wants(state)
+        && (wants(state) ? state.current : !state.shadowedPaths?.length))) return;
+    const results = setOpenThreadsAll(want, { inPlaceFallback: false });
+    const failed = results.filter((result) => result.error);
+    if (failed.length) {
+      const channel = sharedChannel();
+      const stamp = new Date().toISOString();
+      for (const result of failed) {
+        channel?.appendLine(`[${stamp}] open threads: ${result.agent} `
+          + `(${String(result.path || '').replace(os.homedir(), '~')}): ${result.error}`);
+      }
+    }
+    const changed = results.filter((result) => result.changed);
+    if (!changed.length) return;
+    if (announce || want) {
+      const added = changed.filter((result) => result.on).map((result) => result.agent);
+      const removed = changed.filter((result) => !result.on).map((result) => result.agent);
+      vscode.window.setStatusBarMessage('$(pin) ai-acolyte: open threads ' + [
+        added.length ? 'added to ' + added.join(' + ') : '',
+        removed.length ? 'removed from ' + removed.join(' + ') : '',
+      ].filter(Boolean).join(', '), 6000);
+    }
+    dashboard?.refresh();
+  } catch (err) {
+    console.error('ai-acolyte: open threads write failed —', err);
+  }
+}
+
+// `permission-wildcarding.toggleOpenThreads`: the user-tier setting, as toggleGates writes
+// gates.enabled. On (or a stale install) compiles and installs; a settled install is turned off,
+// after a confirmation, which removes the block from every agent.
+async function toggleOpenThreads() {
+  const config = vscode.workspace.getConfiguration('permissionWildcarding');
+  const enabled = !!openThreadsEnabled();
+  const states = openThreadsStatusAll();
+  const settled = (state) => state.readable && state.compile === 'whole'
+    && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
+  const next = !(enabled && states.length && states.every(settled));
+  if (!next) {
+    const files = states.filter((state) => state.on).map((state) => state.path.replace(os.homedir(), '~')).join(', ');
+    const choice = await vscode.window.showWarningMessage('Turn off open threads?', {
+      modal: true,
+      detail: (files ? `Removes the managed block from ${files}. ` : '')
+        + 'The memories keep their status; nothing is compiled or installed while this is off, and '
+        + 'MEMORY.md\'s health is no longer reported to new sessions. Sets openThreads.enabled to false.',
+    }, 'Turn off');
+    if (choice !== 'Turn off') return;
+  }
+  try {
+    await config.update('openThreads.enabled', next, vscode.ConfigurationTarget.Global);
+  } catch (err) {
+    vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
+    return;
+  }
+  if (deactivated) return;
+  // The setting's own listener has just armed a recompile; this one covers it, so it is dropped
+  // rather than run a second time two seconds later.
+  if (next) {
+    clearTimeout(threadsBounce);
+    threadsBounce = null;
+    await compileThreads();
+  }
+  if (deactivated) return;
+  const results = setOpenThreadsAll(next);
+  const refused = results.length === 1 && results[0].refusal ? results[0] : null;
+  const failed = results.filter((result) => result.error);
+  if (refused && !refused.error) {
+    vscode.window.showWarningMessage(`ai-acolyte: open threads are on, and nothing is installed: ${refused.reason}.`);
+  } else if (failed.length) {
+    vscode.window.showErrorMessage(`ai-acolyte: ${failed.map((result) => `${result.agent}: ${result.error}`).join('; ')}`);
+  } else if (!results.length) {
+    vscode.window.showWarningMessage('ai-acolyte: open threads: no agent instruction file to write.');
+  } else if (next && !results.some((result) => result.on)) {
+    vscode.window.showInformationMessage('ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its '
+      + 'budgets, so no block is installed until something is.');
+  } else {
+    vscode.window.showInformationMessage(`ai-acolyte: open threads ${next ? 'ON' : 'OFF'} — `
+      + results.map((result) => result.path.replace(os.homedir(), '~')).join(', ')
+      + (next ? ' (applies from each agent’s next session)' : ''));
+  }
+  dashboard?.refresh();
+}
+
 // The Claude memory card's guard line: the state, and whether Claude Code will run it here.
 function memoryGuardCardData() {
   try {
@@ -4419,6 +4681,36 @@ function memoryGuardCardData() {
     return { label: status.label, on: status.on, policy: status.policy.line, nodeMissing: status.nodeExists === false };
   } catch (err) {
     return { label: 'unreadable', on: false, policy: err.message, nodeMissing: false };
+  }
+}
+
+// The Claude memory card's open-threads line. One status read; `declared` and `listed` come from
+// the push's memory report (memoryLint.js threadOf, recall.py's reading), so the card can say how
+// many would be listed before anything is compiled.
+function threadsCardData(precomputed = null) {
+  try {
+    const enabled = !!openThreadsEnabled();
+    const states = openThreadsStatusAll();
+    let report = null;
+    try { report = (precomputed || memoryReport()).report; } catch { /* the line still draws */ }
+    const declared = report?.threadDeclared ?? null;
+    const listed = report?.threadListed ?? null;
+    if (!states.length) return { enabled, none: true, declared, listed };
+    const first = states[0];
+    return {
+      enabled,
+      none: false,
+      compile: first.compile,
+      count: first.threads,
+      index: states.find((state) => state.index)?.index || null,
+      installed: states.filter((state) => state.on).map((state) => state.agent),
+      current: states.every((state) => (state.wanted ? state.on && state.current : !state.on)),
+      reason: first.reason,
+      declared,
+      listed,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -4856,6 +5148,7 @@ class WildcardingViewProvider {
         case 'toggleGates': vscode.commands.executeCommand('permission-wildcarding.toggleGates'); break;
         case 'toggleMemoryGuard': vscode.commands.executeCommand('permission-wildcarding.toggleMemoryGuard'); break;
         case 'manageGates': vscode.commands.executeCommand('permission-wildcarding.manageGates'); break;
+        case 'toggleOpenThreads': vscode.commands.executeCommand('permission-wildcarding.toggleOpenThreads'); break;
         // No 'showWildcards' arm since 2026-10-14: the webview lost its only sender at
         // c09daab (the shared Saved permissions picker replaced that button), and the
         // two synthetic test rows posting it directly were all that kept it alive. The
@@ -5116,6 +5409,8 @@ class WildcardingViewProvider {
       local: localCardData(),
       guidance: guidanceCardData(),
       gates: gatesCardData(memory),
+      // The Claude memory card's open-threads line (2026-10-19), from the same memory report.
+      threads: threadsCardData(memory),
     });
   }
 
@@ -5368,6 +5663,9 @@ class WildcardingViewProvider {
         <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
         <div class="muted sub" id="memoryGuardStatus"></div>
         <button class="managed-action" id="memoryGuardBtn" title="A PreToolUse hook that refuses an edit leaving MEMORY.md worse on a measure already past its budget">Turn on MEMORY.md guard</button>
+        <div class="muted sub" id="claudeMemoryThreadsStatus"></div>
+        <div class="sub" id="claudeMemoryThreadsIndex" hidden></div>
+        <button class="managed-action" id="claudeMemoryThreads" title="The open-threads block: every memory whose status: is still open, in CLAUDE.md and AGENTS.md">Turn on open threads</button>
         <div class="muted sub" id="claudeCodeVersion"></div>
       </div>
     </div>
@@ -6045,7 +6343,37 @@ class WildcardingViewProvider {
       + (mg.nodeMissing ? ', and the node it runs is gone (turn it on again)' : '') + '. ' + mg.policy;
     $('memoryGuardBtn').textContent = !mg.on ? 'Turn on MEMORY.md guard'
       : (mg.label === 'on (needs repair)' ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
+    renderThreads((d && d.threads) || null);
     $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
+  }
+
+  // The open-threads line, its INDEX warning and its toggle (2026-10-19): what the block holds and
+  // where it is installed, and, while MEMORY.md is past a budget, the same sentence every new
+  // session reads. Text only: a thread's words never reach the card, only counts and the INDEX
+  // line, which recall.py writes from numbers.
+  function renderThreads(t) {
+    const agent = (name) => (name === 'claude' ? 'Claude' : name === 'codex' ? 'Codex' : name);
+    const n = (count) => count + ' thread' + (count === 1 ? '' : 's');
+    let line;
+    if (!t) line = 'Open threads: unavailable.';
+    else if (!t.enabled) {
+      line = 'Open threads: off.' + (t.declared ? ' ' + t.listed + ' of ' + t.declared + ' status memories would be listed.' : '');
+    } else if (t.none) line = 'Open threads: no agent instruction file found.';
+    else if (t.compile === 'refused') line = 'Open threads: the compiled file was refused (' + t.reason + ').';
+    else if (t.compile === 'missing') {
+      line = t.declared ? 'Open threads: ' + t.listed + ' open, not compiled yet.' : 'Open threads: none compiled yet.';
+    } else if (t.installed.length) {
+      line = 'Open threads: ' + t.count + ' installed (' + t.installed.map(agent).join(', ') + ')'
+        + (t.current ? '.' : '; update pending.');
+    } else {
+      line = t.count || t.index ? 'Open threads: ' + n(t.count) + ' compiled, not installed.' : 'Open threads: none open.';
+    }
+    $('claudeMemoryThreadsStatus').textContent = line;
+    const index = $('claudeMemoryThreadsIndex');
+    index.hidden = !(t && t.enabled && t.index);
+    index.textContent = t && t.index ? '⚠ INDEX: ' + t.index : '';
+    index.style.color = 'var(--vscode-charts-yellow, #d29922)';
+    $('claudeMemoryThreads').textContent = t && t.enabled ? 'Turn off open threads' : 'Turn on open threads';
   }
 
   // One wording for both memory cards' CPU LLM line: the Claude and Codex searches run the same
@@ -6383,6 +6711,7 @@ class WildcardingViewProvider {
   $('inspectClaudeMemory').addEventListener('click', () => vscode.postMessage({ type: 'inspectClaudeMemory' }));
   $('claudeMemoryGates').addEventListener('click', () => vscode.postMessage({ type: 'manageGates' }));
   $('memoryGuardBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleMemoryGuard' }));
+  $('claudeMemoryThreads').addEventListener('click', () => vscode.postMessage({ type: 'toggleOpenThreads' }));
   $('drainLocal').addEventListener('click', () => vscode.postMessage({ type: 'drainLocal' }));
   $('guidanceBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGuidance' }));
   $('gatesBtn').addEventListener('click', () => vscode.postMessage({ type: 'toggleGates' }));
@@ -6420,6 +6749,10 @@ async function deactivate() {
   // the recall timeout's handle was never captured at all, so both could fire
   // against a torn-down extension after a reload or an upgrade.
   clearTimeout(gatesBounce);
+  // The open-threads recompile, armed by the corpus watcher, activation or the setting: its
+  // callback spawns Python and then writes the instruction files.
+  clearTimeout(threadsBounce);
+  threadsBounce = null;
   clearTimeout(recallSyncTimer);
   clearTimeout(dashboardBounce);
   // The strip-model check: its timer, and a scan already running on its thread.

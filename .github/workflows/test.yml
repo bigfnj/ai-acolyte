@@ -125,6 +125,17 @@ jobs:
           TOOLBOX_PYTHON: ${{ steps.py.outputs.python-path }}
         run: bash test/gates-manage.sh
 
+      # recall.py --threads-compile (2026-10-19): the open-threads selection, format, caps, the
+      # header-only file, the INDEX line, the refusals, --lint, and memoryLint.js threadOf and
+      # indexHealth held to Python's reading over a generated corpus. The agreement half runs
+      # node, which the ubuntu runner image carries; under CI=true a missing node or Python is a
+      # FAILURE, not a skip, so this step cannot report green having run nothing.
+      - name: test/threads-compile.sh
+        env:
+          CI: "true"
+          TOOLBOX_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: bash test/threads-compile.sh
+
   # A separate job, because it needs a shell the matrix above cannot give it.
   #
   # install.ps1 once replaced the user's whole settings.json with nothing but its

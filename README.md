@@ -243,7 +243,53 @@ way, and installed only while memory gates are on: gates you switched off stay o
 terminal, `wildcard-perms --gates list`, `--gates retire <memory>` and `--gates restore <memory>`
 do the same. Only the store that compiles is changed, never the other stores the card reports.
 
-## 6. Recall over your memory
+## 6. Open threads (both agents)
+
+Status gets a home outside the memory index. Claude Code loads only the first 200 lines of
+`MEMORY.md`, and status written on index lines ("DONE", "AWAITING the owner") is what fills them.
+Instead, a memory says it is still open in its own frontmatter, and the open ones are listed in a
+managed block that both agents read at the start of every session.
+
+> **Buys you:** every session knows what is still waiting, and the index stays a list of hooks.
+
+```yaml
+---
+name: dashboard-layout
+metadata:
+  type: project
+  status: awaiting       # open, awaiting, blocked or deferred
+---
+
+The memory itself.
+
+<!-- status -->
+Waiting on the owner's choice between the two layouts.
+<!-- /status -->
+```
+
+Each open memory is one line of the block, `- **AWAITING** <text> (<memory file>)`, sorted by
+status (open, awaiting, blocked, deferred) and then by name. The text is the status block's, on
+one line, cut at 240 characters. At most ten are listed, and one more line counts the rest and
+points at `recall "status"`. `done`, `closed`, `live`, `shelved`, `deleted`, `dropped` and
+`shipped` close a thread: the memory stays, and its line leaves the block on the next compile.
+Any other value, two `status:` lines, or a listed status whose block is missing or sits only
+inside a code fence is left out, and `recall.py --lint` names it.
+
+While `MEMORY.md` is past 140 lines, 12000 bytes or a 300-character line, the block also carries
+an INDEX line telling every new session to compact it before adding anything. It reaches sessions
+on a machine whose managed policy keeps user hooks from running.
+
+`recall.py --threads-compile` writes `~/.claude/open-threads.generated.md` from the store the gates
+compile from. The extension recompiles after a memory edit that can change the list, a few seconds
+after activation when there is anything to say, and when the feature is turned on. It installs the
+result into `~/.claude/CLAUDE.md` and Codex's `AGENTS.md`, or a nonempty `AGENTS.override.md`.
+With nothing open and the index within its budgets, the block is removed. To turn it off, click
+**Turn off open threads** on the Claude memory card, run **AI Acolyte: Toggle open threads**, or
+set `permissionWildcarding.openThreads.enabled` to `false` in user settings; while it is off the
+extension neither compiles nor installs it. From a terminal, `wildcard-perms --open-threads
+on|off|status|refresh`.
+
+## 7. Recall over your memory
 
 ![Memory and recall card](img/07-memoryllm.png)
 
@@ -324,7 +370,7 @@ the guard does, and `recall.py --lint` also holds the entry count to 16;
 `memory.lineBudget` and `memory.totalBudget` settings tune the gauge only; the hook always uses
 the budgets above.
 
-## 7. Saved permissions (Claude Code and Codex)
+## 8. Saved permissions (Claude Code and Codex)
 
 The **Saved permissions** row combines Claude allow entries and local Codex allow
 rules, with an agent label on each entry. Its 12-entry preview alternates agents;
@@ -354,7 +400,7 @@ call it decided. Only counts are stored, keyed by a hash of each rule.
 
 > **Buys you:** a list worth pruning, without deleting a rule something still uses.
 
-## 8. Agent sessions
+## 9. Agent sessions
 
 The **Agent sessions** row lists the Claude and Codex sessions that wrote a transcript in the
 last 15 minutes. For each one it shows:
@@ -521,6 +567,19 @@ request for both front ends, computing what each agent loads before and after, s
 panel refuse and report alike. After the edit the change compiles once, through the same atomic
 write every compile uses, and installs through `setGatesAll`'s single read. The corpus watcher
 skips the memories the edit itself rewrote (`isOwnGateEdit`), so one change is one compile.
+
+The open-threads block is a third instance of `createManagedBlock`, in `src/agent-open-threads.js`,
+with its own markers, switch and `pre-open-threads` backups. `recall.py --threads-compile` reads
+`status:` the way `agents:` is read, at any indent with its comment dropped, takes the block text
+only from marker lines that sit on their own outside fenced code, and writes through the same
+temp-and-replace helper as the gates compile. It never writes an empty file: zero threads is the
+header and the heading, so an empty read can only be a torn one. The installer reads the file once
+and refuses a missing header, a sha that does not match the bytes below it, or a missing heading,
+with every instruction file left as it was. The same `*.md` watcher hands each event to the gates
+and to the threads, and the threads decide for themselves: they react to `MEMORY.md`, ignore
+whether gates are on, and skip a store that does not compile. `vscode-extension/memoryLint.js`
+`threadOf` is the JavaScript reading the card counts with, and `test/threads-compile.sh` holds it
+to Python's over a generated corpus.
 
 `memory/recall.py` embeds each memory with bge-small-en-v1.5 ONNX on the CPU and fuses the cosine
 with Okapi BM25 over the whole file, each leg min-max normalized per query. The lexical leg exists

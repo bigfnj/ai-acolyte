@@ -3309,3 +3309,141 @@ first commit. Re-run afterwards, it fired, and so did a second `recall-py.sh` mu
 run, and measure the node start it saves there. Verify the hook end to end on such a box: the
 exit-2 message reaching the model, and the per-call cost. Decide what `hookEventAllowed` should
 answer now. The editor gauge has no entry-count rule; the guard and `recall.py --lint` do.
+
+## Open threads: status leaves the index (2026-10-19)
+
+Built for 1.9.0 on branch `feat/open-threads` (on `d4e977d`, v1.8.1), from the maintainer's brief.
+The owner's `MEMORY.md` bloated mainly because agents wrote status on its index lines: 10 of the 15
+lines demoted from it carried DONE, SHIPPED or AWAITING. Claude Code loads only the first 200 lines
+of that file. Status now has a sanctioned home: a memory declares `status:` in its frontmatter and
+says what is open in a `<!-- status -->` ... `<!-- /status -->` block, `recall.py --threads-compile`
+lists the open ones in `~/.claude/open-threads.generated.md`, and `src/agent-open-threads.js`
+installs that file into `CLAUDE.md` and Codex's `AGENTS.md` (or a nonempty `AGENTS.override.md`) as a
+third managed block. The owner's box runs a managed policy that keeps user hooks from running, so the
+MEMORY.md guard hook built on another branch cannot fire there; the block therefore also carries an
+INDEX line whenever `MEMORY.md` is past a budget, and every new session reads it.
+
+**Selection** (`memory/recall.py` `_thread`). `status:` is read like `agents:`: anywhere in the
+frontmatter, at any indent, `status :` still the key, a trailing `# comment` dropped through
+`_uncomment`. Two `status:` lines are refused, never guessed at. Listed, case-insensitive: open,
+awaiting, blocked, deferred, which is also the block's sort order, then the file stem. Closed,
+silently not listed: done, closed, live, shelved, deleted, dropped, shipped. Any other value, an
+empty one included, is a `--lint` finding and is not listed. A listed status needs its block, whose
+marker lines must each stand alone (up to three spaces of indent, then only spaces or tabs after the
+marker) outside fenced code. An unclosed fence runs to the end of the file, as in CommonMark, which
+is deliberately unlike the managed-block reader in `src/agent-guidance.js`: there a stray fence must
+not hide a real block, and here a marker that might be an example must not compile. The last opening
+marker before the first closing one starts the block, as `blockRange` does. A listed status with no
+such block is a finding and is not listed. The index is excluded, as it is from the gates.
+
+**The file.** A header line carrying the first 16 hex digits of the SHA-256 of every byte below it,
+then `## Open threads (N, managed)` with N counting threads only, then the INDEX line when there is
+one, then at most ten lines `- **AWAITING** <text> (<stem>)` and one more counting the rest
+(`- +N more open threads (recall "status")`). The text is the block's, collapsed on Python's
+whitespace, with `<!--` and `-->` neutralised as `&lt;!--` and `--&gt;` (Claude Code strips HTML
+comments, so a stray one would swallow what follows), a leading `#` escaped with a backslash, and cut
+to 240 code points with an ellipsis. The stem gets the same collapse and neutralisation, uncapped.
+Zero threads and a healthy index write the header and the heading alone, never an empty file, so an
+empty read can only be a torn one.
+
+**INDEX line.** Three budgets: 140 lines (`LINT_LINES_WARN`, added here; another branch adds the
+identical line), 12000 bytes on disk (`LINT_TOTAL_WARN`) and a 300 code point physical line
+(`LINT_LINE_WARN`, its line ending excluded). Lines are counted as `memoryLint.js` `fastLint` and
+`wc -l` count them. Not the 16-entry ceiling, which is a soft attention target and would nag forever.
+
+**Refusals.** Exit 1 with nothing written when discovery could not read a store (`compile_gates`'
+reason), when the memory dir is missing, and, beyond the brief, when one memory cannot be read,
+because dropping it would drop its thread in silence. There is no empty-compile refusal: zero is a
+real answer, and it is how a closed thread leaves the block. The write is `_replace_file_text`,
+`compile_gates`' temp-and-replace with its retry, lifted out unchanged (temp name, schedule and
+message), so the gates' own atomic-write test in `test/recall-py.sh` still holds it.
+
+**Install** (`src/agent-open-threads.js`, separate from `agent-gates.js` on purpose). One read of the
+compiled file per call. Missing is nothing to do: a row with `refusal: 'missing'` and no `error`, so
+an unattended caller logs nothing. A missing or torn header (nothing older wrote this file, so there
+is no headerless form to accept), a sha that does not match, or a missing heading is refused with
+every instruction file left as it was. A whole compile that lists nothing and has no INDEX line
+removes the block from every agent, and its status rows read `current` once no block is left.
+Backups are `*.pre-open-threads` and `*.pre-open-threads-prev`.
+
+**CLI.** `wildcard-perms --open-threads on|off|status|refresh`, dispatched just before `--gates`.
+`refresh` compiles through `runRecallCaptured(['--threads-compile'])`, installs with
+`inPlaceFallback: false`, stays quiet when nothing changed, passes the compile's stderr on, and never
+advises itself. `status` gives each agent ON or OFF, the thread count, whether an INDEX line is in
+the compile, and the INDEX sentence itself.
+
+**Extension.** `permissionWildcarding.openThreads.enabled`, machine-scoped and read from the user
+tier like `gates.enabled`. Unlike the gates, the compile runs unattended from the start, because the
+INDEX line exists for boxes where nothing else can say it. Triggers: a memory edit that can move the
+block, a few seconds after activation when a compile could say something (a memory declares
+`status:`, a compile exists, or the index is past a budget), and the setting turning on. Switched
+off stays off: `ensureOpenThreads` removes the block, the corpus bump and activation compile nothing,
+and the compiled-file watcher installs nothing. The `*.md` watcher's handler became a dispatcher,
+`memoryCorpusChanged`, calling the unchanged `gatesCorpusBump` and a new `threadsCorpusBump`, which
+inherits none of the gates' skips (`gatesEnabled`, `isOwnGateEdit`, the MEMORY.md skip), reacts to
+`MEMORY.md`, recompiles on any edit while the compiled file lists a thread (a closure or a deletion),
+otherwise only for a file that mentions `status:` or a status marker, and skips a store that does not
+compile. Its timers are 2500 ms and 4000 ms, not the gates' 2000, which `test/gates-panel.test.js`
+holds as the gates recompile; `threadsBounce` is cleared in deactivate. The activation check runs
+inside its deferred timer rather than at activation: an activation-time `memoryReport()` read the
+whole store on the activation path and broke `test/dashboard-view.test.js`'s one-report-per-push
+census (2 calls against 1). The toggle (**AI Acolyte: Toggle open threads**) writes the user tier;
+a settled install is turned off after a modal, anything else compiles (dropping the recompile the
+setting's own listener just armed) and installs. The Claude memory card gained an open-threads line,
+the INDEX warning and the toggle button, after the gates line, so both cards' shared order still holds.
+
+**JavaScript and Python agree.** `memoryLint.js` `threadOf` (counts for the card and activation's
+check, in `fullReport` as `threadDeclared` and `threadListed`) and `indexHealth` read every one of 700
+generated memories and 24 generated indexes exactly as `_thread` and `_index_health` do
+(`test/threads-compile.sh`). The corpus reached every outcome: none 278, no-block 151, unknown 133,
+closed 60, duplicate 45, listed 33; 12 of the 24 indexes were past a budget. Two recorded
+divergences, neither on the compile's path: for a `MEMORY.md` that is not valid UTF-8, Node's decoder
+and Python's `errors="replace"` can disagree about how many replacement characters a bad sequence
+becomes, which only moves activation's longest-line check; and `memoryReport` sees only stores that
+hold a `MEMORY.md` (`discoverDirs`), so a store without one never triggers activation's compile,
+though `recall.py` compiles it.
+
+**Tests.** `test/threads-compile.sh` (new, a step in the existing `gates-manage` CI job, where
+`CI=true` turns a missing Python or node into a failure), `test/agent-open-threads.test.js` (12),
+`test/cli-open-threads.test.js` (9), `test/extension-open-threads.test.js` (11),
+`test/open-threads-reading.test.js` (3), a card test in `test/dashboard-view.test.js`, and the
+censuses moved: seven `execFile` sites with the new 60 s deadline, the dashboard route table, the
+machine-scoped manifest census, deactivate's timeout count (16, where the old bound of 7 could not
+fail for any timer dropped since), and `fastLint` from HELD to TEST_ONLY in
+`test/dead-exports.test.js`, because the new reading test calls it directly.
+
+**Mutations, each run one at a time by a runner that restored the file and checked it by
+sha256.** 47 of `recall.py` against `test/threads-compile.sh` (selection, every status class,
+duplicate refusal, fence and marker anchoring, the text's collapse, neutralising, escaping and cap,
+the line cap, the header-only file, each INDEX budget and its join, each refusal, the atomic write,
+the run-alone check, every `--lint` section, its count line, its reserved phrases and `clean:`):
+all killed, three only after the test gaps they exposed were closed (an index fixture whose
+frontmatter sat below its index lines and so declared nothing, no text under 240 characters but
+over 240 bytes, no shorter fence closer before a block). 13 of `memoryLint.js`'s reading against
+the agreement half: all killed, one (JavaScript's `.` in `FENCE_OPEN`) only after the generator
+learned to put U+2028 in a fence's info string. 7 more of the reading against
+`test/open-threads-reading.test.js`, which CI's node matrix runs: all killed. 12 of
+`src/agent-open-threads.js` and 11 of `bin/wildcard-perms`: all killed. 32 of `extension.js`, one
+of `memoryLint.js`'s counts and one of the manifest, against the extension, dashboard, lifecycle,
+activation and machine-scope tests: all killed, one (the content check in `threadsMayChange`) only
+after its test stopped letting a listed thread arm the recompile first. Not separately
+falsifiable: `ensureOpenThreads`' early return for a missing compile, since `setOpenThreadsAll`
+then writes nothing either; it saves a second read. The runner itself was killed once by a
+workstation crash, mid-mutation; the one file it left mutated was restored and every mutation's
+original text checked present before anything was committed.
+
+**Not done here, and why.** `scripts/drive-installed.js`, `scripts/verify-release.ps1` and
+`scripts/smoke.sh` are the integrator's to wire. Nothing was pushed, so the new CI step has not run
+on GitHub. No real VS Code was driven.
+
+**Residuals, not changed here:**
+- The CLI has no setting: `--open-threads refresh` installs whatever the extension's setting says,
+  and the extension's next ensure removes it again while the setting is off. The gates behave the
+  same way.
+- A `status:` line inside a multi-line YAML scalar in the frontmatter is read as the key, as an
+  `agents:` line there is.
+- The thread text is the memory's own words, installed into every session, neutralised for comments
+  and markers and otherwise verbatim: the same trust the gates give the store that compiles.
+- Every `MEMORY.md` save in the compile store recompiles, one Python spawn per 2.5 s burst.
+- The block carries no line telling an agent where status belongs; the brief fixed the format, and
+  a footer would cost tokens in every session. A gate memory can say it instead.

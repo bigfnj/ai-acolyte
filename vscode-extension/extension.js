@@ -3412,8 +3412,8 @@ function memoryCardBump() {
 // A SessionStart hook would be the obvious home for this and it does not work under a
 // managed policy. This said enforcement of `allowManagedHooksOnly` is PER EVENT, from a
 // PostToolUse canary that fired 4 of 4 on a box whose policy defined PostToolUse alone. On
-// 2026-10-19 (Claude Code 2.1.293 and 2.1.301) no user hook of any event ran under it, so
-// read it as "no user hooks" (README, "watch the cause, do not hook the event").
+// 2026-10-19 (Claude Code 2.1.293 and 2.1.301) no user hook ran under it on the three events
+// tried, so read it as "no user hooks" (README, "watch the cause, do not hook the event").
 //
 // A memory file changing is the better trigger regardless. It is the actual cause, it
 // fires once per edit instead of once per session, and the extension is not a hook, so no

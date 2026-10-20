@@ -11,7 +11,9 @@ and emits policy in each agent's native format.
 **Version 1.9.0 keeps the memory index lean**: an optional MEMORY.md guard hook refuses an edit
 that leaves the index worse past its budget, an Open threads block carries each memory's open status
 into every session in place of index lines, and Toggle Auto Learn switches Auto Learn from the
-dashboard (a workspace may now only turn it off). Two Windows process-spawn races are fixed.
+dashboard (a workspace may now only turn it off). One Windows process-spawn race is fixed (the
+Codex version probe inherited another spawn's pipes, so it read "timed out"), and a tree kill its
+caller started now reads as ended.
 **Version 1.8.1 groups the dashboard rows** under Activity, Memory & instructions and Permissions,
 with Agent sessions first. **Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
 Inspect memory sources, a gates line and the Claude Code version, and Codex memory gains the CPU model
@@ -625,9 +627,13 @@ current Claude Code it is wrong.** Measured on the development box on 2026-10-19
 2.1.293 and 2.1.301, under a managed policy that sets `allowManagedHooksOnly`:
 `claude -p "/goal x"` answered "/goal can't run while hooks are restricted (disableAllHooks or
 allowManagedHooksOnly is set in settings or by policy)", and no user, project or `--settings` hook
-ran on any event tried (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`). Read the setting as "no
-user hooks at all" until a newer client shows otherwise. `wildcard-perms --memory-guard probe`
-asks the installed client the same `/goal` question.
+ran on the three events tried (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`); no other event
+was tried. Those runs were made by hand. `scripts/probe-user-hooks.js` repeats the `/goal` question
+and the `--settings` and project-local cases on all three events (it does not register a user-level
+hook, which would edit `~/.claude/settings.json`), and refuses to run without `--run-claude`,
+because each case is a real Claude Code turn. Read the setting as "no user hooks at all" until a
+newer client shows otherwise. `wildcard-perms --memory-guard probe` asks the installed client the
+same `/goal` question.
 
 An extension is not a hook, so no policy toggle reaches it, and that reframes the build. Trigger
 on the cause rather than the ceremony: recompiling gates on a corpus change fires once per edit
@@ -699,6 +705,10 @@ mutation run there changes the code the next real tool call runs against your re
 ```bash
 git -C ../ai-acolyte-live checkout --detach vX.Y.Z
 ```
+
+The live worktree exists only on the machine whose `settings.json` registers the hook from it, so a
+release cut on another machine records that this step is still to do there (the record's "The 1.9.0
+backlog clearance (2026-10-20)" explains the 1.9.0 case).
 
 `test/recall-py.sh` is listed because nothing else invokes it. It is not in `node --test`
 (it needs the toolbox Python, which CI has no way to provide) and it was not in this

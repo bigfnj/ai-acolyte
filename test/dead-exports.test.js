@@ -213,6 +213,9 @@ const TEST_ONLY = {
   'scripts/check-codex-runtime.js': ['PROVENANCE_ROOTS', 'localRequireClosure'],
   'scripts/check-line-refs.js': ['anchorLines', 'anchorsFrom', 'checkBounds', 'checkVacuous', 'collectRefs', 'fixAnchored', 'isVacuousSpan', 'stripRefs', 'tracked'],
   'scripts/mirror-pack.js': ['NEVER_MIRROR', 'mirrorTargets'],
+  // 2026-10-20. The probe runs real Claude Code turns, so test/probe-user-hooks.test.js drives
+  // its argument handling, canary settings, plan and verdicts through these.
+  'scripts/probe-user-hooks.js': ['EVENTS', 'VARIANTS', 'canarySettings', 'hookCommand', 'judgeGoal', 'judgeHook', 'parseArgs', 'planRuns', 'probePaths'],
 };
 
 // The tree as git sees it, repo-relative with forward slashes: tracked files, plus new ones

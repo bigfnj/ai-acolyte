@@ -443,14 +443,18 @@ Two lessons that outrank the rest:
    grant. When measuring value, weight the PowerShell half.
 
 Also: where `allowManagedHooksOnly` is set, **a user hook is silently dropped,
-on every event**. This used to read "where `PreToolUse` is not among the events
-the policy itself defines", the per-event reading. On 2026-10-19, with Claude
-Code 2.1.293 and 2.1.301 under a managed policy that sets it, no user, project
-or `--settings` hook ran on `PreToolUse`, `PostToolUse` or `UserPromptSubmit`,
-and `claude -p "/goal x"` refused with "/goal can't run while hooks are
-restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by
-policy)". Any local hook-based permission strategy must account for that
-managed-policy boundary.
+on each of the three events tried** **[measured]**. This used to read "where
+`PreToolUse` is not among the events the policy itself defines", the per-event
+reading. On 2026-10-19, with Claude Code 2.1.293 and 2.1.301 under a managed
+policy that sets it, no user, project or `--settings` hook ran on `PreToolUse`,
+`PostToolUse` or `UserPromptSubmit`, and `claude -p "/goal x"` refused with
+"/goal can't run while hooks are restricted (disableAllHooks or
+allowManagedHooksOnly is set in settings or by policy)". No other event was
+tried. `scripts/probe-user-hooks.js` reproduces the `/goal` question and the
+`--settings` and project-local cases (not the user-level one, which would edit
+`~/.claude/settings.json`); it runs only with `--run-claude`, since each case is
+a real Claude Code turn. Any local hook-based permission strategy must account
+for that managed-policy boundary.
 
 `src/managed-policy.js` reads this file so the tool can act on it:
 `assessPermission` labels a permission `inert` when a managed ask or deny covers
@@ -541,8 +545,9 @@ pattern **[docs: hooks-guide]**:
 An `allow` decision skips the prompt but **does not** override deny rules,
 including enterprise managed deny lists, and cannot suppress the prompt for MCP
 tools marked `requiresUserInteraction` **[docs]**. Unavailable where
-`allowManagedHooksOnly` is set: on 2026-10-19 no user hook of any event ran under
-it (Claude Code 2.1.293 and 2.1.301), not only events the policy leaves out.
+`allowManagedHooksOnly` is set: on 2026-10-19 no user hook ran under it on any of
+the three events tried, `PreToolUse` among them (Claude Code 2.1.293 and 2.1.301,
+`scripts/probe-user-hooks.js`), not only on events the policy leaves out.
 
 This is the interesting one for a learner. A hook can reuse the same
 classification the exporters already run and answer per command, which sidesteps

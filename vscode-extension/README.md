@@ -265,7 +265,7 @@ watcher-driven scan waits out, so a burst of transcript writes coalesces into on
 `permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
 `permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
 how long one worker operation may run before the extension stops waiting). The full list of
-all 19 settings is at the end of this file.
+all 20 settings is at the end of this file.
 
 **AI Acolyte: Toggle Auto Learn**, and the card's **Turn on** / **Turn off** button, switch
 `autoLearn.enabled` in your user settings. Off stops the extension's background scans; **Scan
@@ -311,7 +311,7 @@ works under a managed policy.
   should now take a line out.
 - It auto-discovers every `~/.claude/projects/*/memory/MEMORY.md`, updates on save and
   on external edits, and can be pinned or tuned via the `permissionWildcarding.memory.*`
-  settings (`enabled`, `dir`, `lineBudget` for one hook's width, `maxLines` for how many lines
+  settings (`enabled`, `dir`, `lineBudget` for the width of any one line, `maxLines` for how many lines
   Claude Code actually loads, `totalBudget`, `recallScript`). Command:
   `Acolyte: Lint memory index`.
 
@@ -595,7 +595,7 @@ the Acolyte output channel says so once per window. With no user setting, the de
 | `claudeStripModelCheck` | `true` | Once per new Claude Code binary (about 30 s after activation, on a worker thread), compare its known-safe environment variables with the 2.1.296 list the generalizer models, and warn once on a difference. Never edits the list: a change still needs a release. Machine-scoped: a workspace value is ignored |
 | `memory.enabled` | `true` | Claude index lint/gauge and native Codex diagnostics; native gate refresh has a separate installed-marker opt-in |
 | `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home. Machine-scoped: a workspace value is ignored |
-| `memory.lineBudget` | `300` | Characters one index hook line may use |
+| `memory.lineBudget` | `300` | Characters any one `MEMORY.md` line may use, counted in characters |
 | `memory.maxLines` | `200` | Lines Claude Code actually loads from `MEMORY.md` |
 | `memory.totalBudget` | `12000` | Byte budget for the whole always-loaded index |
 | `memory.recallScript` | `""` | Override the `recall.py` path; checked before the bundled copy. Machine-scoped: a workspace value is ignored |

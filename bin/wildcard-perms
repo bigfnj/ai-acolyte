@@ -1476,7 +1476,7 @@ function codexHook(args) {
 }
 
 // `--memory-guard on|off|status|probe`: the MEMORY.md index guard, a PreToolUse hook that refuses
-// an edit leaving the always-loaded index worse on a measure already past its budget
+// an edit after which the always-loaded index ends past a budget and is worse on it than before
 // (src/memory-index-guard.js). Exit 0 on success, 1 on a usage error or a refusal, like --gates.
 // Every answer carries the policy line, because on a machine whose managed policy restricts
 // hooks the guard is installed and never runs, and a bare "ON" would read as protection.

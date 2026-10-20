@@ -316,9 +316,10 @@ works under a managed policy.
   `Acolyte: Lint memory index`.
 
 The lint is not a hook and needs none. The optional **MEMORY.md guard** is: a Claude Code
-`PreToolUse` hook that refuses an edit leaving the index worse on a measure already past its
-budget (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken comment),
-and lets every shrinking edit through. It uses those fixed budgets; the `memory.*` settings tune
+`PreToolUse` hook that refuses an edit after which the index ends past a budget and is worse on
+it than before (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken
+comment). Deleting whole lines passes unless it breaks an HTML comment or a code fence; for a
+broken comment the fix is to close or remove the whole comment. It uses those fixed budgets; the `memory.*` settings tune
 this gauge, not the hook. Turn it on with **Toggle MEMORY.md guard**, which asks first. Where a
 managed policy sets `allowManagedHooksOnly` or `disableAllHooks`, Claude Code runs no user hook,
 so the guard is installed and inert there, and the card says so. The root README section "The
@@ -545,7 +546,7 @@ dashboard title-bar buttons.
 | Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
-| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit leaving a `MEMORY.md` index worse on a measure already past its budget; asks before adding it, and says when managed policy will stop Claude Code running it |
+| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit after which a `MEMORY.md` index ends past a budget and is worse than before; asks before adding it, and says when managed policy will stop Claude Code running it |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
 | Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line while `MEMORY.md` is past a budget |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |

@@ -9,7 +9,7 @@ approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
 **Version 1.9.0 keeps the memory index lean**: an optional MEMORY.md guard hook refuses an edit
-that leaves the index worse past its budget, an Open threads block carries each memory's open status
+after which the index ends past a budget and is worse than before, an Open threads block carries each memory's open status
 into every session in place of index lines, and Toggle Auto Learn switches Auto Learn from the
 dashboard (a workspace may now only turn it off). Two Windows process-spawn races are fixed.
 **Version 1.8.1 groups the dashboard rows** under Activity, Memory & instructions and Permissions,
@@ -335,11 +335,16 @@ the edit and blocks only when a measure **ends past its budget and is worse than
 | resident `- ` entries | 16 |
 | broken HTML comments: a `<!--` inside an open comment, an orphan `-->`, a `<!--` never closed | 0 |
 
-The worse-than-before half is what makes it safe over an index that is already too big. Deleting
-lines can only lower the first four, so compacting always gets through, and at 16 entries a new
-one has to replace an old one. The one deletion it refuses is half of a comment, because the
-comment's body would then load into every session. When it blocks, Claude Code shows the model
-each measure with its value and budget and the fix: move detail and status into the memory file.
+The worse-than-before half is what makes it safe over an index that is already too big. It also
+means the first step past a budget is refused: 140 lines to 141 is worse and ends past it. Deleting
+whole lines can only lower the first four, so compacting by deletion gets through, and at 16
+entries a new one has to replace an old one. A deletion that breaks an HTML comment or a code
+fence is refused: removing only a comment's `<!--` or `-->` line, or the fence that kept a `<!--`
+from being a comment, would load the comment's body into every session. A smaller file is not
+automatically a pass either: joining two lines into one longer than 300 characters makes the
+longest line worse. When it blocks, Claude Code shows the model each measure with its value and
+budget and the fix: move detail and status into the memory file for a size measure, and close or
+remove the whole comment for a broken one, whose first defect it locates by line.
 Anything the guard cannot judge is let through: a payload over 8 MiB, an `old_string` that is not
 in the file, a `MEMORY.md` it cannot read.
 

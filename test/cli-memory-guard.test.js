@@ -76,7 +76,9 @@ test('--memory-guard on installs, repeats as already, and off removes only the g
   assert.match(again.stdout, /^wildcard-perms memory-guard: ON \(already\)/);
   const status = run(home, ['--memory-guard', 'status']);
   assert.match(status.stdout, /\n {2}hook: {3}PreToolUse Write\|Edit\|MultiEdit, node /);
-  assert.match(status.stdout, /\n {2}copy: {3}~[\\/]\.claude[\\/]wildcarding[\\/]memory-index-guard\.js, revision 1 \(this build ships 1\)/);
+  const { GUARD_REVISION } = require('../src/memory-index-guard');
+  assert.ok(status.stdout.includes(`memory-index-guard.js, revision ${GUARD_REVISION} (this build ships ${GUARD_REVISION})`), status.stdout);
+  assert.match(status.stdout, /\n {2}copy: {3}~[\\/]\.claude[\\/]wildcarding[\\/]memory-index-guard\.js, revision \d+ /);
 
   const off = run(home, ['--memory-guard', 'off']);
   assert.equal(off.status, 0, off.stderr);

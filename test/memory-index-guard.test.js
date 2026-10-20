@@ -46,6 +46,7 @@ test('the guard requires fs and path and nothing else, so its copy runs outside 
 // MUTATION: change any character of the guard (a comment will do) without a bump: this fails.
 const GUARD_SHAS = {
   1: '46d6616be7b3bb8f9d31c406e376bc363ac6aafe4588e3878cf59d3a04fc6012',
+  2: 'f337571b7e2ec599f0dfcaea7849bea771b24725b215e51b7b9725233136780a',
 };
 test('the guard source is pinned to its GUARD_REVISION, so a change without a bump fails', () => {
   const text = fs.readFileSync(GUARD, 'utf8').replace(/\r\n/g, '\n');
@@ -242,12 +243,59 @@ test('the block message names each failed measure with value and budget, and the
   const message = blockMessage(reasons);
   assert.ok(message.length <= 600, `${message.length} characters: ${message}`);
   for (const reason of reasons) assert.ok(message.includes(`${reason.after} (budget ${reason.budget}, was ${reason.before})`));
-  assert.match(message, /Compact MEMORY\.md: move detail into the memory file; status goes in the memory file/);
+  assert.match(message, /Move detail and status to the memory file\. Close or remove the whole comment\./);
+  // With the first defect located, the longest message the guard can write still fits.
+  const located = blockMessage(reasons, '<!--\n'.repeat(99999));
+  assert.ok(located.length <= 600, `${located.length} characters: ${located}`);
+  assert.match(located, /was 98; first: <!-- inside a comment, line 2\)/);
   assert.match(message, /`wildcard-perms --memory-guard off`/);
   // The palette command it names is one the extension contributes, by its exact title.
   const titled = message.match(/AI Acolyte command "([^"]+)"/)[1];
   const titles = require('../vscode-extension/package.json').contributes.commands.map((entry) => entry.title);
   assert.ok(titles.includes(`AI Acolyte: ${titled}`), `no contributed command is titled "AI Acolyte: ${titled}"`);
+});
+
+// The message says what the rule is, not a rule it is not (audit 2026-10-20). A first crossing is
+// refused, so "already past its budget" is false; "shrinking edits always pass" is false for a
+// half-comment deletion and a line join; and "compact MEMORY.md" is the wrong fix for a comment.
+// MUTATION: put back the 1.9.0 wording ("a measure already past its budget ... Compact MEMORY.md
+// ... shrinking edits always pass") and both cases below fail.
+test('the block message states the rule, and its advice follows the reasons', (t) => {
+  const f = configFixture(t);
+  const env = { CLAUDE_CONFIG_DIR: f.config };
+  const at = Array.from({ length: 140 }, (_, i) => `l${i}`).join('\n') + '\n';
+  const crossing = decide(JSON.stringify({ tool_name: 'Write', tool_input: { file_path: f.index, content: `${at}l140\n` } }),
+    { env, readFile: () => at });
+  assert.equal(crossing.code, 2, 'precondition: 140 lines to 141 is refused');
+  assert.doesNotMatch(crossing.stderr, /already past/);
+  assert.match(crossing.stderr, /would end past a budget and worse than before: lines 141 \(budget 140, was 140\)/);
+  assert.match(crossing.stderr, /Move detail and status to the memory file\./);
+  assert.doesNotMatch(crossing.stderr, /comment\./, 'a size measure gets no comment advice');
+
+  const index = '- a\n<!--\nprivate header\n-->\n- b\n';
+  const half = decide(JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: f.index, old_string: '-->\n', new_string: '' } }),
+    { env, readFile: () => index });
+  assert.equal(half.code, 2, 'precondition: deleting the comment\'s close is refused');
+  assert.match(half.stderr, /broken comments 1 \(budget 0, was 0; first: unclosed <!--, line 2\)/,
+    'the message names the comment and where it opens');
+  assert.match(half.stderr, /Close or remove the whole comment\./);
+  assert.doesNotMatch(half.stderr, /always pass|Compact|Move detail/i, 'no size advice and no false promise for a comment');
+});
+
+// Two edits the 1.9.0 docs promised would pass, and the rule refuses, correctly.
+test('removing a fence that hid a <!--, or joining two lines past 300 characters, is refused', () => {
+  const fenced = '- a\n```\n<!-- an example\n```\n- b\n';
+  assert.equal(commentDefects(fenced), 0, 'precondition: the fenced marker is an example');
+  const unfenced = verdict(fenced, fenced.replace('```\n', ''));
+  assert.deepEqual(unfenced.reasons.map((r) => r.metric), ['commentDefects'], 'deleting a whole fence line can break a comment');
+  assert.ok(measure(fenced.replace('```\n', '')).bytes < measure(fenced).bytes, 'and it made the file smaller');
+
+  const left = `- ${'x'.repeat(200)}`;
+  const right = `${'y'.repeat(200)}`;
+  const two = `${left}\n${right}\n`;
+  const joined = verdict(two, `${left} ${right}\n`);
+  assert.deepEqual(joined.reasons, [{ metric: 'lineChars', before: 202, after: 403, budget: 300 }]);
+  assert.ok(measure(`${left} ${right}\n`).lines < measure(two).lines, 'one line fewer, and still refused');
 });
 
 // ── the path filter ──────────────────────────────────────────────────────────

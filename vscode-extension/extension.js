@@ -52,6 +52,7 @@ const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const { memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable } = require('./src/memory-guard-install');
+const { BUDGETS: GUARD_BUDGETS } = require('./src/memory-index-guard');
 const {
   openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath,
 } = require('./src/agent-open-threads');
@@ -4467,10 +4468,12 @@ async function toggleMemoryGuard() {
         {
           modal: true,
           detail: 'Adds a PreToolUse hook to ~/.claude/settings.json. Before each Write or Edit, Claude Code runs '
-            + `${nodeExecutable} on a copy of the guard in ~/.claude/wildcarding, and the guard refuses an edit that `
-            + 'leaves a memory index (MEMORY.md) worse on a measure already past its budget: 140 lines, 12000 bytes, '
-            + '300 characters on one line, 16 "- " entries, no broken HTML comment. Edits that shrink the index always '
-            + `pass, and anything it cannot read is let through. settings.json is backed up first. ${status.policy.line}`,
+            + `${nodeExecutable} on a copy of the guard in ~/.claude/wildcarding, and the guard refuses an edit after `
+            + 'which a memory index (MEMORY.md) ends past a budget and is worse on it than before: '
+            + `${GUARD_BUDGETS.lines} lines, ${GUARD_BUDGETS.bytes} bytes, ${GUARD_BUDGETS.lineChars} characters on `
+            + `one line, ${GUARD_BUDGETS.entries} "- " entries, ${GUARD_BUDGETS.commentDefects} broken HTML comments. `
+            + 'Deleting whole lines passes unless it breaks an HTML comment or a code fence, and anything it cannot '
+            + `read is let through. settings.json is backed up first. ${status.policy.line}`,
         },
         'Turn on');
       if (choice !== 'Turn on') return;
@@ -5662,7 +5665,7 @@ class WildcardingViewProvider {
         <div class="muted sub" id="claudeMemoryGatesStatus"></div>
         <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
         <div class="muted sub" id="memoryGuardStatus"></div>
-        <button class="managed-action" id="memoryGuardBtn" title="A PreToolUse hook that refuses an edit leaving MEMORY.md worse on a measure already past its budget">Turn on MEMORY.md guard</button>
+        <button class="managed-action" id="memoryGuardBtn" title="A PreToolUse hook that refuses an edit after which MEMORY.md ends past a budget and is worse than before">Turn on MEMORY.md guard</button>
         <div class="muted sub" id="claudeMemoryThreadsStatus"></div>
         <div class="sub" id="claudeMemoryThreadsIndex" hidden></div>
         <button class="managed-action" id="claudeMemoryThreads" title="The open-threads block: every memory whose status: is still open, in CLAUDE.md and AGENTS.md">Turn on open threads</button>

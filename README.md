@@ -11,7 +11,7 @@ and emits policy in each agent's native format.
 **Version 1.9.3 fixes what a third audit found**: every CLI verb refuses an option or a word it
 does not read before anything runs (`--drain --dryrun` used to run a real drain), memory gate
 bodies lose invisible characters when they compile and `recall.py --lint` names the gate, memory
-text reaches the terminal with its control characters shown as `?`, and the two hook probes always
+text reaches the terminal with its control characters escaped or shown as `?`, and the two hook probes always
 settle and say a cleanup they could not finish.
 **Version 1.9.2 fixes what a second audit found**: the CLI runs one verb at a time (a second verb
 used to be dropped without a word), the hook probe is ended by a window reload and always answers

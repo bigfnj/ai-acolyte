@@ -29,7 +29,28 @@ function removeDir(dir) {
   return fs.promises.rm(dir, { recursive: true, force: true, maxRetries: RETRIES, retryDelay: RETRY_DELAY_MS });
 }
 
-module.exports = { removeDir };
+// The same retries, synchronously, for a file where an awaited fs.promises.rm cannot be used
+// (2026-10-20). In test/extension-open-threads.test.js it kept the test file's process alive after
+// its last test on CI's Node 20 / windows-latest, with no ref'd timer, request or handle visible from
+// the main thread, so the run hung until cancelled; the same file as in v1.9.3 (a synchronous
+// rmSync) finished in 2 min 28 s (CI runs 39462957968, 39475465959, 39476692653, 39477929287).
+// Why Node 20 keeps that process is not known. The wait between tries blocks the thread, so it
+// starts no timer: Atomics.wait on a private buffer.
+const RETRYABLE = new Set(['EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM']);
+function removeDirSync(dir) {
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!RETRYABLE.has(error.code) || attempt >= RETRIES) throw error;
+      Atomics.wait(nap, 0, 0, RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+}
+
+module.exports = { removeDir, removeDirSync };
 
 if (require.main === module) {
   const test = require('node:test');
@@ -74,5 +95,30 @@ if (require.main === module) {
     const started = Date.now();
     await removeDir(dir);
     assert.equal(fs.existsSync(dir), false, `the directory is gone, ${Date.now() - started} ms after removeDir started`);
+  });
+
+  // MUTATION: removeDirSync's catch rethrows at once (no retry), and this fails on EPERM.
+  test('removeDirSync waits out a process standing in the directory for about a second', {
+    skip: process.platform !== 'win32' && 'POSIX removes a directory a process stands in, so there is no hold to wait out',
+  }, async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-remove-dir-sync-held-'));
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'x');
+    const child = spawn(process.execPath, ['-e', "process.stdout.write('ready'); setTimeout(() => {}, 1000);"],
+      { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const exited = once(child, 'exit');
+    t.after(async () => {
+      child.kill();
+      await exited;
+      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: RETRIES, retryDelay: RETRY_DELAY_MS });
+    });
+    await Promise.race([once(child.stdout, 'data'),
+      exited.then(() => { throw new Error('precondition: the child exited before it stood in the directory'); })]);
+    assert.throws(() => fs.rmSync(dir, { recursive: true, force: true }), { code: /^(EPERM|EBUSY)$/ },
+      'precondition: the child standing in the directory stops a plain removal');
+    // The child must be able to exit while this thread blocks: it is a separate process, and its
+    // own 1 s timer ends it.
+    const started = Date.now();
+    removeDirSync(dir);
+    assert.equal(fs.existsSync(dir), false, `the directory is gone, ${Date.now() - started} ms after removeDirSync started`);
   });
 }

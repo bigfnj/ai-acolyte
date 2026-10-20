@@ -20,7 +20,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { removeDir } = require('./helpers/remove-dir');
+const { removeDirSync } = require('./helpers/remove-dir');
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 
@@ -219,9 +219,10 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   // After close, never before it (2026-10-20): node:test runs t.after hooks in the order they were
   // registered, and the removal used to be registered first, so it ran while the extension was
   // still active and global.setTimeout was still this harness's stub. With removeDir's awaited
-  // fs.promises.rm in place of a synchronous rmSync, CI's Node 20 on Windows hung in this file's
-  // first test (run 39458585848, cancelled at 14 min); Node 22 and 24 did not.
-  t.after(() => removeDir(home).catch(() => {}));
+  // fs.promises.rm in place of a synchronous rmSync, CI's Node 20 on Windows kept this file's
+  // process alive after its last test (runs 39458585848 to 39477929287, bisected); Node 22 and 24
+  // did not. So this file removes synchronously (removeDirSync, test/helpers/remove-dir.js).
+  t.after(() => { try { removeDirSync(home); } catch {} });
   try { extension.activate({ subscriptions: [] }); } catch (error) { await close(); throw error; }
   const settle = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
   const live = () => held.filter((entry) => !entry.cleared && !entry.fired);
@@ -546,7 +547,7 @@ fs.writeFileSync(path.join(process.env.USERPROFILE, '.claude', 'open-threads.gen
   });
   // Registered after threadsWindow's own hooks, so the stand-in's directory goes once the harness
   // has torn down (see threadsWindow).
-  t.after(() => removeDir(standIn).catch(() => {}));
+  t.after(() => { try { removeDirSync(standIn); } catch {} });
   await app.fireTimers();
   const { setTimeout: wait } = require('node:timers/promises');
   // Endpoint scanning can hold the first run of a fresh copy of an executable for seconds.

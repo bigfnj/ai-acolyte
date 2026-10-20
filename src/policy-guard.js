@@ -143,18 +143,6 @@ function shadowedByManaged(managed, permissions) {
   return shadowed;
 }
 
-// Managed policy can disable user hooks or bypass mode independently of ordinary
-// allow-list entries. Report those capabilities without changing user policy.
-function managedCapabilities(managed) {
-  return {
-    userHooksDisabled: managed?.allowManagedHooksOnly === true,
-    bypassDisabled: managed?.disableBypassPermissionsMode === true ||
-      managed?.permissions?.disableBypassPermissionsMode === true,
-    forcedDefaultMode: typeof managed?.permissions?.defaultMode === 'string'
-      ? managed.permissions.defaultMode : null,
-  };
-}
-
 // Whether a loss looks like a policy wipe rather than a deliberate removal.
 //
 // The trigger that matters is not "a policy file changed" — org policy can
@@ -210,7 +198,9 @@ function assessPolicy({ live, backup, managed, limits } = {}) {
     restorable,
     bulkLoss: !unreadable && isBulkLoss(restorable, backupSize),
     shadowed: shadowedByManaged(managed, surface),
-    capabilities: managedCapabilities(managed),
+    // `capabilities` (managedCapabilities: user hooks off, bypass off, a forced default mode)
+    // was computed on every policy check and read by nothing after d947565 (2026-09-24), and
+    // went on 2026-10-20. Where hooks run is src/memory-guard-install.js hookPolicy's question.
     restrictions: policyRestrictions(limits),
   };
 }
@@ -223,7 +213,6 @@ module.exports = {
   permissionMatches,
   missingFromLive,
   shadowedByManaged,
-  managedCapabilities,
   isBulkLoss,
   assessPolicy,
 };

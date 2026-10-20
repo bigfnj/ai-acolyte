@@ -183,7 +183,8 @@ const TEST_ONLY = {
   'src/permissions.js': ['RENAME_RETRY_ATTEMPTS', 'coverIndexKeyCacheStats', 'coverKeyCacheStats', 'readBypassState', 'renameRetryDelayMs'],
   // The shared Codex claims reader now consumes CODEX_BEGIN_MARKER in production.
   'src/policy-exporters.js': ['AUTO_SAFE_GIT_SUBCOMMANDS', 'AUTO_SUFFIX_CLOSED_ROOTS', 'normalizePermissionSpelling'],
-  'src/policy-guard.js': ['isBulkLoss', 'managedCapabilities', 'missingFromLive', 'shadowedByManaged'],
+  // managedCapabilities left 2026-10-20 with the function: assessPolicy's `capabilities` had no reader.
+  'src/policy-guard.js': ['isBulkLoss', 'missingFromLive', 'shadowedByManaged'],
   'src/recall-index.js': ['MEMORY_INDEX_NAME', 'RECALL_EMBED_ID', 'RECALL_INDEX_NAME', 'indexableMemories'],
   // Test-only since 2026-10-14: the extension's import of it was unused (since 000e5b0) and
   // was what made the census count it as a production consumer.

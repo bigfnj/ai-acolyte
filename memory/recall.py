@@ -35,6 +35,9 @@ Usage (from anywhere):
     python recall.py --gates-list      # every scope:global / scope:retired gate, as JSON
     python recall.py --gates-retire NAME [NAME ...]    # scope: global -> retired, after a
     python recall.py --gates-restore NAME [NAME ...]   # snapshot; the caller compiles next
+    python recall.py --threads-compile # every memory whose `status:` is open, awaiting, blocked or
+                                       # deferred, plus MEMORY.md's health, into
+                                       # ~/.claude/open-threads.generated.md
 
 Config via env:
     RECALL_MEMORY_DIR   corpus to index      (default: the ~/.claude/projects/*/memory
@@ -261,6 +264,7 @@ LINT_ENTRY_WARN = 16           # resident entries. Attention dilutes per-entry, 
                                # Set from the real floor after the 2026-08-24 diet (52 -> 11:
                                # 7 recall triggers + 4 entries nothing else can trigger), with
                                # headroom for a few triggers. 0 would mean report-only.
+LINT_LINES_WARN = 140
 GATE_BEGIN = "<!-- gate -->"   # a scope:global memory's resident lines, lifted verbatim into
 GATE_END = "<!-- /gate -->"    # the managed CLAUDE.md block so the compiler needs no judgement
 # ONE pairing test, used by BOTH _compile_gates_text() and --lint's "resident-eligible, not
@@ -1131,6 +1135,41 @@ def lint():
             print("    run `recall.py --gates-compile` (or `wildcard-perms --gates refresh`) "
                   "to update it.\n")
 
+    # Open threads (--threads-compile), from the texts already read: the count, then each memory
+    # whose `status:` the compile leaves out or cuts. Every one of them names a fix, so each
+    # counts against `clean:` below. Worded clear of the phrases scripts/verify-release.ps1
+    # fails a release on.
+    threads, thread_findings, thread_declared = _collect_threads(texts)
+    if thread_declared:
+        n = len(threads)
+        print(f"  {n} open thread{'' if n == 1 else 's'} compile{'s' if n == 1 else ''} "
+              f"(of {thread_declared} memor{'y' if thread_declared == 1 else 'ies'} declaring `status:`)")
+        print()
+    if thread_findings["duplicate"]:
+        print("  memory with more than one `status:` line -- left out of the open threads:")
+        for stem, _ in thread_findings["duplicate"]:
+            print(f"    {stem}")
+        print()
+    if thread_findings["unknown"]:
+        print(f"  `status:` value that is neither listed ({', '.join(THREAD_STATUSES)}) nor closed "
+              f"({', '.join(THREAD_CLOSED)}) -- left out of the open threads:")
+        for stem, value in thread_findings["unknown"]:
+            print(f"    {stem}  ({value or 'empty'})")
+        print()
+    if thread_findings["no-block"]:
+        print(f"  listed `status:` with no {STATUS_BEGIN} ... {STATUS_END} block outside code "
+              f"-- left out of the open threads:")
+        for stem, status in thread_findings["no-block"]:
+            print(f"    {stem}  ({status})")
+        print()
+    if thread_findings["long"]:
+        print(f"  status text longer than {THREAD_TEXT_CAP} characters -- cut with an ellipsis "
+              f"in the open threads:")
+        for stem, length in thread_findings["long"]:
+            print(f"    {stem}  ({length} characters)")
+        print()
+    thread_problems = any(thread_findings.values())
+
     unresolved = sorted({l for l in re.findall(r'\[\[([^\]]+)\]\]',
                                                _strip_code(mem + "".join(texts.values())))
                          if _norm(l) not in valid})
@@ -1159,7 +1198,7 @@ def lint():
     # not (demote), the message must not claim it.
     if not (over_budget or over_ceiling or over or broken or unresolved
             or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
-            or other_gates or other_unreadable or gate_excluded):
+            or other_gates or other_unreadable or gate_excluded or thread_problems):
         print("  clean: index within budget, links resolve, every standing order compiled.\n")
     return texts
 
@@ -1437,27 +1476,9 @@ def compile_gates(allow_empty=False):
     # 5). Same schedule as src/permissions.js writeFileAtomicSync, 10 attempts at 20..180 ms.
     # Unlike that writer there is NO in-place fallback, because writing in place is the bug. A
     # reader that never lets go still wins, and then this exits non-zero with the previous file
-    # whole, which both callers already handle as a failed compile.
-    os.makedirs(os.path.dirname(GATES_OUT), exist_ok=True)
-    tmp = f"{GATES_OUT}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(out)
-        for attempt in range(10):
-            try:
-                os.replace(tmp, GATES_OUT)
-                break
-            except PermissionError:
-                if attempt == 9:
-                    raise
-                time.sleep(0.02 * (attempt + 1))
-    except OSError as e:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        sys.exit(f"[recall] could not write {GATES_OUT} ({type(e).__name__}: {e}); "
-                 f"the previous file is unchanged.")
+    # whole, which both callers already handle as a failed compile. _replace_file_text is that
+    # write, shared with compile_threads() since 2026-10-19, unchanged.
+    _replace_file_text(GATES_OUT, out)
 
     # On stderr, so `wildcard-perms --gates refresh` passes it through: a gate the user wrote
     # and the compile left out is a standing order that is not loading anywhere.
@@ -1474,6 +1495,291 @@ def compile_gates(allow_empty=False):
     print("  " + ", ".join(f"{a} {len(per_agent[a])}" for a in GATE_AGENTS) + "\n")
     for name in names:
         print(f"    {name}")
+    print()
+
+
+def _replace_file_text(path, text):
+    """Write `text` to `path` through a pid-named temp and os.replace, retried 10 times at 20 to
+    180 ms on PermissionError, with NO in-place fallback; on failure remove the temp and exit
+    non-zero with the previous file whole. compile_gates()'s write (G1, ported from rampage
+    7139659; the reasons are in its comment), lifted out on 2026-10-19 so compile_threads()
+    writes the same way. The temp name, the schedule and the refusal text are what they were."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        sys.exit(f"[recall] could not write {path} ({type(e).__name__}: {e}); "
+                 f"the previous file is unchanged.")
+
+
+# --- open threads: --threads-compile ---------------------------------------------------------
+#
+# Added 2026-10-19. MEMORY.md is the one memory file Claude Code loads every session, and only its
+# first 200 lines. It bloated because agents wrote STATUS on its index lines (10 of 15 lines
+# demoted from the owner's index carried DONE, SHIPPED or AWAITING). Status gets its own home
+# here: a memory declares `status:` in its frontmatter and says what is open in a paired
+# `<!-- status -->` ... `<!-- /status -->` block, and this compiles the open ones into
+# ~/.claude/open-threads.generated.md, which src/agent-open-threads.js installs into each agent's
+# instruction file as a managed block, exactly as the gates are.
+#
+# Selection, primary store only, the index excluded (EXCLUDE):
+#   * `status:` anywhere in the frontmatter, at any indent, like `scope:` and `agents:`, its
+#     trailing `# comment` dropped (_uncomment). Two `status:` lines are refused, never guessed at.
+#   * listed, case-insensitive: THREAD_STATUSES. Known closed: THREAD_CLOSED, silently not
+#     listed. Any other value is a --lint finding and is not listed.
+#   * a listed status needs its block: marker lines on their own, outside fenced code, so a
+#     memory that documents this syntax in a code fence does not compile its example. A listed
+#     status with no block is a finding and is not listed.
+#
+# The file also carries an INDEX line whenever MEMORY.md is past one of its budgets, because the
+# MEMORY.md guard hook cannot run where a managed policy blocks user hooks, and this block is
+# loaded in every session regardless. Not the 16-entry ceiling: that is a soft attention target,
+# and a line for it would be printed forever.
+#
+# vscode-extension/memoryLint.js threadOf is this reading in JavaScript, for the dashboard's
+# count; test/threads-compile.sh holds the two together over generated memories.
+THREADS_OUT = os.path.normpath(os.path.expanduser(r"~/.claude/open-threads.generated.md"))
+STATUS_BEGIN = "<!-- status -->"
+STATUS_END = "<!-- /status -->"
+THREAD_STATUSES = ("open", "awaiting", "blocked", "deferred")   # listed, in the block's order
+THREAD_CLOSED = ("done", "closed", "live", "shelved", "deleted", "dropped", "shipped")
+THREAD_TEXT_CAP = 240          # characters (code points) of one thread's text, ellipsis included
+THREAD_LINES_CAP = 10          # thread lines in the block; the rest are counted on one line
+ELLIPSIS = chr(0x2026)
+BACKSLASH = chr(92)
+# A marker line: up to three spaces of indent (four is an indented code block), the marker, then
+# nothing but spaces or tabs. Fences are CommonMark's, cut down: up to three spaces, three or more
+# backticks or tildes, a backtick opener's info string holding no backtick, and a closer of the
+# same character at least as long with nothing after it but spaces or tabs. Unlike the managed
+# block's reading (src/agent-guidance.js fencedSpans), an opener that never closes runs to the
+# end of the file, as CommonMark has it: a status marker that might be an example is left out.
+_STATUS_MARK = re.compile(r" {0,3}(<!-- /?status -->)[ \t]*")
+_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+
+
+def _status_of(text):
+    """(value, problem) for a memory's `status:`: (None, None) when it declares none, (None,
+    problem) for two `status:` lines, else the value with quotes and a trailing comment removed,
+    not yet lowercased. `status :` is still the key, as `agents :` is (_gate_agents)."""
+    found = [line for line in _frontmatter_block(text).split("\n")
+             if line.lstrip().startswith("status") and line.lstrip()[6:].lstrip().startswith(":")]
+    if not found:
+        return None, None
+    if len(found) > 1:
+        return None, "more than one `status:` line"
+    value = _uncomment(found[0].lstrip()[6:].lstrip()[1:])
+    return value.strip().strip('"').strip("'").strip(), None
+
+
+def _memory_body(text):
+    """The text below a memory's closing `---` fence line, as _frontmatter_block finds it."""
+    head = text.lstrip(chr(0xFEFF) + " \t\r\n")
+    if not head.startswith("---"):
+        return text
+    end = head.find("\n---", 3)
+    if end == -1:
+        return ""
+    below = head.find("\n", end + 4)
+    return "" if below == -1 else head[below + 1:]
+
+
+def _status_block(text):
+    """The lines between the first paired status markers in the body, outside fenced code, joined
+    with "\\n", or None. The last opening marker before the first closing one starts the block, as
+    a managed block's range does (src/agent-guidance.js blockRange)."""
+    start, fence = None, None
+    lines = _memory_body(text).split("\n")
+    for i, line in enumerate(lines):
+        if fence is not None:
+            m = _FENCE_CLOSE.fullmatch(line)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        m = _FENCE_OPEN.fullmatch(line)
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = (m.group(1)[0], len(m.group(1)))
+            continue
+        m = _STATUS_MARK.fullmatch(line)
+        if not m:
+            continue
+        if m.group(1) == STATUS_BEGIN:
+            start = i
+        elif start is not None:
+            return "\n".join(lines[start + 1:i])
+    return None
+
+
+def _thread_text(raw):
+    """One line of thread text: whitespace collapsed, every `<!--` and `-->` neutralised (Claude
+    Code strips HTML comments, so a stray one would swallow the lines after it), and a leading
+    `#` escaped. Not capped: _cap does that, so --lint can say how long it was."""
+    text = " ".join(raw.split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    return BACKSLASH + text if text.startswith("#") else text
+
+
+def _cap(text):
+    return text if len(text) <= THREAD_TEXT_CAP else text[:THREAD_TEXT_CAP - 1] + ELLIPSIS
+
+
+def _thread(text):
+    """What a memory is to the open threads, as (kind, status, detail):
+      None                      no `status:` at all
+      ("listed", status, text)  an open thread; `text` is _thread_text's, uncapped
+      ("closed", status, None)  a known closed status, silently not listed
+      ("duplicate", None, problem), ("unknown", value, None), ("no-block", status, None)
+                                findings: --lint names each, and none is listed."""
+    value, problem = _status_of(text)
+    if problem is not None:
+        return ("duplicate", None, problem)
+    if value is None:
+        return None
+    status = value.lower()
+    if status in THREAD_CLOSED:
+        return ("closed", status, None)
+    if status not in THREAD_STATUSES:
+        return ("unknown", value, None)
+    block = _status_block(text)
+    if block is None:
+        return ("no-block", status, None)
+    return ("listed", status, _thread_text(block))
+
+
+def _collect_threads(texts=None):
+    """([(status, stem, text)], {kind: [(stem, detail)]}, declared) over MEMORY_DIR, the index
+    excluded: the listed threads sorted by status (THREAD_STATUSES order) then stem, each finding
+    by stem, and how many memories declare a `status:` at all. `texts` is lint()'s {stem: text}
+    map. A memory that cannot be read refuses the compile rather than dropping its thread."""
+    threads, declared = [], 0
+    findings = {"duplicate": [], "unknown": [], "no-block": [], "long": []}
+    for name in sorted(os.listdir(MEMORY_DIR)):
+        if not name.endswith(".md") or name in EXCLUDE:
+            continue
+        stem = name[:-3]
+        text = texts.get(stem) if texts is not None else None
+        if text is None:
+            try:
+                text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8", errors="replace").read()
+            except OSError as e:
+                sys.exit(f"[recall] refusing to compile open threads: cannot read "
+                         f"{os.path.join(MEMORY_DIR, name)} ({type(e).__name__}); nothing was written.")
+        found = _thread(text)
+        if found is None:
+            continue
+        declared += 1
+        kind, status, detail = found
+        if kind == "listed":
+            threads.append((status, stem, detail))
+            if len(detail) > THREAD_TEXT_CAP:
+                findings["long"].append((stem, len(detail)))
+        elif kind == "duplicate":
+            findings["duplicate"].append((stem, detail))
+        elif kind in ("unknown", "no-block"):
+            findings[kind].append((stem, status))
+    threads.sort(key=lambda t: (THREAD_STATUSES.index(t[0]), t[1]))
+    return threads, findings, declared
+
+
+def _index_health():
+    """Each budget MEMORY.md is past, as "<value> <unit> (budget <b>)" phrases, [] when it is
+    within all three or there is none. Lines as `wc -l` and memoryLint.js fastLint count them
+    (a final newline adds none); bytes on disk; the longest physical line in code points, its
+    line ending excluded. An index that exists and cannot be read is warned about and skipped:
+    the threads still compile."""
+    index = os.path.join(MEMORY_DIR, "MEMORY.md")
+    try:
+        with open(index, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        print(f"[recall] cannot read {index} ({type(e).__name__}), so its health is left out "
+              f"of the open threads", file=sys.stderr)
+        return []
+    lines = data.decode("utf-8", errors="replace").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    longest = max((len(line[:-1] if line.endswith("\r") else line) for line in lines), default=0)
+    over = []
+    if len(lines) > LINT_LINES_WARN:
+        over.append(f"{len(lines)} lines (budget {LINT_LINES_WARN})")
+    if len(data) > LINT_TOTAL_WARN:
+        over.append(f"{len(data)} bytes (budget {LINT_TOTAL_WARN})")
+    if longest > LINT_LINE_WARN:
+        over.append(f"{longest} characters on its longest line (budget {LINT_LINE_WARN})")
+    return over
+
+
+def _compile_threads_text(texts=None):
+    """(file text, threads, findings, health) without writing. The file is a header line holding
+    the first 16 hex digits of the SHA-256 of everything below it, then `## Open threads (N,
+    managed)` with N counting threads only, then the INDEX line when `health` has any phrase,
+    then at most THREAD_LINES_CAP thread lines and one line counting the rest. With no thread and
+    a healthy index it is the header and the heading alone: never an empty file, which a reader
+    could not tell from a torn one."""
+    threads, findings, _ = _collect_threads(texts)
+    health = _index_health()
+    clean = lambda s: " ".join(s.split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    lines = []
+    if health:
+        lines.append(f"- **INDEX** MEMORY.md is {'; '.join(health)}: compact it before adding "
+                     f"anything, and move detail into the memory files.")
+    for status, stem, text in threads[:THREAD_LINES_CAP]:
+        lines.append(f"- **{status.upper()}** {_cap(text)} ({clean(stem)})")
+    more = len(threads) - THREAD_LINES_CAP
+    if more > 0:
+        lines.append(f"- +{more} more open thread{'' if more == 1 else 's'} (recall \"status\")")
+    body = f"## Open threads ({len(threads)}, managed)\n" + "".join(line + "\n" for line in lines)
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+    return (f"<!-- generated by recall.py --threads-compile; sha {digest} -->\n{body}",
+            threads, findings, health)
+
+
+def compile_threads():
+    """--threads-compile: write THREADS_OUT from the primary store. Refuses, exit 1 with nothing
+    written, when discovery could not read a store (compile_gates()' reason) or there is no memory
+    dir. Unlike the gates there is no empty-compile refusal: zero threads and a healthy index is a
+    real answer, and it is written as one, so a closed thread leaves the block."""
+    if _DISCOVERY_ERRORS:
+        store, err = _DISCOVERY_ERRORS[0]
+        more = f" and {len(_DISCOVERY_ERRORS) - 1} more" if len(_DISCOVERY_ERRORS) > 1 else ""
+        sys.exit(f"[recall] refusing to compile open threads: cannot read {os.path.normpath(store)} "
+                 f"({type(err).__name__}){more}, so {MEMORY_DIR} may be the wrong store. Fix that, "
+                 f"or set RECALL_MEMORY_DIR.")
+    if not os.path.isdir(MEMORY_DIR):
+        sys.exit(f"[recall] refusing to compile open threads: no memory dir at {MEMORY_DIR}; "
+                 f"nothing was written.")
+    try:
+        out, threads, findings, health = _compile_threads_text()
+    except OSError as e:
+        sys.exit(f"[recall] refusing to compile open threads: cannot list {MEMORY_DIR} "
+                 f"({type(e).__name__}); nothing was written.")
+    _replace_file_text(THREADS_OUT, out)
+    # On stderr, as the gates' are, so `wildcard-perms --open-threads refresh` passes them on.
+    for stem, problem in findings["duplicate"]:
+        print(f"[recall] open thread left out: {stem}.md: {problem}", file=sys.stderr)
+    for stem, value in findings["unknown"]:
+        print(f"[recall] open thread left out: {stem}.md: unknown status {value!r}", file=sys.stderr)
+    for stem, status in findings["no-block"]:
+        print(f"[recall] open thread left out: {stem}.md: status {status} with no "
+              f"{STATUS_BEGIN} block", file=sys.stderr)
+    print(f"\n  compiled {len(threads)} open thread(s)\n  -> {THREADS_OUT}")
+    if health:
+        print(f"  MEMORY.md: {'; '.join(health)}")
     print()
 
 
@@ -2158,6 +2464,9 @@ def main():
     ap.add_argument("--gates-restore", nargs="+", action="extend", default=[], metavar="NAME",
                     help="set these retired gate memories back to scope: global, after a snapshot "
                          "of the memory dir (does not compile)")
+    ap.add_argument("--threads-compile", action="store_true",
+                    help="compile every memory whose status: is open, awaiting, blocked or deferred, "
+                         "and MEMORY.md's health, into ~/.claude/open-threads.generated.md (no model)")
     ap.add_argument("--selftest", action="store_true", help="verify the embedder's reference cosines")
     ap.add_argument("--vector-only", action="store_true", help="rank by embedding cosine alone")
     ap.add_argument("--lexical-only", action="store_true", help="rank by BM25 alone (no model load)")
@@ -2173,6 +2482,7 @@ def main():
         mixed = [flag for flag, on in (("--gates-list", args.gates_list and editing),
                                        ("--lint", args.lint), ("--gates-compile", args.gates_compile),
                                        ("--gates-allow-empty", args.gates_allow_empty),
+                                       ("--threads-compile", args.threads_compile),
                                        ("--selftest", args.selftest), ("--rebuild", args.rebuild),
                                        ("--list", args.list), ("a query", bool(args.query))) if on]
         if mixed:
@@ -2183,6 +2493,17 @@ def main():
             gates_list()
         else:
             change_gate_scopes(args.gates_retire, args.gates_restore)
+        return
+    if args.threads_compile:
+        # Alone, for the reason above: `--threads-compile --gates-compile` doing one of the two
+        # would be half of what was asked.
+        mixed = [flag for flag, on in (("--lint", args.lint), ("--gates-compile", args.gates_compile),
+                                       ("--gates-allow-empty", args.gates_allow_empty),
+                                       ("--selftest", args.selftest), ("--rebuild", args.rebuild),
+                                       ("--list", args.list), ("a query", bool(args.query))) if on]
+        if mixed:
+            ap.error(f"--threads-compile runs on its own, not with {', '.join(mixed)}.")
+        compile_threads()
         return
     if args.lint:
         texts = lint()

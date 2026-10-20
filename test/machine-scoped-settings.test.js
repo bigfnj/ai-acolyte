@@ -321,7 +321,8 @@ async function corpusAfterMemoryEdit(t, memoryDir) {
 test('the manifest declares memory.dir, gates.enabled and guidance.enabled machine-scoped', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vscode-extension', 'package.json'), 'utf8'));
   const properties = manifest.contributes?.configuration?.properties || {};
-  for (const key of ['memory.dir', 'gates.enabled', 'guidance.enabled']) {
+  // openThreads.enabled since 2026-10-19: it decides whether the same two files carry a third block.
+  for (const key of ['memory.dir', 'gates.enabled', 'guidance.enabled', 'openThreads.enabled']) {
     const setting = properties[`permissionWildcarding.${key}`];
     assert.ok(setting, `precondition: ${key} is declared`);
     // MUTATION: drop `"scope": "machine"` from any one of the three. This fails. Confirmed 2026-10-14.

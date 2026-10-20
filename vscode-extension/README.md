@@ -37,7 +37,9 @@ minutes. For each it shows the app, the folder name, the permission mode when it
 the last activity, and the subagents that are working.
 **Claude memory** and **Codex memory** are two rows with the same layout and the same actions.
 Each shows the CPU model status, its folder, four figures, an issues line, **Search**, **Rebuild**
-and **Inspect memory sources**, its gates, and the agent version.
+and **Inspect memory sources**, its gates, and the agent version. The Claude card also has an
+open-threads line ("Open threads: 2 installed (Claude, Codex)"), the INDEX warning while
+`MEMORY.md` is past a budget, and **Turn on / Turn off open threads**.
 
 Version **1.8.1** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
@@ -355,6 +357,13 @@ memories hold, which is how a change whose compile or install failed is finished
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`
 and `AGENTS.md` carry, so all three are read from user settings only.
+The open-threads compiler spawns `recall.py --threads-compile` after a memory edit that can
+change its list (a file that mentions `status:` or a status marker, any edit while a thread is
+listed, and every `MEMORY.md` change, for the INDEX line), a few seconds after activation when
+a memory declares `status:`, a compile already exists or `MEMORY.md` is past a budget, and when
+`openThreads.enabled` is turned on. Only edits in the store that compiles count. While the
+setting is off it compiles nothing. `openThreads.enabled` is machine-scoped for the same reason
+as `gates.enabled`.
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
@@ -507,6 +516,7 @@ dashboard title-bar buttons.
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
+| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line while `MEMORY.md` is past a budget |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |
 | Rebuild recall index | Force a full CPU bge-small re-embed |
@@ -518,7 +528,7 @@ dashboard title-bar buttons.
 
 ## Every setting
 
-All 19 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
+All 20 keys under `permissionWildcarding.*`, with the defaults the manifest declares.
 
 The Auto Learn worker deadline, `autoLearn.workerTimeoutSeconds`, is the one that needs a
 word. It exists so a worker wedged in a synchronous filesystem call cannot hold teardown open
@@ -549,6 +559,7 @@ the Acolyte output channel says so once per window. With no user setting, the de
 | `localDrain.enabled` | `true` | Automatic project-local drain. Off still leaves the button. A workspace may only make it stricter: it can turn the drain off, never on when your user setting has it off |
 | `guidance.enabled` | `true` | Keep the shell-style block installed on activation. Machine-scoped: a workspace value is ignored |
 | `gates.enabled` | `true` | Keep the memory-gates block installed on activation. Machine-scoped: a workspace value is ignored |
+| `openThreads.enabled` | `true` | Keep the open-threads block in step with your memories: compile after an edit that can change it, after activation when there is anything to say, and on turning it on; install the result. Off removes the block, and nothing compiles or installs it. Machine-scoped: a workspace value is ignored |
 | `claudeStripModelCheck` | `true` | Once per new Claude Code binary (about 30 s after activation, on a worker thread), compare its known-safe environment variables with the 2.1.296 list the generalizer models, and warn once on a difference. Never edits the list: a change still needs a release. Machine-scoped: a workspace value is ignored |
 | `memory.enabled` | `true` | Claude index lint/gauge and native Codex diagnostics; native gate refresh has a separate installed-marker opt-in |
 | `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home. Machine-scoped: a workspace value is ignored |

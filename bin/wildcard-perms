@@ -64,17 +64,18 @@ const GUIDANCE_USAGE = 'usage: wildcard-perms --guidance on|off|status\n' +
 const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n' +
   '       wildcard-perms --gates list [--json]\n' +
   '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';
+const OPEN_THREADS_USAGE = 'usage: wildcard-perms --open-threads on|off|status|refresh\n';
 const CODEX_HOOK_USAGE = 'usage: wildcard-perms --codex-hook on|off|status\n';
 
 // Every active verb, the two retired MAX flags, and the one-way cleanup for
 // withdrawn Codex workspace rules. Keeping the retired flags in dispatch is a
 // safety boundary: an old invocation must reach a read-only or cleanup handler,
 // never fall through to hook mode and rewrite settings.json.
-const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
+const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates', '--open-threads',
   '--codex-max', '--max', '--bypass', '--codex-workspace-rules', '--codex-hook'];
 const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex permissions\n\n' +
   'Run with NO arguments to act as a PostToolUse hook (reads a JSON event on stdin).\n\n' +
-  LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
+  LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE + OPEN_THREADS_USAGE +
   'usage: wildcard-perms --seed\n' +
   'usage: wildcard-perms --bypass on|off|status\n' +
   WORKSPACE_RULES_USAGE + CODEX_HOOK_USAGE +
@@ -124,6 +125,8 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   drain(argv);
 } else if (argv.includes('--guidance')) {
   guidance(argv);
+} else if (argv.includes('--open-threads')) {
+  openThreads(argv);
 } else if (argv.includes('--gates')) {
   gates(argv);
 } else if (argv.includes('--codex-max')) {
@@ -1203,6 +1206,98 @@ function gates(args) {
   if (cmd !== 'off' && results.some((result) => result.changed && result.on)) {
     process.stdout.write('  standing orders resident from the next session on.'
       + (cmd === 'on' ? ' Re-run after editing a gate in a memory file.\n' : '\n'));
+  }
+}
+
+// ── open threads (2026-10-19) ─────────────────────────────────────────────────
+// `recall.py --threads-compile` lists every memory whose `status:` is open, awaiting, blocked or
+// deferred, with an INDEX line when MEMORY.md is past a budget, in
+// ~/.claude/open-threads.generated.md; src/agent-open-threads.js installs that into each agent's
+// instruction file under its own markers. Modelled on gates(): `refresh` compiles and installs
+// unattended, with no in-place fallback, and is quiet when nothing changed; `on` and `off` are a
+// person's, and keep the fallback. The CLI has no setting, so `refresh` and `on` install.
+function writeOpenThreadsStatus(states) {
+  if (!states.length) {
+    process.stdout.write('wildcard-perms open threads: no agent instruction file found\n');
+    return;
+  }
+  for (const state of states) {
+    const count = state.compile === 'whole'
+      ? `, ${state.threads} thread${state.threads === 1 ? '' : 's'}${state.index ? ', INDEX line' : ''}` : '';
+    const note = state.compile === 'missing' ? ' (nothing compiled)'
+      : state.compile === 'refused' ? ` (compiled file refused: ${state.reason})`
+        : state.on && !state.current ? ' (compile changed — run --open-threads refresh)'
+          : !state.on && state.wanted ? ' (compiled, not installed)' : '';
+    process.stdout.write(`wildcard-perms open threads [${state.agent}]: ${state.on ? 'ON' : 'OFF'}${count}${note} `
+      + `(${state.readable ? state.path : `unreadable: ${state.path}`})\n`);
+  }
+  const index = states.find((state) => state.index)?.index;
+  if (index) process.stdout.write(`wildcard-perms open threads: INDEX ${index}\n`);
+}
+
+function openThreads(args) {
+  const { openThreadsStatusAll, setOpenThreadsAll } = require('../src/agent-open-threads');
+  const at = args.indexOf('--open-threads');
+  const cmd = String(args[at + 1] || 'status').toLowerCase();
+  const label = `wildcard-perms --open-threads ${cmd}`;
+  if (!['on', 'off', 'status', 'refresh'].includes(cmd)) {
+    process.stderr.write(OPEN_THREADS_USAGE);
+    process.exitCode = 1;
+    return;
+  }
+  if (cmd === 'status') {
+    writeOpenThreadsStatus(openThreadsStatusAll());
+    return;
+  }
+
+  // Compile first, found on PATH and never spawned bare (runRecallCaptured, as refresh's own
+  // reason records). A failed compile is reported after the install, which decides what is true
+  // to say; a successful one's stderr names the memories it left out, and is passed on.
+  let compileFailure = null;
+  if (cmd === 'refresh') {
+    const compile = runRecallCaptured(['--threads-compile']);
+    if (compile.error || compile.status !== 0) compileFailure = recallFailure(compile);
+    else if (compile.stderr) process.stderr.write(compile.stderr);
+  }
+
+  const results = setOpenThreadsAll(cmd !== 'off', { inPlaceFallback: cmd !== 'refresh' });
+  const refused = results.length === 1 && results[0].refusal ? results[0] : null;
+  if (refused) {
+    let why;
+    if (compileFailure !== null) {
+      why = `compile failed, and nothing was installed (${compileFailure})`
+        + (refused.refusal === 'missing' ? '' : `; ${refused.reason}`);
+    } else if (refused.refusal === 'missing') {
+      why = cmd === 'refresh' ? `the compile left nothing to install (${refused.reason})`
+        : `${refused.reason}: \`wildcard-perms --open-threads refresh\` compiles and installs`;
+    } else {
+      why = cmd === 'refresh' ? `${refused.reason}; the next refresh tries again` : refused.error;
+    }
+    process.stderr.write(`${label}: ${why}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (compileFailure !== null) {
+    process.stderr.write(`${label}: compile failed, installing whatever was last compiled (${compileFailure})\n`);
+  }
+  if (!results.length) {
+    process.stderr.write(`${label}: no agent instruction file to write\n`);
+    process.exitCode = 1;
+    return;
+  }
+  for (const result of results) {
+    if (result.error) {
+      process.stderr.write(`wildcard-perms --open-threads [${result.agent}]: ${result.error}\n`);
+      process.exitCode = 1;
+      continue;
+    }
+    // Quiet when nothing moved: a SessionStart hook's stdout can be folded into the session.
+    if (cmd === 'refresh' && !result.changed) continue;
+    const state = cmd === 'off' ? 'OFF'
+      : result.on ? `ON, ${result.threads} thread${result.threads === 1 ? '' : 's'}${result.index ? ', INDEX line' : ''}`
+        : 'OFF, nothing open and MEMORY.md within its budgets';
+    process.stdout.write(`wildcard-perms open threads [${result.agent}]: ${state}`
+      + `${result.changed ? '' : ' (already)'} — ${result.path}\n`);
   }
 }
 

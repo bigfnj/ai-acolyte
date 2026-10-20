@@ -149,6 +149,11 @@
         "icon": "$(checklist)"
       },
       {
+        "command": "permission-wildcarding.toggleOpenThreads",
+        "title": "AI Acolyte: Toggle open threads",
+        "icon": "$(pin)"
+      },
+      {
         "command": "permission-wildcarding.lintMemory",
         "title": "AI Acolyte: Lint memory index (MEMORY.md bloat + broken links)",
         "icon": "$(book)"
@@ -318,6 +323,12 @@
           "default": true,
           "scope": "machine",
           "markdownDescription": "Maintain a second managed block holding your own **standing orders**, compiled out of your Claude Code file-memory. `recall.py --gates-compile` lifts the `<!-- gate -->` section from every memory marked `scope: global` into `~/.claude/gates.generated.md`, and this installs it into each agent's instruction file. Why it needs to be resident: the memory index is a list of one-line hooks, so the enforceable half of a rule sits in a file that only loads if a recall surfaces it — which never happens for a rule you are already breaking, because nothing triggers the lookup. Reference material is fine on demand; policy is not. Installing is a file read and runs on activation; compiling spawns python, an explicit action until the block is installed and then again after each memory edit. Marker-fenced separately from the shell-style block, so turning either off leaves the other byte-identical. To retire or restore one gate at a time instead, run **AI Acolyte: Manage memory gates…**: it edits and recompiles either way, and installs its change only while this is on, which it never changes. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
+        },
+        "permissionWildcarding.openThreads.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "markdownDescription": "Maintain a third managed block, **open threads**, in each agent's instruction file. `recall.py --threads-compile` lists every memory whose frontmatter `status:` is `open`, `awaiting`, `blocked` or `deferred`, with the text of its `<!-- status -->` block, into `~/.claude/open-threads.generated.md`, and this installs it. While `MEMORY.md` is past 140 lines, 12000 bytes or a 300-character line, the block also carries an INDEX line telling every new session to compact it. Status then has a home outside the index, whose first 200 lines are all Claude Code loads. The compile runs on its own: after a memory edit that can change the list, on activation when there is anything to say, and when this is turned on. Off removes the block and nothing compiles or installs it. Machine-scoped, because it writes your global instruction files: a repository's `.vscode/settings.json` can neither install the block nor remove it; set it in user settings."
         },
         "permissionWildcarding.claudeStripModelCheck": {
           "type": "boolean",

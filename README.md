@@ -8,6 +8,10 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.9.0 keeps the memory index lean**: an optional MEMORY.md guard hook refuses an edit
+that leaves the index worse past its budget, an Open threads block carries each memory's open status
+into every session in place of index lines, and Toggle Auto Learn switches Auto Learn from the
+dashboard (a workspace may now only turn it off). Two Windows process-spawn races are fixed.
 **Version 1.8.1 groups the dashboard rows** under Activity, Memory & instructions and Permissions,
 with Agent sessions first. **Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
 Inspect memory sources, a gates line and the Claude Code version, and Codex memory gains the CPU model
@@ -67,7 +71,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v181.vsix
+code --install-extension ai-acolyte-v190.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

@@ -4461,7 +4461,10 @@ async function toggleMemoryGuard() {
       + 'to use this one. Nothing was changed.');
     return;
   }
-  const next = !(status.status === 'configured' || status.status === 'foreign');
+  // A hook of ours whose node is gone is repaired, never turned off: the card's button says
+  // "Repair" for it, and `on` re-points it at the node found now (audit 2026-10-20).
+  const repair = status.on && status.nodeExists === false;
+  const next = repair || !(status.status === 'configured' || status.status === 'foreign');
   let nodeExecutable;
   if (next) {
     nodeExecutable = resolveNodeExecutable();
@@ -6390,9 +6393,9 @@ class WildcardingViewProvider {
     // here, said every time, because where policy restricts hooks the guard is installed and inert.
     const mg = (d && d.memoryGuard) || { label: 'unreadable', on: false, policy: '', nodeMissing: false };
     $('memoryGuardStatus').textContent = 'MEMORY.md guard: ' + mg.label
-      + (mg.nodeMissing ? ', and the node it runs is gone (turn it on again)' : '') + '. ' + mg.policy;
+      + (mg.nodeMissing ? ', and the node it runs is gone (Repair re-points it)' : '') + '. ' + mg.policy;
     $('memoryGuardBtn').textContent = !mg.on ? 'Turn on MEMORY.md guard'
-      : (mg.label === 'on (needs repair)' ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
+      : (mg.label === 'on (needs repair)' || mg.nodeMissing ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
     renderThreads((d && d.threads) || null);
     $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
   }

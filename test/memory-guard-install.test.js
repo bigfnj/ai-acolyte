@@ -313,7 +313,10 @@ test('status says when the node the hook names is gone', (t) => {
   assert.equal(status.status, 'configured');
   assert.equal(status.nodeExists, false);
   assert.equal(status.copy.exists, false);
-  assert.equal(status.label, 'on (copy outdated)', 'a registered hook with no copy reads as outdated');
+  assert.equal(status.label, 'on (needs repair)', 'a hook whose node is gone judges nothing, and reads as needing repair');
+  const repaired = setMemoryGuard(true, f.options);
+  assert.equal(repaired.label, 'on', 'on re-points it at the node found now');
+  assert.equal(repaired.nodeExists, true);
 });
 
 // The policy line, on every status, from what this machine can read.

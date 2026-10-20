@@ -201,8 +201,11 @@ function hookPolicy({ home, config, settings, managedPaths, platform, surface })
       + `is not visible locally, so run ${ask} to check.` };
 }
 
-function labelFor(status, copyOutdated) {
+// A registered hook whose node is gone fails on every Write and Edit and judges nothing, so it
+// reads as needing repair, which `on` does (it re-points the hook at the node found now).
+function labelFor(status, copyOutdated, nodeMissing) {
   if (status === 'missing') return 'off';
+  if (status === 'configured' && nodeMissing) return 'on (needs repair)';
   if (status === 'configured') return copyOutdated ? 'on (copy outdated)' : 'on';
   if (status === 'outdated') return 'on (needs repair)';
   if (status === 'foreign') return 'foreign';
@@ -223,9 +226,10 @@ function memoryGuardStatus(options = {}) {
   const copyRevision = revisionOf(scriptPath);
   const on = inspected.ours.length > 0;
   const copyOutdated = on && (copyRevision === null || (packaged !== null && copyRevision < packaged));
+  const nodeExists = inspected.node ? isFile(inspected.node) : null;
   return {
     status: inspected.status,
-    label: labelFor(inspected.status, copyOutdated),
+    label: labelFor(inspected.status, copyOutdated, nodeExists === false),
     on,
     reason: inspected.reason,
     configDir: config,
@@ -235,7 +239,7 @@ function memoryGuardStatus(options = {}) {
     packagedRevision: packaged,
     copyOutdated,
     node: inspected.node,
-    nodeExists: inspected.node ? isFile(inspected.node) : null,
+    nodeExists,
     policy: hookPolicy({ home, config, settings: state.settings, managedPaths: options.managedSettingsPaths, platform,
       surface: options.surface }),
   };

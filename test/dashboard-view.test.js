@@ -3719,6 +3719,38 @@ test('a cancelled modal, or no node on PATH, leaves settings.json untouched', as
   } finally { await app.dispose(); }
 });
 
+// The hook's node gone (audit 2026-10-20): the card said "turn it on again" while its button,
+// reading the hook as configured, turned the guard OFF. It now reads as needing repair, and the
+// toggle repairs it, without the first-install modal.
+// MUTATION: drop `repair ||` from toggleMemoryGuard's `next` and the click removes the hook.
+test('a guard whose node is gone is repaired by the toggle, not turned off', async (t) => {
+  const env = setup(t);
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  const ghost = path.join(env.tempHome, 'gone', process.platform === 'win32' ? 'node.exe' : 'node');
+  env.write({ hooks: { PreToolUse: [memoryGuardDefinition({ home: env.tempHome, nodeExecutable: ghost })] } });
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual({ label: data.memoryGuard.label, nodeMissing: data.memoryGuard.nodeMissing }, { label: 'on (needs repair)', nodeMissing: true });
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver({ ...data, memory: { tokens: 10, lines: 3, maxLines: 200, over: 0, broken: 0, unresolved: 0 } });
+    assert.equal(panel.dom.byId.get('memoryGuardBtn').textContent, 'Repair MEMORY.md guard');
+    assert.match(panel.dom.byId.get('memoryGuardStatus').textContent, /the node it runs is gone \(Repair re-points it\)/);
+
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.equal(app.shown.filter((entry) => entry.level === 'warning').length, 0, 'a repair does not ask');
+    const hooks = env.read().hooks.PreToolUse;
+    assert.equal(hooks.length, 1, 'the hook is still there');
+    assert.deepEqual(hooks[0], memoryGuardDefinition({ home: env.tempHome,
+      nodeExecutable: path.join(path.dirname(process.execPath), path.basename(process.execPath)) }), 'and runs the node found now');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard ON/.test(entry.message)));
+  } finally { await app.dispose(); }
+});
+
 // A stub `claude`, first on PATH, for the extension's probe. APPDATA is pointed at an empty
 // directory too: on Windows the launcher falls back to %APPDATA%\npm when PATH has no claude,
 // and that is where the real one lives on a development box.

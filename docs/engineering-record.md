@@ -2892,6 +2892,19 @@ no extra resolution and `{ bigint: true }` was not added. What is cached is a pr
 not the parse: the full parse retains 486 KB, the projection 16 KB, because `vec` is 384
 floats per memory and no caller reads it.
 
+**`summarizeRuleUsage` hashing the allow list twice per push. DECLINED, 2026-10-20.**
+`src/rule-usage.js` `summarizeRuleUsage` runs on every dashboard push. It hashes each tracked
+rule with `ruleKey` to find its record, then `allowFingerprint` hashes every rule again, plus
+the sorted keys, to tell whether the saved count belongs to this list. A 1.9.0 audit measured
+**1.89 ms min / 3.16 ms p50 for 470 rules**. Method: warm, n=30, in ONE process, which is NOT
+this section's cold protocol, and it was not re-measured cold. Declined on that number: the
+most a fix could save is the second pass, which by construction is about half the total (one
+SHA-256 per rule in each pass), so 1 to 2 ms per push, the same size as the 1.54 ms fs-dedupe
+package declined above. The fix (reuse the per-rule keys for the fingerprint, or cache it per
+list) would give the fingerprint's definition a second home that `test/rule-usage.test.js` then
+has to hold to the first. What reopens it: a cold measurement, fresh interleaved processes,
+against a variant with the second pass removed, showing more than that.
+
 ---
 
 ## The 2026-09-25 measurement pass: fourteen claims, one survivor

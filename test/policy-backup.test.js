@@ -58,7 +58,7 @@ function harness(tempHome, options = {}) {
   const warnings = [];
   // `options.answers` is queued BEFORE activate(), which is the only way to reach
   // the managed-policy prompt: onManagedPolicyChanged() runs from activation
-  // (vscode-extension/extension.js:3139#onManagedPolicyChanged) and this harness's file-system
+  // (vscode-extension/extension.js:3142#onManagedPolicyChanged) and this harness's file-system
   // watcher is a no-op, so there is no post-activation trigger to push an answer for.
   const warningAnswers = [...(options.answers || [])];
   const settings = { ...(options.settings || {}) };
@@ -124,6 +124,7 @@ function harness(tempHome, options = {}) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
         memoryReport: () => ({ conf: {}, dir: null, report: null }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };
@@ -685,7 +686,7 @@ test('legacy cleanup preserves MCP blankets for servers introduced after MAX', a
 // fires `onWrite(allow, deny)` after a successful write, and only the caller that supplies
 // it takes a backup; the CLI deliberately supplies none, because giving the hook path one
 // would be a behaviour change smuggled in beside a correctness fix
-// (bin/wildcard-perms:402-405#rebasing says exactly that).
+// (bin/wildcard-perms:412-415#rebasing says exactly that).
 //
 // Until now that sentence was the only thing holding the arrangement up. Nothing asserted
 // the CLI writer had no `onWrite`, so "deliberate rather than dropped" rested on a comment,

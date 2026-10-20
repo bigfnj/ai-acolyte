@@ -255,11 +255,14 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, and the bidi controls,
-// removed before anything else. Code points, as recall.py writes them.
+// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, the bidi controls and
+// the invisible format characters (U+00AD, U+200B-U+200D, U+2060-U+2064, U+FEFF, the tag block
+// U+E0000-U+E007F), removed before anything else. Code points, as recall.py writes them; threadText
+// walks the text with Array.from, one code point at a time, so a tag character is one entry here.
 const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
 const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
-  ...span(0x86, 0xa0), 0x061c, 0x200e, 0x200f, ...span(0x202a, 0x202f), ...span(0x2066, 0x206a)]);
+  ...span(0x86, 0xa0), 0x00ad, 0x061c, ...span(0x200b, 0x2010), ...span(0x202a, 0x202f),
+  ...span(0x2060, 0x2065), ...span(0x2066, 0x206a), 0xfeff, ...span(0xe0000, 0xe0080)]);
 
 // recall.py _thread_text: THREAD_STRIP removed, Python's str.split() whitespace collapsed, comment
 // markers neutralised, a leading `#` escaped. Uncapped, as Python's is.
@@ -346,7 +349,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:3427-3428#memoryStoreDirs) overrides `dir` before it calls this.
+// (extension.js:3430-3431#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive

@@ -142,6 +142,7 @@ async function harness(t, options = {}) {
     if (parent?.filename === extensionPath && request === './memoryLint') return {
       MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
       memoryReport: () => ({ conf: {}, dir: null, report: null }),
+      memoryStoreDir: () => null,
       cfg: () => ({ enabled: false, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }), discoverDirs: () => [],
     };
     return originalLoad.call(this, request, parent, isMain);

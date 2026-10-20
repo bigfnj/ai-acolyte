@@ -14,7 +14,7 @@
 //   - `autoLearnBusy` left true, which short-circuits every later scan.
 //
 // Its own mocks, again: this needs to count spawns, kills and watcher callbacks,
-// and the standing decision in this suite (test/extension-activation.test.js:505#sharing)
+// and the standing decision in this suite (test/extension-activation.test.js:509#sharing)
 // is that duplicating a mock is cheaper than breaking one that works.
 
 const test = require('node:test');
@@ -459,6 +459,12 @@ function harness(tempHome, options = {}) {
               },
             }
             : { conf: {}, dir: null, report: null };
+        },
+        // The store alone, as memoryLint.js memoryStoreDir answers it, with the same thrower:
+        // autoSyncRecallIfStale asks this, not memoryReport(), for the store it syncs.
+        memoryStoreDir: () => {
+          if (options.memoryReportThrows) throw new Error('memory store unreadable');
+          return memoryDirs.length ? memoryDirs[0] : null;
         },
         discoverDirs: (conf) => { discoverCalls.push(conf); return [...memoryDirs]; },
       };

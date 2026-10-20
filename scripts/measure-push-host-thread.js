@@ -175,6 +175,7 @@ async function child([tree, codexExecutable, sampleDir]) {
       return {
         MemoryLint: class { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: null, report: null, gateSources: undefined }),
+        memoryStoreDir: () => null,
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [],
       };

@@ -309,6 +309,7 @@ function harness(options = {}) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return disposable(); } },
         memoryReport: () => ({ conf: {}, dir: options.storeDir === undefined ? store : options.storeDir(), report: null }),
+        memoryStoreDir: () => (options.storeDir === undefined ? store : options.storeDir()),
         cfg: () => ({ enabled: true, dir: '', lineBudget: 300, totalBudget: 12000, maxLines: 200 }),
         discoverDirs: () => [store],
       };

@@ -338,12 +338,14 @@ const TEST_ONLY = {
     EVENTS: 'the three hook events the reproducer tries',
     VARIANTS: 'the settings sources it registers each canary in',
     canarySettings: 'the canary settings JSON, pinned per event',
+    defaultProbeBase: 'the per-platform base, pinned with no .claude segment',
     hookCommand: 'the canary command quoting',
     judgeGoal: 'reads the /goal restriction text',
     judgeHook: 'reads a canary log into fired, not fired or inconclusive',
     parseArgs: 'the opt-in flag and its refusal',
     planRuns: 'the run plan printed before anything runs',
     probePaths: 'where each run starts and where its logs go',
+    runClaude: 'driven with a stand-in tree kill, so the grace settle can be seen',
   },
 };
 

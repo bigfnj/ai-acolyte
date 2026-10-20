@@ -79,11 +79,11 @@ const {
 // cfg is aliased: `cfg` is already a local name in six places in this file, and a
 // module-scope binding shadowed by six locals meaning something else is a footgun.
 // memoryStoreDir is memoryReport()'s store without the report: what every recall.py spawn pins and
-// the open threads' watcher compares with. The default is only for a test harness that stubs this
-// module with an older export list, and gives memoryReport()'s answer at its old cost.
+// the open threads' watcher compares with. No fallback for it here: one used to serve only test
+// stubs written before memoryLint.js exported it, and every stub now exports its own
+// (test/memory-lint-stubs.test.js).
 const {
-  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, fastLint, cfg: memoryConf,
-  memoryStoreDir = () => memoryReport().dir,
+  MemoryLint, memoryReport, discoverDirs, otherStoreGates, indexHealth, fastLint, cfg: memoryConf, memoryStoreDir,
 } = require('./memoryLint');
 
 const SETTINGS      = path.join(os.homedir(), '.claude', 'settings.json');
@@ -136,7 +136,9 @@ let threadsBounce = null;    // debounce for the open-threads recompile (corpus,
 // What armed that recompile: { anyStore } once anything but a corpus event did, else the stores
 // the burst's events came from (scheduleThreadsCompile). Reset when the timer fires or is dropped.
 let threadsBurst = null;
-let recallRebuildAt = 0;     // timestamp of the last auto-rebuild (cooldown gate)
+// Whether this activation has logged that no compile can run here (noteThreadsBlocked).
+let threadsBlockedSaid = false;
+let recallRebuildAt = 0;    // timestamp of the last auto-rebuild (cooldown gate)
 let autoLearnBounce = null;  // debounce for Claude/Codex transcript writes
 let autoLearnTimer = null;   // periodic reconciliation timer
 let autoLearnBusy = false;
@@ -1180,7 +1182,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:3350#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:3353#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1225,14 +1227,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:756-764#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:759-767#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
     // (memoryLint.js:1094-1098#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:991#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:994#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -1568,7 +1570,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:7018#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:7089#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1825,12 +1827,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:7051#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:7122#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:3085#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:3088#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -3066,6 +3068,7 @@ function activate(context) {
   activationGeneration += 1;
   // A re-activate logs to a fresh channel, so current trouble is not "seen" yet.
   lastScanTroubleLog = '';
+  threadsBlockedSaid = false;
   // A predecessor's trust refresh was abandoned by its deactivate and will never
   // release this latch (its continuation checks the generation), so release it.
   projectTrustRefreshing = false;
@@ -3793,7 +3796,7 @@ function runWildcarding(manual = false) {
   //
   // The read and the pass used to happen INSIDE the lock, so every settings.json
   // change paid a full lock cycle just to discover there was nothing to do. Same
-  // mistake, and the same fix, as bin/wildcard-perms:483-492#NEGATIVE — this read is a
+  // mistake, and the same fix, as bin/wildcard-perms:493-502#NEGATIVE — this read is a
   // NEGATIVE TEST ONLY, which is what makes it safe unlocked. If the list is
   // already a fixed point we write nothing, so a stale read costs nothing. The
   // moment it differs, everything authoritative is redone inside the lock.
@@ -3957,7 +3960,7 @@ function localDrainEnabled() {
 // promoting them into user scope from a parent window is the same trust problem the
 // gate below exists for. A Claude session running in a subfolder is covered anyway:
 // the CLI hook drains each session's own cwd on every tool call
-// (bin/wildcard-perms:527-536#hookCwd, `hookCwd(input)`).
+// (bin/wildcard-perms:537-546#hookCwd, `hookCwd(input)`).
 //
 // A folder on another file system (a virtual workspace, or a non-file scheme mixed
 // into a multi-root workspace) has an fsPath that names no file on this disk, so
@@ -4502,8 +4505,10 @@ async function toggleMemoryGuard() {
     return;
   }
   // A hook of ours whose node is gone is repaired, never turned off: the card's button says
-  // "Repair" for it, and `on` re-points it at the node found now (audit 2026-10-20).
-  const repair = status.on && status.nodeExists === false;
+  // "Repair" for it, and `on` re-points it at the node found now (audit 2026-10-20). Not beside a
+  // foreign guard (audit of 1.9.1): planMemoryGuard refuses every add while one is there, so a
+  // repair could only fail, and off, which removes ours, is the click that works.
+  const repair = status.on && status.nodeExists === false && status.status !== 'foreign';
   const next = repair || !(status.status === 'configured' || status.status === 'foreign');
   let nodeExecutable;
   if (next) {
@@ -4569,7 +4574,7 @@ async function probeUserHooks() {
   try {
     probe = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'ai-acolyte: asking Claude Code whether it runs user hooks…' },
-      () => memoryGuardProbe({ home: os.homedir() }));
+      () => memoryGuardProbe({ home: os.homedir(), track: trackChild }));
   } catch (err) {
     probe = { result: 'unknown', detail: err.message };
   } finally {
@@ -4579,7 +4584,8 @@ async function probeUserHooks() {
   const message = `ai-acolyte: user hooks: ${probe.result}. ${probe.detail}`;
   if (probe.result === 'not restricted') vscode.window.showInformationMessage(message);
   else vscode.window.showWarningMessage(message);
-  dashboard?.refresh();
+  // No dashboard refresh (audit of 1.9.1): the card reads files only (memoryGuardStatus), and the
+  // probe changes none of them and keeps no answer, so a refresh would push the same card again.
 }
 
 // ── open threads (2026-10-19) ──────────────────────────────────────────────────────
@@ -4630,6 +4636,29 @@ function compileThreads({ quiet = false } = {}) {
   return queued.promise;
 }
 
+// What a compile runs (recall.py and the DevToolbox venv python), and `blocked`, why it cannot run
+// on this machine, or null. Stats only, never a spawn. A VSIX user without the toolbox has open
+// threads on by default and can never compile, so every MEMORY.md save used to arm a compile that
+// logged the same missing venv once per burst, forever, and the card offered a Refresh that could
+// only fail (2026-10-20). Now, while blocked, nothing is armed (scheduleThreadsCompile), the card
+// offers no Refresh and its line says why (threadsCardData), and the log says it once.
+function threadsCompileTools() {
+  const script = recallScriptPath();
+  const py = toolboxPython();
+  const blocked = !script ? 'recall.py was not found'
+    : !fs.existsSync(py) ? `the DevToolbox venv python was not found at ${py}` : null;
+  return { script, py, blocked };
+}
+
+// The unattended paths' one log line for a compile that cannot run, at most once per activation.
+function noteThreadsBlocked(blocked) {
+  if (threadsBlockedSaid) return;
+  threadsBlockedSaid = true;
+  const msg = `${blocked}, so open threads cannot be compiled; nothing compiles until it is there (said once per activation).`;
+  console.error('ai-acolyte: ' + msg);
+  sharedChannel()?.appendLine(`[${new Date().toISOString()}] open threads: ${msg}`);
+}
+
 // compileGates for `--threads-compile`: the same Python, the same pinned store, the same tracked
 // and tree-killed child with a 60 s deadline. Resolves false when it could not run, having said
 // why: a modal for a person's action, the console and the output channel for an unattended one.
@@ -4647,14 +4676,19 @@ function spawnThreadsCompile({ quiet = false } = {}) {
     console.error('ai-acolyte: ' + msg);
     sharedChannel()?.appendLine(`[${new Date().toISOString()}] open threads: ${msg}`);
   };
-  if (deactivated) return Promise.resolve(false);
-  const script = recallScriptPath();
-  if (!script) { say('recall.py not found, so open threads cannot be compiled.'); return Promise.resolve(false); }
-  const st = recallStatus();
-  if (!st.venv) { say(`DevToolbox venv python not found at ${st.py}, so open threads cannot be compiled.`); return Promise.resolve(false); }
+  // The switch is asked here, at the spawn, not only where a compile is armed: a compile queued
+  // behind a running one (compileThreads) outlives cancelThreadsCompile, and switched off stays
+  // off (2026-10-20). Silent, because off is what the person chose.
+  if (deactivated || !openThreadsEnabled()) return Promise.resolve(false);
+  const { script, py, blocked } = threadsCompileTools();
+  if (blocked) {
+    if (quiet) noteThreadsBlocked(blocked);
+    else say(`${blocked}, so open threads cannot be compiled.`);
+    return Promise.resolve(false);
+  }
   const env = gateCompileEnv();
   return new Promise((resolve) => {
-    endTreeAfter(trackChild(execFileOffThread(st.py, [script, '--threads-compile'], { env, windowsHide: true }, (err, _out, stderr) => {
+    endTreeAfter(trackChild(execFileOffThread(py, [script, '--threads-compile'], { env, windowsHide: true }, (err, _out, stderr) => {
       if (deactivated) { resolve(false); return; }
       if (err) {
         const detail = (stderr || err.message || '').trim().slice(0, 300);
@@ -4676,6 +4710,13 @@ function spawnThreadsCompile({ quiet = false } = {}) {
 const THREADS_IF_WORTH = Symbol('activation: compile if a compile could say something');
 function scheduleThreadsCompile(delay = THREADS_BOUNCE_MS, dir = null) {
   if (deactivated) return;
+  // No compile can run here: nothing is armed. Activation's own check says nothing, so a machine
+  // that never uses the feature is not told about a venv it does not need.
+  const { blocked } = threadsCompileTools();
+  if (blocked) {
+    if (dir !== THREADS_IF_WORTH) noteThreadsBlocked(blocked);
+    return;
+  }
   if (!threadsBurst) threadsBurst = { anyStore: false, ifWorth: false, dirs: new Set() };
   if (dir === null) threadsBurst.anyStore = true;
   else if (dir === THREADS_IF_WORTH) threadsBurst.ifWorth = true;
@@ -4779,13 +4820,19 @@ function ensureOpenThreads(announce = false) {
 // One agent's install is what the setting and the compile ask for: the compile is whole, and the
 // block is in, and current, exactly when that compile wants one. threadsNeedRefresh is the one
 // predicate the toggle's modal and the card's Refresh button read, so the button offers what the
-// command would do.
+// command would do. It judges the targets ensureOpenThreads acts on: an unreadable one (a file
+// that is not UTF-8, an inactive Codex file that cannot be inspected) is skipped by every install,
+// so it can never settle, and counting it kept Refresh up after every click (2026-10-20); the
+// card's line names it instead. And with no compile possible (`blocked`, threadsCompileTools)
+// Refresh could only fail, and install the last compile, which ensure already does unattended.
 function threadsSettled(state) {
   return state.readable && state.compile === 'whole'
     && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
 }
-function threadsNeedRefresh(states) {
-  return states.length > 0 && !states.every(threadsSettled);
+function threadsNeedRefresh(states, blocked = threadsCompileTools().blocked) {
+  if (blocked) return false;
+  const readable = states.filter((state) => state.readable);
+  return readable.length > 0 && !readable.every(threadsSettled);
 }
 
 // What the extension says where src/agent-open-threads.js would name the CLI's refresh, which a
@@ -4808,7 +4855,7 @@ async function toggleOpenThreads(request = null) {
   }
   if (enabled) {
     const states = openThreadsStatusAll();
-    const stale = threadsNeedRefresh(states);
+    const stale = threadsNeedRefresh(states);   // false while no compile can run: no Refresh then
     const files = states.filter((state) => state.on).map((state) => state.path.replace(os.homedir(), '~')).join(', ');
     const choice = await vscode.window.showWarningMessage('Turn off open threads?', {
       modal: true,
@@ -4840,32 +4887,40 @@ async function toggleOpenThreads(request = null) {
 // is dropped rather than run a second time two seconds later.
 // A compile that failed still installs what was compiled before, as the CLI's refresh does, and
 // every message then says so: "ON" over an old compile reads as a fresh one (2026-10-20).
+// With no compile possible, this skips the compile and the one message says why, where the failed
+// spawn's warning and the install's used to be two (2026-10-20).
 async function refreshOpenThreads() {
   cancelThreadsCompile();
-  const compiled = await compileThreads();
-  if (deactivated) return;
-  reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true, compiled);
+  const { blocked } = threadsCompileTools();
+  const compiled = blocked ? false : await compileThreads();
+  // Turned off while this waited for its compile: the off path has removed the block, and an
+  // install now would put it back with the switch off (2026-10-20).
+  if (deactivated || !openThreadsEnabled()) return;
+  reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true, compiled, blocked);
 }
 
-function reportThreadsInstall(results, next, compiled = true) {
+// `blocked` is why no compile could run (threadsCompileTools); the messages then say that, not
+// that a compile failed.
+function reportThreadsInstall(results, next, compiled = true, blocked = null) {
   const refused = results.length === 1 && results[0].refusal ? results[0] : null;
   const failed = results.filter((result) => result.error);
   const stale = next && !compiled;
+  const failure = blocked ? `the compile cannot run (${blocked})` : 'the compile failed';
   if (refused && !refused.error) {
     vscode.window.showWarningMessage('ai-acolyte: open threads are on, and nothing is installed: '
-      + `${stale ? 'the compile failed, and ' : ''}${refused.reason}.`);
+      + `${stale ? failure + ', and ' : ''}${refused.reason}.`);
   } else if (failed.length) {
-    vscode.window.showErrorMessage(`ai-acolyte: ${stale ? 'open threads: the compile failed; ' : ''}`
+    vscode.window.showErrorMessage(`ai-acolyte: ${stale ? `open threads: ${failure}; ` : ''}`
       + failed.map((result) => `${result.agent}: ${result.error}`).join('; '));
   } else if (!results.length) {
     vscode.window.showWarningMessage('ai-acolyte: open threads: no agent instruction file to write.');
   } else if (next && !results.some((result) => result.on)) {
     vscode.window.showInformationMessage(stale
-      ? 'ai-acolyte: open threads ON — the compile failed, and the last compile lists nothing open, so no block is installed.'
+      ? `ai-acolyte: open threads ON — ${failure}, and the last compile lists nothing open, so no block is installed.`
       : 'ai-acolyte: open threads ON — nothing is open and MEMORY.md is within its budgets, so no block is installed until something is.');
   } else {
     vscode.window.showInformationMessage(`ai-acolyte: open threads ${next ? 'ON' : 'OFF'} — `
-      + (stale ? 'the compile failed, so the last compile is installed: ' : '')
+      + (stale ? `${failure}, so the last compile is installed: ` : '')
       + results.map((result) => result.path.replace(os.homedir(), '~')).join(', ')
       + (next ? ' (applies from each agent’s next session)' : ''));
   }
@@ -4895,6 +4950,11 @@ function threadsCardData(precomputed = null) {
     const listed = report?.threadListed ?? null;
     if (!states.length) return { enabled, none: true, declared, listed };
     const first = states[0];
+    const home = (text) => String(text).replace(os.homedir(), '~');
+    const { blocked } = threadsCompileTools();
+    // Every install skips an unreadable target, so "current" is about the others, and the line
+    // names the skipped one with its reason (2026-10-20).
+    const readable = states.filter((state) => state.readable);
     return {
       enabled,
       none: false,
@@ -4902,9 +4962,12 @@ function threadsCardData(precomputed = null) {
       count: first.threads,
       index: states.find((state) => state.index)?.index || null,
       installed: states.filter((state) => state.on).map((state) => state.agent),
-      current: states.every((state) => (state.wanted ? state.on && state.current : !state.on)),
+      current: readable.every((state) => (state.wanted ? state.on && state.current : !state.on)),
       // Whether the card offers Refresh: the toggle's own predicate.
-      refresh: threadsNeedRefresh(states),
+      refresh: threadsNeedRefresh(states, blocked),
+      unreadable: states.filter((state) => !state.readable).map((state) => home(state.error || `cannot read ${state.path}`)),
+      // Why no compile can run here, said on the line once instead of in a log line per burst.
+      unavailable: blocked ? home(blocked) : null,
       reason: first.reason,
       declared,
       listed,
@@ -6537,10 +6600,12 @@ class WildcardingViewProvider {
     // The MEMORY.md guard line (2026-10-19): the hook's state, then whether Claude Code will run it
     // here, said every time, because where policy restricts hooks the guard is installed and inert.
     const mg = (d && d.memoryGuard) || { label: 'unreadable', on: false, policy: '', nodeMissing: false };
+    // Beside a foreign guard the toggle cannot repair (it refuses an add), so no Repair is offered.
+    const mgRepair = mg.nodeMissing && mg.label !== 'foreign';
     $('memoryGuardStatus').textContent = 'MEMORY.md guard: ' + mg.label
-      + (mg.nodeMissing ? ', and the node it runs is gone (Repair re-points it)' : '') + '. ' + mg.policy;
+      + (mgRepair ? ', and the node it runs is gone (Repair re-points it)' : '') + '. ' + mg.policy;
     $('memoryGuardBtn').textContent = !mg.on ? 'Turn on MEMORY.md guard'
-      : (mg.label === 'on (needs repair)' || mg.nodeMissing ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
+      : (mg.label === 'on (needs repair)' || mgRepair ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
     renderThreads((d && d.threads) || null);
     $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
   }
@@ -6565,6 +6630,12 @@ class WildcardingViewProvider {
         + (t.current ? '.' : '; update pending.');
     } else {
       line = t.count || t.index ? 'Open threads: ' + n(t.count) + ' compiled, not installed.' : 'Open threads: none open.';
+    }
+    // What every install skips, and why nothing can compile here: said on the line, since the
+    // card offers no Refresh for either.
+    if (t && t.enabled && !t.none) {
+      if (t.unreadable && t.unreadable.length) line += ' Skipped: ' + t.unreadable.join('; ') + '.';
+      if (t.unavailable) line += ' They cannot be compiled here: ' + t.unavailable + '.';
     }
     $('claudeMemoryThreadsStatus').textContent = line;
     const index = $('claudeMemoryThreadsIndex');

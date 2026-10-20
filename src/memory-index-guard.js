@@ -12,14 +12,16 @@
 //
 // THE RULE. A write is blocked only when some measure ENDS over its budget AND is worse than
 // it was before the write, judged per measure. That includes a first crossing (140 lines to
-// 141). Deleting whole lines can only lower a line count, a byte count, the longest line and
-// the entry count, so compaction by deletion gets through even from an index far past every
-// budget, with one deliberate exception: a deletion that breaks an HTML comment (its `<!--`
+// 141). Deleting whole lines can only lower a line count, a byte count and the longest line,
+// so compaction by deletion gets through even from an index far past every budget, with one
+// deliberate exception: a deletion that breaks an HTML comment (its `<!--`
 // line or its `-->` line alone) or a code fence (an opener that kept a `<!--` from being a
 // comment) creates a comment defect, and is refused because the comment's body would leak
 // into context. An edit that is not a whole-line deletion can shrink the file and still be
-// refused: joining two lines into one past 300 characters makes the longest line worse. The
-// entry budget is what makes "one in, one out" a rule rather than advice.
+// refused: joining two lines into one past 300 characters makes the longest line worse.
+// `measure` counts the "- " entries too, and since revision 5 (1.9.5) that count is reported and
+// never a budget: the 16-entry ceiling was one corpus's floor, never measured, and it refused
+// every new memory's line on an index that gives each memory one.
 //
 // SELF-CONTAINED ON PURPOSE. The installer copies this file to
 // `<home>/.claude/wildcarding/memory-index-guard.js` and the hook runs that copy, outside the
@@ -40,13 +42,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const GUARD_REVISION = 4;
+const GUARD_REVISION = 5;
 
-// Shared with the lint: memory/recall.py LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN and
-// LINT_ENTRY_WARN, and the extension's memory.totalBudget / memory.lineBudget defaults. A test
-// pins all three places together. The extension's window-scoped settings tune its editor gauge
-// only; the hook always uses these.
-const BUDGETS = Object.freeze({ lines: 140, bytes: 12000, lineChars: 300, entries: 16, commentDefects: 0 });
+// Shared with the lint: memory/recall.py LINT_LINES_WARN, LINT_TOTAL_WARN and LINT_LINE_WARN,
+// and the extension's memory.totalBudget / memory.lineBudget defaults. A test pins all three
+// places together. The extension's window-scoped settings tune its editor gauge only; the hook
+// always uses these. No entry count here: it is measured, not judged (revision 5).
+const BUDGETS = Object.freeze({ lines: 140, bytes: 12000, lineChars: 300, commentDefects: 0 });
 const STDIN_CAP = 8 * 1024 * 1024;
 const INDEX_NAME = 'MEMORY.md';
 const TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
@@ -237,12 +239,11 @@ const LABELS = {
   lines: 'lines',
   bytes: 'bytes',
   lineChars: 'longest line',
-  entries: '"- " entries',
   commentDefects: 'broken comments',
 };
 const DEFECT_KINDS = { nested: '<!-- inside a comment', orphan: 'orphan -->', unclosed: 'unclosed <!--' };
 
-// Under 600 characters with all five measures failing and a comment located: Claude Code hands
+// Under 600 characters with all four measures failing and a comment located: Claude Code hands
 // stderr to the model, and the fix has to survive being read in one pass. The advice follows
 // the reasons: compaction for a size measure, the whole comment for a comment defect, whose
 // first defect is located when the text the edit would leave is given.

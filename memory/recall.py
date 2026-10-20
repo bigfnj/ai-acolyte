@@ -259,12 +259,11 @@ RRF_K = 60                     # damping for the reciprocal-rank fusion kept as 
                                # 0.0 when it cannot separate, degrading to pure cosine.
 LINT_LINE_WARN = 300           # chars; a dense one-line hook ceiling -- over this is drifting to changelog
 LINT_TOTAL_WARN = 12000        # bytes; whole always-loaded index getting heavy
-LINT_ENTRY_WARN = 16           # resident entries. Attention dilutes per-entry, not per-byte: 3k
-                               # tokens costs nothing, 50 entries competing for relevance does.
-                               # Set from the real floor after the 2026-08-24 diet (52 -> 11:
-                               # 7 recall triggers + 4 entries nothing else can trigger), with
-                               # headroom for a few triggers. 0 would mean report-only.
-LINT_LINES_WARN = 140          # lines; the target below Claude Code's 200-line load cap
+# No entry ceiling since 1.9.5: the resident "- " entries are counted and never a finding. The
+# 16 (LINT_ENTRY_WARN, 2026-08-24) was one corpus's floor after its diet (52 -> 11) plus headroom,
+# never measured, and an index that gives every memory a line could not clear it. The size
+# budgets above and below bound what a long index costs.
+LINT_LINES_WARN = 140         # lines; the target below Claude Code's 200-line load cap
 GATE_BEGIN = "<!-- gate -->"   # a scope:global memory's resident lines, lifted verbatim into
 GATE_END = "<!-- /gate -->"    # the managed CLAUDE.md block so the compiler needs no judgement
 # ONE pairing test, used by BOTH _compile_gates_text() and --lint's "resident-eligible, not
@@ -1047,13 +1046,9 @@ def lint():
     # Over raw_lines, not `mem.splitlines()` (2026-10-20): `mem` is a universal-newline read, so
     # a lone CR already ended a line there, and splitlines() also ends one at \v, \f, \x1c-\x1e,
     # \x85, U+2028 and U+2029. The guard splits at LF or CRLF only, so "- a", a U+2028, then
-    # "- b" was one entry to the hook that enforces the ceiling and two here.
+    # "- b" was one entry to the guard's count and two here. A count, never a finding (1.9.5).
     entries = [ln for ln in raw_lines if ln.startswith("- ")]
-    print(f"  {len(entries)} resident index entries" +
-          (f", target < {LINT_ENTRY_WARN}" if LINT_ENTRY_WARN else " (no ceiling set yet)"))
-    over_ceiling = bool(LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN)
-    if over_ceiling:
-        print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
+    print(f"  {len(entries)} resident index entries")
     print()
 
     print(f"  {len(raw_lines)} lines, target {LINT_LINES_WARN} (Claude Code loads the first 200)")
@@ -1326,7 +1321,7 @@ def lint():
     #
     # over_lines and comment_defects joined 2026-10-19 with their checks, and the sentence names
     # what they test: the line target is part of "within budget", and "comments close" is new.
-    if not (over_budget or over_ceiling or over_lines or over or broken or comment_defects or unresolved
+    if not (over_budget or over_lines or over or broken or comment_defects or unresolved
             or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
             or other_gates or other_unreadable or gate_excluded or gate_hidden or thread_problems):
         print("  clean: index within budget, links resolve, comments close, every standing order compiled.\n")

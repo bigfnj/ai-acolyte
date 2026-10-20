@@ -96,7 +96,7 @@ echo "ok: a corrupt index warns on stderr, names the file, and still exits 0"
 #
 # The residue check underneath used to be the only guard here, and it was vacuous twice over.
 # It globbed for `recall_index.json.tmp`, but save_index names its temp file with the writing
-# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:436#os.getpid) -- so the literal path
+# PID -- `recall_index.json.<pid>.tmp` (memory/recall.py:435#os.getpid) -- so the literal path
 # it tested has never existed on any run, broken or not. And even spelled correctly it only fires for
 # "wrote a tmp, forgot os.replace": revert to an in-place json.dump and there is no temp file
 # to leave behind, so it passes on the state it exists to forbid. Between it and the
@@ -347,8 +347,9 @@ printf '%s\n' "$CLEAN_LINT" | grep -q 'clean:' \
 # Each arm perturbs exactly one axis away from that corpus, and asserts BOTH that its own
 # warning fired (or the fixture is degenerate and proves nothing) and that clean: did not.
 #   over_budget   > LINT_TOTAL_WARN bytes, from prose -- entry count and line length untouched
-#   over_ceiling  > LINT_ENTRY_WARN short entries -- 40 x ~20 chars stays well inside the budget
 #   unresolved    one [[link]] to nothing -- one extra short line changes no other axis
+# (over_ceiling was an arm until 1.9.5, when the entry count stopped being a finding: the 40
+# short entries below are now the control that a count alone leaves the corpus clean.)
 check_axis() {   # check_axis <name> <warning substring>
   AXIS_LINT="$("$PY" "$RECALL" --lint)" || fail "$1: --lint exited non-zero"
   printf '%s\n' "$AXIS_LINT" | grep -q "$2" \
@@ -369,10 +370,16 @@ PAD="$(printf '%0240d' 0 | tr 0 p)"
 } > "$MEM/MEMORY.md"
 check_axis over_budget 'over budget'
 
+# 40 short entries, inside every size budget: counted, and still clean (1.9.5).
+# Mutation: put an entry ceiling back into lint()'s clean condition and this fails.
 { printf -- '# Memory Index\n\n'
   i=0; while [ $i -lt 40 ]; do printf -- '- [g](g.md) hook %02d\n' "$i"; i=$((i + 1)); done
 } > "$MEM/MEMORY.md"
-check_axis over_ceiling 'over the attention ceiling'
+ENTRIES_LINT="$("$PY" "$RECALL" --lint)" || fail "entries: --lint exited non-zero"
+printf '%s\n' "$ENTRIES_LINT" | grep -q '^  40 resident index entries$' \
+  || fail "the entry count is not reported as a bare count"
+printf '%s\n' "$ENTRIES_LINT" | grep -q 'clean:' \
+  || fail "40 entries inside every size budget is not clean: the count became a finding again"
 
 clean_index
 printf 'A forward link to nothing: [[no-such-memory]]\n' >> "$MEM/MEMORY.md"
@@ -415,12 +422,12 @@ echo "ok: line widths are code points, and comment markers in code are not comme
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1496#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1491#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1488#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1483#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.

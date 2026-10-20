@@ -176,25 +176,21 @@ test('a broken HTML comment in the index is reported with its line and kind', ()
   });
 });
 
-// The guard's entry ceiling, in the editor lint (2026-10-20). The guard and recall.py --lint hold
-// the index to 16 resident "- " entries; the gauge did not count them at all.
-// MUTATION: compare `entries >= ENTRIES_CEILING` in fastLint and 16 entries read as over; drop the
-// `ln.startsWith('- ')` count and 17 do not.
-test('past the 16-entry ceiling is reported, at the first entry past it, and not at 16', () => {
+// The resident "- " entries, counted by the guard's measure and never judged (1.9.5). From
+// 1.9.1 to 1.9.4 past 16 was a warning that an index giving every memory a line could not clear.
+// MUTATION: drop the `ln.startsWith('- ')` count in fastLint and the counts fail; put back a
+// ceiling field and the "no verdict" assertion does.
+test('the entry count is reported and carries no ceiling or verdict', () => {
   const { fastLint } = loadLint();
   const entries = (n) => Array.from({ length: n }, (_, i) => `- [m${i}](m${i}.md) hook`).join('\r\n') + '\r\n';
   withStore(`# Index\n-not an entry\n${entries(16)}`, (dir) => {
-    const r = fastLint(dir, CONF);
-    assert.equal(r.entries, 16, 'CRLF entries count, and "-not" is not one');
-    assert.equal(r.entriesCeiling, 16);
-    assert.equal(r.entriesOver, false, 'exactly at the ceiling');
-    assert.equal(r.entryPastCeiling, null);
+    assert.equal(fastLint(dir, CONF).entries, 16, 'CRLF entries count, and "-not" is not one');
   });
-  withStore(`# Index\n${entries(18)}`, (dir) => {
+  withStore(`# Index\n${entries(60)}`, (dir) => {
     const r = fastLint(dir, CONF);
-    assert.equal(r.entries, 18);
-    assert.equal(r.entriesOver, true);
-    assert.deepEqual(r.entryPastCeiling, { line: 17, end: '- [m16](m16.md) hook'.length },
-      'the warning sits on the 17th entry, its range the line without its CR');
+    assert.equal(r.entries, 60);
+    for (const key of ['entriesCeiling', 'entriesOver', 'entryPastCeiling']) {
+      assert.equal(Object.hasOwn(r, key), false, `no ${key}: the count is not a budget`);
+    }
   });
 });

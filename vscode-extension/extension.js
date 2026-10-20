@@ -1227,14 +1227,14 @@ function memoryCardData(precomputed = null) {
     // early when memory.enabled is false and so never registers
     // `permission-wildcarding.lintMemory`", so the card's link posted a command that
     // did not exist and VS Code answered "command not found". That justification
-    // outlived its truth: memoryLint.js:775-783#activate registers the command UNCONDITIONALLY,
+    // outlived its truth: memoryLint.js:768-776#activate registers the command UNCONDITIONALLY,
     // above the enabled check, showReport() answers for the disabled case itself
-    // (memoryLint.js:1110-1114#conf.enabled), and test/memory-lint-watchers.test.js:497#lintMemory
+    // (memoryLint.js:1090-1094#conf.enabled), and test/memory-lint-watchers.test.js:490#lintMemory
     // pins it there. The stated failure mode has not been reachable since.
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:1008#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:1001#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two
@@ -4527,7 +4527,7 @@ async function toggleMemoryGuard() {
             + `${nodeExecutable} on a copy of the guard in ${tilde(path.dirname(status.scriptPath))}, and the guard refuses an edit after `
             + 'which a memory index (MEMORY.md) ends past a budget and is worse on it than before: '
             + `${GUARD_BUDGETS.lines} lines, ${GUARD_BUDGETS.bytes} bytes, ${GUARD_BUDGETS.lineChars} characters on `
-            + `one line, ${GUARD_BUDGETS.entries} "- " entries, ${GUARD_BUDGETS.commentDefects} broken HTML comments. `
+            + `one line, ${GUARD_BUDGETS.commentDefects} broken HTML comments. `
             + 'Deleting whole lines passes unless it breaks an HTML comment or a code fence, and anything it cannot '
             + `read is let through. settings.json is backed up first. ${status.policy.line}`,
         },

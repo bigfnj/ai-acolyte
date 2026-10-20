@@ -171,7 +171,8 @@ const TEST_ONLY = {
   'src/legacy-backup-cleanup.js': ['parseBackupText'],
   'src/legacy-max-cleanup.js': ['LEGACY_ALLOW_CORE', 'legacyApproveCommandFor', 'legacyGeneratedAllow'],
   'src/local-settings.js': ['localBackupPath', 'partitionLocal', 'planPromotions', 'promotionFor', 'redundantUnder'],
-  'src/managed-policy.js': ['coversPrefix', 'hookEventAllowed', 'rulePrefix'],
+  // hookEventAllowed left 2026-10-20 with the function: its per-event model was disproved.
+  'src/managed-policy.js': ['coversPrefix', 'rulePrefix'],
   'src/permission-match.js': ['MATCH_CACHE_LIMIT', 'matchCacheStats'],
   // readBypassState joined on 2026-09-25 off PENDING_REMOVAL: see the note above that
   // list. test/bypass-round-trip.test.js is the only caller and is the whole reason the

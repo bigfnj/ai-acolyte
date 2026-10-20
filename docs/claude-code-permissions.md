@@ -458,9 +458,14 @@ every command it would match, `partial` when the grant is broader than such a
 rule, `redundant` when a managed allow already covers it, and `effective`
 otherwise. An `inert` family is withheld from the Claude review list **and from
 the write**, because writing that rule cannot stop the prompt.
-`hookEventAllowed` still encodes the per-event reading corrected above, so it
-answers "allowed" for a user hook on an event the policy defines, which the
-2026-10-19 measurement contradicts. No production caller reads it today.
+It answers no hook question. `hookEventAllowed`, which encoded the per-event
+reading corrected above, was removed on 2026-10-20 with the two policy fields
+only it read; it had no production caller after 2026-09-24. Where hooks run is
+read by `hookPolicy` in `src/memory-guard-install.js`, to the measured rule:
+`allowManagedHooksOnly` or `disableAllHooks` in a managed settings file or the
+cached `remote-settings.json`, or `disableAllHooks` in `settings.json`, means no
+user hook runs on any event. A policy it cannot see locally is reported as
+unknown, never as "hooks run".
 
 The "and from the write" half was a documentation claim before it was true.
 `clone` dropped `claude` from `eligibleTargets` for an inert family, but the
@@ -496,10 +501,14 @@ nothing and the number worth acting on would otherwise take weeks to reappear.
 
 Three deliberate limits. The file is a client-refreshed CACHE, so it is advisory:
 it can withhold a proposal, never widen one. Absence is not an empty policy, and
-an unreadable file reports `unreadable` rather than passing as unmanaged. And
-`hookBlocked` is the policy's own declaration, not an observation; per-event
-enforcement has changed across policy versions, so confirm with a canary that
-appends to a file before relying on it in either direction.
+an unreadable file reports `unreadable` rather than passing as unmanaged. And a
+hook restriction read from policy is the policy's own declaration, not an
+observation. The measured rule is the whole-hook one above: with
+`allowManagedHooksOnly` or `disableAllHooks` set, no user hook runs on any event,
+and no per-event canary can find one that does. `hookPolicy` reports it that way.
+The observation is `wildcard-perms --memory-guard probe` (`classifyProbe` reads
+its answer): it asks Claude Code itself, which refuses `/goal` while hooks are
+restricted.
 
 ---
 

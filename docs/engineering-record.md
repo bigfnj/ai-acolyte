@@ -3447,3 +3447,42 @@ on GitHub. No real VS Code was driven.
 - Every `MEMORY.md` save in the compile store recompiles, one Python spawn per 2.5 s burst.
 - The block carries no line telling an agent where status belongs; the brief fixed the format, and
   a footer would cost tokens in every session. A gate memory can say it instead.
+
+## The 1.9.0 backlog clearance (2026-10-20)
+
+The maintainer asked for `BACKLOG.md` to be cleared outright alongside 1.9.0. Every entry open
+on 2026-10-19 was re-verified against the tree before its disposition was written; none was
+closed by re-reading its own prose.
+
+| Entry (BACKLOG.md, as of `d4e977d`) | Disposition | Evidence |
+|---|---|---|
+| Two process-timing tests fail on the development box under full-suite load (2026-10-16) | **FIXED** (`5f065fc`, `1db8ab8`, `16c5427`, `c3591fb`, `f211943`, `648edbe`, merged in `dedb978`) | Two product races and four test orderings; the section "Spawn timing under load: what a timing capture found (2026-10-20)" above has the capture. Under the same synthetic load, `d4e977d` failed a family test in 4 of 5 full runs and the fixed tree passed 5 of 5, then one unloaded run. The grace-kill test's late exit of 2026-10-16 was not reproduced and its cause is not known (ACCEPTED-RECORDED); the test no longer depends on it. |
+| A worker-runner timing test was cancelled once under heavy load | **DECLINED-MEASURED** | 240 runs of `test/auto-learn-worker-runner.test.js`, 24 at a time beside the load: 3,840 results, 0 failed or cancelled, the slowest test 571 ms against its 15 s timeout. Every wait in the file is bounded by a ref'd timer of at most 3 s. Same section. |
+| Memory gates: `agents:` targeting (all three gaps closed), and the owner's note that rampage's Project-local drain work "is not mapped yet" | **CLOSED-VERIFIED** | The three gaps were already FIXED (`a9a2dbf`, `c6a1878`, `659be23`). For the note: rampage's source diff since its base `7ec8a8a` (`git diff 7ec8a8a main -- src bin`, 9 files, +1881/-501) contains no drain, `local-settings` or `localDrain` change at all; the only drain commits in its history, `4bc54ed` and `0dc2148` (2026-09-27), predate the extraction and are this repo's own `c640340` and `5d1720e`. There is no drain work to port. |
+| Decided 2026-10-15, CLOSED: a workspace may lower Auto Learn's mode, never raise it | **CLOSED-VERIFIED** (shipped in 1.6.7, `f1407bf`) | Its two ACCEPTED-RECORDED residuals move here verbatim, below. Since 1.9.0 `autoLearn.enabled` is the fifth tighten-only key ("Toggle Auto Learn, and `autoLearn.enabled` made tighten-only (2026-10-19)"). |
+| VS Code acceptance has not run against the 1.6.2 tree | **CLOSED-VERIFIED** | Run against the installed 1.9.0 on 2026-10-20, VS Code 1.142.0: the default groups 4 of 4; `--review-runtime yes --dashboard-ui yes` 6 of 6 (the "6 of 6" in the 1.6.8 to 1.8.1 release paragraphs is this run); `--mcp-only yes --review-runtime yes` 6 of 6, which includes the MCP suite's 0.161.0 shape check. |
+
+**Moved from the 2026-10-15 entry, ACCEPTED-RECORDED rather than queued (wave-f15):**
+- **Argument splitting on the cmd route.** A token ending in `\` before the closing quote merges
+  with the next argument. That is argument splitting, not injection, and it affects only a
+  non-npm batch-file codex.
+- **The version probe still runs an npm `codex.cmd` through cmd.exe.** It is safe with fixed
+  arguments.
+
+**The 1.7.1 and 1.7.2 release paragraphs carried no evidence.** Recorded now: both merge commits
+(`4fe6a32`, `3e8ba86`) have a green Tests push run and a green Release VSIX run. 1.7.2's published
+`ai-acolyte-v172.vsix` matches a local build of the tag in all 61 entries once line endings are
+normalised (checked 2026-10-19, CLOSED-VERIFIED). 1.7.1's release was pruned by release.yml's
+keep-three rule, so its asset can no longer be compared (ACCEPTED-RECORDED on the CI evidence).
+
+**The live hook worktree is on the other development box.** Every release paragraph since 1.6.7
+says "the live worktree has moved to the tag", and this box has neither the worktree nor a user
+hook: it records the box those releases were cut on, whose record entry counts 831 allow
+entries where this box has 470. 1.9.0 was cut on this box; moving that worktree to `v1.9.0` is a
+step for the other machine.
+
+**A workstation lockup during a load experiment.** On 2026-10-19 at 23:59 the development box
+locked up and rebooted (Kernel-Power 41, no BugCheck) while the spawn-timing capture ran 8
+spinning threads plus spawn loops beside a full suite. Whether the load caused it is not known.
+The capture was rerun at half the load. Keep synthetic load experiments on this box at that
+level or below.

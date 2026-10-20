@@ -10,6 +10,28 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Cleared 2026-10-20 for 1.9.0.** All five entries open on 2026-10-19 were re-verified against the
+tree and closed: the spawn-timing family FIXED, the worker-runner cancellation DECLINED-MEASURED,
+the `agents:` entry and its rampage-drain note CLOSED-VERIFIED, the workspace-tighten entry
+CLOSED-VERIFIED with its two ACCEPTED-RECORDED residuals moved into the record, and the VS Code
+acceptance entry CLOSED-VERIFIED. Each disposition and its evidence is in `docs/engineering-record.md`
+under "The 1.9.0 backlog clearance (2026-10-20)".
+
+**Released 2026-10-20 as 1.9.0.** The tag `v1.9.0` is at `8324b6d`, the `--no-ff` merge of
+`release/1.9.0`. CI is green on all 8 jobs on the merge (run 39402040201) and on the release branch
+(runs 39400001253 and 39401520799), and the Python job's new `test/threads-compile.sh` step ran on
+GitHub ("24 indexes, 12 past a budget", ALL PASS). The published `ai-acolyte-v190.vsix` (release.yml
+run 39402110398) matches the local build in all 66 entries apart from line endings. Against the
+installed 1.9.0: `drive-installed.js` 17 of 17 (two new checks: the MEMORY.md guard end to end
+through the packaged copy, and open threads through the packaged recall.py), and `drive-vscode.js`
+4 of 4 by default, 6 of 6 with `--review-runtime yes --dashboard-ui yes` (now reading the Claude
+memory card's guard and open-threads lines from the real webview), and 6 of 6 with `--mcp-only yes
+--review-runtime yes`. Suite at the merge: 1966 tests, 1960 pass, 0 fail, 6 skipped (masked view 0
+fail); smoke 18 of 18. The live worktree is on the other development box, so moving it is a step
+for that machine (the record's clearance section says why). 1.9.0 adds the MEMORY.md guard, the
+Open threads block and Toggle Auto Learn, makes `autoLearn.enabled` tighten-only, and fixes two
+Windows spawn races; the record has a section for each.
+
 **Cleared 2026-10-13 for 1.6.2.** Every entry open on that morning was re-verified against
 the tree and given a disposition; they are recorded in `docs/engineering-record.md` under
 "The 1.6.2 backlog clearance (2026-10-13)" and removed from here. Two had rotted in the way
@@ -32,11 +54,15 @@ and lines, files, embedded passages) and an issues line. The record has it under
 
 **Released 2026-10-19 as 1.7.2.** The dashboard's Memory row is now Claude memory, to match the Codex
 memory row beside it. It was named before Codex support existed, and its row key is unchanged.
+Evidence recorded 2026-10-20: Tests and Release VSIX green for `3e8ba86`, and the published asset
+matches a local build of the tag in all 61 entries apart from line endings.
 
 **Released 2026-10-19 as 1.7.1.** Each Agent sessions row is laid out on two lines: the badge
 and folder name, then the details beneath. As one flex row, the details squeezed the folder name
 to one character wide in a narrow sidebar (the user's screenshot). The header line now reads "watching
-Claude & Codex history", with the settings path on its hover.
+Claude & Codex history", with the settings path on its hover. Evidence recorded 2026-10-20: Tests and
+Release VSIX green for `4fe6a32`; the release itself was pruned by the keep-three rule, so its asset
+can no longer be compared.
 
 **Released 2026-10-16 as 1.7.0.** The tag `v1.7.0` is at `0c7ad66`. CI is green on all 8 jobs. The
 published asset matches the local build in all 61 entries, apart from line endings. The installed
@@ -75,96 +101,27 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Two process-timing tests fail on the development box under full-suite load (2026-10-16)
+### Found while building 1.9.0 (2026-10-20)
 
-**Open, and not a regression.** On 2026-10-16, `node --test` failed the same two tests in three
-out of three full runs: on the 1.6.8 branch, under `mask-sqlite`, and on untouched `main`
-(`75265d2`), which CI had passed the day before.
-- **`test/codex-mcp-config.test.js`**, "the config worker's grace kill skips an app-server that
-  exited by a signal, and still ends a live one". The stand-in's exit arrived 2 s after the grace
-  kill had already fired.
-- **`test/dashboard-project-trust.test.js`**, "a cold push starts no process on the host thread,
-  and both Codex answers still arrive". The stand-in never answered within the 30 s limit.
+Each was seen during the 1.9.0 build or integration and is unresolved at the release.
 
-Both pass when their two files run alone (34 of 34), and both passed on all 8 CI jobs for
-`bb5c6d8`. Two things changed on the box that day: VS Code updated itself to 1.142.0, and the
-workstation restarted after a crash. The suspects are process-spawn pressure from a full run, or an
-endpoint security filter holding a freshly spawned process. **Not yet diagnosed.** The next step is
-a timing capture of the stand-in process during a full run.
-
-**2026-10-19.** On the 1.8.0 full run, a third test from `test/codex-mcp-config.test.js` failed beside
-them: "the asynchronous layers read does not block, is bounded, hands its child over, and leaves no
-codex running". It is the same family, a stand-in Codex process under load. Its file passed 34 of
-34 alone, and CI passed 1.8.0. One 1.7.0 full run passed all three, so this is load-dependent, not
-constant.
-
-**It has failed on CI too, once.** A docs-only push on 2026-10-16 (`67ff813`) failed CI on Windows Node 24
-with a fourth test from the same file: "the config worker's own kill runs System32's taskkill, not one
-planted in its cwd". Every run since has passed, so the claim that these tests always pass on CI was
-wrong. The family is spawn timing in `test/codex-mcp-config.test.js` and
-`test/dashboard-project-trust.test.js`, on any loaded Windows host.
-
-### Memory gates: `agents:` targeting (2026-10-14; all three gaps closed)
-
-A read-only census of this box found 0 compiled gates and 1 qualifying memory. The 16 gates in
-the repo's comments, from a 119–123-memory corpus, lived on the development machine. Three
-defects surfaced along the way, and all three are closed, with their evidence in
-`docs/engineering-record.md` under "Rampage's memory-gates hardening, ported (2026-10-14)" and
-"Per-agent memory gates (2026-10-14)":
-
-- **CLOSED, FIXED by reporting (`a9a2dbf`): the compiler reads one store and ignored the rest
-  without saying so.** By the maintainer's decision the other stores are still never compiled.
-  `recall.py --lint` and the dashboard's gates card now name each other store and its count of
-  gate memories that are not installed.
-- **CLOSED, FIXED (`c6a1878`): `agents:` targeting was ignored.** A gate marked `agents: [codex]`
-  was installed into Claude's `CLAUDE.md` too. Now `agents:` decides which agents get each gate,
-  and once one names a subset the compile writes one file with a section per agent, each under
-  its own header sha, read once and refused whole if any section is torn. The older checkout's
-  per-agent files are never read. A corpus with no `agents:` key compiles and installs byte for
-  byte as before, pinned against `d624539` by test/recall-py.sh.
-- **CLOSED, FIXED (`659be23`): `src/agent-gates.js`'s header said gates need `type: feedback`.**
-  It now says selection is on `scope: global` alone.
-
-**Note (user, 2026-10-14):** the private spin-off `bigfnj/rampage` ("a memory manager for Claude
-Code") has feature work on memory gates and on Project-local draining. Its memory-gates hardening
-(`7139659`) was ported in wave-h1 (the record section above), and its "retire and restore memory
-gates one at a time" (`e5c0ee7`) in wave-h3 (the record's "Retire and restore memory gates
-(2026-10-14)"). Its Project-local drain work is not mapped yet. Check it before designing that.
-
-### Decided 2026-10-15, CLOSED: a workspace may lower Auto Learn's mode, never raise it
-
-**CLOSED, FIXED (`ea1fabe`).** The evidence is in `docs/engineering-record.md` under "Workspace
-settings may only tighten (2026-10-15)". wave-f15's census had found that a repository's
-`.vscode/settings.json` could set `autoLearn.mode` to `auto-safe` and so opt the user into
-unattended grants to the global files. Now `autoLearn.mode`, `autoLearn.successThreshold`,
-`autoLearn.codexScope` and `localDrain.enabled` are tighten-only. A workspace or folder value may
-make each one stricter than the user's own setting, never looser. A looser value is ignored, with
-one output line. The Cycle mode command writes user settings for any step above the user's mode.
-This entry can go once that release ships.
-
-Also from wave-f15, ACCEPTED-RECORDED rather than queued:
-- **Argument splitting on the cmd route.** A token ending in `\` before the closing quote merges
-  with the next argument. That is argument splitting, not injection, and it affects only a
-  non-npm batch-file codex.
-- **The version probe still runs an npm `codex.cmd` through cmd.exe.** It is safe with fixed
-  arguments.
-
-### VS Code acceptance has not run against the 1.6.2 tree
-
-`scripts/drive-vscode.js` launches an isolated VS Code instance, and on 2026-10-13 every launch
-was refused: a staged VS Code update held the `vscode-updating` mutex ("Code is currently being
-updated"), which is released only when the running VS Code exits. The packaged-build drive
-(`scripts/drive-installed.js`), both suites and every CLI-only Codex harness passed; the
-real-editor groups, including the MCP acceptance suite's new 0.161.0 shape check, are unrun.
-Run `node scripts/drive-vscode.js --extension-dir <stage>` (plus `--review-runtime yes
---dashboard-ui yes`) after the next VS Code restart.
-
-### A worker-runner timing test was cancelled once under heavy load
-
-2026-10-13, while four worktrees ran full suites at once: a long timing test in
-`test/auto-learn-worker-runner.test.js` was cancelled in one full run; the file alone passed 16
-of 16. The Windows rename-holder flakes measured the same day had a different cause and are
-fixed; this one is unreproduced.
+- **`hookEventAllowed` answers per event, and that model is disproved.** `src/managed-policy.js`
+  decides user-hook availability event by event, but on 2026-10-19 Claude Code 2.1.293 and 2.1.301
+  ran no user hook of any event while hooks were restricted (the record's MEMORY.md guard
+  section). It has no production caller. Change it to the measured rule or retire it.
+- **The README's command count is not pinned.** `vscode-extension/README.md` said 36 and then 37
+  while the manifest registered 37 and then 38; two merges each moved it, and no test noticed.
+- **The editor gauge has no entry-count rule.** The guard and `recall.py --lint` hold resident
+  `- ` entries to 16; `vscode-extension/memoryLint.js` does not count them.
+- **`test/release-version.test.js` failed once under a full masked run.** "a same-version VSIX
+  left over..." printed nothing from its checker in one of agent D's masked runs and passed on the
+  rerun and 3 of 3 alone. Not one of the spawn-timing family. Unreproduced.
+- **A synthetic click on the Claude memory row head did not land in the real-editor drive.** The
+  hover settled on the Auto Learn row instead. The dashboard group now reads the card's lines from
+  the DOM rather than expanding the row; why the click missed is not known.
+- **The guard does not replay Claude Code's quote normalisation.** An `Edit` whose `old_string`
+  Claude Code would match only after normalising quotes reads as "not found" to the guard, which
+  lets it through (fail open).
 
 ---
 
@@ -189,4 +146,9 @@ stripper in `src/permission-match.js`) was read from Claude Code 2.1.296, becaus
 docs list neither. Since 2026-10-15 the variable list is checked automatically on each Claude
 Code update: the extension re-reads it once per new binary and warns when it differs
 (`src/claude-strip-model.js`). A list change still needs a release, and the wrapper stripper
-and value class are still re-read by hand.
+and value class are still re-read by hand. The MEMORY.md guard cannot be exercised live on the
+development box, whose managed policy restricts user hooks (`--memory-guard probe` reads
+"restricted"): it is verified by tests that spawn the hook with Claude Code's payloads, and by the
+packaged-copy drive. Two things wait for a box where user hooks run: an end-to-end check that the
+exit-2 reason reaches the model, and the `if` filter (`Edit(//**/MEMORY.md)`), whose matching for
+`Write` could not be observed, so the hook filters in-process and pays a node start per Write or Edit.

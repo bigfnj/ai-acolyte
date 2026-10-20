@@ -749,12 +749,14 @@ def search(query, k, mode="hybrid"):
             bits = ([f"cos {r['cos']:.3f}"] if r["cos"] is not None else []) + \
                    ([f"lex {r['bm25']:.1f}"] if r["bm25"] is not None else [])
             tail = ("   " + "  ".join(bits)) if bits else ""
-        print(f"  {r['score']:5.3f}  {r['name']}{tail}")
+        # The name, the description and the line are the memory's, and a terminal acts on what
+        # they hold: each through _shown or _shown_text (the fourth pass). --json is JSON's.
+        print(f"  {r['score']:5.3f}  {_shown(r['name'])}{tail}")
         if r["desc"]:
-            print(f"         {r['desc'][:150]}")
+            print(f"         {_shown_text(r['desc'][:150])}")
         hit = best_line(query, r["name"], r["text"])
         if hit:
-            print(f"         > {hit}")
+            print(f"         > {_shown_text(hit)}")
         print()
 
 
@@ -1072,7 +1074,7 @@ def lint():
         print(f"  {len(over)} index line(s) over {LINT_LINE_WARN} chars "
               f"-- move detail into the file/repo, leave a hook:")
         for length, i, ln in sorted(over, reverse=True):
-            print(f"    {length:4d} ch  L{i}  {(ln[2:] if ln.startswith('- ') else ln)[:70]}...")
+            print(f"    {length:4d} ch  L{i}  {_shown_text((ln[2:] if ln.startswith('- ') else ln)[:70])}...")
         print()
 
     # Claude Code strips HTML comments from the index, so a broken one is never seen where it is
@@ -1093,7 +1095,7 @@ def lint():
     if broken:
         print("  index links to MISSING files:")
         for t in broken:
-            print(f"    {t}")
+            print(f"    {_shown(t)}")
         print()
 
     # Standing orders have to be resident: a gate you must remember to go look up never
@@ -1105,7 +1107,7 @@ def lint():
     if no_scope:
         print("  type: feedback with no `scope:` -- compiler cannot place these:")
         for s in no_scope:
-            print(f"    {s}")
+            print(f"    {_shown(s)}")
         print()
 
     # The gate reports below describe what the COMPILER would do, and the compiler skips the
@@ -1137,7 +1139,7 @@ def lint():
         print(f"  {GATE_BEGIN} block inside the always-loaded index "
               f"-- resident here, never compiled for any other project:")
         for s in index_gate:
-            print(f"    {s}.md  (move it to its own memory file)")
+            print(f"    {_shown(s)}.md  (move it to its own memory file)")
         print()
 
     no_gate = [s for s in gateable if meta[s][1] == "global" and not meta[s][2]]
@@ -1163,7 +1165,7 @@ def lint():
         print(f"  {GATE_BEGIN} block with no `scope:` -- written, never compiled, "
               f"nowhere to place it:")
         for s in gate_no_scope:
-            print(f"    {s}")
+            print(f"    {_shown(s)}")
         print()
 
     # The compile, once, from the texts already read: the per-agent counts below, the gates it
@@ -1181,7 +1183,7 @@ def lint():
     if gate_excluded:
         print("  gate memory whose `agents:` cannot be read -- left out for every agent, not compiled:")
         for name, problem in gate_excluded:
-            print(f"    {name[:-3]}  ({problem})")
+            print(f"    {_shown(name[:-3])}  ({problem})")
         print()
 
     # A compiled gate whose block holds characters the compile removes (_gate, 2026-10-20): the
@@ -1192,7 +1194,7 @@ def lint():
         print("  gate memory whose block holds hidden characters -- removed when it compiles, so the "
               "instruction files get only the text a person reading it sees:")
         for s, n in gate_hidden:
-            print(f"    {s}  ({n} hidden character{'' if n == 1 else 's'})")
+            print(f"    {_shown(s)}  ({n} hidden character{'' if n == 1 else 's'})")
         print()
 
     # Gate memories in the OTHER stores, which never compile (see _other_store_gates). Worded
@@ -1213,9 +1215,9 @@ def lint():
         print("  store compiles. Move one into this store to install it, or point RECALL_MEMORY_DIR")
         print("  (the extension's memory.dir) at its store:")
         for slug, n in other_gates:
-            print(f"    {slug}: {n}")
+            print(f"    {_shown(slug)}: {n}")
         for slug in other_unreadable:
-            print(f"    {slug}: could not be read")
+            print(f"    {_shown(slug)}: could not be read")
         print()
 
     # Reference material wearing a standing order's clothes. These only matter once you are
@@ -1231,7 +1233,7 @@ def lint():
         print(f"  {len(demote)} demotion candidate(s), ~{sum(n for _, _, n in demote)} bytes "
               f"-- lookup-on-demand, not standing orders:")
         for t, stem, n in sorted(demote, key=lambda r: -r[2])[:8]:
-            print(f"    {n:4d} ch  {t:9s} {stem}")
+            print(f"    {n:4d} ch  {_shown_text(t):9s} {_shown(stem)}")
         if len(demote) > 8:
             print(f"    ... and {len(demote) - 8} more")
         print()
@@ -1273,25 +1275,25 @@ def lint():
     if thread_findings["duplicate"]:
         print("  memory with more than one `status:` line -- left out of the open threads:")
         for stem, _ in thread_findings["duplicate"]:
-            print(f"    {stem}")
+            print(f"    {_shown(stem)}")
         print()
     if thread_findings["unknown"]:
         print(f"  `status:` value that is neither listed ({', '.join(THREAD_STATUSES)}) nor closed "
               f"({', '.join(THREAD_CLOSED)}) -- left out of the open threads:")
         for stem, value in thread_findings["unknown"]:
-            print(f"    {stem}  ({_shown(value) if value else 'empty'})")
+            print(f"    {_shown(stem)}  ({_shown(value) if value else 'empty'})")
         print()
     if thread_findings["no-block"]:
         print(f"  listed `status:` with no {STATUS_BEGIN} ... {STATUS_END} block outside code "
               f"-- left out of the open threads:")
         for stem, status in thread_findings["no-block"]:
-            print(f"    {stem}  ({status})")
+            print(f"    {_shown(stem)}  ({status})")
         print()
     if thread_findings["long"]:
         print(f"  status text longer than {THREAD_TEXT_CAP} characters -- cut with an ellipsis "
               f"in the open threads:")
         for stem, length in thread_findings["long"]:
-            print(f"    {stem}  ({length} characters)")
+            print(f"    {_shown(stem)}  ({length} characters)")
         print()
     thread_problems = any(thread_findings.values())
 
@@ -1301,7 +1303,7 @@ def lint():
     if unresolved:
         print("  unresolved [[links]] (typo, or a forward-link not written yet):")
         for l in unresolved:
-            print(f"    [[{l}]]")
+            print(f"    [[{_shown_text(l)}]]")
         print()
 
     # `demote` is deliberately NOT a condition here, though it is still printed
@@ -1626,7 +1628,7 @@ def compile_gates(allow_empty=False):
     # On stderr, so `wildcard-perms --gates refresh` passes it through: a gate the user wrote
     # and the compile left out is a standing order that is not loading anywhere.
     for name, problem in excluded:
-        print(f"[recall] gate left out for every agent: {name}: {problem}",
+        print(f"[recall] gate left out for every agent: {_shown(name)}: {problem}",
               file=sys.stderr)
 
     if not names:
@@ -1637,7 +1639,7 @@ def compile_gates(allow_empty=False):
     print(f"\n  compiled {len(names)} gate(s), {len(out)} bytes\n  -> {GATES_OUT}")
     print("  " + ", ".join(f"{a} {len(per_agent[a])}" for a in GATE_AGENTS) + "\n")
     for name in names:
-        print(f"    {name}")
+        print(f"    {_shown(name)}")
     print()
 
 
@@ -1836,10 +1838,28 @@ def _strip_hidden(text, table=_THREAD_STRIP):
 
 def _shown(name):
     """A name from a memory, as a terminal may be shown it: unchanged when every character of it
-    is printable, else ascii() of it, so an ESC, a BEL or a bidi control arrives as an escape and
-    not as the character (2026-10-20). For an `agents:` name, which a problem string carries to
-    --lint, to the compile's stderr, to --gates-list and from there to `wildcard-perms`."""
-    return name if name.isprintable() else ascii(name)
+    is printable and none is in the hidden set (_strip_hidden over _GATE_STRIP removes nothing),
+    else ascii() of it, so an ESC, a BEL, a bidi control or a Hangul filler arrives as an escape
+    and not as the character (2026-10-20). For an `agents:` name, which a problem string carries
+    to --lint, to the compile's stderr, to --gates-list and from there to `wildcard-perms`, and for
+    every file name and stem a human-readable report prints (the fourth pass)."""
+    return name if name.isprintable() and _strip_hidden(name, _GATE_STRIP) == name else ascii(name)
+
+
+def _shown_text(text):
+    """Memory text (a description, a best-matching line, an index line), as a terminal may be shown
+    it (the fourth pass): each character _strip_hidden over _GATE_STRIP would remove, and a line
+    feed, as its Python escape (`\\x1b`, `\\u202e`), everything else as written, so an accented
+    word or an arrow still reads as itself. The tab stays. src/gates-manage.js markHidden is the
+    same walk, marking where this escapes."""
+    out, last = [], None   # `last`: the last character not in the hidden set, as _strip_hidden keeps
+    for ch in text:
+        if ord(ch) in _GATE_STRIP or (ord(ch) in _PRESENTATION_SELECTORS and not (last and _selector_base(last))):
+            out.append(ascii(ch)[1:-1])
+            continue
+        out.append(ascii(ch)[1:-1] if ord(ch) == 0x0A else ch)
+        last = ch
+    return "".join(out)
 
 
 def _thread_text(raw):
@@ -2022,11 +2042,11 @@ def compile_threads():
         _replace_file_text(THREADS_OUT, out)
     # On stderr, as the gates' are, so `wildcard-perms --open-threads refresh` passes them on.
     for stem, problem in findings["duplicate"]:
-        print(f"[recall] open thread left out: {stem}.md: {problem}", file=sys.stderr)
+        print(f"[recall] open thread left out: {_shown(stem)}.md: {problem}", file=sys.stderr)
     for stem, value in findings["unknown"]:
-        print(f"[recall] open thread left out: {stem}.md: unknown status {value!r}", file=sys.stderr)
+        print(f"[recall] open thread left out: {_shown(stem)}.md: unknown status {ascii(value)}", file=sys.stderr)
     for stem, status in findings["no-block"]:
-        print(f"[recall] open thread left out: {stem}.md: status {status} with no "
+        print(f"[recall] open thread left out: {_shown(stem)}.md: status {status} with no "
               f"{STATUS_BEGIN} block", file=sys.stderr)
     print(f"\n  compiled {len(threads)} open thread(s)\n  -> {THREADS_OUT}{' (unchanged)' if unchanged else ''}")
     if health:
@@ -2828,7 +2848,7 @@ def main():
     if args.list:
         idx = build_or_update()
         for name in sorted(idx["files"]):
-            print(f"  {name}  --  {idx['files'][name]['desc'][:90]}")
+            print(f"  {_shown(name)}  --  {_shown_text(idx['files'][name]['desc'][:90])}")
         return
     if not args.query:
         if args.json:

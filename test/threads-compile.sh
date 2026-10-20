@@ -947,4 +947,108 @@ print(f"  {len(cf)} format characters: {len(cf) - len(VISIBLE)} removed, {len(VI
 PY
 echo "ok: the hidden set is Default_Ignorable_Code_Point and the hidden format controls, and every format character is placed"
 
+# ------------------------------------- memory text and names reach the terminal escaped (the fourth pass)
+# recall.py prints a memory's description and best-matching line in search results and its
+# description in --list, and memory file names and stems in search, --list, --lint and the
+# compile. Each is the memory's own text, and a terminal acts on what it holds: ESC ] 0 ; ... BEL
+# retitles it, ESC [ 2 J clears it, an RLO reorders the line, a Hangul filler shows as nothing.
+# Text goes through _shown_text (each hidden character as its Python escape, the rest as written,
+# so an e-acute stays one), names through _shown (ascii() of a name that holds any). --json is
+# JSON's and is not checked here. An ESC in a FILE NAME cannot exist on NTFS, so that name is
+# written where the file system takes it (CI's Linux) and the run says it is skipped where it is
+# not; the RLO name runs everywhere.
+# Mutations, each failing here: print r['desc'] raw in search ("search: a raw"), or the best line;
+# print --list's description raw, or its name; print the name raw in search; print the stem raw in
+# --lint's hidden-gate list, its left-out list or its unknown-status list; print --lint's
+# unresolved link or over-long index line raw; print the name raw in the compile's stdout list, or
+# in its stderr left-out line, or the stem in --threads-compile's; _shown_text escaping every
+# character outside ASCII (the e-acute); _shown on isprintable() alone (the Hangul filler name).
+fresh
+"$PY" - "$MEM" <<'PY'
+import json, os, sys
+mem = sys.argv[1]
+NL = chr(10)
+ESC, BEL, RLO = chr(0x1b), chr(7), chr(0x202e)
+def write(name, lines):
+    open(os.path.join(mem, name), "w", encoding="utf-8", newline="").write(NL.join(lines) + NL)
+desc = ESC + "]0;title" + BEL + ESC + "[2J kettle descaling caf" + chr(0xe9) + " " + chr(0x3164)
+names = ["evil" + RLO + "dm.md", "filler" + chr(0x3164) + ".md"]
+if os.name == "nt":
+    print("  skip: a memory named with an ESC (NTFS refuses the character); the RLO and Hangul filler names run")
+else:
+    names.append("esc" + ESC + "[2Jname.md")
+descs = {}
+for name in names:
+    write(name, ["---", "name: x", "description: " + desc, "scope: global", "---",
+                 "kettle descaling cycle line " + ESC + "[31m red " + RLO + "x",
+                 "<!-- gate -->", "- A rule" + chr(0x200b) + ".", "<!-- /gate -->"])
+    write("typo" + name, ["---", "name: y", "description: left out", "scope: global", "agents: [gemini]", "---",
+                          "<!-- gate -->", "- Elsewhere.", "<!-- /gate -->"])
+    descs[name], descs["typo" + name] = desc, "left out"
+# A thread --lint and --threads-compile leave out (an unknown status) under an RLO name, a link
+# --lint cannot resolve, and an index line over the budget, each holding an ESC.
+write("thread" + RLO + ".md", ["---", "name: t", "description: a thread", "status: wip", "---", "Body."])
+write("links.md", ["---", "name: l", "description: links", "---", "See [[gone" + ESC + "[2J]]."])
+descs["thread" + RLO + ".md"], descs["links.md"] = "a thread", "links"
+open(os.path.join(mem, "MEMORY.md"), "w", encoding="utf-8", newline="").write(
+    "# Memory Index" + NL + "- " + ESC + "[2J" + "x" * 320 + NL)
+# Each file's mtime and size, with its description, so --list builds no model: what it prints
+# comes from the cache, as it does for a user.
+files = {}
+for name, text in descs.items():
+    st = os.stat(os.path.join(mem, name))
+    files[name] = {"mtime": st.st_mtime, "size": st.st_size, "desc": text, "vec": [0.0] * 384}
+json.dump({"embed": "bge-small-onnx", "files": files}, open(os.path.join(mem, "recall_index.json"), "w", encoding="utf-8"))
+json.dump(names, open(os.path.join(mem, "..", "names.json"), "w"), ensure_ascii=True)
+PY
+RECALL_MEMORY_DIRS= "$PY" "$RECALL" --lexical-only -k 8 "kettle descaling" > "$TMP/p-search.txt" 2>&1 || fail "the lexical search failed: $(cat "$TMP/p-search.txt")"
+RECALL_MEMORY_DIRS= "$PY" "$RECALL" --list > "$TMP/p-list.txt" 2>&1 || fail "--list failed: $(cat "$TMP/p-list.txt")"
+RECALL_MEMORY_DIRS= "$PY" "$RECALL" --lint > "$TMP/p-lint.txt" 2>&1
+RECALL_MEMORY_DIRS= "$PY" "$RECALL" --gates-compile > "$TMP/p-compile.txt" 2> "$TMP/p-compile-err.txt" \
+  || fail "the compile failed: $(cat "$TMP/p-compile.txt" "$TMP/p-compile-err.txt")"
+RECALL_MEMORY_DIRS= "$PY" "$RECALL" --threads-compile > "$TMP/p-threads.txt" 2> "$TMP/p-threads-err.txt" \
+  || fail "the threads compile failed: $(cat "$TMP/p-threads.txt" "$TMP/p-threads-err.txt")"
+"$PY" - "$TMP" <<'PY' || fail "memory text or a memory name reached the terminal unescaped (above)"
+import json, os, sys
+tmp = sys.argv[1]
+B = chr(92)
+names = json.load(open(os.path.join(tmp, "names.json")))
+read = lambda n: open(os.path.join(tmp, n), "rb").read().decode("utf-8").replace(chr(13), "")
+out = {k: read("p-" + k + ".txt") for k in ("search", "list", "lint", "compile", "compile-err", "threads", "threads-err")}
+bad = []
+for k, text in out.items():
+    raw = sorted({hex(ord(ch)) for ch in text if ord(ch) in (0x07, 0x1b, 0x202e, 0x3164, 0x200b)})
+    if raw:
+        bad.append(f"{k}: a raw {raw}")
+# Written out by hand, not by recall.py, so a broken escape is not its own witness.
+desc = B + "x1b]0;title" + B + "x07" + B + "x1b[2J kettle descaling caf" + chr(0xe9) + " " + B + "u3164"
+line = "> kettle descaling cycle line " + B + "x1b[31m red " + B + "u202ex"
+for name in names:
+    shown, stem, typo = ascii(name), ascii(name[:-3]), ascii("typo" + name)
+    want = {"search": [shown, "         " + desc, "         " + line],
+            "list": ["  " + shown + "  --  " + desc],
+            "lint": ["    " + stem + "  (1 hidden character)",
+                     "    " + ascii("typo" + name[:-3]) + "  (`agents:` names an agent this compiler does not know: gemini)"],
+            "compile": ["    " + shown],
+            "compile-err": ["gate left out for every agent: " + typo + ": "]}
+    for k, needles in want.items():
+        for needle in needles:
+            if needle not in out[k]:
+                bad.append(f"{k}: no {ascii(needle)}")
+thread = ascii("thread" + chr(0x202e))
+for k, needle in (("lint", "    " + thread + "  (wip)"), ("lint", "    [[gone" + B + "x1b[2J]]"),
+                  ("lint", "  " + B + "x1b[2J" + "x" * 66 + "..."),
+                  ("threads-err", "open thread left out: " + thread + ".md: unknown status 'wip'")):
+    if needle not in out[k]:
+        bad.append(f"{k}: no {ascii(needle)}")
+for b in bad:
+    print("  " + b)
+if bad:
+    for k, text in out.items():
+        print(f"  --- {k} ---" + chr(10) + ascii(text)[:1500])
+assert not bad
+print(f"  {len(names)} memory name(s) and their text, escaped in search, --list, --lint and the compile")
+PY
+echo "ok: descriptions, best-matching lines and memory names are printed with their hidden characters escaped"
+
 echo "ALL PASS: test/threads-compile.sh"

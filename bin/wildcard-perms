@@ -1493,14 +1493,18 @@ function memoryGuard(args) {
   const home = path.resolve(os.homedir());
   const tilde = (file) => (String(file).startsWith(home) ? '~' + String(file).slice(home.length) : String(file));
   if (cmd === 'probe') {
-    try {
-      const probe = install.memoryGuardProbe();
-      process.stdout.write(`wildcard-perms memory-guard probe: ${probe.result}. ${probe.detail}\n`
-        + `  (${probe.command}, in the empty directory ${tilde(probe.directory)}; the answer reads Claude Code's own message text)\n`);
-      if (probe.result === 'unknown') process.exitCode = 1;
-    } catch (error) {
-      process.stderr.write(`wildcard-perms --memory-guard probe: ${error.message}\n`);
+    const failed = (error) => {
+      process.stderr.write(`wildcard-perms --memory-guard probe: ${error && error.message}\n`);
       process.exitCode = 1;
+    };
+    try {
+      install.memoryGuardProbe().then((probe) => {
+        process.stdout.write(`wildcard-perms memory-guard probe: ${probe.result}. ${probe.detail}\n`
+          + `  (${probe.command}, in the empty directory ${tilde(probe.directory)}; the answer reads Claude Code's own message text)\n`);
+        if (probe.result === 'unknown') process.exitCode = 1;
+      }, failed);
+    } catch (error) {
+      failed(error);
     }
     return;
   }

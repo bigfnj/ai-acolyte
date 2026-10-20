@@ -360,17 +360,19 @@ test('the probe reads Claude Code\'s refusal text, and anything else as accepted
   assert.match(classifyProbe({ error: Object.assign(new Error('x'), { code: 'ETIMEDOUT' }), status: null }).detail, /no answer within 60 s/);
 });
 
-// A stub `claude` that records how it was run and answers with the refusal.
-function stubClaude(t, answer, exitCode) {
+// A stub `claude` that records how it was run (and its pid) and answers, or sleeps first.
+function stubClaude(t, answer, exitCode, sleepMs = 0) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-stub-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const record = path.join(dir, 'record.json');
   const script = path.join(dir, 'claude-stub.js');
   fs.writeFileSync(script, `const fs = require('fs');
-fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(),
+fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid,
   entries: fs.readdirSync(process.cwd()) }));
-process.stdout.write(${JSON.stringify(answer)} + '\\n');
-process.exitCode = ${exitCode};
+setTimeout(() => {
+  process.stdout.write(${JSON.stringify(answer)} + '\\n');
+  process.exitCode = ${exitCode};
+}, ${sleepMs});
 `);
   let executable;
   if (process.platform === 'win32') {
@@ -381,18 +383,25 @@ process.exitCode = ${exitCode};
     fs.writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
     fs.chmodSync(executable, 0o755);
   }
-  return { dir, executable, record: () => JSON.parse(fs.readFileSync(record, 'utf8')) };
+  return { dir, script, executable, record: () => JSON.parse(fs.readFileSync(record, 'utf8')) };
 }
 
-test('the probe runs claude -p "/goal probe" once, in an empty directory of its own', (t) => {
+const PROBE_ARGV = ['-p', '/goal reply with the word acolyte-probe-ok and stop', '--tools', '', '--strict-mcp-config',
+  '--no-session-persistence'];
+
+// The bound arrives as arguments (audit 2026-10-20): an inert goal, no built-in tools, no MCP
+// servers, nothing saved. `--tools ""` is an empty argument, and survives the cmd.exe launch.
+// MUTATION: drop '--tools', '' from PROBE_ARGS and the argv below differs.
+test('the probe runs the bounded /goal command once, in an empty directory of its own', async (t) => {
   const f = fixture(t);
   const stub = stubClaude(t, RESTRICTED, 1);
   const options = { home: f.home, env: {}, claudeExecutable: stub.executable };
-  const probe = memoryGuardProbe(options);
+  const probe = await memoryGuardProbe(options);
   assert.equal(probe.result, 'restricted', probe.detail);
-  assert.equal(probe.command, 'claude -p "/goal probe"');
+  assert.equal(probe.command, 'claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --strict-mcp-config '
+    + '--no-session-persistence');
   const seen = stub.record();
-  assert.deepEqual(seen.argv, ['-p', '/goal probe']);
+  assert.deepEqual(seen.argv, PROBE_ARGV);
   assert.deepEqual(seen.entries, [], 'the probe session has no project to act on');
   assert.equal(fs.existsSync(seen.cwd), false, 'and its directory is removed afterwards');
   // One fixed name, because Claude Code keeps a transcript directory per working directory, in
@@ -402,11 +411,54 @@ test('the probe runs claude -p "/goal probe" once, in an empty directory of its 
   assert.equal(path.basename(seen.cwd), 'ai-acolyte-memory-guard-probe');
   assert.equal(probe.directory, path.join(f.home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe'));
   fs.mkdirSync(probe.directory);
-  memoryGuardProbe(options);
+  await memoryGuardProbe(options);
   assert.equal(stub.record().cwd, seen.cwd, 'an empty leftover of our own is used');
   const accepted = stubClaude(t, 'Goal set.', 0);
-  assert.equal(memoryGuardProbe({ ...options, claudeExecutable: accepted.executable }).result, 'not restricted');
-  assert.equal(memoryGuardProbe({ ...options, claudeExecutable: path.join(stub.dir, 'missing-claude') }).result, 'unknown');
+  assert.equal((await memoryGuardProbe({ ...options, claudeExecutable: accepted.executable })).result, 'not restricted');
+  assert.equal((await memoryGuardProbe({ ...options, claudeExecutable: path.join(stub.dir, 'missing-claude') })).result, 'unknown');
+});
+
+// An npm shim in cmd-shim's node form is run as the node script it names, with no cmd.exe, and
+// only a shim it cannot read goes through resolvedLaunch.
+// MUTATION: call resolvedLaunch alone and npmShimLaunch is never asked.
+test('the probe asks npmShimLaunch first, and runs what it returns', async (t) => {
+  const f = fixture(t);
+  const stub = stubClaude(t, RESTRICTED, 1);
+  const execResolve = require('../src/exec-resolve');
+  const asked = [];
+  t.mock.method(execResolve, 'npmShimLaunch', (name, args) => {
+    asked.push({ name, args: [...args] });
+    return { file: process.execPath, args: [stub.script, ...args], options: {}, resolved: name };
+  });
+  const probe = await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: path.join(stub.dir, 'not-a-real-claude') });
+  assert.equal(probe.result, 'restricted', probe.detail);
+  assert.deepEqual(asked, [{ name: path.join(stub.dir, 'not-a-real-claude'), args: PROBE_ARGV }]);
+  assert.deepEqual(stub.record().argv, PROBE_ARGV);
+});
+
+// The deadline ends the whole tree. On Windows the stub is a .cmd, so the process the probe holds
+// is cmd.exe and the stub's node is its child: spawnSync's timeout ended cmd.exe and left that
+// node running (audit 2026-10-20).
+// The stub's node holds the probe's stdio pipes, so while it lives the probe cannot finish: an
+// answer well inside the stub's 60 s sleep is the proof that it was ended at the deadline.
+// MUTATION: end only the child at the deadline (child.kill() in place of endProcessTree) and on
+// Windows the probe waits out the stub's full 60 s.
+test('a probe that outlives its deadline is ended with everything it started', async (t) => {
+  const f = fixture(t);
+  const stub = stubClaude(t, 'too late', 0, 60 * 1000);
+  t.after(() => { try { process.kill(stub.record().pid); } catch { /* already gone */ } });
+  const started = Date.now();
+  const probe = await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable, timeoutMs: 2500 });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 30 * 1000, `the probe answered ${elapsed} ms after it started, against a 2.5 s deadline`);
+  assert.equal(probe.result, 'unknown');
+  assert.match(probe.detail, /claude gave no answer within/);
+  const { pid } = stub.record();
+  let alive = true;
+  for (let i = 0; i < 40 && alive; i += 1) {
+    try { process.kill(pid, 0); await new Promise((done) => setTimeout(done, 50)); } catch { alive = false; }
+  }
+  assert.equal(alive, false, `the stub (pid ${pid}) outlived the probe's deadline`);
 });
 
 // The fixed directory used to sit in os.tmpdir(), which is /tmp and shared on Linux: another
@@ -416,20 +468,20 @@ test('the probe runs claude -p "/goal probe" once, in an empty directory of its 
 // not run, and the planted files are left exactly where they are.
 // MUTATION: clear and reuse an existing directory as 1.9.0 did (rmSync then mkdirSync
 // recursive) and the stub runs in the planted directory.
-test('the probe refuses a directory that already holds files, and does not run claude', (t) => {
+test('the probe refuses a directory that already holds files, and does not run claude', async (t) => {
   const f = fixture(t);
   const stub = stubClaude(t, 'Goal set.', 0);
   const dir = path.join(f.home, '.claude', 'wildcarding', 'ai-acolyte-memory-guard-probe');
   const planted = path.join(dir, '.claude', 'settings.json');
   fs.mkdirSync(path.dirname(planted), { recursive: true });
   fs.writeFileSync(planted, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo planted' }] }] } }));
-  const probe = memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable });
+  const probe = await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable });
   assert.equal(probe.result, 'unknown');
   assert.match(probe.detail, /^The probe did not run: .*ai-acolyte-memory-guard-probe already exists and is not empty, so Claude Code was not run in it\./);
   assert.throws(() => stub.record(), /ENOENT/, 'claude never ran');
   assert.ok(fs.existsSync(planted), 'and nothing of someone else\'s was deleted');
   fs.rmSync(dir, { recursive: true });
   fs.writeFileSync(dir, 'a file, not a directory');
-  assert.match(memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable }).detail, /is not a plain directory/);
+  assert.match((await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable })).detail, /is not a plain directory/);
   assert.throws(() => stub.record(), /ENOENT/);
 });

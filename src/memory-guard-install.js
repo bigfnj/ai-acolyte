@@ -30,8 +30,21 @@ const { inspectMemoryGuard, planMemoryGuard, memoryGuardScriptPath } = require('
 
 const PACKAGED_GUARD = path.join(__dirname, 'memory-index-guard.js');
 const REVISION_RE = /^const GUARD_REVISION = (\d+);/m;
-const PROBE_PROMPT = '/goal probe';
+// THE PROBE IS BOUNDED (2026-10-20). Where hooks are allowed, `/goal <condition>` starts a real
+// agent run that Claude Code keeps going until the condition holds, under the user's own
+// permission mode and allow list; "probe" was a goal that invited exploration. The condition is
+// now inert, and the run gets no built-in tools (`--tools ""`), no MCP servers
+// (`--strict-mcp-config` with no --mcp-config) and no saved session (`--no-session-persistence`),
+// every one of them listed by `claude --help` in Claude Code 2.1.293. That help lists no turn
+// limit, so none is passed: an undocumented flag is one more way for the probe to break, and the
+// 60 s ceiling, which ends the whole process tree, is the bound on time. A Claude Code that does
+// not know one of these flags answers with an error, and that reads as unknown.
+const PROBE_GOAL = 'reply with the word acolyte-probe-ok and stop';
+const PROBE_PROMPT = `/goal ${PROBE_GOAL}`;
+const PROBE_ARGS = Object.freeze(['-p', PROBE_PROMPT, '--tools', '', '--strict-mcp-config', '--no-session-persistence']);
+const PROBE_COMMAND = `claude -p "${PROBE_PROMPT}" --tools "" --strict-mcp-config --no-session-persistence`;
 const PROBE_TIMEOUT_MS = 60 * 1000;
+const PROBE_OUTPUT_CAP = 4 * 1024 * 1024;
 const RESTRICTED_TEXT = /can['\u2019]t run while hooks are restricted/i;
 
 function resolveHome(options) {
@@ -303,9 +316,9 @@ function classifyProbe(run) {
   return { result: 'unknown', detail: `Claude Code neither refused nor accepted /goal: ${first.slice(0, 200)}` };
 }
 
-// Runs `claude -p "/goal probe"` once, in an empty directory of its own so a session that does
-// start (hooks allowed) has no project to act on, with stdin closed and a 60 s ceiling. Where
-// hooks are allowed this starts a real, short Claude Code turn.
+// Runs the bounded `claude -p "/goal ..."` (PROBE_ARGS) once, in an empty directory of its own so a
+// session that does start (hooks allowed) has no project to act on, with stdin closed and a 60 s
+// ceiling. Where hooks are allowed this starts a real, short Claude Code turn.
 //
 // ONE directory NAME, not a fresh random one (2026-10-19). Claude Code writes a transcript under
 // ~/.claude/projects/<slug of the cwd>/ even for the refusal (measured: 2.7 KB, Claude Code
@@ -343,24 +356,54 @@ function probeDirectory(dir) {
   return dir;
 }
 
+// ASYNC, AND THE DEADLINE ENDS THE TREE (2026-10-20). spawnSync's timeout kills the one process it
+// started, and on Windows that is routinely a launcher: an npm `claude.cmd` runs under cmd.exe,
+// so the claude (or the node) under it kept running after the 60 s. The launch is
+// npmShimLaunch's when the shim is cmd-shim's node form (no cmd.exe at all), else resolvedLaunch's,
+// and the deadline calls endProcessTree, which ends cmd.exe and everything under it
+// (src/exec-resolve.js). Resolves, never rejects, with { result, detail, command, directory }.
 function memoryGuardProbe(options = {}) {
-  const { spawnSync } = require('child_process');
-  const { resolvedLaunch } = require('./exec-resolve');
-  const command = `claude -p "${PROBE_PROMPT}"`;
   const directory = probeDirectoryPath(options);
-  let cwd = null;
-  let run;
-  try {
-    const launch = resolvedLaunch(options.claudeExecutable || 'claude', ['-p', PROBE_PROMPT], 'spawnSync');
-    cwd = probeDirectory(directory);
-    run = spawnSync(launch.file, launch.args, { ...launch.options, cwd, input: '', encoding: 'utf8',
-      timeout: options.timeoutMs || PROBE_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-  } catch (error) {
-    run = { error };
-  } finally {
-    if (cwd) try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* a probe dir left behind is refused next time */ }
-  }
-  return { ...classifyProbe(run), command, directory };
+  return new Promise((resolve) => {
+    let cwd = null;
+    let settled = false;
+    const settle = (run) => {
+      if (settled) return;
+      settled = true;
+      if (cwd) try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* a probe dir left behind is refused next time */ }
+      resolve({ ...classifyProbe(run), command: PROBE_COMMAND, directory });
+    };
+    try {
+      const { spawn } = require('child_process');
+      const execResolve = require('./exec-resolve');
+      const name = options.claudeExecutable || 'claude';
+      const launch = execResolve.npmShimLaunch(name, PROBE_ARGS) || execResolve.resolvedLaunch(name, PROBE_ARGS, 'spawn');
+      cwd = probeDirectory(directory);
+      const child = spawn(launch.file, launch.args, { ...launch.options, cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const out = { stdout: '', stderr: '' };
+      for (const stream of ['stdout', 'stderr']) {
+        child[stream].setEncoding('utf8');
+        child[stream].on('data', (chunk) => { if (out[stream].length < PROBE_OUTPUT_CAP) out[stream] += chunk; });
+      }
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; execResolve.endProcessTree(child); }, options.timeoutMs || PROBE_TIMEOUT_MS);
+      // A program that cannot start emits 'error' then 'close'; one already running that fails a
+      // kill emits 'error' and is still running, so only 'close' settles that one.
+      child.on('error', (error) => {
+        if (Number.isInteger(child.pid)) return;
+        clearTimeout(timer);
+        settle({ error, ...out });
+      });
+      child.on('close', (status) => {
+        clearTimeout(timer);
+        settle(timedOut ? { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), ...out } : { status, ...out });
+      });
+      child.stdin.on('error', () => { /* a child that exits before reading stdin */ });
+      child.stdin.end();
+    } catch (error) {
+      settle({ error });
+    }
+  });
 }
 
 module.exports = {

@@ -47,6 +47,75 @@ const TASK = 'ai-acolyte.spawn-thread';
 // than the 5 s taskkill ceiling it waits on; deactivate bounds its own wait at 6 s.
 const END_BOUND_MS = 6000;
 
+// ONE SPAWN AT A TIME ACROSS THESE THREADS (2026-10-20). On Windows, libuv makes a
+// child's ends of its stdio pipes inheritable for the length of spawn(), and every
+// CreateProcess in the process inherits every inheritable handle there is at that
+// moment. Two threads spawning at once therefore hand each other's pipe ends to
+// their children. A cold dashboard push starts two threads together: the version
+// probe (`codex --version`) and the trust ask (the config worker, which lives for
+// as long as Codex takes to answer). When the two spawns overlapped, the worker held
+// the probe's stdout open, so the probe's 'close' and its answer waited for the
+// worker to exit. Measured on the development box under load: `--version` exited
+// 2.3 s after the probe began, its 'close' came 4.8 s later, one millisecond after
+// the worker exited, and the probe's 5 s timer had already called it "timed out",
+// which then stood for 60 s. In isolation, two threads spawning together: the short
+// child's 'close' came about 4 s after its exit in 8 of 8 rounds, until the long one
+// exited, and 0 ms after it in 8 of 8 with each spawn() held under one lock.
+//
+// So each spawn made here holds the gate below, shared by every spawn thread this
+// process starts, for the length of the spawn() call only: by the time spawn()
+// returns, libuv has closed the child's ends on this side. A second thread waits
+// out one CreateProcess (74-465 ms p50 on that box, about 1 s at worst under load),
+// on its own thread, never the host's. The lock word holds when it was taken, so a
+// holder that never released (a thread that died inside the call) is taken over
+// after GATE_STALE_MS, and the gate can delay a spawn but never stop one.
+//
+// NOT GATED, and recorded: spawns on the extension host thread and on the Auto Learn
+// worker thread, and the taskkill a thread runs to end its tree. Each is short-lived
+// or rare, and a pipe it leaks makes one answer wait for one other process to exit.
+const GATE = 'ai-acolyte.spawn-gate';
+const GATE_SLOT = Symbol.for('ai-acolyte.spawn-gate');
+const GATE_STALE_MS = 5000;
+const GATE_TICK_MS = 100;
+// One gate per process, kept on the global, so a reloaded copy of this module (a
+// same-realm re-activate) shares it with threads its predecessor started. The Int32 at
+// byte 0 is the lock word (0 free, else 1 + the tenths of a second after `base` when it
+// was taken), and the Float64 at byte 8 is `base`, written before any thread can read it.
+function spawnGate() {
+  if (!(globalThis[GATE_SLOT] instanceof SharedArrayBuffer)) {
+    const shared = new SharedArrayBuffer(16);
+    new Float64Array(shared, 8, 1)[0] = Date.now();
+    globalThis[GATE_SLOT] = shared;
+  }
+  return globalThis[GATE_SLOT];
+}
+
+// The thread's half: run `start` (one spawn) holding the gate, and hand back what it
+// returned. Without a gate in workerData (a thread started some other way) it runs
+// ungated, as before.
+function gated(start) {
+  const shared = workerData?.[GATE];
+  if (!(shared instanceof SharedArrayBuffer)) return start();
+  const lock = new Int32Array(shared, 0, 1);
+  const base = new Float64Array(shared, 8, 1)[0];
+  const stamp = () => 1 + Math.max(0, Math.floor((Date.now() - base) / GATE_TICK_MS));
+  let mine = stamp();
+  for (;;) {
+    const held = Atomics.compareExchange(lock, 0, 0, mine);
+    if (held === 0) break;
+    if (Date.now() - (base + (held - 1) * GATE_TICK_MS) > GATE_STALE_MS
+      && Atomics.compareExchange(lock, 0, held, mine) === held) break;
+    Atomics.wait(lock, 0, held, 50);
+    mine = stamp();
+  }
+  try {
+    return start();
+  } finally {
+    // Only this hold is released: one taken over as stale is no longer this thread's.
+    if (Atomics.compareExchange(lock, 0, mine, 0) === mine) Atomics.notify(lock, 0, 1);
+  }
+}
+
 const describe = (error) => ({ message: String((error && error.message) || error),
   code: error?.code ?? null, signal: error?.signal ?? null, killed: error?.killed === true });
 
@@ -99,7 +168,7 @@ function startThread(task, settle, lost) {
   const answer = (result) => { if (!answered) { answered = true; settle(result); } };
   let worker;
   try {
-    worker = new Worker(__filename, { workerData: { [TASK]: task } });
+    worker = new Worker(__filename, { workerData: { [TASK]: task, [GATE]: spawnGate() } });
   } catch (error) {
     // Nothing started, so nothing needs ending. Answered on a later tick, the way
     // a spawn failure reaches execFile's callback, never inline.
@@ -174,10 +243,10 @@ function runTask(task) {
   try {
     if (task.kind === 'execFile') {
       const { execFile } = require('node:child_process');
-      track(execFile(task.file, task.args, task.options, (error, stdout, stderr) =>
-        reply({ error: error ? describe(error) : null, stdout, stderr })));
+      track(gated(() => execFile(task.file, task.args, task.options, (error, stdout, stderr) =>
+        reply({ error: error ? describe(error) : null, stdout, stderr }))));
     } else if (task.kind === 'config-rpc') {
-      require('./codex-mcp-config').nativeRpcAsync(task.requests, { ...task.options, track }, task.context)
+      require('./codex-mcp-config').nativeRpcAsync(task.requests, { ...task.options, track, spawnGate: gated }, task.context)
         .then((results) => reply({ results }), (error) => reply({ error: describe(error) }));
     } else {
       reply({ error: { message: `unknown spawn-thread task ${String(task.kind)}` } });

@@ -229,8 +229,11 @@ function nativeRpcAsync(requests, options, context) {
     // `detached` on POSIX only: it makes the worker a process-group leader, so the
     // tree kill (endProcessTree) reaches its codex as well. On Windows it would
     // open a console; the tree kill there is taskkill /T and needs no group.
-    const child = spawn(launch.file, launch.args, { ...launch.options, windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    // `options.spawnGate`, from src/spawn-thread.js only, holds the spawn under the
+    // lock its threads share, so no other thread's child inherits this one's pipes.
+    const gate = typeof options.spawnGate === 'function' ? options.spawnGate : (start) => start();
+    const child = gate(() => spawn(launch.file, launch.args, { ...launch.options, windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
     // THE ANSWER IS THE LINE, NOT THE EXIT (2026-10-14). The worker ends its answer with a
     // newline (JSON.stringify never emits a raw one), then spends its grace and its kill
     // ending its codex before it exits. This side used to read the answer only on 'close',

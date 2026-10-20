@@ -2565,7 +2565,8 @@ def main():
             pass
     ap = argparse.ArgumentParser(description="Semantic search + hygiene lint over the Claude memory dir.")
     ap.add_argument("query", nargs="*", help="what you're trying to recall")
-    ap.add_argument("-k", type=int, default=6, help="how many results (default 6)")
+    # default=None, so "was -k given?" has an answer the refusals below can ask; a search reads 6.
+    ap.add_argument("-k", type=int, default=None, help="how many results (default 6)")
     ap.add_argument("--rebuild", action="store_true", help="force re-embed every file")
     ap.add_argument("--list", action="store_true", help="show what's indexed and exit")
     ap.add_argument("--lint", action="store_true", help="audit index bloat + links (no model)")
@@ -2594,6 +2595,11 @@ def main():
     args = ap.parse_args()
 
     editing = bool(args.gates_retire or args.gates_restore)
+    # A query's own flags, refused beside every mode that runs alone (2026-10-20). They were left
+    # out of these lists, so `--threads-compile --json` and `--lint --json` ran and dropped the
+    # flag without a word, which is the half-done run the lists below exist to refuse.
+    query_flags = (("--json", args.json), ("-k", args.k is not None),
+                   ("--vector-only", args.vector_only), ("--lexical-only", args.lexical_only))
     if args.gates_list or editing:
         # Each runs alone. `--gates-retire x --gates-compile` reads as "retire, then compile", and
         # quietly doing half of it is the shape of failure this file keeps removing. Exit 2 is
@@ -2603,7 +2609,8 @@ def main():
                                        ("--gates-allow-empty", args.gates_allow_empty),
                                        ("--threads-compile", args.threads_compile),
                                        ("--selftest", args.selftest), ("--rebuild", args.rebuild),
-                                       ("--list", args.list), ("a query", bool(args.query))) if on]
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
         if mixed:
             ap.error(f"--gates-list, --gates-retire and --gates-restore run on their own (retire "
                      f"and restore may share a run), not with {', '.join(mixed)}. Compile in a "
@@ -2619,12 +2626,22 @@ def main():
         mixed = [flag for flag, on in (("--lint", args.lint), ("--gates-compile", args.gates_compile),
                                        ("--gates-allow-empty", args.gates_allow_empty),
                                        ("--selftest", args.selftest), ("--rebuild", args.rebuild),
-                                       ("--list", args.list), ("a query", bool(args.query))) if on]
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
         if mixed:
             ap.error(f"--threads-compile runs on its own, not with {', '.join(mixed)}.")
         compile_threads()
         return
     if args.lint:
+        # Alone too: the lint printed its report and returned, and whatever else was asked for
+        # (a rebuild, a compile, a query and its flags) was dropped in silence.
+        mixed = [flag for flag, on in (("--gates-compile", args.gates_compile),
+                                       ("--gates-allow-empty", args.gates_allow_empty),
+                                       ("--selftest", args.selftest), ("--rebuild", args.rebuild),
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--lint runs on its own, not with {', '.join(mixed)}.")
         texts = lint()
         if texts is not None:
             _lint_retired(texts)
@@ -2655,7 +2672,7 @@ def main():
     if args.vector_only and args.lexical_only:
         sys.exit("[recall] --vector-only and --lexical-only are mutually exclusive.")
     mode = "vector" if args.vector_only else "lexical" if args.lexical_only else "hybrid"
-    (search_json if args.json else search)(" ".join(args.query), args.k, mode)
+    (search_json if args.json else search)(" ".join(args.query), 6 if args.k is None else args.k, mode)
 
 
 if __name__ == "__main__":

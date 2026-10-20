@@ -3071,3 +3071,93 @@ This is the same lesson as the release-note claim about validating the deployed 
 keeps arriving from a different direction: **a patch script that asserts `count === 1` proves
 its pattern was unique, not that the pattern was the only place the thing was said.** Uniqueness
 of a string is not coverage of a concept. Grep the artefact for the CONCEPT afterwards.
+
+---
+
+## Spawn timing under load: what a timing capture found (2026-10-20)
+
+The two BACKLOG items "Two process-timing tests fail on the development box under full-suite
+load (2026-10-16)" and "A worker-runner timing test was cancelled once under heavy load", on
+branch `fix/spawn-timing` (from `d4e977d`). Every run below was a full `node --test` on the
+development box (Ryzen 9 3900X, 24 logical CPUs, Node 24.16.0), inside the shared suite lock, so
+no other full suite ran beside it. Other sessions' single-file runs could.
+
+**The load.** A generator beside the suite: 6 loops spawning `node -e 0` and `cmd /c exit` back
+to back, N spinning worker threads, and 1 loop copying `node.exe` to a fresh file and running it
+once (a first run of a new executable, which endpoint scanning holds). N was 8 until the box
+locked up at 23:59 on 2026-10-19, during the second run of a pass at that load (Kernel-Power 41
+with no BugCheck event, so a hang or power loss, not a crash with a dump). Whether the load caused
+it is not known. Every run after it used N=4, the "before" pass included, so the comparison
+below is like for like.
+
+**The capture.** A `NODE_OPTIONS` preload, kept out of the repo, wrote one JSONL file per process
+and thread: when the process started and its JS began, every `spawn`, `execFile` and `spawnSync`
+with how long the call held its thread, and when each child's 'exit' and 'close' arrived. Over
+three captured loaded runs of `d4e977d` (N=8), `spawn()` of a node child held its caller
+107-1,080 ms (p50 291, n=81), of a cmd.exe 118-1,228 ms (p50 290, n=112), and a node child's JS
+began 197-1,701 ms after its `spawn()` returned (p50 570, n=63). Those three runs failed 2, 1 and
+0 tests.
+
+| Test | Failed | Cause | Disposition |
+|---|---|---|---|
+| dashboard-project-trust "a cold push starts no process on the host thread, and both Codex answers still arrive" | 1 of 3 captured runs (the 30 s wait) | **A product race.** The push's two threads spawned at once: the version probe's cmd.exe from 25,622 to 25,979 ms, the config worker's node from about 25,661 to 26,111 ms. On Windows libuv makes a child's pipe ends inheritable for the length of `spawn()`, and CreateProcess inherits every inheritable handle in the process, so the worker inherited the probe's stdout. `--version` exited at 27,903 ms, but its 'close' came at 30,752 ms, 1 ms after the worker exited, and the probe's 5 s timer had fired at 30,559 ms: "timed out", cached for 60 s. Isolated (two threads released by one barrier, a 4 s child and an instant one): the instant child's 'close' came about 4 s after its exit in 8 of 8 rounds, and 0-1 ms after it in 8 of 8 with one lock held across each `spawn()` | **FIXED**, `5f065fc`. src/spawn-thread.js gives every thread it starts one process-wide SharedArrayBuffer gate, held for the `spawn()` call alone: the probe's execFile, and the config worker's spawn through nativeRpcAsync's new `spawnGate` option. A hold older than 5 s is taken over, so the gate can delay a spawn but never stop one. Tests: "the version a cold push asks for lands while the trust ask it started is still open" (the stand-in holds its config/read answer until the test opens a gate file, which it does only once the version is on screen; no clock), and "a thread spawns only while no other holds the gate, and takes over a hold left stale" |
+| codex-mcp-config "a tree kill of the asynchronous worker ends the codex it started, on every platform" | 1 of 3 | taskkill /T ends the leaves first and the root last (root last in 10 of 10 trees, unloaded). The codex was ended. The test's taskkill started at 25,513 ms; the worker saw its cmd.exe die at 26,839 ms, answered "Codex config server exited early" and exited on its own at 26,842 ms, so taskkill exited 255 and the host took the worker's line as the answer: "refused: ... exited early" instead of "unavailable" | **FIXED**, `1db8ab8`. endProcessTree marks a live child `TREE_ENDING` before it signals anything, and nativeRpcAsync reports an ask so marked as ended by its caller, whatever its worker printed meanwhile. Nothing kept such an answer (deactivate abandons it in the same tick), so what changed is a contract two tests assert, now true by construction. Test: "an ask its caller ends reads as unavailable even when its worker answers inside the kill" (Windows) forces the order |
+| codex-mcp-config "the config worker's own kill runs System32's taskkill, not one planted in its cwd" | 1 of 3; and CI run 38970150410 on `67ff813` | A 4 s budget put the worker's deadline 1 s after the call, and a worker that starts past its deadline spawns nothing (`1cf20d0`): "precondition: the stand-in codex started", the host answering after 2,759 ms here and 1,091 ms on CI | **FIXED (test)**, `16c5427`. The stand-in refuses `initialize` and stays up, so the worker's grace kill is reached by an event; the budget is 30 s. New witness: the host itself started no taskkill, so its backstop never had to end the tree. The old "worker's deadline, not the host's backstop" check could no longer fail on its mutation, because the answer is the worker's line, written before the kill |
+| codex-mcp-config "the config worker's grace kill skips an app-server that exited by a signal, and still ends a live one" | 0 of 3 here; 3 of 3 on 2026-10-16 | **NOT REPRODUCED, cause NOT KNOWN.** On 2026-10-16 the cmd.exe's 'exit' came 2 s after the 1 s grace kill had fired. Captured here: 29, 81 and 81 ms after the kill, and 54, 63 and 195 ms in the controls. The test needed that exit inside the 1 s grace, and the node's 3 s linger to outlast the grace | **FIXED (test), cause ACCEPTED-RECORDED**, `c3591fb`. Each step now waits for the one before it: the signal run's finally is reached through the exit itself ("exited early"), and the stand-in's node exits only once the grace kill has decided, so 'close' always follows. A late exit now makes the run slower, and one that never comes fails at the 30 s bound with its log |
+| codex-mcp-config "the asynchronous layers read does not block, is bounded, hands its child over, and leaves no codex running" | 0 of 3 captured; once on the 1.8.0 full run (line not recorded); and once in the first "after" pass, in its after hook | Body, inferred and not observed: `Date.now() - started < 1000` right after the call includes the worker's CreateProcess, 162-569 ms for this file's workers (n=9) and up to 1,080 ms for a node child. Hook, observed: EPERM removing the directory the app-server stood in, the HARNESS HAZARD of 2026-10-14 (a `.cmd` stand-in's console host keeps its cwd after it dies, and Node 24's rmSync does not retry) | **FIXED (test)**, `f211943` and `648edbe`. The claim is an order: when the call returns, the codex it asks has not started (no pid file). Two cleanup hooks that removed an app-server's cwd with a bare rmSync now retry, as the file's other process tests already did |
+
+**Mutations**, each run against its blast radius and restored:
+- `gated` runs its spawn at once: the new dashboard test failed 5 of 5 runs, and the gate test
+  failed with "a thread spawned while another held the gate".
+- The gate's stale takeover dropped: the gate test failed with "a stale hold stopped every later
+  spawn".
+- `endedByCaller` always false, and separately the `TREE_ENDING` mark dropped: the forced-order
+  test failed both times, reading "refused: Codex config server exited early".
+- `taskkill` named bare in endProcessTree: the planted-taskkill test failed on the flag, the host
+  having run its backstop's taskkill itself.
+- The old `exitCode`-only grace kill: the grace test failed, its log showing taskkill /PID (the
+  signalled PID) /T /F 1.0 s after the finally.
+- readCodexConfigLayersAsync routed through the synchronous nativeRpc: the asynchronous-read test
+  failed with "it returned after 31308 ms".
+
+**HARNESS HAZARD: a mutation that does nothing.** For "does not block", the first candidate
+witness was a `setImmediate` that must run before the answer, and the first mutation blocked the
+thread for 7 s after `spawn()`. Both passed together. The block starved the worker of its request,
+which is written only once the loop runs, so the worker answered past its deadline without
+spawning anything, and no witness had anything to see. Only the synchronous-route mutation was a
+real one. Also: a gate-test mutation that leaves a spawn thread waiting for ever held the test
+file open after the test had failed; the test now frees the gate in a `finally`.
+
+**ACCEPTED-RECORDED, not gated:** spawns on the extension host thread (its four `execFile` sites
+and deactivate's taskkill), the Auto Learn worker thread's `execpolicy` checks, and the taskkill
+a spawn thread runs to end its tree. A pipe one of them leaks makes one answer wait for one other
+process to exit, and none of them is on the dashboard push.
+
+**Not verified here:** the Linux and macOS legs. The gate and the mark are platform-neutral, and
+the new order and grace tests are Windows-only, but nothing was run on POSIX (the podman machine
+was not running). CI is the first POSIX run.
+
+**The box got faster across the lockup.** Before it, the load generator managed about 3.3
+spawns a second and a loaded full run took 98-124 s (95 s for one unloaded run); after it,
+about 18 spawns a second and 35-43 s. So every figure in the capture paragraph above is from the
+slower state, and the runs after the reboot are a milder load than the ones before it.
+
+**Results** (tests / pass / fail / skip per run; only the first row ran with the capture preload):
+
+| Pass | Tree | Load (spawners, spinners, copiers) | Runs | Tests / pass / fail / skip | Family failures |
+|---|---|---|---|---|---|
+| Captured, 2026-10-19 | `d4e977d` | 6, 8, 1, with the capture preload | 3 | 1844 / 1836, 1837, 1838 / 2, 1, 0 / 6 | tree kill and planted taskkill; cold push; none |
+| First after pass, 2026-10-19 | `b88f4c5`, two test files edited during runs 4 and 5 | 6, 8, 1 | 5 | 1847 / 1841 / 0 / 6, except run 3: 1840 / 1 | run 3: the asynchronous-read test's after hook, EPERM (fixed in `648edbe`) |
+| Clean after pass, 2026-10-19 | `48392b6` | 6, 8, 1 | 1, then the box locked up in run 2 | 1847 / 1841 / 0 / 6 | none |
+| **Before**, 2026-10-20 | `d4e977d` (an extracted copy under the temp root) | 6, 4, 1 | 5 | 1844 / 1835, 1836, 1835, 1835, 1835 / 3, 2, 3, 3, 3 / 6 | **4 of 5 runs**: the asynchronous-read hook EPERM (runs 1 and 3), spawn-thread "ending a thread child ends the worker and the codex it started", reading "refused ... exited early" (runs 4 and 5). Two more failures in every run are the copy's location, not the family: runtime-instruction-isolation and vscode-acceptance-mcp refuse a checkout under the temp root |
+| **After**, 2026-10-20 | `48392b6` | 6, 4, 1 | 5 consecutive | 1847 / 1841 / 0 / 6, every run (35-37 s) | **none** |
+| **Unloaded**, 2026-10-20 | `48392b6` | none | 1 | 1847 / 1841 / 0 / 6 (32 s) | none |
+
+**The worker-runner item.** **DECLINED-MEASURED: nothing to fix.** Not reproduced: 240 runs of
+`test/auto-learn-worker-runner.test.js`, 24 at a time for 10 rounds beside the 6, 4, 1 load, gave
+3,840 results with 0 failed or cancelled; its slowest test took 571 ms (p50 559, n=240) against
+the 15 s per-test timeout. It also passed in every full run above (19 loaded, 2 unloaded). Read for a
+mechanism: every wait in the file is bounded by a ref'd timer of at most 3 s (`outcomeWithin`,
+`until`, the 200 and 500 ms waits), so nothing in it can be cancelled by an empty event loop,
+and a cancellation needs the file's process stalled past 15 s. The 2026-10-13 condition, four
+full suites at once, was deliberately not re-created after the lockup.

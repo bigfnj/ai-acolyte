@@ -2702,7 +2702,28 @@ def main():
         # It qualifies the compile and nothing else, so alone it was dropped in silence too.
         ap.error("--gates-allow-empty applies only to --gates-compile.")
     if args.selftest:
+        # Alone too (2026-10-20). It checked the embedder and returned, so a query and its flags,
+        # --rebuild and --list were dropped without a word.
+        mixed = [flag for flag, on in (("--rebuild", args.rebuild), ("--list", args.list),
+                                       ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--selftest runs on its own, not with {', '.join(mixed)}.")
         selftest(); return
+    if args.list:
+        # Alone as well, refused before the rebuild below can start: --list printed the index and
+        # returned, dropping a query and its flags, and beside --rebuild with no query the rebuild
+        # returned first and the list never printed.
+        mixed = [flag for flag, on in (("--rebuild", args.rebuild), ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--list runs on its own, not with {', '.join(mixed)}.")
+    if args.rebuild and not args.query:
+        # `--rebuild <query>` rebuilds and then searches, and -k, --json and the ranking flags
+        # apply to that search. With no query there is no search, so they were dropped.
+        mixed = [flag for flag, on in query_flags if on]
+        if mixed:
+            ap.error(f"--rebuild without a query runs on its own, not with {', '.join(mixed)}.")
     if args.rebuild:
         # Spans MEMORY_DIRS. Rebuilding only the primary while search covers several corpora
         # meant there was no way to force a re-embed of a secondary one: after an EMBED_ID bump

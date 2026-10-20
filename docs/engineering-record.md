@@ -495,7 +495,7 @@ retired count. A change a reload cut short is recorded and reported on the next 
 | A second compile 2 s later by the corpus watcher, "harmless by construction" | One change, one compile. The memories the edit rewrites are marked before it starts and stamped (mtimeMs, size) when it ends, and `gatesCorpusBump` skips an event for one while it still has that stamp (`vscode-extension/extension.js:6402#isOwnGateEdit`). A later edit moves the stamp and compiles as before. The compile is recall.py's atomic replace (G1) and the install `setGatesAll`'s single read (G2); the compiled-file watcher's ensureGates then finds the install current. |
 | The edit untracked, so a reload cannot kill it | It is tracked and bounded like every child (the execFile censuses in test/extension-lifecycle-async.test.js now count five sites), and it is the one child deactivate lets finish (`vscode-extension/extension.js:6490#finishingChildren`): rampage measured a kill 30 ms after the snapshot line leaving 18 memories retired and nothing put back. |
 | `--lint` note "not compiled" | "kept in the store and left out of the compile by choice": scripts/verify-release.ps1 fails its standing-order check on "not compiled". |
-| CI runs recall-py.sh and gates-stale.sh | Neither is in this repo's CI (the brief assumed they were). gates-manage.sh got its own job, `gates-manage` in .github/workflows/test.yml, on rampage's pins (Python 3.11, numpy 2.4.6, onnxruntime 1.30.0) with `CI=true` turning a missing interpreter into a failure. It has not run on GitHub: nothing was pushed. |
+| CI runs recall-py.sh and gates-stale.sh | Neither is in this repo's CI (the brief assumed they were). gates-manage.sh got its own job, `gates-manage` in .github/workflows/test.yml, on rampage's pins (Python 3.11, numpy 2.4.6, onnxruntime 1.30.0) with `CI=true` turning a missing interpreter into a failure. It has not run on GitHub: nothing was pushed. **Superseded 2026-10-19:** the job ("recall.py gate edits on Python 3.11") has run on every push since v1.6.5 (Tests run 38663225986, green) and was green in run 39302888761 for v1.8.1. |
 
 **Decision recorded: gates switched off stay off** (rampage's GATES_FOLLOW_THE_SETTING). A retire
 or restore never switches gates on or off. In the extension gates are on exactly when
@@ -537,7 +537,9 @@ restores the file and checks it by sha256):
 (this wave runs neither), and its CI floor arithmetic (this repo's suite has no `--min-pass`).
 
 **Residuals, not changed here:**
-- Not run: drive-vscode on real VS Code, and the new CI job on GitHub.
+- Not run: drive-vscode on real VS Code, and the new CI job on GitHub. (Superseded 2026-10-19: the CI
+  job has run green on every push since v1.6.5, and drive-vscode passed 6 of 6 for v1.6.8, v1.7.0,
+  v1.8.0 and v1.8.1, per BACKLOG.md's release paragraphs.)
 - `isOwnGateEdit` keys on the path the store is listed under, case-folded on Windows. A store the
   watcher reports under another spelling (through a junction, say) would not match, and the
   watcher's compile would run once more, harmlessly, as in rampage.
@@ -752,7 +754,8 @@ with the files restored afterwards.
 - The installed build passed `drive-installed.js` 14 of 14.
 - The release list keeps 3 releases.
 - The real-editor drive, `drive-vscode.js`, is still unrun, because VS Code's pending update holds
-  its mutex (BACKLOG).
+  its mutex (BACKLOG). (Superseded: it passed 6 of 6 from v1.6.8 on; the flagged groups are recorded
+  under the 1.9.0 backlog clearance.)
 
 The last audit before the v1.6.3 tag found two MEDIUM security defects and two NOTEs. Each was
 re-verified before it was changed, and every test named here was run against a revert of its fix.

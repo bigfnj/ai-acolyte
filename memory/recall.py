@@ -1747,21 +1747,40 @@ def _status_block(text):
 # format characters, which a person reading the file cannot see and a model reading it still does:
 # the soft hyphen U+00AD, the zero-width space, non-joiner and joiner U+200B-U+200D, the word joiner
 # and invisible operators U+2060-U+2064, U+FEFF, and the tag block U+E0000-U+E007F, whose
-# characters spell out ASCII text that renders as nothing. Code points, not escapes, so no writer
-# can turn them into the characters themselves. memoryLint.js THREAD_STRIP is the same set, held to
-# it by test/threads-compile.sh.
+# characters spell out ASCII text that renders as nothing. Then (2026-10-20, the third pass) the
+# combining grapheme joiner U+034F, the Mongolian vowel separator U+180E and the unassigned U+2065,
+# each one hidden bit, and the variation selectors: U+E0100-U+E01EF always, and U+FE00-U+FE0F
+# unless one directly follows a character that is not a selector (_strip_hidden), which keeps the
+# single emoji presentation selector in a warning sign and removes a run, since a run of selectors
+# carries about a byte each and shows as nothing. Code points, not escapes, so no writer can turn
+# them into the characters themselves. memoryLint.js THREAD_STRIP and stripHidden are the same set
+# and rule, held to them by test/threads-compile.sh.
 _THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
-                               *range(0x86, 0xA0), 0x00AD, 0x061C, *range(0x200B, 0x2010),
-                               *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A),
-                               0xFEFF, *range(0xE0000, 0xE0080)])
+                               *range(0x86, 0xA0), 0x00AD, 0x034F, 0x061C, 0x180E, *range(0x200B, 0x2010),
+                               *range(0x202A, 0x202F), *range(0x2060, 0x206A),
+                               0xFEFF, *range(0xE0000, 0xE0080), *range(0xE0100, 0xE01F0)])
+
+
+def _strip_hidden(text, table=_THREAD_STRIP):
+    """`text` with `table`'s characters removed, then every variation selector U+FE00-U+FE0F that
+    does not directly follow a kept character which is not one itself: the first selector after
+    a character stays, the rest of a run go, and so does one at the start. Judged against what is
+    kept, so a removed character between two selectors cannot make a run look like two singles.
+    memoryLint.js stripHidden is the same walk."""
+    out = []
+    for ch in text.translate(table):
+        if 0xFE00 <= ord(ch) <= 0xFE0F and (not out or 0xFE00 <= ord(out[-1]) <= 0xFE0F):
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _thread_text(raw):
-    """One line of thread text: control and bidi characters removed (_THREAD_STRIP), whitespace
+    """One line of thread text: control and bidi characters removed (_strip_hidden), whitespace
     collapsed, every `<!--` and `-->` neutralised (Claude Code strips HTML comments, so a stray one
     would swallow the lines after it), and a leading `#` escaped. Not capped: _cap does that, so
     --lint can say how long it was."""
-    text = " ".join(raw.translate(_THREAD_STRIP).split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    text = " ".join(_strip_hidden(raw).split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
     return BACKSLASH + text if text.startswith("#") else text
 
 
@@ -1884,7 +1903,7 @@ def _compile_threads_text(texts=None):
     could not tell from a torn one."""
     threads, findings, _ = _collect_threads(texts)
     health = _index_health()
-    clean = lambda s: (" ".join(s.translate(_THREAD_STRIP).split())
+    clean = lambda s: (" ".join(_strip_hidden(s).split())
                        .replace("<!--", "&lt;!--").replace("-->", "--&gt;"))
     lines = []
     if health:

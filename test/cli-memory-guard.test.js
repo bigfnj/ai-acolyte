@@ -31,7 +31,7 @@ function run(home, args, extraEnv = {}) {
     cwd: home, encoding: 'utf8', windowsHide: true,
     input: JSON.stringify({ cwd: home, tool_name: 'Bash' }),
     env: {
-      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
+      ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), CLAUDE_CONFIG_DIR: '',
       HOMEDRIVE: root.replace(/[\\/]$/, ''), HOMEPATH: home.slice(root.length - 1), ...extraEnv,
     },
   });
@@ -84,6 +84,21 @@ test('--memory-guard on installs, repeats as already, and off removes only the g
   assert.equal(off.status, 0, off.stderr);
   assert.match(off.stdout, /^wildcard-perms memory-guard: OFF - /);
   assert.equal(settingsText(home), before, 'off restores the file byte for byte');
+});
+
+// The CLI follows CLAUDE_CONFIG_DIR as Claude Code does, and leaves ~/.claude alone.
+test('--memory-guard on and status use $CLAUDE_CONFIG_DIR/settings.json when it is set', (t) => {
+  const home = tempHome(t);
+  const before = settingsText(home);
+  const config = path.join(home, 'cfg');
+  const on = run(home, ['--memory-guard', 'on'], { CLAUDE_CONFIG_DIR: config });
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stdout, /^wildcard-perms memory-guard: ON - ~[\\/]cfg[\\/]settings\.json\n/);
+  assert.ok(fs.existsSync(path.join(config, 'wildcarding', 'memory-index-guard.js')));
+  assert.equal(settingsText(home), before, '~/.claude/settings.json is untouched');
+  const status = run(home, ['--memory-guard', 'status'], { CLAUDE_CONFIG_DIR: config });
+  assert.match(status.stdout, /^wildcard-perms memory-guard: ON - ~[\\/]cfg[\\/]settings\.json\n/);
+  assert.match(run(home, ['--memory-guard', 'status']).stdout, /^wildcard-perms memory-guard: OFF - ~[\\/]\.claude/);
 });
 
 test('a bad sub-verb or an extra argument is a usage error that writes nothing', (t) => {

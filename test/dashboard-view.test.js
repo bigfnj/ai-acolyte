@@ -3647,7 +3647,8 @@ test('turning the MEMORY.md guard on asks first, writes the hook, and the card n
     const asked = app.shown.find((entry) => entry.message === 'Turn on the MEMORY.md guard?');
     assert.ok(asked, `the toggle must ask before it adds a hook: ${JSON.stringify(app.shown.map((s) => s.message))}`);
     assert.equal(asked.options.modal, true);
-    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~\/\.claude\/settings\.json/);
+    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~[\\/]\.claude[\\/]settings\.json\. /);
+    assert.match(asked.options.detail, /a copy of the guard in ~[\\/]\.claude[\\/]wildcarding, /);
     assert.ok(asked.options.detail.includes(path.join(path.dirname(process.execPath), path.basename(process.execPath))),
       'the modal names the node it found on PATH');
     assert.match(asked.options.detail, POLICY_LINE, 'and says whether Claude Code will run it here');

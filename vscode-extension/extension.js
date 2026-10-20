@@ -4448,8 +4448,11 @@ async function toggleMemoryGuard() {
     vscode.window.showErrorMessage(`ai-acolyte: the MEMORY.md guard cannot be changed: ${status.reason}. Nothing was changed.`);
     return;
   }
+  // CLAUDE_CONFIG_DIR moves the settings.json Claude Code reads, so every path said here is the
+  // status's own, never a literal ~/.claude.
+  const tilde = (file) => String(file).replace(home, '~');
   if (status.status === 'foreign' && !status.on) {
-    vscode.window.showWarningMessage(`ai-acolyte: ${status.reason}. Remove that hook from ~/.claude/settings.json `
+    vscode.window.showWarningMessage(`ai-acolyte: ${status.reason}. Remove that hook from ${tilde(status.settingsPath)} `
       + 'to use this one. Nothing was changed.');
     return;
   }
@@ -4467,8 +4470,8 @@ async function toggleMemoryGuard() {
         'Turn on the MEMORY.md guard?',
         {
           modal: true,
-          detail: 'Adds a PreToolUse hook to ~/.claude/settings.json. Before each Write or Edit, Claude Code runs '
-            + `${nodeExecutable} on a copy of the guard in ~/.claude/wildcarding, and the guard refuses an edit after `
+          detail: `Adds a PreToolUse hook to ${tilde(status.settingsPath)}. Before each Write or Edit, Claude Code runs `
+            + `${nodeExecutable} on a copy of the guard in ${tilde(path.dirname(status.scriptPath))}, and the guard refuses an edit after `
             + 'which a memory index (MEMORY.md) ends past a budget and is worse on it than before: '
             + `${GUARD_BUDGETS.lines} lines, ${GUARD_BUDGETS.bytes} bytes, ${GUARD_BUDGETS.lineChars} characters on `
             + `one line, ${GUARD_BUDGETS.entries} "- " entries, ${GUARD_BUDGETS.commentDefects} broken HTML comments. `

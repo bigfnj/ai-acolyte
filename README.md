@@ -352,7 +352,9 @@ Turn it on with **AI Acolyte: Toggle MEMORY.md guard**, the button on the **Clau
 or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `status` says what is
 installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
 registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
-(`src/claude-hook-config.js:56#memoryGuardDefinition`). The copy outlives upgrades and is replaced
+(`src/claude-hook-config.js:56#memoryGuardDefinition`). Where `CLAUDE_CONFIG_DIR` is set, every
+`~/.claude` path in this section is that directory instead, as it is for Claude Code
+(`src/memory-guard-install.js:46#configDirFor`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
 `~/.claude/backups/settings.json.pre-memory-guard`. A hook is the guard's own only when its
 command is a `node` and that copy and nothing else. If another hook already runs a

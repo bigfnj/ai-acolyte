@@ -27,8 +27,9 @@ function fixture(t, settings) {
     home, settingsPath,
     script: path.join(home, '.claude', 'wildcarding', 'memory-index-guard.js'),
     backup: path.join(home, '.claude', 'backups', 'settings.json.pre-memory-guard'),
-    // No managed-settings.json anywhere: the machine's real policy files must not decide a test.
-    options: { home, nodeExecutable: process.execPath, managedSettingsPaths: [] },
+    // No managed-settings.json anywhere: the machine's real policy files must not decide a test,
+    // and no CLAUDE_CONFIG_DIR from the environment running the suite either.
+    options: { home, nodeExecutable: process.execPath, managedSettingsPaths: [], env: {} },
     bytes: () => fs.readFileSync(settingsPath),
     json: () => JSON.parse(fs.readFileSync(settingsPath, 'utf8')),
   };
@@ -80,6 +81,39 @@ test('on keeps the pre-change bytes once, is idempotent, and off round-trips set
   setMemoryGuard(true, f.options);
   assert.equal(fs.readFileSync(f.backup, 'utf8'), prior, 'a later on keeps the first snapshot');
   assert.ok(fs.existsSync(f.script), 'off leaves the copy, so a running session still has a script to run');
+});
+
+// CLAUDE_CONFIG_DIR moves Claude Code's settings.json, and the guard already reads it to find the
+// index, so install, status and backup follow it too (audit 2026-10-20). Unset, or empty, it is
+// <home>/.claude, as before.
+// MUTATION: make configDirFor ignore CLAUDE_CONFIG_DIR and the first half writes <home>/.claude.
+test('CLAUDE_CONFIG_DIR moves the settings.json, the stable copy and the backup, and unset means ~/.claude', (t) => {
+  const f = fixture(t, text(OTHER));
+  const config = path.join(f.home, 'elsewhere', 'claude-config');
+  fs.mkdirSync(config, { recursive: true });
+  const configured = path.join(config, 'settings.json');
+  fs.writeFileSync(configured, text({ model: 'sonnet' }));
+  const options = { ...f.options, env: { CLAUDE_CONFIG_DIR: config } };
+  const on = setMemoryGuard(true, options);
+  assert.equal(on.settingsPath, configured);
+  assert.equal(on.scriptPath, path.join(config, 'wildcarding', 'memory-index-guard.js'));
+  assert.equal(on.status, 'configured');
+  assert.ok(fs.existsSync(on.scriptPath), 'the copy is under the config dir');
+  assert.equal(on.backupPath, path.join(config, 'backups', 'settings.json.pre-memory-guard'));
+  assert.equal(fs.readFileSync(on.backupPath, 'utf8'), text({ model: 'sonnet' }));
+  const registered = JSON.parse(fs.readFileSync(configured, 'utf8'));
+  assert.deepEqual(registered.hooks.PreToolUse, [memoryGuardDefinition({ home: f.home, configDir: config, nodeExecutable: process.execPath })]);
+  assert.ok(registered.hooks.PreToolUse[0].hooks[0].command.includes('claude-config/wildcarding/memory-index-guard.js'));
+  assert.equal(f.bytes().toString(), text(OTHER), '<home>/.claude/settings.json is not the one in use, and is untouched');
+  assert.equal(fs.existsSync(f.script), false);
+  assert.equal(memoryGuardStatus(options).label, 'on');
+  assert.equal(memoryGuardStatus(f.options).label, 'off', 'unset, the home config has no guard');
+  assert.equal(setMemoryGuard(false, options).on, false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(configured, 'utf8')), { model: 'sonnet' });
+
+  const plain = setMemoryGuard(true, { ...f.options, env: { CLAUDE_CONFIG_DIR: '' } });
+  assert.equal(plain.settingsPath, f.settingsPath, 'an empty CLAUDE_CONFIG_DIR is unset');
+  assert.ok(fs.existsSync(f.script));
 });
 
 // writeTransform writes LF; a CRLF settings.json keeps every value, and its exact CRLF bytes are

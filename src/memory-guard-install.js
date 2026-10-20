@@ -3,12 +3,13 @@
 // Install, remove, inspect and probe the MEMORY.md guard (src/memory-index-guard.js). The
 // settings.json half is planned by src/claude-hook-config.js and written through the settings
 // writer's compare-and-swap writeTransform, under the shared policy lock, with the bytes as they
-// were before the first change kept in ~/.claude/backups. Default off: the hook's presence in
-// settings.json is the whole state, and there is no setting key beside it.
+// were before the first change kept in <config>/backups. <config> is CLAUDE_CONFIG_DIR when set,
+// else ~/.claude (configDirFor). Default off: the hook's presence in settings.json is the whole
+// state, and there is no setting key beside it.
 //
 // THE STABLE COPY. The hook never points into a checkout or the versioned extension directory.
 // A VSIX carries no bin/, and a path like `.../ai-acolyte-1.9.0/src/...` would stop being ours
-// on the next upgrade. So `on` copies the guard to `<home>/.claude/wildcarding/` and registers
+// on the next upgrade. So `on` copies the guard to `<config>/wildcarding/` and registers
 // that path, and the copy is refreshed only when the packaged GUARD_REVISION is higher than the
 // copy's: comparing bytes would flip-flop between a CRLF checkout and an LF build.
 //
@@ -37,12 +38,24 @@ function resolveHome(options) {
   return path.resolve(options.home === undefined ? os.homedir() : options.home);
 }
 
-function settingsPathFor(home) { return path.join(home, '.claude', 'settings.json'); }
+// The Claude Code config directory, resolved the way Claude Code resolves it (2026-10-20):
+// CLAUDE_CONFIG_DIR when it is set, else <home>/.claude. The guard reads the same variable to
+// find the index (src/memory-index-guard.js configDirectory), so the settings.json it is
+// registered in, its stable copy and its backup all live where that Claude Code reads.
+// `options.configDir` and `options.env` are for tests; an empty CLAUDE_CONFIG_DIR is unset.
+function configDirFor(options, home) {
+  if (typeof options.configDir === 'string' && options.configDir) return path.resolve(options.configDir);
+  const value = (options.env || process.env).CLAUDE_CONFIG_DIR;
+  return typeof value === 'string' && value ? path.resolve(value) : path.join(home, '.claude');
+}
+function settingsPathFor(config) { return path.join(config, 'settings.json'); }
 // The shared policy lock, derived from the home in use. POLICY_LOCK_PATH would be the same file
 // for the real home, but it froze os.homedir() when policy-lock.js was first required, so a test
-// home (or any caller passing another home) would lock the wrong file.
+// home (or any caller passing another home) would lock the wrong file. It stays under the home
+// whatever CLAUDE_CONFIG_DIR says: it is a mutex between this tool's own writers, and every one of
+// them takes it at this path.
 function lockPathFor(home) { return path.join(home, '.claude', 'wildcarding', 'auto-learn-policy.lock'); }
-function backupPathFor(home) { return path.join(home, '.claude', 'backups', 'settings.json.pre-memory-guard'); }
+function backupPathFor(config) { return path.join(config, 'backups', 'settings.json.pre-memory-guard'); }
 
 function isFile(target) {
   try { return fs.statSync(target).isFile(); } catch { return false; }
@@ -84,12 +97,12 @@ function resolveNodeExecutable(options = {}) {
 // revision or newer (a newer extension wrote it). Written whole or not at all: no in-place
 // fallback, because a running hook reading a half-written script would just fail open, but a
 // truncated copy would then stay broken until the next refresh.
-function installGuardCopy(home, options = {}) {
+function installGuardCopy(home, config, options = {}) {
   const source = options.packagedPath || PACKAGED_GUARD;
   const bytes = fs.readFileSync(source);
   const packaged = guardRevision(bytes.toString('utf8'));
   if (!Number.isInteger(packaged)) throw new Error(`${source} carries no GUARD_REVISION`);
-  const target = memoryGuardScriptPath(home);
+  const target = memoryGuardScriptPath(home, config);
   const existing = revisionOf(target);
   if (existing !== null && existing >= packaged) return { path: target, revision: existing, packaged, refreshed: false };
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -99,8 +112,8 @@ function installGuardCopy(home, options = {}) {
 
 // The settings.json bytes as they were before this feature ever changed them. Written once:
 // a later on/off keeps the first snapshot, which is the one a person undoing the feature wants.
-function takeBackup(home, settingsPath) {
-  const target = backupPathFor(home);
+function takeBackup(config, settingsPath) {
+  const target = backupPathFor(config);
   if (fs.existsSync(target)) return target;
   let bytes;
   try { bytes = fs.readFileSync(settingsPath); }
@@ -121,10 +134,10 @@ function readJson(file) {
 // administrator's managed-settings.json, the cached copy of server-delivered policy
 // (remote-settings.json), and the user's own disableAllHooks. A server-delivered policy that has
 // not been cached is invisible, so "nothing found" is reported as unknown, never as "runs".
-function hookPolicy({ home, settings, managedPaths, platform }) {
+function hookPolicy({ home, config, settings, managedPaths, platform }) {
   const managed = [];
   const files = Array.isArray(managedPaths) ? managedPaths : managedSettingsPaths(platform || process.platform, home);
-  for (const file of [...files, path.join(home, '.claude', 'remote-settings.json')]) {
+  for (const file of [...files, path.join(config, 'remote-settings.json')]) {
     const data = readJson(file);
     if (!data) continue;
     for (const key of ['allowManagedHooksOnly', 'disableAllHooks']) {
@@ -154,13 +167,14 @@ function labelFor(status, copyOutdated) {
 
 function memoryGuardStatus(options = {}) {
   const home = resolveHome(options);
+  const config = configDirFor(options, home);
   const platform = options.platform || process.platform;
-  const settingsPath = settingsPathFor(home);
-  const scriptPath = memoryGuardScriptPath(home);
+  const settingsPath = settingsPathFor(config);
+  const scriptPath = memoryGuardScriptPath(home, config);
   const state = readSettingsState(settingsPath);
   const inspected = state.state === SETTINGS_UNREADABLE
     ? { status: 'unreadable', ours: [], foreign: [], node: null, reason: `${settingsPath} exists but could not be parsed` }
-    : inspectMemoryGuard(state.settings, { home, platform });
+    : inspectMemoryGuard(state.settings, { home, configDir: config, platform });
   const packagedRevision = revisionOf(options.packagedPath || PACKAGED_GUARD);
   const copyRevision = revisionOf(scriptPath);
   const on = inspected.ours.length > 0;
@@ -171,6 +185,7 @@ function memoryGuardStatus(options = {}) {
     on,
     reason: inspected.reason,
     foreign: inspected.foreign,
+    configDir: config,
     settingsPath,
     scriptPath,
     copy: { exists: isFile(scriptPath), revision: copyRevision },
@@ -178,7 +193,7 @@ function memoryGuardStatus(options = {}) {
     copyOutdated,
     node: inspected.node,
     nodeExists: inspected.node ? isFile(inspected.node) : null,
-    policy: hookPolicy({ home, settings: state.settings, managedPaths: options.managedSettingsPaths, platform }),
+    policy: hookPolicy({ home, config, settings: state.settings, managedPaths: options.managedSettingsPaths, platform }),
   };
 }
 
@@ -190,8 +205,9 @@ function memoryGuardStatus(options = {}) {
 function setMemoryGuard(enabled, options = {}) {
   if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
   const home = resolveHome(options);
+  const config = configDirFor(options, home);
   const platform = options.platform || process.platform;
-  const settingsPath = settingsPathFor(home);
+  const settingsPath = settingsPathFor(config);
   let nodeExecutable = options.nodeExecutable;
   if (enabled) {
     if (nodeExecutable === undefined) nodeExecutable = resolveNodeExecutable({ platform });
@@ -201,7 +217,7 @@ function setMemoryGuard(enabled, options = {}) {
     }
     if (!isFile(nodeExecutable)) throw new Error(`${nodeExecutable} does not exist. Nothing was changed.`);
   }
-  const plan = { home, nodeExecutable, platform };
+  const plan = { home, configDir: config, nodeExecutable, platform };
   let outcome = null;
   let copy = null;
   let backupPath = null;
@@ -214,12 +230,12 @@ function setMemoryGuard(enabled, options = {}) {
     // A refusal (another guard, an unreadable hooks shape) throws here, before the copy or the
     // backup is written, so a refused `on` leaves no trace.
     const dry = planMemoryGuard(state.settings, enabled, plan);
-    if (enabled) copy = installGuardCopy(home, options);
-    if (dry.changed) backupPath = takeBackup(home, settingsPath);
+    if (enabled) copy = installGuardCopy(home, config, options);
+    if (dry.changed) backupPath = takeBackup(config, settingsPath);
     if (options.beforeWrite) options.beforeWrite(settingsPath);
     outcome = createSettingsWriter({ settingsPath }).writeTransform((latest) => planMemoryGuard(latest, enabled, plan));
   });
-  const after = memoryGuardStatus({ ...options, home, platform });
+  const after = memoryGuardStatus({ ...options, home, configDir: config, platform });
   const held = enabled ? after.status === 'configured' : !after.on;
   if (!held) {
     throw new Error(`settings.json did not keep the MEMORY.md guard ${enabled ? 'on' : 'off'} (it reads ${after.status} now)`);
@@ -232,7 +248,7 @@ function setMemoryGuard(enabled, options = {}) {
 function refreshMemoryGuardCopy(options = {}) {
   const status = memoryGuardStatus(options);
   if (!status.on || !status.copyOutdated) return { refreshed: false, status };
-  const copy = installGuardCopy(resolveHome(options), options);
+  const copy = installGuardCopy(resolveHome(options), status.configDir, options);
   return { refreshed: copy.refreshed, copy, status: memoryGuardStatus(options) };
 }
 

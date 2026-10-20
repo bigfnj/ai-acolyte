@@ -477,23 +477,23 @@ names retired gates after its verdict (`memory/recall.py:2046#_lint_retired`). `
 is the planner both front ends run (`src/gates-manage.js:107#planGateChanges`). The CLI and a
 dashboard panel with Apply, Revert and a filter are the two front ends, and the card shows a
 retired count. A change a reload cut short is recorded and reported on the next activation
-(`vscode-extension/extension.js:7481#reportInterruptedGateChanges`).
+(`vscode-extension/extension.js:7482#reportInterruptedGateChanges`).
 
 **Adaptations.**
 
 | Rampage | AI Acolyte, and why |
 |---|---|
 | Data under `~/.claude/rampage/`, override `RAMPAGE_SNAPSHOT_DIR` | `~/.claude/wildcarding/`: `gate-snapshots/`, `gates-edit.lock`, `pending-gates.<pid>.json` (`memory/recall.py:1977#_snapshot_root`, `memory/recall.py:2503#_gate_lock_path`). It is the extension's Claude-side state directory: the policy lock, the learner's state and backups, and the recall model already live there, and the store being edited is Claude Code's. `~/.ai-acolyte/` holds Codex-profile state and the Codex backup catalog. The override is `AI_ACOLYTE_GATE_SNAPSHOT_DIR`. |
-| Settings read with `get()` | `gates.enabled` through `userSetting` (`vscode-extension/extension.js:7335#gatesSwitch`); `memory.dir` through memoryReport's `cfg()`, `inspect().globalValue` (wave-f15); `memory.recallScript` through `recallScriptPath`. A workspace value of any of them is ignored. |
-| No pin: recall.py picks the store | Every step pins the compile store, the one compileGates already pinned (`vscode-extension/extension.js:7171#gateCompileEnv`), and the list's own `store` is named outright for the edit and the compile, so a store that changes under an open panel can only be refused. compileGates now takes its environment from the same helper. |
+| Settings read with `get()` | `gates.enabled` through `userSetting` (`vscode-extension/extension.js:7336#gatesSwitch`); `memory.dir` through memoryReport's `cfg()`, `inspect().globalValue` (wave-f15); `memory.recallScript` through `recallScriptPath`. A workspace value of any of them is ignored. |
+| No pin: recall.py picks the store | Every step pins the compile store, the one compileGates already pinned (`vscode-extension/extension.js:7172#gateCompileEnv`), and the list's own `store` is named outright for the edit and the compile, so a store that changes under an open panel can only be refused. compileGates now takes its environment from the same helper. |
 | `--gates-list` entries: `scope`, `active` | `scope`, `state` (`active`, `retired`, or `excluded`: scope global with an `agents:` line that cannot be read, so neither active nor retired), `agents`, `problem` (`memory/recall.py:1985#_gate_entry`). gates-manage.sh holds the list's active gates to the compiler's own per-agent output. |
 | One instruction file | Per agent. A retire is per memory and rewrites the scope value only, so `agents:` survives a retire and a restore byte for byte (fixtures: a flow list, a CRLF block list before the scope, `agents:` after a lone CR, an unknown agent). The plan carries each agent's gates before and after, and the modal says what CLAUDE.md and AGENTS.md each load (`src/gates-manage.js:222#describePlan`): a Codex-only retire reads "CLAUDE.md: not changed by this", and CLAUDE.md is not rewritten. An excluded gate may be retired (it changes no file) and is not restorable (it is scope: global already). |
 | The card's own `frontmatterScope` | memoryLint.js `gateEntryOf` (`vscode-extension/memoryLint.js:56#gateEntryOf`), built on wave-h2's `frontmatter` and `gateAgents`; `gateOf` now reads through it, so there is no third parser. fullReport lists `gateRetired`, in compile order, for the card. test/gate-agents.test.js holds it to `_gate_entry` over the 480 generated memories (243 active, 81 retired, 20 retired with an unreadable `agents:`, 75 excluded, 61 none, measured 2026-10-14). |
 | `rampage gates list\|retire\|restore` | `wildcard-perms --gates list [--json]` and `--gates retire\|restore [--] <memory>...` (`bin/wildcard-perms:1045#gatesChange`), beside `on\|off\|status\|refresh`, in `--help` and its census. Every word after `retire` or `restore` is a name, never a verb (`bin/wildcard-perms:94#takesNames`): the dispatch finds verbs anywhere in argv, so `--gates retire --seed` ran `--seed`. A dashed name goes after `--`. |
 | Legacy ai-acolyte block branches | Dropped. The UI and the CLI name CLAUDE.md and AGENTS.md. |
-| Failure advice: `rampage gates refresh`, `gates off`, `rampage recall --gates-compile` | The CLI names `wildcard-perms --gates refresh` / `--gates off` and the recall.py it runs, in backticks (the commands carry quoted paths). The panel names its own **Compile and install** (`vscode-extension/extension.js:7758#runGateFinish`), which finishes every case, because the extension ships no CLI on PATH. |
-| A second compile 2 s later by the corpus watcher, "harmless by construction" | One change, one compile. The memories the edit rewrites are marked before it starts and stamped (mtimeMs, size) when it ends, and `gatesCorpusBump` skips an event for one while it still has that stamp (`vscode-extension/extension.js:7192#isOwnGateEdit`). A later edit moves the stamp and compiles as before. The compile is recall.py's atomic replace (G1) and the install `setGatesAll`'s single read (G2); the compiled-file watcher's ensureGates then finds the install current. |
-| The edit untracked, so a reload cannot kill it | It is tracked and bounded like every child (the execFile censuses in test/extension-lifecycle-async.test.js now count five sites), and it is the one child deactivate lets finish (`vscode-extension/extension.js:7280#finishingChildren`): rampage measured a kill 30 ms after the snapshot line leaving 18 memories retired and nothing put back. |
+| Failure advice: `rampage gates refresh`, `gates off`, `rampage recall --gates-compile` | The CLI names `wildcard-perms --gates refresh` / `--gates off` and the recall.py it runs, in backticks (the commands carry quoted paths). The panel names its own **Compile and install** (`vscode-extension/extension.js:7759#runGateFinish`), which finishes every case, because the extension ships no CLI on PATH. |
+| A second compile 2 s later by the corpus watcher, "harmless by construction" | One change, one compile. The memories the edit rewrites are marked before it starts and stamped (mtimeMs, size) when it ends, and `gatesCorpusBump` skips an event for one while it still has that stamp (`vscode-extension/extension.js:7193#isOwnGateEdit`). A later edit moves the stamp and compiles as before. The compile is recall.py's atomic replace (G1) and the install `setGatesAll`'s single read (G2); the compiled-file watcher's ensureGates then finds the install current. |
+| The edit untracked, so a reload cannot kill it | It is tracked and bounded like every child (the execFile censuses in test/extension-lifecycle-async.test.js now count five sites), and it is the one child deactivate lets finish (`vscode-extension/extension.js:7281#finishingChildren`): rampage measured a kill 30 ms after the snapshot line leaving 18 memories retired and nothing put back. |
 | `--lint` note "not compiled" | "kept in the store and left out of the compile by choice": scripts/verify-release.ps1 fails its standing-order check on "not compiled". |
 | CI runs recall-py.sh and gates-stale.sh | Neither is in this repo's CI (the brief assumed they were). gates-manage.sh got its own job, `gates-manage` in .github/workflows/test.yml, on rampage's pins (Python 3.11, numpy 2.4.6, onnxruntime 1.30.0) with `CI=true` turning a missing interpreter into a failure. It has not run on GitHub: nothing was pushed. **Superseded 2026-10-19:** the job ("recall.py gate edits on Python 3.11") has run on every push since v1.6.5 (Tests run 38663225986, green) and was green in run 39302888761 for v1.8.1. |
 
@@ -649,7 +649,7 @@ none compiled for claude" for the removal. `--lint` prints "N gate memories comp
 codex Y" and reports a gate left out, with the reason, as a finding that keeps `clean:` from
 printing; the compile names it on stderr, which `--gates refresh` passes through. The dashboard
 card reads "Claude 13 · Codex 14" in its text and badge once the agents differ, judges ON and
-PARTIAL over the agents that have gates (`vscode-extension/extension.js:4991#wanted`), and names a
+PARTIAL over the agents that have gates (`vscode-extension/extension.js:4992#wanted`), and names a
 left-out gate memory. Its count now comes from the status rows, which removed `compiledGateCount`
 and one read of the compiled file per push; `readCompiled` became test-only. `ensureGates` treats
 a gateless agent with no block as settled (`vscode-extension/extension.js:4369#wants`), and the toggle
@@ -3087,7 +3087,7 @@ unit test, and the guard asserts the CONDITION (the block does not imply blanket
 than that the strings exist.
 
 ⚠ **There were THREE sites, not two, and the first fix missed one.** The status row —
-`setState('stLocal', ...)` at `vscode-extension/extension.js:6173#stLocal` — said the same thing in two
+`setState('stLocal', ...)` at `vscode-extension/extension.js:6174#stLocal` — said the same thing in two
 words, `legacy blanket detected`, and the tripwire, written against the long sentence, did not
 know that spelling.
 It was caught by grepping the **installed VSIX** after packaging 1.5.6, not by the suite, which
@@ -3123,7 +3123,7 @@ changed in Settings, and Cycle mode, the one Auto Learn switch, never touches it
 
 **The card.** A Turn on / Turn off button in the Auto Learn card's row posts `toggleAutoLearn`.
 While off, the collapsed row reads "disabled · Turn on" with no tint
-(`vscode-extension/extension.js:6104#stAutoLearn`), since off is a choice. Review and Apply safe,
+(`vscode-extension/extension.js:6105#stAutoLearn`), since off is a choice. Review and Apply safe,
 refused while off, now name the command where they said "Enable it" in settings.
 
 **Tighten-only.** `autoLearn.enabled` is the fifth key in

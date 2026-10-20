@@ -55,7 +55,7 @@ const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
 const {
-  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe,
+  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe, PROBE_LONGEST_MS,
 } = require('./src/memory-guard-install');
 const { BUDGETS: GUARD_BUDGETS } = require('./src/memory-index-guard');
 const {
@@ -1570,7 +1570,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:7089#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:7090#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1827,7 +1827,7 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:7122#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:7123#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
@@ -4565,7 +4565,7 @@ async function probeUserHooks() {
       modal: true,
       detail: 'Runs claude -p "/goal ..." once, with no built-in tools and no saved session, in an empty '
         + 'directory of its own, and reads Claude Code\'s own answer. Where hooks are restricted it refuses at once; '
-        + 'where they are allowed this is one short real Claude Code turn. Ends after 60 s at most.',
+        + `where they are allowed this is one short real Claude Code turn. Ends after ${PROBE_LONGEST_MS / 1000} s at most.`,
     },
     'Check');
   if (choice !== 'Check' || deactivated) return;
@@ -4825,8 +4825,9 @@ function ensureOpenThreads(announce = false) {
 // so it can never settle, and counting it kept Refresh up after every click (2026-10-20); the
 // card's line names it instead. And with no compile possible (`blocked`, threadsCompileTools)
 // Refresh could only fail, and install the last compile, which ensure already does unattended.
+// threadsSettled is asked of readable states only: threadsNeedRefresh filters them first.
 function threadsSettled(state) {
-  return state.readable && state.compile === 'whole'
+  return state.compile === 'whole'
     && (state.wanted ? state.on && state.current : !state.on && !state.shadowedPaths?.length);
 }
 function threadsNeedRefresh(states, blocked = threadsCompileTools().blocked) {

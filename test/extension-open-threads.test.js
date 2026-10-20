@@ -877,6 +877,35 @@ test('with no DevToolbox venv nothing is armed, nothing spawns, and the reason i
   // log through say() on spawnThreadsCompile's quiet path and the last count is 2.
 });
 
+// "Once per activation" means a re-activation says it again. VS Code re-activates the same module
+// instance on an extension disable and enable, or an upgrade, and activate() releases the latch;
+// no test had re-activated one (audit of 1.9.2), so the reset could go unnoticed.
+// MUTATION: delete `threadsBlockedSaid = false;` from activate() and the count stays 1.
+test('with no DevToolbox venv a re-activation in the same module says why once more', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => {
+    noVenv(box);
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+  } });
+  const said = () => app.channel.filter((line) => /open threads: .*cannot be compiled/.test(line));
+  for (let burst = 0; burst < 2; burst += 1) {
+    app.fireCorpus(app.store, 'MEMORY.md');
+    await app.fireTimers();
+  }
+  assert.equal(said().length, 1, `precondition: the first activation said it once: ${JSON.stringify(app.channel)}`);
+  await app.extension.deactivate();
+  // VS Code disposes the subscriptions, the watchers among them, before it activates again.
+  for (const watcher of app.watchers) watcher.dispose();
+  app.extension.activate({ subscriptions: [] });
+  await app.settle();
+  assert.equal(said().length, 1, 'activation itself asked for no compile, so it said nothing');
+  for (let burst = 0; burst < 2; burst += 1) {
+    app.fireCorpus(app.store, 'MEMORY.md');
+    await app.fireTimers();
+  }
+  assert.equal(said().length, 2, `the second activation said it once: ${JSON.stringify(app.channel)}`);
+  assert.deepEqual(app.compiles(), [], 'and nothing spawned in either');
+});
+
 // The card's half: Refresh could only fail there, so it is not offered, and the line says why. A
 // person's turn-on says why in one message, where the spawn's warning and the install's were two.
 test('with no DevToolbox venv the card offers no Refresh, says why, and turning it on gives one message', async (t) => {

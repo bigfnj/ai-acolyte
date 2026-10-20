@@ -73,6 +73,15 @@ function revisionOf(file) {
   try { return guardRevision(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
+// The packaged guard's revision, read once: the file ships with this code and cannot change
+// while the process lives (an upgrade replaces both together). Every status call, which the
+// dashboard makes on each push, read it again before 2026-10-20. A failed read is not kept.
+let packagedRevisionRead = null;
+function packagedRevision() {
+  if (packagedRevisionRead === null) packagedRevisionRead = revisionOf(PACKAGED_GUARD);
+  return packagedRevisionRead;
+}
+
 // An absolute node to name in the hook command, found on PATH at install time. Never
 // process.execPath: in the extension host that is Electron, not node. Absolute PATH entries
 // only (src/exec-resolve.js resolveExecutable gives the reason), and on Windows only node.exe,
@@ -190,10 +199,10 @@ function memoryGuardStatus(options = {}) {
   const inspected = state.state === SETTINGS_UNREADABLE
     ? { status: 'unreadable', ours: [], foreign: [], node: null, reason: `${settingsPath} exists but could not be parsed` }
     : inspectMemoryGuard(state.settings, { home, configDir: config, platform });
-  const packagedRevision = revisionOf(options.packagedPath || PACKAGED_GUARD);
+  const packaged = options.packagedPath ? revisionOf(options.packagedPath) : packagedRevision();
   const copyRevision = revisionOf(scriptPath);
   const on = inspected.ours.length > 0;
-  const copyOutdated = on && (copyRevision === null || (packagedRevision !== null && copyRevision < packagedRevision));
+  const copyOutdated = on && (copyRevision === null || (packaged !== null && copyRevision < packaged));
   return {
     status: inspected.status,
     label: labelFor(inspected.status, copyOutdated),
@@ -204,7 +213,7 @@ function memoryGuardStatus(options = {}) {
     settingsPath,
     scriptPath,
     copy: { exists: isFile(scriptPath), revision: copyRevision },
-    packagedRevision,
+    packagedRevision: packaged,
     copyOutdated,
     node: inspected.node,
     nodeExists: inspected.node ? isFile(inspected.node) : null,

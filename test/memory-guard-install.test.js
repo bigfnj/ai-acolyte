@@ -285,6 +285,26 @@ test('the stable copy is refreshed when the packaged revision is higher, and onl
   assert.equal(fs.readFileSync(f.script, 'utf8'), 'const GUARD_REVISION = 0;\n');
 });
 
+// The packaged guard ships with this code, so its revision is read once per process, not on
+// every status call (the dashboard calls status on each push).
+// MUTATION: read PACKAGED_GUARD inside memoryGuardStatus again and the second call reads it.
+test('status reads the packaged guard\'s revision once, not on every call', (t) => {
+  const f = fixture(t);
+  const packaged = path.join(__dirname, '..', 'src', 'memory-index-guard.js');
+  memoryGuardStatus(f.options);
+  const reads = [];
+  const real = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', function readFileSync(file, ...rest) {
+    reads.push(path.resolve(String(file)));
+    return real.call(this, file, ...rest);
+  });
+  const status = memoryGuardStatus(f.options);
+  memoryGuardStatus(f.options);
+  assert.equal(status.packagedRevision, GUARD_REVISION);
+  assert.ok(reads.length > 0, 'WITNESS: the mock sees status\'s own reads');
+  assert.deepEqual(reads.filter((file) => file === path.resolve(packaged)), [], `re-read: ${reads.join(', ')}`);
+});
+
 test('status says when the node the hook names is gone', (t) => {
   const f = fixture(t);
   const ghost = path.join(f.home, 'gone', process.platform === 'win32' ? 'node.exe' : 'node');

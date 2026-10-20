@@ -3966,6 +3966,34 @@ test('deactivate ends a "Check whether Claude Code runs user hooks" probe that i
   } finally { await app.dispose(); }
 });
 
+// The probe changes no file the card reads and keeps no answer, so it pushes nothing to the
+// dashboard (audit of 1.9.1). The witness is the guard toggle, which does refresh, through the
+// same view and the same wait.
+// MUTATION: put `dashboard?.refresh()` back at the end of probeUserHooks and a push arrives.
+test('the hooks probe pushes nothing to the dashboard', async (t) => {
+  const env = setup(t);
+  env.write({});
+  const stub = stubClaudeOnPath(t, GOAL_REFUSAL, 1);
+  withPath(t, [stub.dir, path.dirname(process.execPath)]);
+  const app = harness(env.tempHome, { withProgress: true });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.ok(ui.posted.length >= 1, 'precondition: the view was pushed once');
+    const before = ui.posted.length;
+    app.answer('Check');
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    assert.ok(stub.ran(), 'precondition: the probe ran');
+    await settle(400);
+    assert.equal(ui.posted.length, before, 'the probe pushed the card again');
+    app.answer('Turn on');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    await settle(400);
+    assert.ok(ui.posted.length > before, 'WITNESS: a guard toggle does push, through the same wait');
+  } finally { await app.dispose(); }
+});
+
 // A census of what the extension shows about the guard: the card's policy line, the modal, the
 // toasts, the refusals and the probe's answers. None may name a `wildcard-perms --` verb, because
 // a VSIX user has no CLI, and the policy line names the palette command by its contributed title.

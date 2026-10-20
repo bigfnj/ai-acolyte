@@ -4581,7 +4581,8 @@ async function probeUserHooks() {
   const message = `ai-acolyte: user hooks: ${probe.result}. ${probe.detail}`;
   if (probe.result === 'not restricted') vscode.window.showInformationMessage(message);
   else vscode.window.showWarningMessage(message);
-  dashboard?.refresh();
+  // No dashboard refresh (audit of 1.9.1): the card reads files only (memoryGuardStatus), and the
+  // probe changes none of them and keeps no answer, so a refresh would push the same card again.
 }
 
 // ── open threads (2026-10-19) ──────────────────────────────────────────────────────

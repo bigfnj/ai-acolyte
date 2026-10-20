@@ -65,16 +65,17 @@ const GATES_USAGE = 'usage: wildcard-perms --gates on|off|status|refresh\n' +
   '       wildcard-perms --gates list [--json]\n' +
   '       wildcard-perms --gates retire|restore [--] <memory> [<memory>...]\n';
 const CODEX_HOOK_USAGE = 'usage: wildcard-perms --codex-hook on|off|status\n';
+const MEMORY_GUARD_USAGE = 'usage: wildcard-perms --memory-guard on|off|status|probe\n';
 
 // Every active verb, the two retired MAX flags, and the one-way cleanup for
 // withdrawn Codex workspace rules. Keeping the retired flags in dispatch is a
 // safety boundary: an old invocation must reach a read-only or cleanup handler,
 // never fall through to hook mode and rewrite settings.json.
-const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates',
+const VERBS = ['--learn', '--seed', '--drain', '--guidance', '--gates', '--memory-guard',
   '--codex-max', '--max', '--bypass', '--codex-workspace-rules', '--codex-hook'];
 const HELP_USAGE = 'wildcard-perms — generalize approved Claude Code and Codex permissions\n\n' +
   'Run with NO arguments to act as a PostToolUse hook (reads a JSON event on stdin).\n\n' +
-  LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE +
+  LEARN_USAGE + DRAIN_USAGE + GUIDANCE_USAGE + GATES_USAGE + MEMORY_GUARD_USAGE +
   'usage: wildcard-perms --seed\n' +
   'usage: wildcard-perms --bypass on|off|status\n' +
   WORKSPACE_RULES_USAGE + CODEX_HOOK_USAGE +
@@ -126,6 +127,8 @@ if (optionArgs.includes('--help') || optionArgs.includes('-h')) {
   guidance(argv);
 } else if (argv.includes('--gates')) {
   gates(argv);
+} else if (argv.includes('--memory-guard')) {
+  memoryGuard(argv);
 } else if (argv.includes('--codex-max')) {
   legacyCodexMax(argv);
 } else if (argv.includes('--max')) {
@@ -1373,6 +1376,52 @@ function codexHook(args) {
     if (!result.writable) process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`wildcard-perms --codex-hook: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+// `--memory-guard on|off|status|probe`: the MEMORY.md index guard, a PreToolUse hook that refuses
+// an edit leaving the always-loaded index worse on a measure already past its budget
+// (src/memory-index-guard.js). Exit 0 on success, 1 on a usage error or a refusal, like --gates.
+// Every answer carries the policy line, because on a machine whose managed policy restricts
+// hooks the guard is installed and never runs, and a bare "ON" would read as protection.
+function memoryGuard(args) {
+  const at = args.indexOf('--memory-guard');
+  const cmd = String(args[at + 1] || 'status').toLowerCase();
+  const extra = args.filter((arg, index) => index !== at && index !== at + 1);
+  if (extra.length || !['on', 'off', 'status', 'probe'].includes(cmd)) {
+    process.stderr.write(MEMORY_GUARD_USAGE);
+    process.exitCode = 1;
+    return;
+  }
+  const install = require('../src/memory-guard-install');
+  const home = path.resolve(os.homedir());
+  const tilde = (file) => (String(file).startsWith(home) ? '~' + String(file).slice(home.length) : String(file));
+  if (cmd === 'probe') {
+    const probe = install.memoryGuardProbe();
+    process.stdout.write(`wildcard-perms memory-guard probe: ${probe.result}. ${probe.detail}\n`
+      + `  (ran ${probe.command} in an empty temporary directory; the answer reads Claude Code's own message text)\n`);
+    if (probe.result === 'unknown') process.exitCode = 1;
+    return;
+  }
+  try {
+    const status = cmd === 'status' ? install.memoryGuardStatus() : install.setMemoryGuard(cmd === 'on');
+    const head = status.label === 'off' ? 'OFF' : status.label.toUpperCase();
+    const changed = cmd === 'status' ? '' : status.changed ? '' : ' (already)';
+    process.stdout.write(`wildcard-perms memory-guard: ${head}${changed} - ${tilde(status.settingsPath)}\n`);
+    if (status.on) {
+      process.stdout.write(`  hook:   PreToolUse Write|Edit|MultiEdit, node ${status.node || '(unreadable)'}`
+        + `${status.nodeExists === false ? ' (MISSING: turn the guard on again to repoint it)' : ''}\n`);
+      process.stdout.write(`  copy:   ${tilde(status.scriptPath)}, revision ${status.copy.revision ?? 'none'}`
+        + ` (this build ships ${status.packagedRevision ?? '?'})\n`);
+    }
+    if (status.reason) process.stdout.write(`  note:   ${status.reason}\n`);
+    if (cmd === 'on' && status.changed) process.stdout.write('  Applies to Claude Code sessions started from now on.\n');
+    if (status.backupPath) process.stdout.write(`  backup: ${tilde(status.backupPath)} (settings.json before the guard's first change)\n`);
+    process.stdout.write(`  policy: ${status.policy.line}\n`);
+    if (cmd === 'status' && status.status === 'unreadable') process.exitCode = 1;
+  } catch (error) {
+    process.stderr.write(`wildcard-perms --memory-guard ${cmd}: ${error.message}\n`);
     process.exitCode = 1;
   }
 }

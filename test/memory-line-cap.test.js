@@ -130,3 +130,48 @@ test('an empty index reports zero lines rather than one', () => {
     assert.equal(r.linesOver, false);
   });
 });
+
+// ── the MEMORY.md guard's rules, in the editor lint (2026-10-19) ──────────────
+// The guard (src/memory-index-guard.js) blocks growth past 140 lines, a line past 300
+// characters on ANY line, and a broken HTML comment. The lint reports the same three, from
+// the guard's own scanner and constant; test/memory-guard-parity.test.js holds them together.
+
+test('past the 140-line target is reported below the 200-line cap, and not at it', () => {
+  const { fastLint } = loadLint();
+  withStore('x\n'.repeat(140), (dir) => {
+    const r = fastLint(dir, CONF);
+    assert.equal(r.linesTarget, 140);
+    assert.equal(r.linesOverTarget, false, 'exactly at the target');
+  });
+  withStore('x\n'.repeat(141), (dir) => {
+    const r = fastLint(dir, CONF);
+    assert.equal(r.linesOverTarget, true);
+    assert.equal(r.linesOver, false, 'still inside the cap: the index loads whole');
+  });
+});
+
+// MUTATION: restore `ln.startsWith('- ') &&` in fastLint and the heading below is not flagged;
+// measure with `ln.length` and the 300-emoji line is.
+test('every line is held to the width budget, in code points', () => {
+  const { fastLint } = loadLint();
+  const emoji = String.fromCodePoint(0x1F600);
+  withStore(`# ${'h'.repeat(299)}\n${emoji.repeat(300)}\n- ${'e'.repeat(299)}\r\n`, (dir) => {
+    const r = fastLint(dir, CONF);
+    assert.deepEqual(r.over.map((o) => [o.line, o.len]), [[0, 301], [2, 301]],
+      'the heading and the CRLF entry are 301 characters; 300 emoji are 300');
+    assert.equal(r.over[1].end, 301, 'a Range ends at the UTF-16 column, CR excluded by the split');
+  });
+});
+
+// MUTATION: return [] from commentDefectList's caller (drop `comments:` from fastLint) and the
+// nested header goes unreported.
+test('a broken HTML comment in the index is reported with its line and kind', () => {
+  const { fastLint } = loadLint();
+  withStore('<!-- header\n  <!-- nested -->\n  tail -->\n- [a](a.md)\n```\n<!-- example\n```\n', (dir) => {
+    const r = fastLint(dir, CONF);
+    assert.deepEqual(r.comments.map((c) => [c.line, c.kind]), [[1, 'nested'], [2, 'orphan']]);
+  });
+  withStore('<!-- one -->\n- [a](a.md)\n', (dir) => {
+    assert.deepEqual(fastLint(dir, CONF).comments, []);
+  });
+});

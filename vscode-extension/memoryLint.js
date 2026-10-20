@@ -17,6 +17,15 @@ const os = require('os');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
+// The MEMORY.md guard's own rules, shared rather than restated (2026-10-19): the comment-defect
+// scanner, and the 140-line target the guard blocks growth past. The guard hook uses fixed
+// budgets; this lint's window-scoped memory.* settings tune the gauge only. Found in `./src/` in a
+// packaged extension and `../src/` in the repository, as autoLearnUi.js explains, by a resolve
+// rather than a try/catch, so test/dead-exports.test.js can see which names this file uses.
+const GUARD_MODULE = require.resolve('./memory-index-guard.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
+const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
+const LINES_TARGET = GUARD_BUDGETS.lines;
+
 // recall.py's EXCLUDE (recall.py:230#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
@@ -244,7 +253,7 @@ function norm(s) {
   return s.trim().toLowerCase().replace(/-/g, '_');
 }
 
-// Fast lint of one dir's MEMORY.md: size + over-budget hook lines + broken file links.
+// Fast lint of one dir's MEMORY.md: size + over-long lines + broken file links + broken comments.
 // Cheap enough to run on every save (reads one file, no sibling scan).
 //
 // `names` is the dir's `.md` listing when the caller already has one (fullReport does),
@@ -287,8 +296,12 @@ function fastLint(dir, conf, names = null, text = null) {
   const broken = [];
   const linkRe = /\]\(([^)]+\.md)(#[^)]*)?\)/g;
   lines.forEach((ln, i) => {
-    if (ln.startsWith('- ') && ln.length > conf.lineBudget) {
-      over.push({ line: i, len: ln.length, text: ln });
+    // EVERY line, in code points (2026-10-19), the guard's and recall.py's rule. This read only
+    // "- " lines and measured UTF-16 units, so a 300-character heading passed and a line of 160
+    // emoji read as 320. `end` is the UTF-16 length, which is what a Range column counts.
+    const len = Array.from(ln.replace(/\r/g, '')).length;
+    if (len > conf.lineBudget) {
+      over.push({ line: i, len, end: ln.length, text: ln });
     }
     let m;
     linkRe.lastIndex = 0;
@@ -304,6 +317,13 @@ function fastLint(dir, conf, names = null, text = null) {
     totalOver: bytes > conf.totalBudget,
     lineCount,
     linesOver: lineCount > conf.maxLines,
+    // Below the loader's cap, the target the MEMORY.md guard holds growth to: past it the index
+    // still loads whole, and every addition should now take a line out.
+    linesTarget: LINES_TARGET,
+    linesOverTarget: lineCount > LINES_TARGET,
+    // A `<!--` inside an open comment, an orphan `-->`, a comment never closed: Claude Code
+    // strips comments from the index, so each one leaks text into every session or hides it.
+    comments: commentDefectList(text),
   };
 }
 
@@ -839,19 +859,24 @@ class MemoryLint {
     // is absent here and lands on the same hide() the second call's null used to reach.
     const r = primary ? lints.get(primary) : null;
     if (!r) { this.status.hide(); return; }
-    const issues = r.over.length + r.broken.length;
+    const issues = r.over.length + r.broken.length + r.comments.length;
     const tok = r.tokens >= 1000 ? (r.tokens / 1000).toFixed(1) + 'k' : String(r.tokens);
+    // Past the cap names the cap; below it, past the 140-line target names the target.
     this.status.text = `$(book) mem: ${tok} tok`
-      + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines` : '')
+      + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines`
+        : r.linesOverTarget ? ` · ${r.lineCount} lines, over the ${r.linesTarget}-line target` : '')
       + (issues ? ` · ${issues} to fix` : '');
     this.status.tooltip =
       `MEMORY.md: ${r.bytes} bytes (~${r.tokens} tokens/session, budget ${conf.totalBudget / 4 | 0})\n` +
-      `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest\n` +
-      `${r.over.length} over-budget hook line(s), ${r.broken.length} broken index link(s)\n` +
+      `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest; `
+        + `the target is ${r.linesTarget}\n` +
+      `${r.over.length} over-budget line(s), ${r.broken.length} broken index link(s), `
+        + `${r.comments.length} broken HTML comment(s)\n` +
       `${path.dirname(r.memPath).replace(os.homedir(), '~')}\nClick for the full report.`;
     // linesOver joins totalOver here rather than the count: neither has a line to point
-    // at, and both are worse than anything that does.
-    this.status.backgroundColor = (issues || r.totalOver || r.linesOver)
+    // at, and both are worse than anything that does. Past the target is a warning too: the
+    // index still loads, and the next addition should take a line out.
+    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget)
       ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.status.show();
   }
@@ -860,11 +885,23 @@ class MemoryLint {
     const out = [];
     for (const o of r.over) {
       const d = new vscode.Diagnostic(
-        new vscode.Range(o.line, 0, o.line, o.len),
+        new vscode.Range(o.line, 0, o.line, o.end),
         `Index line is ${o.len} chars (budget ${conf.lineBudget}). Move the running detail into ` +
         `the memory file or the project repo and leave a one-line hook.`,
         vscode.DiagnosticSeverity.Warning
       );
+      d.source = 'claude-memory';
+      out.push(d);
+    }
+    const said = {
+      nested: '`<!--` inside a comment that is already open: the first `-->` closes both, and the text up to the next `-->` is loaded into every session.',
+      orphan: '`-->` with no comment open: it is shown as text in every session.',
+      unclosed: '`<!--` never closed: everything after it is hidden from every session.',
+    };
+    for (const c of r.comments) {
+      const width = c.kind === 'orphan' ? 3 : 4;
+      const d = new vscode.Diagnostic(new vscode.Range(c.line, c.column, c.line, c.column + width),
+        `Broken HTML comment in the index. ${said[c.kind]}`, vscode.DiagnosticSeverity.Warning);
       d.source = 'claude-memory';
       out.push(d);
     }
@@ -922,14 +959,23 @@ class MemoryLint {
     if (r.linesOver) {
       ch.appendLine(`  ! ${r.lineCount - conf.maxLines} line(s) past the cap`
         + ` — everything after line ${conf.maxLines} is NOT being loaded into sessions`);
+    } else if (r.linesOverTarget) {
+      ch.appendLine(`  ! ${r.lineCount - r.linesTarget} line(s) past the ${r.linesTarget}-line target:`
+        + ' still loaded, but every addition should now take a line out');
     }
     ch.appendLine(`  ${r.fileCount} memory files in the dir`);
     ch.appendLine('');
     if (r.over.length) {
       ch.appendLine(`${r.over.length} index line(s) over ${conf.lineBudget} chars — leave a hook, move detail out:`);
       for (const o of [...r.over].sort((a, b) => b.len - a.len)) {
-        ch.appendLine(`  ${String(o.len).padStart(4)} ch  L${o.line + 1}  ${o.text.slice(2, 72)}...`);
+        ch.appendLine(`  ${String(o.len).padStart(4)} ch  L${o.line + 1}  ${o.text.slice(o.text.startsWith('- ') ? 2 : 0, 72)}...`);
       }
+      ch.appendLine('');
+    }
+    if (r.comments.length) {
+      ch.appendLine('broken HTML comments (Claude Code strips comments, so these leak text into sessions or hide it):');
+      const kinds = { nested: '<!-- inside an open comment', orphan: '--> with no comment open', unclosed: '<!-- never closed' };
+      for (const c of r.comments) ch.appendLine(`  L${c.line + 1}  ${kinds[c.kind]}`);
       ch.appendLine('');
     }
     if (r.broken.length) {
@@ -946,11 +992,13 @@ class MemoryLint {
     // resolve, because the verdict only tests over + broken. The unresolved ones are
     // report-only and correctly excluded from the verdict; the sentence just has to stop
     // claiming otherwise when there are any.
-    if (!r.over.length && !r.broken.length) {
+    // The comments joined the verdict with their check (2026-10-19), and the sentence names them,
+    // so it claims exactly what it tests.
+    if (!r.over.length && !r.broken.length && !r.comments.length) {
       ch.appendLine(r.unresolved.length
-        ? `clean: every index line within budget, every index link resolves. `
+        ? `clean: every index line within budget, every index link resolves, every comment closes. `
           + `The ${r.unresolved.length} [[link]](s) above are forward-links, not faults.`
-        : 'clean: every index line within budget, all index links resolve.');
+        : 'clean: every index line within budget, all index links resolve, every comment closes.');
     }
     ch.show(true);
     this.refresh();

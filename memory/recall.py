@@ -261,6 +261,7 @@ LINT_ENTRY_WARN = 16           # resident entries. Attention dilutes per-entry, 
                                # Set from the real floor after the 2026-08-24 diet (52 -> 11:
                                # 7 recall triggers + 4 entries nothing else can trigger), with
                                # headroom for a few triggers. 0 would mean report-only.
+LINT_LINES_WARN = 140          # lines; the target below Claude Code's 200-line load cap
 GATE_BEGIN = "<!-- gate -->"   # a scope:global memory's resident lines, lifted verbatim into
 GATE_END = "<!-- /gate -->"    # the managed CLAUDE.md block so the compiler needs no judgement
 # ONE pairing test, used by BOTH _compile_gates_text() and --lint's "resident-eligible, not
@@ -911,6 +912,75 @@ def _strip_code(text):
     return text
 
 
+# Fences as src/memory-index-guard.js spells them: spaces and tabs only, never `\s`, because
+# Python's and JavaScript's `\s` are different sets (memoryLint.js PY_SPACE has the list).
+_FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
+
+
+def _comment_defects(text):
+    """Broken HTML comments in the index, as (line, kind) pairs, line 1-based: a `<!--` opened
+    while a comment is already open ("nested", the first `-->` closes both and the text up to
+    the next one leaks into every session), an "orphan" `-->`, and a `<!--` still open at the
+    end ("unclosed", reported where it opened). Markers inside fenced code and inline code
+    spans are examples and are skipped; inside an open comment nothing is code.
+
+    A port of commentDefectList in src/memory-index-guard.js, the MEMORY.md guard, step for
+    step, so the guard, this lint and the extension's gauge count the same defects.
+    `text` must be read with newline="" so lines split at LF or CRLF only, as the guard's do."""
+    defects, opened, fence = [], None, None
+    for row, line in enumerate(re.split(r"\r?\n", text), 1):
+        if opened is None:
+            if fence:
+                m = _FENCE_CLOSE.match(line)
+                if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                    fence = None
+                continue
+            m = _FENCE_OPEN.match(line)
+            if m:
+                fence = m.group(1)
+                continue
+        i = 0
+        while i < len(line):
+            if opened is not None:
+                close, reopen = line.find("-->", i), line.find("<!--", i)
+                if reopen != -1 and (close == -1 or reopen < close):
+                    defects.append((row, "nested"))
+                    i = reopen + 4
+                    continue
+                if close == -1:
+                    break
+                opened = None
+                i = close + 3
+                continue
+            if line[i] == "`":
+                run = 1
+                while i + run < len(line) and line[i + run] == "`":
+                    run += 1
+                ticks = "`" * run
+                end = line.find(ticks, i + run)
+                # A closing run must be exactly as long as the opening one.
+                while end != -1 and end + run < len(line) and line[end + run] == "`":
+                    skip = run
+                    while end + skip < len(line) and line[end + skip] == "`":
+                        skip += 1
+                    end = line.find(ticks, end + skip)
+                i = i + run if end == -1 else end + run
+                continue
+            if line.startswith("<!--", i):
+                opened = row
+                i += 4
+                continue
+            if line.startswith("-->", i):
+                defects.append((row, "orphan"))
+                i += 3
+                continue
+            i += 1
+    if opened is not None:
+        defects.append((opened, "unclosed"))
+    return defects
+
+
 def lint():
     """Audit the always-loaded index for bloat and broken links. No model needed.
 
@@ -961,13 +1031,48 @@ def lint():
         print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
     print()
 
-    over = [(len(ln), i, ln) for i, ln in enumerate(mem.splitlines(), 1)
-            if ln.startswith("- ") and len(ln) > LINT_LINE_WARN]
+    # The lines, their widths and the comments, measured the way the MEMORY.md guard
+    # (src/memory-index-guard.js) and vscode-extension/memoryLint.js measure them (2026-10-19):
+    # read with newline="" so a line ends at LF or CRLF only, a trailing newline is not one more
+    # line, a CR is not a character, and a width is code points, which is what len() counts.
+    # test/memory-guard-parity.test.js runs this lint and the guard over the same fixtures.
+    with open(index, encoding="utf-8", errors="replace", newline="") as handle:
+        raw = handle.read()
+    raw_lines = re.split(r"\r?\n", raw)
+    if raw_lines and raw_lines[-1] == "":
+        raw_lines.pop()
+    print(f"  {len(raw_lines)} lines, target {LINT_LINES_WARN} (Claude Code loads the first 200)")
+    over_lines = len(raw_lines) > LINT_LINES_WARN
+    if over_lines:
+        print(f"  ! {len(raw_lines) - LINT_LINES_WARN} line(s) past the {LINT_LINES_WARN}-line target "
+              f"-- each addition should now take a line out")
+    print()
+
+    # EVERY physical line, not only the "- " entries (2026-10-19): a 300-character heading or
+    # note costs the same tokens and attention as a 300-character hook, and the guard counts it.
+    over = []
+    for i, ln in enumerate(raw_lines, 1):
+        ln = ln.replace("\r", "")
+        if len(ln) > LINT_LINE_WARN:
+            over.append((len(ln), i, ln))
     if over:
         print(f"  {len(over)} index line(s) over {LINT_LINE_WARN} chars "
               f"-- move detail into the file/repo, leave a hook:")
         for length, i, ln in sorted(over, reverse=True):
-            print(f"    {length:4d} ch  L{i}  {ln[2:72]}...")
+            print(f"    {length:4d} ch  L{i}  {(ln[2:] if ln.startswith('- ') else ln)[:70]}...")
+        print()
+
+    # Claude Code strips HTML comments from the index, so a broken one is never seen where it is
+    # written: a nested `<!--` leaks the rest of its comment into every session, and an
+    # unclosed one hides everything after it. The defect that leaked a real index's header.
+    comment_defects = _comment_defects(raw)
+    if comment_defects:
+        kinds = {"nested": "<!-- inside an open comment", "orphan": "--> with no comment open",
+                 "unclosed": "<!-- never closed"}
+        print(f"  ! {len(comment_defects)} broken HTML comment(s) in MEMORY.md -- Claude Code strips "
+              f"comments, so each one leaks text into every session or hides it:")
+        for row, kind in comment_defects:
+            print(f"    L{row}  {kinds[kind]}")
         print()
 
     broken = sorted({t for t, _ in re.findall(r'\]\(([^)]+\.md)(#[^)]*)?\)', mem)
@@ -1157,10 +1262,13 @@ def lint():
     # links resolve" printed underneath them. Three of the words in this sentence were
     # decorative. If a finding is worth a line above, it is worth a bit here -- and if it is
     # not (demote), the message must not claim it.
-    if not (over_budget or over_ceiling or over or broken or unresolved
+    #
+    # over_lines and comment_defects joined 2026-10-19 with their checks, and the sentence names
+    # what they test: the line target is part of "within budget", and "comments close" is new.
+    if not (over_budget or over_ceiling or over_lines or over or broken or comment_defects or unresolved
             or no_scope or no_gate or gate_no_scope or index_gate or stale_gates
             or other_gates or other_unreadable or gate_excluded):
-        print("  clean: index within budget, links resolve, every standing order compiled.\n")
+        print("  clean: index within budget, links resolve, comments close, every standing order compiled.\n")
     return texts
 
 

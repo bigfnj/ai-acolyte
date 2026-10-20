@@ -128,6 +128,14 @@ const TEST_ONLY = {
   // drive a pass with an injected scanner. agent-sessions.js: the tests age fixtures by the window.
   'src/rule-usage.js': ['analyzeRuleUsage', 'countRuleUsage', 'createRuleIndex', 'creditsFor', 'probesFor', 'ruleKey', 'trackedRule'],
   'src/agent-sessions.js': ['WINDOW_MS'],
+  // 2026-10-19, the MEMORY.md guard. memory-index-guard.js runs as a hook from its stable copy,
+  // so production enters at `require.main === module`; these are the seams its test drives the
+  // rule, the edit replay and the path filter through. memoryGuardDefinition is what the planner
+  // writes and the tests compare against; classifyProbe and guardRevision are the probe's reading
+  // of Claude Code's message and the installer's reading of a copy's revision.
+  'src/memory-index-guard.js': ['GUARD_REVISION', 'applyEdit', 'blockMessage', 'commentDefects', 'decide', 'isIndexPath', 'measure', 'verdict'],
+  'src/claude-hook-config.js': ['memoryGuardDefinition'],
+  'src/memory-guard-install.js': ['classifyProbe', 'guardRevision'],
   // 2026-10-14: agent-gates.js left this list, and agent-guidance.js, derived-guidance.js
   // and history-adapters.js shrank, when the census learned to follow a require through a
   // path.join. scripts/check-codex-runtime.js and scripts/vscode-acceptance/ load the STAGED

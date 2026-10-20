@@ -758,4 +758,48 @@ print(f"  {len(py)} indexes, {flagged} past a budget, every one judged alike")
 PY
 echo "ok: memoryLint.js threadOf and indexHealth read every generated memory and index exactly as recall.py does"
 
+# ------------------------------------- what recall.py removes, every display marks (2026-10-20)
+# One hidden set, held in spirit by every sink: recall.py REMOVES from compiled text
+# (_THREAD_STRIP, _GATE_STRIP, the selector rule in _strip_hidden), and src/gates-manage.js
+# markHidden, which the terminal (forTerminal) and the gates panel (extension.js forDisplay) both
+# use, MARKS. Every code point either Python set removes between two letters must come out of
+# markHidden as `?`, in a name and in a whole text, and over selector runs the characters
+# markHidden shows must be exactly the ones Python keeps.
+# Mutations, each failing here: drop any range from markHidden's HIDDEN_RANGES (the code points
+# it no longer marks are named); drop its selector rule, or judge a selector by the raw neighbour
+# (a run case differs); the old UNSAFE_FOR_TERMINAL set (U+00AD, U+200B and the tag block named).
+"$PY" - "$RECALL" "$TMP/removed.json" <<'PY' || fail "the Python strip sets could not be listed"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("recall", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+removed = []
+for c in range(0x110000):
+    if 0xD800 <= c <= 0xDFFF:
+        continue
+    s = "a" + chr(c) + "b"
+    if m._strip_hidden(s) != s or m._strip_hidden(s, m._GATE_STRIP) != s:
+        removed.append(c)
+# Witness: both sets are in the list, and the list stops somewhere.
+assert 0xE0041 in removed and 0x0B in removed and 0xFE0F not in removed and 0x0A not in removed, "degenerate"
+S = lambda *c: "".join(map(chr, c))
+runs = ["x" + S(0xfe0f, 0xfe0e), S(0xfe00) + "y", "a" + S(0xfe01, 0x200b, 0xfe02, 0x200b, 0xfe03), "b" + S(0xfe0f) + " " + S(0xfe0e, 0xfe0d),
+        S(0x26a0, 0xfe0f), "c" + S(0xe0041, 0xfe0f, 0xfe0f), "d" + S(0xe0100, 0xfe01)]
+json.dump({"removed": removed, "runs": [[r, m._strip_hidden(r, m._GATE_STRIP)] for r in runs]}, open(sys.argv[2], "w"), ensure_ascii=True)
+print(f"  {len(removed)} code points removed by recall.py")
+PY
+node - "$HERE/../src/gates-manage.js" "$TMP/removed.json" <<'JS' || fail "a character recall.py removes is shown as itself by markHidden (above)"
+const fs = require('fs');
+const { markHidden } = require(process.argv[2]);
+const { removed, runs } = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const unmarked = removed.filter((c) => markHidden(`a${String.fromCodePoint(c)}b`) !== 'a?b'
+  || markHidden(`a${String.fromCodePoint(c)}b`, { keepLines: true }) !== 'a?b');
+if (unmarked.length) console.log(`  unmarked: ${unmarked.slice(0, 12).map((c) => c.toString(16)).join(' ')} (${unmarked.length})`);
+const wrong = runs.filter(([raw, kept]) => Array.from(raw).filter((ch, i) => Array.from(markHidden(raw))[i] !== '?').join('') !== kept);
+const points = (text) => Array.from(text).map((ch) => ch.codePointAt(0).toString(16)).join(' ');
+for (const [raw] of wrong) console.log(`  run ${points(raw)} shows ${points(markHidden(raw))}`);
+process.exit(unmarked.length || wrong.length ? 1 : 0);
+JS
+echo "ok: every character recall.py removes from compiled text is one markHidden shows as ?, selector runs included"
+
 echo "ALL PASS: test/threads-compile.sh"

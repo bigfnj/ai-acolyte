@@ -325,8 +325,41 @@ function changedButFailed({ stage, detail, snapshot, retired = [], restored = []
 // recolour, retitle or clear the user's terminal, and a bidi override can reorder the line it
 // sits on. Each becomes `?` for display. The JSON form passes recall.py's bytes through as they
 // are, because a program reading it has to see the real file name.
-const UNSAFE_FOR_TERMINAL = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-const forTerminal = (text) => String(text || '').replace(UNSAFE_FOR_TERMINAL, '?');
+//
+// THE HIDDEN SET (2026-10-20), one for every place memory text is SHOWN: the terminal here and in
+// bin/wildcard-perms, and the gates panel's page, modal and toasts (extension.js forDisplay). The
+// C0 controls (a whole text keeps its line feeds and tabs), DEL and the C1 controls, the soft
+// hyphen U+00AD, U+034F, the bidi controls U+061C, U+200E, U+200F, U+202A-U+202E and
+// U+2066-U+2069, U+180E, the zero-width characters U+200B-U+200D, U+2060-U+206F, U+FEFF, the tag
+// block U+E0000-U+E007F and the variation selectors U+E0100-U+E01EF, and a selector U+FE00-U+FE0F
+// that does not directly follow a shown character which is not one, so the one in a warning sign
+// shows and a run does not. Where recall.py REMOVES text it compiles (_THREAD_STRIP, _GATE_STRIP,
+// _strip_hidden), a display MARKS: every character it removes is in this set, which
+// test/threads-compile.sh checks code point by code point. Two lines that differ only in hidden
+// characters therefore never read alike. Code points, so no hidden character sits in this source.
+const HIDDEN_RANGES = [[0x00, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x34f, 0x34f], [0x61c, 0x61c], [0x180e, 0x180e],
+  [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x206f], [0xfeff, 0xfeff], [0xe0000, 0xe007f], [0xe0100, 0xe01ef]];
+const isSelector = (cp) => cp >= 0xfe00 && cp <= 0xfe0f;
+
+// `text` with every hidden character as `?`, one per code point. `keepLines` keeps the line feed
+// and the tab, for a whole message or a gate's text; a caller turns CRLF into a line feed first.
+function markHidden(text, { keepLines = false } = {}) {
+  let out = '';
+  let last = null;   // the last code point shown as itself
+  for (const ch of Array.from(String(text))) {
+    const cp = ch.codePointAt(0);
+    const hidden = !(keepLines && (cp === 0x0a || cp === 0x09))
+      && (HIDDEN_RANGES.some(([from, to]) => cp >= from && cp <= to) || (isSelector(cp) && (last === null || isSelector(last))));
+    if (hidden) {
+      out += '?';
+    } else {
+      out += ch;
+      last = cp;
+    }
+  }
+  return out;
+}
+const forTerminal = (text) => markHidden(String(text || ''));
 
 // `wildcard-perms --gates list`: one line per gate memory in recall.py's order (by filename,
 // the compile order), then the counts and what each instruction file loads.
@@ -356,5 +389,5 @@ function formatGateList({ gates }) {
 
 module.exports = {
   parseGatesList, planGateChanges, gateSteps, describePlan,
-  parseEditOutput, changedButFailed, formatGateList,
+  parseEditOutput, changedButFailed, formatGateList, markHidden,
 };

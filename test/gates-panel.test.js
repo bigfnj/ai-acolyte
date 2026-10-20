@@ -655,17 +655,27 @@ test('the list steps run the toolbox Python on recall.py, pinned to the compile 
 
 test('the extension sends the page only the fields it renders, each made safe to show', async () => {
   const rlo = String.fromCharCode(0x202e);
+  // A tag character and a selector run, each code point one ? (2026-10-20).
+  const tagA = String.fromCodePoint(0xe0041);
+  const run = String.fromCodePoint(0xfe0f, 0xfe0e);
   const app = harness({ respond: () => [null, JSON.stringify({ store: '/s', gates: [
     { file: `feedback_${rlo}a.md`, scope: 'global', state: 'active', agents: ['codex'], problem: null,
-      title: `t${rlo}`, text: `x\r\ny${rlo}`, description: `d${rlo}`, extra: '<b>no</b>' },
+      title: `t${rlo}${tagA}`, text: `x\r\ny${rlo}${run}`, description: `d${rlo}`, extra: '<b>no</b>' },
+    { file: 'plain.md', scope: 'global', state: 'active', agents: ['codex'], problem: null,
+      title: 'p', text: 'p\r\nq', description: '' },
   ], other: 1 }), 'a warning about another store'] });
   try {
     const message = (await app.open()).last('gates');
     assert.deepEqual(message.gates, [{ file: `feedback_${rlo}a.md`, label: 'feedback_?a.md', state: 'active', agents: ['codex'],
-      only: 'codex only', problem: '', title: 't?', text: 'x\ny?', description: 'd?' }]);
+      only: 'codex only', problem: '', title: 't??', text: `x\ny?${String.fromCodePoint(0xfe0f)}?`,
+      hiddenText: true, description: 'd?' },
+    { file: 'plain.md', label: 'plain.md', state: 'active', agents: ['codex'], only: 'codex only', problem: '', title: 'p',
+      text: 'p\nq', hiddenText: false, description: '' }]);
     assert.equal(message.warning, 'a warning about another store', 'a successful list\'s stderr is passed on');
     assert.equal(message.off, '', 'gates.enabled is on, so gates are on, with nothing installed yet');
-    // MUTATION: send gate.title unfiltered (drop forDisplay) and the deepEqual fails on the RLO.
+    // MUTATION: send gate.title unfiltered (drop forDisplay) and the deepEqual fails on the RLO;
+    // put the old fromCharCode ranges back and it fails on the tag character and the run; drop
+    // hiddenText, or compare it before the CRLF pass, and it fails on one of the two gates.
   } finally { await app.dispose(); }
 });
 
@@ -1120,6 +1130,10 @@ test('a name or title with hidden characters shows them as ?, and the page still
     assert.equal(posing.file.textContent, 'feedback_?elur_ytefas?.md', 'the two no longer read the same');
     assert.ok(posing.tags.includes('hidden characters in the name'));
     assert.ok(!real.tags.includes('hidden characters in the name'));
+    // The text's own mark (2026-10-20): recall.py removes these when it compiles, the panel shows where.
+    // MUTATION: drop the page's hiddenText tag and this fails.
+    assert.ok(posing.tags.includes('hidden characters in the text, shown as ?'));
+    assert.ok(!real.tags.includes('hidden characters in the text, shown as ?'));
     const pre = page.dom.created.filter((element) => element.tag === 'pre').map((element) => element.textContent);
     assert.equal(pre[1], '- Safety rule\n\t?detail', 'gate text keeps its line breaks and tabs');
     const shown = page.dom.created.map((element) => element.textContent).join('');

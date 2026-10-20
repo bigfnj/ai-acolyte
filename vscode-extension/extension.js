@@ -4647,7 +4647,10 @@ function spawnThreadsCompile({ quiet = false } = {}) {
     console.error('ai-acolyte: ' + msg);
     sharedChannel()?.appendLine(`[${new Date().toISOString()}] open threads: ${msg}`);
   };
-  if (deactivated) return Promise.resolve(false);
+  // The switch is asked here, at the spawn, not only where a compile is armed: a compile queued
+  // behind a running one (compileThreads) outlives cancelThreadsCompile, and switched off stays
+  // off (2026-10-20). Silent, because off is what the person chose.
+  if (deactivated || !openThreadsEnabled()) return Promise.resolve(false);
   const script = recallScriptPath();
   if (!script) { say('recall.py not found, so open threads cannot be compiled.'); return Promise.resolve(false); }
   const st = recallStatus();
@@ -4843,7 +4846,9 @@ async function toggleOpenThreads(request = null) {
 async function refreshOpenThreads() {
   cancelThreadsCompile();
   const compiled = await compileThreads();
-  if (deactivated) return;
+  // Turned off while this waited for its compile: the off path has removed the block, and an
+  // install now would put it back with the switch off (2026-10-20).
+  if (deactivated || !openThreadsEnabled()) return;
   reportThreadsInstall(setOpenThreadsAll(true, { refreshHint: THREADS_REFRESH_HINT }), true, compiled);
 }
 

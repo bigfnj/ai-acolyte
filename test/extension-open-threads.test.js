@@ -783,6 +783,43 @@ test('a recompile armed before the switch went off is dropped, and compiles noth
   // first "dropped" assertion fails.
 });
 
+// SWITCHED OFF STAYS OFF, FOR A COMPILE ALREADY QUEUED (2026-10-20). cancelThreadsCompile drops the
+// armed timer, but a compile queued behind a running one (compileThreads) is a promise chain, not a
+// timer: it spawned Python after the switch went off and wrote open-threads.generated.md. And a
+// Refresh that was waiting on that queue then installed the block, with the switch off.
+test('a compile queued behind a running one spawns nothing once the switch is off, and its Refresh installs nothing', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => {
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+    fs.writeFileSync(box.threadsFile, ONE);
+  } });
+  app.held.length = 0;
+  assert.ok(installedIn(app.claude()), 'precondition: activation installed the last compile');
+  app.state.hold = true;
+  app.state.compileWrites = ONE;
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'precondition: one compile running, held');
+  app.state.compileWrites = TWO;
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  const refreshed = app.commands.get('permission-wildcarding.toggleOpenThreads')({ refresh: true });
+  assert.equal(app.compiles().length, 1, 'precondition: the burst and the Refresh are queued behind it');
+  app.tiers['openThreads.enabled'] = { globalValue: false };
+  app.fireConfig('permissionWildcarding.openThreads.enabled');
+  assert.equal(installedIn(app.claude()), false, 'precondition: turning it off removed the block');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  assert.equal(app.compiles().length, 1, 'the queued compile spawned nothing after the switch went off');
+  assert.equal(fs.readFileSync(app.threadsFile, 'utf8'), ONE, 'and open-threads.generated.md was not rewritten');
+  await refreshed;
+  await app.settle();
+  assert.equal(installedIn(app.claude()), false, 'the Refresh that waited on it installed nothing into CLAUDE.md');
+  assert.equal(installedIn(app.codex()), false, 'nor into AGENTS.md');
+  // MUTATION: drop `|| !openThreadsEnabled()` from spawnThreadsCompile and the spawn count is 2;
+  // drop it from refreshOpenThreads (after the compile) and the block is back in CLAUDE.md.
+});
+
 test('deactivate clears the pending recompile, so a torn-down host never compiles', async (t) => {
   const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
   app.fireCorpus(app.store, 'a.md');

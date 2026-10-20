@@ -3852,3 +3852,72 @@ verbs still ignore a stray word (`--bypass on extra` and similar); the child-pro
 extension.js only, so a spawn in `src/` is listed by no test; the probe's confirmation says "60 s at
 most" where the answer can come about 62 s after the start; a stray process in the probe's
 directory makes its cleanup fail in silence.
+
+## The 1.9.3 audit clearance: the third pass (2026-10-20)
+
+The third pass audited what 1.9.2 changed (`053cf25..c362e77`) with the same three read-only lenses,
+and verified the six seeds BACKLOG.md held open from the second pass. It filed 23 rows, none above
+LOW. Three fix packages took the code findings to dispositions on their own branches, merged
+`--no-ff` into `release/1.9.3` in this order: WP-X `fix/cli-args-193`, WP-W `fix/probe-tidy-193`,
+WP-Y `fix/hidden-text-193`. The integrator took the six documentation rows (D1 to D6) and the
+measured note (H3). Each FIXED row names the commit whose message carries its mutations; every
+package's runner restored each mutated file and checked it by sha256.
+
+| id | Finding | Disposition |
+|---|---|---|
+| C1 [LOW] | a verb before `--gates retire` or `restore` is dropped in silence (the takesNames branch runs ahead of the one-verb check), contradicting README and the 1.9.2 notes | **FIXED** WP-X 690618f (a verb, dashed word or bare word before --gates retire or restore is refused; mutation `const lead = []` FIRED) |
+| C2 [LOW] | with a verb present an unknown dashed option is never refused: `--drain --dryrun` runs a real drain (promotes, prunes) | **FIXED** WP-X 690618f (verbOptions per verb from its parser, exit 2 naming the option before anything runs; 2 mutations FIRED; 59 real invocations unchanged) |
+| C3 [LOW] | seed: stray bare words ignored by --bypass, --seed, --drain, --codex-workspace-rules, the derived --guidance verbs, --learn status, --max status, --codex-max status | **FIXED** WP-X 690618f (verbArguments tokenizer; nine verbs refuse a stray word with their usage; 12 mutations FIRED) |
+| C4 [LOW] | CLI twin of R1: `--memory-guard status` prints "turn the guard on again to repoint it" beside a foreign guard, where `on` always refuses | **FIXED** WP-X 31a539f (no repoint advice beside a foreign guard; mutation `missing = false` FIRED) |
+| T1 [LOW] | memory text reaches the terminal raw, ESC included: recall.py's agents problem strings, the compile's stderr passed on by --gates refresh and retire/restore, the restore refusal | **FIXED** WP-Y adecd27 + e689e05 (recall.py _shown prints untrusted names with ascii(); the CLI wraps every passed-on stderr and refusal in terminalText; 8 mutations FIRED) |
+| T2 [LOW] | seed: terminal and panel sanitisers miss invisible characters: UNSAFE_FOR_TERMINAL (src/gates-manage.js) passes U+00AD, zero-width, U+2060-U+2064, U+FEFF, U+180E, the tag block and U+061C; HIDDEN_RANGES (extension.js) lacks the tag block and variation selectors, and its regex is built with fromCharCode and no u flag | **FIXED** WP-Y f5b04bd (one display set, markHidden, walked by code point, used by forTerminal and the panel; the fromCharCode regex removed; parity over 456 code points; 9 mutations FIRED) |
+| T3 [LOW] | gate bodies reach CLAUDE.md and AGENTS.md with no strip (tag characters and U+202E kept), and the panel cannot show hidden tag text | **FIXED** WP-Y 324de9c + f5b04bd (gate bodies stripped at compile, newlines and tabs kept; --lint names the gate; the panel tags it; the real store's 34 gates compile byte-identical; 7 mutations FIRED) |
+| T4 [LOW] | seed: variation selectors (U+E0100-U+E01EF and runs of U+FE00-U+FE0F) carry about a byte each through thread text; U+034F, U+180E, U+2065 one bit each | **FIXED** WP-Y 583ff9f (variation-selector runs and U+E0100-U+E01EF, U+034F, U+180E, U+2065 stripped in both twins; strip and kept axes moved; 12 mutations FIRED) |
+| P1 [LOW] | probe-user-hooks.js arms its grace timer after the tree kill resolves; when 'close' wins, the timer leaks and the script exits 2 s late (6 of 6 runs) | **FIXED** WP-W a0038f9 (no grace armed after a settled run; mutation FIRED) |
+| P2 [LOW] | seed: the guard probe's cleanup fails in silence with a stray process in its directory (rmSync in catch {}, no retries), and an empty leftover is reused | **FIXED** WP-W 6ee96f6 (async removal with 5 retries; a failure is named in the detail; 2 mutations FIRED) |
+| P3 [NOTE] | the guard probe's grace destroys stdout/stderr but never unrefs the child or ends stdin: on POSIX a surviving child keeps the CLI alive past its answer | **FIXED** WP-W 6ee96f6 + 17b364d (the grace unrefs the child; the unref mutation FIRED; ending stdin is parity only, as stdin is ended at spawn, and its mutant survives) |
+| P4 [NOTE] | seed: the probe confirmation says "Ends after 60 s at most" and classifyProbe "no answer within 60 s"; the answer can come about 62 s after the start | **FIXED** WP-W 11b8d08 (PROBE_LONGEST_MS, 65 s with the grace and the removal retries; 2 mutations FIRED) |
+| P5 [NOTE] | probe-user-hooks.js: if only the closing freshDirectory fails, a completed run exits 3 and skips the report line | **FIXED** WP-W a0038f9 (a closing cleanup failure is a warning, the report still named, exit 0; mutation FIRED) |
+| P6 [NOTE] | seed: the child-process census reads extension.js only; every async src/ spawn the extension reaches is tracked today, but no test lists them | **FIXED** WP-W 926f978 (test/src-spawn-census.test.js lists all 15 spawn sites in src/ with how each is tracked; 4 mutations FIRED) |
+| H1 [NOTE] | threadsSettled's `state.readable &&` can never be false since its one caller filters readable first | **FIXED** WP-W 2e8c951 (the dead conjunct removed; putting it back is an equivalent mutant, so no test can name a killing mutation) |
+| H2 [NOTE] | the threadsBlockedSaid reset in activate() has no test (no harness re-activates one module instance) | **FIXED** WP-W b8d48ed (test: a re-activation of the same module says the missing venv again; mutation FIRED) |
+| H3 [NOTE] | threadsCompileTools runs per corpus event, per spawn and per push (2 existsSync, 0.176 p50 ms measured, n=41 fresh processes, interleaved against an empty arm) | **DECLINED-MEASURED**: 0.176 ms p50 per call for the two existsSync (n=41 fresh processes, interleaved against an empty arm, fs binding warmed by one stat; inspect() not measured), below the reads threadsMayChange already does on the same event |
+| D1 [LOW] | v1.9.2 notes: "text a person cannot see does not reach every session's CLAUDE.md and AGENTS.md" overclaims (variation selectors, gate bodies) | **FIXED**: the v1.9.2 notes corrected 2026-10-20 (dated parenthesis), and 1.9.3 strips what they named |
+| D2 [NOTE] | BACKLOG seed misstated the extension twin (HIDDEN_RANGES has U+00AD; it lacks the tag block and variation selectors) | **FIXED**: superseded by T2 (the display set replaced HIDDEN_RANGES); the 1.9.3 clearance states the twin correctly |
+| D3 [NOTE] | the record and BACKLOG say "22 distinct findings" for pass 2: 22 rows, 21 distinct (S7 = R2), one (L2b) found by a fix package | **FIXED** 956f50d (record and BACKLOG: 22 rows, 21 distinct) |
+| D4 [NOTE] | v1.9.1 notes "needs the goal's own reply": the code accepts the probe word anywhere, and an accepted /goal echoes it; v1.9.0's "any exit 0" left out the "unknown command" exclusion | **FIXED**: the v1.9.1 and v1.9.0 notes corrected 2026-10-20 (the probe's word in the answer; the unknown-command exclusion) |
+| D5 [NOTE] | the probe reads "not restricted" from the probe word, which an accepted /goal's echo of the condition carries; a future refusal that echoes the condition and exits 0 would misread | **ACCEPTED-RECORDED** (integrator's decision, in the owner's review table): classifyProbe reads the restriction text first (src/memory-guard-install.js, classifyProbe), so only a future refusal worded differently that also echoes the condition and exits 0 would misread; the allowed path cannot be observed on this box, and changing the acceptance unobserved risks a permanent unknown where hooks run |
+| D6 [NOTE] | v1.9.2 notes: "Claude Code 2.1.293 carries its own checks that ask a person" dropped the record's hedge (never observed) | **FIXED**: the v1.9.2 notes hedge restored (the binary carries the checks; no session has been seen to prompt) |
+
+**Two mutants were expected to survive and did.** Putting H1's dropped conjunct back is an
+equivalent mutant (its one caller filters readable states first), and ending stdin in the guard
+probe's grace (P3) duplicates the end at spawn. Both are cleanups with no killing test by
+construction, recorded here rather than counted as FIXED-by-test.
+
+**The owner's decision taken on their behalf (T3).** Gate bodies now lose invisible characters at
+compile, as thread text already did: gates are standing orders installed unattended into every
+session's instruction files, and nothing a person can see changes. `--lint` names any gate whose
+text carried one; the real store's 34 gates compile byte-identical.
+
+**Evidence for the release.** The tag `v1.9.3` is at `72f600a`, the `--no-ff` merge of
+`release/1.9.3`. The full battery on the integration (`ccb5383`): 2063 tests, 2057 pass, 0 fail, 0
+cancelled, 6 skipped (the masked view 2039 pass, 0 fail, 24 skipped); smoke 18 of 18; every bash
+harness ALL PASS; 307 of 307 line references anchored. CI 8 of 8 on the integration (run
+39445718161), on the release commit `2baa4ee` (39446196365) and on the merge (39446741923). The
+published `ai-acolyte-v193.vsix` (release.yml run 39446782793) matches the local build in all 66
+entries apart from line endings. Against the installed 1.9.3: `drive-installed.js` 17 of 17 (guard
+copy at revision 4) and `drive-vscode.js` 4 of 4, 6 of 6 and 6 of 6 in the same three groups.
+Merging: six conflicting hunks (one in the WP-W merge, five in WP-Y's; WP-X's was clean), every one in line-number digits, repointed afterwards by
+`fix-refs-after-merge.sh` (digits only each time). The integrator corrected three published release
+bodies the day the pass found them (D1, D4, D6).
+
+**Seeds for the fourth pass,** noticed by the fix packages outside their briefs: a bare word with
+no verb still reaches hook mode, which rewrites settings.json; `--learn --mode <m>` with no
+subcommand writes the mode before it prints the usage; the older CLI test helpers redirect the home
+but not `CLAUDE_CONFIG_DIR` or `LOCALAPPDATA`; `test/memory-guard-install.test.js` removes its
+fixture home with no retries, and earlier runs left temp directories behind; invisible characters
+outside the set still pass the strip (Hangul fillers, musical, interlinear and shorthand format
+controls, Mongolian free variation selectors, U+206A-U+206F); memory file names print raw in
+`--lint` and the compile (untestable on NTFS, testable on CI's Linux); `memoryLint.js` gate bodies
+are not stripped, so its other-store census can differ from Python's; the `NOT_SPACE` axis of
+`test/threads-compile.sh` is now wholly stripped, a degenerate axis.

@@ -10,6 +10,19 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Cleared 2026-10-20 for 1.9.3.** A third full audit, of what 1.9.2 changed, filed 23 rows, none
+above LOW, and verified the six seeds this file held: 20 FIXED with mutation-tested commits, one
+DECLINED-MEASURED and two ACCEPTED-RECORDED. The six seeds are rows T2, T4, C3, P6, P4 and P2.
+Every row and the evidence are in `docs/engineering-record.md` under "The 1.9.3 audit clearance:
+the third pass (2026-10-20)".
+
+**Released 2026-10-20 as 1.9.3.** The tag `v1.9.3` is at `72f600a`, the `--no-ff` merge of
+`release/1.9.3`. CI is green on all 8 jobs on the integration (run 39445718161), the release commit
+(39446196365) and the merge (39446741923). The published `ai-acolyte-v193.vsix` (release.yml run
+39446782793) matches the local build in all 66 entries apart from line endings. Against the
+installed 1.9.3: `drive-installed.js` 17 of 17 and `drive-vscode.js` 4 of 4, 6 of 6 and 6 of 6.
+Suite on the integration: 2063 tests, 2057 pass, 0 fail, 6 skipped (masked view 0 fail).
+
 **Cleared 2026-10-20 for 1.9.2.** A second full audit, of what 1.9.1 changed, filed 22 rows
 (one MED, none HIGH), 21 distinct (S7 repeats R2; WP-B found L2b while fixing L2). 20 of the
 distinct findings are FIXED with mutation-tested commits and one is ACCEPTED-RECORDED;
@@ -136,25 +149,30 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Seeds for the third audit pass (2026-10-20, noticed while fixing the second)
+### Seeds for the fourth audit pass (2026-10-20, noticed while fixing the third)
 
-Each was seen by a 1.9.2 fix package outside its brief and is unverified as a finding until the
-third pass reads it.
+Each was seen by a 1.9.3 fix package outside its brief and is unverified as a finding until the
+fourth pass reads it.
 
-- **Gate names printed to a terminal keep invisible format characters.** `UNSAFE_FOR_TERMINAL` in
-  `src/gates-manage.js` passes zero-width characters, the soft hyphen, U+FEFF and the tag block, and
-  its twin in `vscode-extension/extension.js` lacks the tag block and U+00AD. Thread text strips
-  them since 1.9.2.
-- **Variation selectors stay in thread text** (U+FE00-U+FE0F, U+E0100-U+E01EF), as do U+2065,
-  U+034F, U+180E and the Hangul fillers. Several are on the kept axis of `test/threads-compile.sh`.
-- **Five verbs ignore a stray word:** `--bypass on extra`, `--seed extra`, `--drain extra`,
-  `--codex-workspace-rules status extra` and `--guidance accept <id> extra`.
-- **The child-process census reads `vscode-extension/extension.js` only.** A spawn inside `src/`
-  reaches `trackChild` by the `options.track` convention, and no test lists those spawns.
-- **The probe's confirmation says "Ends after 60 s at most".** With the 2 s close grace, the answer
-  can come about 62 s after the start.
-- **A stray process in the probe's directory makes its cleanup fail in silence.** An empty leftover
-  is reused and a non-empty one is refused next time.
+- **A bare word with no verb reaches hook mode.** `wildcard-perms extra` rewrote settings.json in a
+  throwaway home and exited 0 (on a terminal it waits on stdin). The no-verb guard in
+  `bin/wildcard-perms` fires only on a dashed word. No caller passes arguments to hook mode.
+- **`--learn --mode <m>` with no subcommand writes the mode,** then prints the usage with exit 1.
+- **The older CLI test helpers redirect the home but not `CLAUDE_CONFIG_DIR` or `LOCALAPPDATA`**
+  (cli-gates `runCli`, cli-hook `runArgs` and others).
+- **`test/memory-guard-install.test.js` removes its fixture home with no retries,** and earlier runs
+  left `acolyte-memory-guard-install-*`, `acolyte-claude-holder-*` and `acolyte-probe-hooks-*`
+  directories in `%TEMP%`.
+- **Invisible characters outside the strip set still pass:** the Hangul fillers (U+115F, U+1160,
+  U+3164, U+FFA0), musical format controls U+1D173-U+1D17A, interlinear annotation U+FFF9-U+FFFB,
+  shorthand format controls U+1BCA0-U+1BCA3, the Mongolian free variation selectors and
+  U+206A-U+206F (which the display marks but the compile keeps).
+- **Memory file names print raw** in `recall.py --lint` and the compile. NTFS forbids control
+  characters in names, so only CI's Linux jobs can test it.
+- **`vscode-extension/memoryLint.js` does not strip gate bodies,** so its other-store census can
+  differ from Python's for two bodies that differ only in hidden characters.
+- **The `NOT_SPACE` axis of `test/threads-compile.sh` is now wholly stripped,** so it no longer tests
+  anything in thread text (a degenerate generator axis).
 
 ---
 

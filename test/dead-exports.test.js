@@ -345,6 +345,7 @@ const TEST_ONLY = {
     parseArgs: 'the opt-in flag and its refusal',
     planRuns: 'the run plan printed before anything runs',
     probePaths: 'where each run starts and where its logs go',
+    runClaude: 'driven with a stand-in tree kill, so the grace settle can be seen',
   },
 };
 

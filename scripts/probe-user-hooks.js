@@ -50,7 +50,8 @@
 // Nothing outside those two directories is written by this script.
 //
 // Exit codes: 0 every run completed (whatever it found); 1 claude could not be started;
-// 2 refused (no --run-claude) or a usage error.
+// 2 refused (no --run-claude) or a usage error; 3 a probe directory could not be emptied (a
+// process still running in it, on Windows), named in the message.
 
 const fs = require('fs');
 const os = require('os');
@@ -226,18 +227,78 @@ function describePlan(runs, options, paths) {
   return `${lines.join('\n')}\n`;
 }
 
+// A directory that cannot be emptied stops the probe with a message, never a stack trace. On
+// Windows that is a process still running in it (its working directory holds the folder), or
+// one holding a file there open.
+const DIRECTORY_FAILED = 3;
 function freshDirectory(dir) {
-  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (error) {
+    throw Object.assign(new Error(`could not empty and recreate ${dir} (${error.code || error.message}). `
+      + 'A process may still be running in it or holding a file there; end it, remove the directory, and run the probe again'),
+    { probeDirectory: dir });
+  }
 }
 
-function runClaude(options, args, cwd) {
-  const { spawnSync } = require('child_process');
-  const { resolvedLaunch } = require('../src/exec-resolve');
-  let launch;
-  try { launch = resolvedLaunch(options.claude, args, 'spawnSync'); } catch (error) { return { error }; }
-  return spawnSync(launch.file, launch.args, { ...launch.options, cwd, input: '', encoding: 'utf8',
-    timeout: options.timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+// ASYNC, AND THE DEADLINE ENDS THE TREE (2026-10-20). This ran claude with spawnSync and its
+// `timeout`, which kills the one process it started, and on Windows that is cmd.exe: Claude
+// Code's npm `claude.cmd` is cmd-shim's direct-exe form, which npmShimLaunch does not read:
+//   "%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe"   %*
+// (2.1.293's, on the development box), so the launch always goes through cmd.exe, and the
+// claude.exe under it kept running. The next run's freshDirectory then
+// met that claude's working directory, Windows refused the rmSync, and the probe died on an
+// uncaught throw. Now, as src/memory-guard-install.js memoryGuardProbe does it, the run is async
+// and the deadline calls endProcessTree (src/exec-resolve.js), which ends cmd.exe and everything
+// under it. A run settles on 'close' or, should 'close' never come (a process that survived the
+// kill still holding a pipe), KILL_GRACE_MS after the kill. Resolves, never rejects, with
+// { status } or { error }, plus stdout and stderr.
+const KILL_GRACE_MS = 2000;
+const OUTPUT_CAP = 4 * 1024 * 1024;
+function runClaude(options, args, cwd, endTree) {
+  const { spawn } = require('child_process');
+  const execResolve = require('../src/exec-resolve');
+  const end = endTree || execResolve.endProcessTree;
+  return new Promise((resolve) => {
+    const out = { stdout: '', stderr: '' };
+    let settled = false;
+    let deadline = null;
+    let grace = null;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(grace);
+      resolve({ status: null, ...out, ...result });
+    };
+    const timedOut = () => Object.assign(new Error(`no answer within ${options.timeoutMs / 1000} s`), { code: 'ETIMEDOUT' });
+    let child;
+    try {
+      const launch = execResolve.npmShimLaunch(options.claude, args) || execResolve.resolvedLaunch(options.claude, args, 'spawn');
+      child = spawn(launch.file, launch.args, { ...launch.options, cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) {
+      settle({ error });
+      return;
+    }
+    for (const stream of ['stdout', 'stderr']) {
+      child[stream].setEncoding('utf8');
+      child[stream].on('data', (chunk) => { if (out[stream].length < OUTPUT_CAP) out[stream] += chunk; });
+    }
+    let killed = false;
+    deadline = setTimeout(() => {
+      killed = true;
+      Promise.resolve(end(child)).catch(() => {}).then(() => {
+        grace = setTimeout(() => settle({ error: timedOut() }), KILL_GRACE_MS);
+      });
+    }, options.timeoutMs);
+    // A program that cannot start emits 'error' then 'close'; one already running that fails a
+    // kill emits 'error' and is still running, so only 'close' (or the grace) settles that one.
+    child.on('error', (error) => { if (!Number.isInteger(child.pid)) settle({ error }); });
+    child.on('close', (status) => settle(killed ? { error: timedOut() } : { status }));
+    child.stdin.on('error', () => { /* a child that exits before reading stdin */ });
+    child.stdin.end();
+  });
 }
 
 function firstLine(run) {
@@ -270,17 +331,31 @@ function judgeGoal(run) {
   return 'unknown';
 }
 
-function execute(options, runs, paths, io) {
+// A directory that cannot be emptied ends the probe with exit 3 and a message naming it, and the
+// report as far as it got is written when the work directory still takes it.
+async function execute(options, runs, paths, io) {
+  const report = { at: new Date().toISOString(), platform: process.platform, claude: options.claude, runs: [] };
+  try {
+    return await executeRuns(options, runs, paths, io, report);
+  } catch (error) {
+    if (!error || !error.probeDirectory) throw error;
+    io.err.write(`probe-user-hooks: ${error.message}. Stopping.\n`);
+    report.stopped = error.message;
+    try { fs.writeFileSync(paths.report, `${JSON.stringify(report, null, 2)}\n`); } catch { /* the work directory is the one that failed */ }
+    return DIRECTORY_FAILED;
+  }
+}
+
+async function executeRuns(options, runs, paths, io, report) {
   freshDirectory(paths.work);
   fs.writeFileSync(paths.canary, CANARY_SOURCE);
-  const report = { at: new Date().toISOString(), platform: process.platform, claude: options.claude, runs: [] };
   for (const run of runs) {
     freshDirectory(paths.cwd);
     if (run.kind === 'hook') {
       fs.mkdirSync(path.dirname(run.settingsFile), { recursive: true });
       fs.writeFileSync(run.settingsFile, `${JSON.stringify(run.settings, null, 2)}\n`);
     }
-    const result = runClaude(options, run.args, paths.cwd);
+    const result = await runClaude(options, run.args, paths.cwd);
     if (result.error && result.error.code === 'ENOENT') {
       io.err.write(`probe-user-hooks: ${options.claude} could not be started (${result.error.message}); stopping.\n`);
       report.runs.push({ label: run.label, error: result.error.message });
@@ -331,8 +406,9 @@ function main(argv = process.argv.slice(2), io = { out: process.stdout, err: pro
   return execute(options, runs, paths, io);
 }
 
-if (require.main === module) process.exitCode = main();
+if (require.main === module) Promise.resolve(main()).then((code) => { process.exitCode = code; });
 
 module.exports = {
   EVENTS, VARIANTS, parseArgs, hookCommand, canarySettings, defaultProbeBase, probePaths, planRuns, judgeHook, judgeGoal,
+  runClaude,
 };

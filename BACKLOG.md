@@ -10,6 +10,21 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Released 2026-10-20 as 1.9.6.** The tag `v1.9.6` is at `cec5058`, the `--no-ff` merge of
+`release/1.9.6`. It reads the sessions of Codex 0.162/0.163 (the owner's report: an active session's
+approvals were not reflected): the Agent sessions card takes a Codex session's activity from its last
+record and does not list guardian review threads; a code-mode cell of several literal commands is
+credited from its printed results; a guardian rejection is withheld; evidence revision 5. The record
+has it under "Codex 0.162/0.163 sessions". CI is green on all 8 jobs on the release branch (run
+39516934569) and on the merge (39517500636). The published `ai-acolyte-v196.vsix` (release.yml run
+39517808321) matches the local build in all 66 entries apart from line endings; the keep-three rule
+pruned v1.9.3. The full suite ran on CI's six Node legs and not locally (the owner asked that this box
+be spared heavy runs); locally the touched tests, 140 of 140 and 145 of 145, plus every new test's
+mutations (12, all FIRED). Smoke 19 of 19 with settings.json unchanged (464 allow, 13 deny); installers
+37 of 37 under Windows PowerShell 5.1; 307 of 307 line references. `drive-installed.js` 17 of 17
+staged and installed; `drive-vscode.js` 4 of 4, 6 of 6 and 6 of 6. The live worktree is on `v1.9.6`
+and the hook exits 0.
+
 **Released 2026-10-20 as 1.9.5.** The tag `v1.9.5` is at `cd81845`, the `--no-ff` merge of
 `release/1.9.5` (built on the other box's `6d91a92`). The MEMORY.md entry count is a count, never a
 budget: guard revision 5, no editor diagnostic or colour, no `LINT_ENTRY_WARN` (the owner's call; the

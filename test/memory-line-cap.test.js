@@ -175,3 +175,26 @@ test('a broken HTML comment in the index is reported with its line and kind', ()
     assert.deepEqual(fastLint(dir, CONF).comments, []);
   });
 });
+
+// The guard's entry ceiling, in the editor lint (2026-10-20). The guard and recall.py --lint hold
+// the index to 16 resident "- " entries; the gauge did not count them at all.
+// MUTATION: compare `entries >= ENTRIES_CEILING` in fastLint and 16 entries read as over; drop the
+// `ln.startsWith('- ')` count and 17 do not.
+test('past the 16-entry ceiling is reported, at the first entry past it, and not at 16', () => {
+  const { fastLint } = loadLint();
+  const entries = (n) => Array.from({ length: n }, (_, i) => `- [m${i}](m${i}.md) hook`).join('\r\n') + '\r\n';
+  withStore(`# Index\n-not an entry\n${entries(16)}`, (dir) => {
+    const r = fastLint(dir, CONF);
+    assert.equal(r.entries, 16, 'CRLF entries count, and "-not" is not one');
+    assert.equal(r.entriesCeiling, 16);
+    assert.equal(r.entriesOver, false, 'exactly at the ceiling');
+    assert.equal(r.entryPastCeiling, null);
+  });
+  withStore(`# Index\n${entries(18)}`, (dir) => {
+    const r = fastLint(dir, CONF);
+    assert.equal(r.entries, 18);
+    assert.equal(r.entriesOver, true);
+    assert.deepEqual(r.entryPastCeiling, { line: 17, end: '- [m16](m16.md) hook'.length },
+      'the warning sits on the 17th entry, its range the line without its CR');
+  });
+});

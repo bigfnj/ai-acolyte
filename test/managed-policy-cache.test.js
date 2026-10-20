@@ -88,8 +88,6 @@ test('an injected policy is never re-read from disk', (t) => {
       allow: [],
       deny: [],
       raw: { ask: [], allow: [], deny: [] },
-      hookEvents: [],
-      managedHooksOnly: false,
     },
   });
 

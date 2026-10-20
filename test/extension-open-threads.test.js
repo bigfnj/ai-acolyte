@@ -41,8 +41,9 @@ const memory = (status, text = 'Synthetic.') => `---\nname: m\ndescription: synt
 
 // `tiers` maps a setting key to VS Code's per-tier inspect() object; `prepare(box)` seeds the home
 // before activation; `compileWrites` is what a `--threads-compile` writes (a string, or null to
-// write nothing and fail).
-async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites = ONE } = {}) {
+// write nothing and fail). `realThreads` leaves src/spawn-thread.js real, so a compile started
+// off the host thread really runs `box.python`, which the test then has to make a program.
+async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites = ONE, realThreads = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-window-'));
   t.after(() => { try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
   const claude = path.join(home, '.claude');
@@ -62,7 +63,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   fs.mkdirSync(path.dirname(python), { recursive: true });
   fs.writeFileSync(python, '');
   const threadsFile = path.join(claude, 'open-threads.generated.md');
-  const box = { home, store, other, threadsFile, claudeMd: path.join(claude, 'CLAUDE.md'), agentsMd: path.join(home, '.codex', 'AGENTS.md') };
+  const box = { home, store, other, threadsFile, python, claudeMd: path.join(claude, 'CLAUDE.md'), agentsMd: path.join(home, '.codex', 'AGENTS.md') };
   prepare(box);
 
   const watchers = [];
@@ -70,10 +71,12 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const held = [];       // the threads' timers: { ms, fn, cleared }
   const commands = new Map();
   const warnings = [];
+  const modals = [];     // each warning with the buttons it offered
   const infos = [];
   const channel = [];
   const configListeners = [];
-  const state = { compileWrites, warningAnswer: undefined };
+  const state = { compileWrites, warningAnswer: undefined, hold: false, holding: [] };
+  const counters = { memoryReport: 0 };
   const disposable = () => ({ dispose() {} });
   const vscode = {
     StatusBarAlignment: { Left: 1, Right: 2 }, ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -89,7 +92,11 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
       registerWebviewViewProvider() { return disposable(); }, onDidChangeActiveTextEditor() { return disposable(); },
       withProgress(options, task) { return task({ report() {} }); },
       setStatusBarMessage() { return disposable(); }, showErrorMessage(message) { warnings.push(String(message)); },
-      showWarningMessage(message) { warnings.push(String(message)); return Promise.resolve(state.warningAnswer); },
+      showWarningMessage(message, ...rest) {
+        warnings.push(String(message));
+        modals.push({ message: String(message), items: rest.filter((item) => typeof item === 'string') });
+        return Promise.resolve(state.warningAnswer);
+      },
       showInformationMessage(message) { infos.push(String(message)); return Promise.resolve(undefined); },
     },
     workspace: {
@@ -122,26 +129,32 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     },
   };
   const realChildProcess = require('node:child_process');
-  const recorded = {
-    ...realChildProcess,
-    execFile(file, args, options, callback) {
-      if (file !== python) return realChildProcess.execFile.apply(this, arguments);
-      const done = typeof options === 'function' ? options : callback;
-      spawns.push({ args, env: (typeof options === 'object' && options?.env) || {} });
-      const child = new EventEmitter();
-      setImmediate(() => {
-        let err = null;
-        if (args.includes('--threads-compile')) {
-          if (state.compileWrites === null) err = Object.assign(new Error('exit 1'), { code: 1 });
-          else fs.writeFileSync(threadsFile, state.compileWrites);
-        }
-        done(err, '', err ? '[recall] refusing to compile open threads: the test said so' : '');
-        child.emit('exit', err ? 1 : 0, null);
-        child.emit('close', err ? 1 : 0, null);
-      });
-      return child;
-    },
+  // The python's spawns, recorded and never run, from the host thread (`via: 'host'`, the
+  // extension's child_process.execFile) or from src/spawn-thread.js (`via: 'thread'`), which
+  // is replaced by the same recorder unless the test asks for the real threads.
+  const record = (via) => function execFile(file, args, options, callback) {
+    if (file !== python) return realChildProcess.execFile.apply(this, arguments);
+    const done = typeof options === 'function' ? options : callback;
+    spawns.push({ via, args, env: (typeof options === 'object' && options?.env) || {} });
+    const child = new EventEmitter();
+    // What this compile writes is what the corpus was when it was spawned, as recall.py reads it.
+    const writes = state.compileWrites;
+    const finish = () => {
+      let err = null;
+      if (args.includes('--threads-compile')) {
+        if (writes === null) err = Object.assign(new Error('exit 1'), { code: 1 });
+        else fs.writeFileSync(threadsFile, writes);
+      }
+      done(err, '', err ? '[recall] refusing to compile open threads: the test said so' : '');
+      child.emit('exit', err ? 1 : 0, null);
+      child.emit('close', err ? 1 : 0, null);
+    };
+    // `state.hold`: the compile runs until the test calls its finish (state.holding).
+    if (state.hold && args.includes('--threads-compile')) state.holding.push(finish);
+    else setImmediate(finish);
+    return child;
   };
+  const recorded = { ...realChildProcess, execFile: record('host') };
   const extensionPath = require.resolve('../vscode-extension/extension');
   const rootSrc = path.resolve(__dirname, '..', 'src');
   const originalLoad = Module._load;
@@ -163,6 +176,16 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
     if (request === 'vscode') return vscode;
     if (request === 'os') return { ...os, homedir: () => home };
     if ((request === 'child_process' || request === 'node:child_process') && parent?.filename === extensionPath) return recorded;
+    if (!realThreads && request === './src/spawn-thread' && parent?.filename === extensionPath) {
+      const real = originalLoad.call(this, path.join(rootSrc, 'spawn-thread.js'), parent, isMain);
+      return { ...real, execFileOffThread: record('thread') };
+    }
+    // The REAL memoryLint, with the extension's memoryReport() calls counted: it reads every file
+    // in the store, and the unattended paths must not.
+    if (request === './memoryLint' && parent?.filename === extensionPath) {
+      const real = originalLoad.call(this, request, parent, isMain);
+      return { ...real, memoryReport: (...args) => { counters.memoryReport += 1; return real.memoryReport(...args); } };
+    }
     if (parent?.filename === extensionPath && request.startsWith('./src/')) {
       return originalLoad.call(this, path.join(rootSrc, request.slice('./src/'.length)), parent, isMain);
     }
@@ -195,7 +218,7 @@ async function threadsWindow(t, { tiers = {}, prepare = () => {}, compileWrites 
   const settle = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
   const live = () => held.filter((entry) => !entry.cleared && !entry.fired);
   return {
-    ...box, extension, watchers, spawns, held, commands, warnings, infos, channel, state, tiers, close, settle, live,
+    ...box, extension, watchers, spawns, held, commands, warnings, modals, infos, channel, state, counters, tiers, close, settle, live,
     claude: () => fs.readFileSync(box.claudeMd, 'utf8'),
     codex: () => fs.readFileSync(box.agentsMd, 'utf8'),
     compiles: () => spawns.filter((spawn) => spawn.args.includes('--threads-compile')),
@@ -336,15 +359,195 @@ test('the corpus watcher hands every change to both the gates and the threads, a
   app.fireCorpus(app.store, 'extra.md', 'delete');
   assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'a deletion is recompiled while a thread is listed');
   await app.fireTimers();
-  // A store that does not compile: no recompile, whatever changed in it.
+  // A store that does not compile: no recompile, whatever changed in it. Which store compiles is
+  // asked once per burst, when the timer fires, so the burst arms and then compiles nothing.
+  const compiledBefore = app.compiles().length;
   fs.writeFileSync(path.join(app.other, 'x.md'), memory('open'));
   app.fireCorpus(app.other, 'x.md');
   app.fireCorpus(app.other, 'MEMORY.md');
-  assert.deepEqual(app.live(), [], 'another store\'s change is skipped: the compile reads one store');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, compiledBefore, 'another store\'s change is skipped: the compile reads one store');
   // MUTATION: in memoryCorpusChanged, call only gatesCorpusBump and nothing here arms; route the
   // threads through gatesCorpusBump's early returns (MEMORY.md, gatesEnabled) and the index edit
   // arms nothing; drop compiledListsThreads from threadsMayChange and the closure and deletion
   // arm nothing; drop the store check and the other store arms one.
+});
+
+// ONE READING OF THE COMPILED FILE (2026-10-20). Whether the compile lists a thread was a third
+// parse of it, the heading alone with no sha check; it is src/agent-open-threads.js readCompiled
+// now. A compile that reading refuses arms the recompile on any edit, since nothing installs it.
+test('the watcher asks the install\'s own reader whether a thread is listed, and a refused compile recompiles', async (t) => {
+  const tornNone = NONE.replace('(0, managed)', '(0, managed)\n- **OPEN** Pasted in by hand. (x)');
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, tornNone) });
+  app.held.length = 0;
+  app.fireCorpus(app.store, 'extra.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'an edit with no status recompiles a compile the install refuses');
+  await app.fireTimers();
+  // A whole compile that lists none: the same edit arms nothing.
+  fs.writeFileSync(app.threadsFile, NONE);
+  app.fireCorpus(app.store, 'extra.md');
+  assert.deepEqual(app.live(), [], 'a whole compile listing none, and an edit with no status: nothing');
+  // MUTATION: put back the heading regex in compiledListsThreads and the first assertion fails.
+});
+
+// THE UNATTENDED PATHS DO NOT READ THE STORE (2026-10-20). memoryReport() reads every file in it
+// (24-29 ms warm on the development box) and threadsCorpusBump (per *.md event), gateCompileEnv
+// (per compile) and autoSyncRecallIfStale (per MEMORY.md burst) took only `.dir` from it. They ask
+// memoryLint.js memoryStoreDir() now, the same choice without the report, and the threads ask it
+// once per burst.
+test('twenty corpus events and their compile read no memory report, and the compile still pins the store', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'precondition: activation compiled');
+  const before = app.counters.memoryReport;
+  for (let i = 0; i < 20; i += 1) app.fireCorpus(app.store, 'a.md');
+  app.fireCorpus(app.other, 'MEMORY.md');
+  assert.equal(app.live().length, 1, 'one burst');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 2, 'one compile for the burst');
+  assert.equal(path.resolve(app.compiles().at(-1).env.RECALL_MEMORY_DIR), path.resolve(app.store),
+    'the compile is still pinned to the store with the most memory files');
+  // The Memory card's MEMORY.md watcher (and the linter's own, which watches the same file): the
+  // card's 350 ms bump runs the recall sync check.
+  const cards = app.watchers.filter((w) => w.pattern?.pattern === 'MEMORY.md' && w.pattern.base?.fsPath === app.store && !w.disposed);
+  assert.ok(cards.length, 'precondition: the card watches the store\'s MEMORY.md');
+  for (const card of cards) for (const fn of card.handlers.change) fn({ fsPath: path.join(app.store, 'MEMORY.md') });
+  // node:timers/promises, not the global: threadsWindow's setTimeout unrefs every real timer, so a
+  // wait through it holds nothing open, and Node 20 and 22 ended the file's event loop here with
+  // this promise pending, cancelling the test and every one after it (CI, 2026-10-20). The same
+  // test passed on Node 24, on the development box and in CI, so only the older runtimes show it.
+  await require('node:timers/promises').setTimeout(600);
+  assert.equal(app.counters.memoryReport - before, 0, 'no memoryReport() on the events, the burst, the compile or the sync check');
+  // MUTATION: put `memoryReport().dir` back in gateCompileEnv, in threadsBurstCompiles, or in
+  // autoSyncRecallIfStale, and the count is 1.
+});
+
+// MEMORY.md MOVES ONLY THE INDEX LINE (2026-10-20). recall.py leaves the index out of the threads,
+// so while the index is healthy and the compile carries no INDEX line, its save cannot change the
+// compile, and every one of them used to spawn Python for nothing.
+test('a MEMORY.md save compiles only when the INDEX line could move', async (t) => {
+  const index = (n) => Array.from({ length: n }, (_, i) => `- line ${i}`).join('\n') + '\n';
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, ONE) });
+  app.held.length = 0;
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live(), [], 'a healthy index and a compile with no INDEX line: nothing armed');
+  fs.writeFileSync(path.join(app.store, 'MEMORY.md'), index(141));
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'past the 140-line budget: armed');
+  app.state.compileWrites = compiled({ threads: ['- **AWAITING** The owner decides. (a)'], index: 'MEMORY.md is 141 lines (budget 140): compact it.' });
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1);
+  fs.writeFileSync(path.join(app.store, 'MEMORY.md'), index(10));
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live().map((entry) => entry.ms), [2500], 'healthy again while the compile still carries INDEX: armed, so it goes');
+  app.state.compileWrites = ONE;
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 2);
+  app.fireCorpus(app.store, 'MEMORY.md');
+  assert.deepEqual(app.live(), [], 'and once it has gone, nothing again');
+  // MUTATION: return true for MEMORY.md in threadsMayChange and the first assertion fails; drop
+  // the `compiled.index !== null` check and the "healthy again" one does; return false from
+  // indexHealth's branch and the 141-line one does.
+});
+
+// ONE COMPILE AT A TIME (2026-10-20). A compile slower than the debounce overlapped the next, and
+// whichever finished last won, the older included. Now a compile asked for while one runs waits
+// for it and then runs once, however many asked.
+test('a compile asked for while one runs waits for it, and the asks in between are one compile', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
+  app.held.length = 0;
+  app.state.hold = true;
+  app.state.compileWrites = ONE;
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'precondition: the first compile is running, held');
+  app.state.compileWrites = TWO;
+  for (let burst = 0; burst < 3; burst += 1) {
+    app.fireCorpus(app.store, 'a.md');
+    await app.fireTimers();
+  }
+  assert.equal(app.compiles().length, 1, 'three more bursts while it runs start no second compile');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  assert.equal(app.compiles().length, 2, 'once it finished, one more compile ran for the three');
+  assert.equal(app.state.holding.length, 1, 'and it is the one running');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  assert.ok(app.claude().includes('- **BLOCKED** Second. (b)'), 'the newer compile is the one installed');
+  assert.equal(app.compiles().length, 2, 'and nothing else ran');
+  // A person's Refresh joining a queued unattended compile still hears why it failed.
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  app.state.compileWrites = null;
+  app.fireCorpus(app.store, 'a.md');
+  await app.fireTimers();
+  const refreshed = app.commands.get('permission-wildcarding.toggleOpenThreads')({ refresh: true });
+  assert.equal(app.compiles().length, 3, 'precondition: one running, the burst and the Refresh queued behind it');
+  app.state.holding.shift()();
+  await app.settle();
+  await app.settle();
+  app.state.holding.shift()();
+  await refreshed;
+  assert.equal(app.compiles().length, 4, 'the burst and the Refresh were one compile');
+  assert.ok(app.warnings.some((message) => /open threads compile failed/.test(message)),
+    `the queued compile spoke for the Refresh: ${JSON.stringify(app.warnings)}`);
+  // MUTATION: make compileThreads call spawnThreadsCompile directly (no queue) and the second
+  // assertion fails at 4 compiles; keep the first ask's `quiet` for the queued compile and the
+  // last assertion fails.
+});
+
+// THE COMPILE NEVER HOLDS THE HOST THREAD (2026-10-20). On Windows a spawn holds its calling thread
+// for the length of CreateProcess (src/spawn-thread.js), and this compile runs unattended after
+// edits, activation and the setting. It is started from a worker thread now, under the spawn gate
+// the other thread spawns share. A real thread and a real stand-in: a copy of node named
+// python.exe running a script that writes the compile, so the install that lands proves the thread
+// did the work, and the recorded host execFile proves the host thread did not.
+test('the compile is spawned from a worker thread, never the host thread, and still lands', { timeout: 120000 }, async (t) => {
+  const standIn = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-threads-standin-'));
+  t.after(() => { try { fs.rmSync(standIn, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} });
+  const marks = path.join(standIn, 'ran.log');
+  const script = path.join(standIn, 'recall-standin.js');
+  fs.writeFileSync(script, `const fs = require('fs'); const path = require('path');
+fs.appendFileSync(${JSON.stringify(marks)}, process.argv.slice(2).join(' ') + '\\n');
+fs.writeFileSync(path.join(process.env.USERPROFILE, '.claude', 'open-threads.generated.md'), ${JSON.stringify(TWO)});
+`);
+  const app = await threadsWindow(t, {
+    realThreads: true,
+    tiers: { 'memory.recallScript': { globalValue: script } },
+    prepare: (box) => {
+      fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+      fs.rmSync(box.python);
+      try { fs.linkSync(process.execPath, box.python); } catch { fs.copyFileSync(process.execPath, box.python); }
+    },
+  });
+  await app.fireTimers();
+  const { setTimeout: wait } = require('node:timers/promises');
+  // Endpoint scanning can hold the first run of a fresh copy of an executable for seconds.
+  const onHost = () => app.spawns.filter((spawn) => spawn.args.includes('--threads-compile'));
+  const landed = () => app.claude().includes('- **BLOCKED** Second. (b)');
+  for (let waited = 0; waited < 90000 && !landed() && !onHost().length; waited += 100) await wait(100);
+  assert.deepEqual(onHost(), [], 'the host thread\'s child_process.execFile was handed the compile');
+  assert.ok(landed(), `the stand-in's compile was installed: ${JSON.stringify(app.channel)}`);
+  assert.match(fs.readFileSync(marks, 'utf8'), /--threads-compile$/m, 'precondition: the stand-in ran as the compile');
+  // MUTATION: spawn it with the host's execFile again in spawnThreadsCompile, and the recorded
+  // host execFile receives --threads-compile.
+});
+
+// One timer serves activation's check and the corpus bursts, so an event from another store in
+// activation's first seconds joins the check instead of replacing it.
+test('an event from another store during activation\'s delay does not cancel activation\'s compile', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => {
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('awaiting'));
+    fs.writeFileSync(path.join(box.other, 'x.md'), memory('open'));
+  } });
+  assert.deepEqual(app.live().map((entry) => entry.ms), [4000], 'precondition: activation\'s check is armed');
+  app.fireCorpus(app.other, 'x.md');
+  await app.fireTimers();
+  assert.equal(app.compiles().length, 1, 'activation\'s check still compiled');
+  // MUTATION: drop `burst.ifWorth && threadsWorthCompiling()` from threadsBurstCompiles (return
+  // false) and the count is 0.
 });
 
 test('the gates still recompile through the dispatcher', async (t) => {
@@ -422,6 +625,106 @@ test('the toggle turns a settled install off after asking, and back on with a co
   // compileThreads on the way on and the old compile is what installs.
 });
 
+// AN OFF SWITCH THAT CAN INSTALL IS NOT ONE (2026-10-20). The toggle used to turn the feature off
+// only when every install was settled, which needs a whole compile, so with nothing compiled, no
+// venv, or an unreadable instruction file the card's "Turn off" ran the ON path: a compile and an
+// install. Now, while on, the click is always the off path behind its modal, and Refresh is a
+// separate choice offered only when the install is not current.
+test('while on, the toggle turns it off in any install state, and offers Refresh beside it only when stale', async (t) => {
+  const app = await threadsWindow(t, { compileWrites: null });
+  const toggle = () => app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.equal(fs.existsSync(app.threadsFile), false, 'precondition: nothing is compiled');
+  await toggle();
+  assert.deepEqual(app.modals.map((modal) => [modal.message, modal.items]), [['Turn off open threads?', ['Turn off', 'Refresh']]],
+    'the modal asks to turn it off, and offers Refresh because the install is not current');
+  assert.equal(app.tiers['openThreads.enabled'], undefined, 'a cancelled modal changes nothing');
+  app.state.warningAnswer = 'Turn off';
+  await toggle();
+  await app.settle();
+  assert.equal(app.tiers['openThreads.enabled']?.globalValue, false, 'the setting went off');
+  assert.equal(app.tiers['openThreads.enabled'].updatedAt, 1, 'at the user tier');
+  assert.deepEqual(app.compiles(), [], 'turning it off compiled nothing');
+  assert.equal(app.claude(), '# Mine\n', 'and wrote nothing into CLAUDE.md');
+  assert.equal(app.codex(), '# Codex mine\n');
+  // MUTATION: restore `next = !(enabled && states.length && states.every(settled))` and the
+  // click runs the ON path: the setting stays on and a compile is spawned.
+});
+
+test('Refresh, from the modal or the card, compiles and installs and leaves the setting on', async (t) => {
+  const app = await threadsWindow(t, { compileWrites: ONE });
+  const toggle = (request) => app.commands.get('permission-wildcarding.toggleOpenThreads')(request);
+  app.state.warningAnswer = 'Refresh';
+  await toggle();
+  await app.settle();
+  assert.equal(app.compiles().length, 1, 'Refresh compiled');
+  assert.ok(installedIn(app.claude()) && installedIn(app.codex()), 'and installed the result');
+  assert.equal(app.tiers['openThreads.enabled'], undefined, 'without touching the setting');
+  // Now settled: the modal offers Turn off alone.
+  app.state.warningAnswer = undefined;
+  await toggle();
+  assert.deepEqual(app.modals.at(-1).items, ['Turn off'], 'a current install is offered no Refresh');
+  // The card's button: no modal, the same refresh.
+  const before = app.modals.length;
+  app.state.compileWrites = TWO;
+  await toggle({ refresh: true });
+  await app.settle();
+  assert.equal(app.modals.length, before, 'the card\'s Refresh asks nothing');
+  assert.equal(app.compiles().length, 2);
+  assert.ok(app.claude().includes('- **BLOCKED** Second. (b)'), 'and installs the fresh compile');
+  // While off it does nothing but say so.
+  app.state.warningAnswer = 'Turn off';
+  await toggle();
+  await toggle({ refresh: true });
+  await app.settle();
+  assert.equal(app.compiles().length, 2, 'a Refresh while off compiles nothing');
+  assert.equal(installedIn(app.claude()), false);
+  // MUTATION: drop the `choice === 'Refresh'` branch and the first compile never happens; drop
+  // the `enabled` check on the refresh request and the last compile count is 3.
+});
+
+// A FAILED COMPILE IS NOT A FRESH ONE (2026-10-20). Turning it on ignored compileThreads()'s
+// answer, installed the previous compile and said "ON" over it. It still installs the last compile,
+// as `wildcard-perms --open-threads refresh` does, and now says that is what it did.
+test('turning it on with a compile that fails installs the last compile and says so', async (t) => {
+  const app = await threadsWindow(t, { tiers: { 'openThreads.enabled': { globalValue: false } }, compileWrites: null,
+    prepare: (box) => fs.writeFileSync(box.threadsFile, ONE) });
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  await app.settle();
+  assert.equal(app.tiers['openThreads.enabled'].globalValue, true, 'precondition: the setting went on');
+  assert.equal(app.compiles().length, 1, 'precondition: it compiled, and the compile failed');
+  assert.ok(app.claude().includes('- **AWAITING** The owner decides. (a)'), 'the last compile is installed');
+  const on = app.infos.filter((message) => /open threads ON/.test(message));
+  assert.equal(on.length, 1, `one ON message: ${JSON.stringify(app.infos)}`);
+  assert.match(on[0], /the compile failed, so the last compile is installed: /);
+  // A compile that succeeds says nothing of the kind.
+  app.state.compileWrites = TWO;
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')({ refresh: true });
+  await app.settle();
+  assert.doesNotMatch(app.infos.at(-1), /failed/);
+  // MUTATION: pass `true` for `compiled` from refreshOpenThreads and the first match fails.
+});
+
+// A VSIX SHIPS NO bin/ (2026-10-20). A refused compile's error named `wildcard-perms --open-threads
+// refresh`, which an extension user does not have; the extension names its own way instead.
+test('a refused compile tells an extension user how the extension recompiles, never the CLI', async (t) => {
+  const torn = ONE.replace('The owner decides.', 'Edited by hand.');
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, torn) });
+  const logged = app.channel.filter((line) => /open threads: all /.test(line));
+  assert.equal(logged.length, 1, `activation's install logged the refusal: ${JSON.stringify(app.channel)}`);
+  assert.match(logged[0], /does not match the sha in its own header.*Refresh open threads on the Claude memory card/);
+  assert.doesNotMatch(logged[0], /wildcard-perms/);
+  app.state.compileWrites = null;
+  app.state.warningAnswer = 'Refresh';
+  await app.commands.get('permission-wildcarding.toggleOpenThreads')();
+  await app.settle();
+  const said = app.warnings.filter((message) => /does not match the sha/.test(message));
+  assert.equal(said.length, 1, `the Refresh reported the refusal: ${JSON.stringify(app.warnings)}`);
+  assert.match(said[0], /AI Acolyte: Toggle open threads and choose Refresh/);
+  assert.doesNotMatch(said[0], /wildcard-perms/);
+  // MUTATION: drop `refreshHint` from ensureOpenThreads' setOpenThreadsAll call and the logged
+  // line names wildcard-perms; drop it from refreshOpenThreads' and the reported one does.
+});
+
 test('a settings edit takes effect without a reload: off removes the block, on recompiles and installs', async (t) => {
   const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(box.threadsFile, ONE) });
   await app.fireTimers();
@@ -441,6 +744,43 @@ test('a settings edit takes effect without a reload: off removes the block, on r
   assert.equal(app.compiles().length, before + 1);
   assert.ok(app.claude().includes('- **BLOCKED** Second. (b)'), 'whose result is installed');
   // MUTATION: drop the openThreads branch from the configuration listener and nothing here moves.
+});
+
+// SWITCHED OFF STAYS OFF, FOR A RECOMPILE ALREADY ARMED (2026-10-20). The timer re-checked only
+// `deactivated`, and neither the setting's off branch nor the toggle's off path cleared it, so an
+// edit 2.5 s before the switch went off still compiled after it.
+test('a recompile armed before the switch went off is dropped, and compiles nothing if it fires anyway', async (t) => {
+  const app = await threadsWindow(t, { prepare: (box) => fs.writeFileSync(path.join(box.store, 'a.md'), memory('open')) });
+  app.fireCorpus(app.store, 'a.md');
+  const pending = app.live();
+  assert.deepEqual(pending.map((entry) => entry.ms), [2500], 'precondition: a status edit armed the recompile');
+  app.tiers['openThreads.enabled'] = { globalValue: false };
+  app.fireConfig('permissionWildcarding.openThreads.enabled');
+  assert.ok(pending.every((entry) => entry.cleared), 'turning it off in settings dropped the armed recompile');
+  for (const entry of pending) { entry.fired = true; entry.fn(); }
+  await app.settle();
+  await app.settle();
+  assert.deepEqual(app.compiles(), [], 'and the timer, run anyway, compiled nothing');
+  // The toggle's off path, from a fresh window with a recompile armed: its setting write reaches
+  // the same listener.
+  const second = await threadsWindow(t, { prepare: (box) => {
+    fs.writeFileSync(path.join(box.store, 'a.md'), memory('open'));
+    fs.writeFileSync(box.threadsFile, ONE);
+  } });
+  second.fireCorpus(second.store, 'a.md');
+  const armed = second.live();
+  assert.equal(armed.length, 1, 'precondition: armed');
+  second.state.warningAnswer = 'Turn off';
+  await second.commands.get('permission-wildcarding.toggleOpenThreads')();
+  assert.ok(armed.every((entry) => entry.cleared), 'the toggle turning it off dropped it');
+  for (const entry of armed) { entry.fired = true; entry.fn(); }
+  await second.settle();
+  await second.settle();
+  assert.deepEqual(second.compiles(), [], 'and nothing compiled');
+  assert.equal(installedIn(second.claude()), false);
+  // MUTATION: drop `|| !openThreadsEnabled()` from scheduleThreadsCompile's timer and both
+  // "compiled nothing" assertions fail; drop the listener's `else cancelThreadsCompile()` and the
+  // first "dropped" assertion fails.
 });
 
 test('deactivate clears the pending recompile, so a torn-down host never compiles', async (t) => {

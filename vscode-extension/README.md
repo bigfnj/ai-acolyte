@@ -39,9 +39,11 @@ the last activity, and the subagents that are working.
 Each shows the CPU model status, its folder, four figures, an issues line, **Search**, **Rebuild**
 and **Inspect memory sources**, its gates, and the agent version. The Claude card also has an
 open-threads line ("Open threads: 2 installed (Claude, Codex)"), the INDEX warning while
-`MEMORY.md` is past a budget, and **Turn on / Turn off open threads**.
+`MEMORY.md` is past a budget, **Turn on / Turn off open threads**, and **Refresh open threads**
+while the install is not current. The whole card is hidden while `memory.enabled` is off; the
+open threads keep running, and the palette command still reaches them.
 
-Version **1.9.0** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.9.1** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -176,7 +178,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo**, **Why prompt?** and
 **Turn on** / **Turn off**, and they post five of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:5134#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:5334#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -239,10 +241,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:5083#showWarningMessage`).
+`vscode-extension/extension.js:5283#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:4883#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:5083#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -265,7 +267,7 @@ watcher-driven scan waits out, so a burst of transcript writes coalesces into on
 `permissionWildcarding.autoLearn.codexExecutable` (default `codex`), and
 `permissionWildcarding.autoLearn.workerTimeoutSeconds` (default **300**, `0` disables it —
 how long one worker operation may run before the extension stops waiting). The full list of
-all 19 settings is at the end of this file.
+all 20 settings is at the end of this file.
 
 **AI Acolyte: Toggle Auto Learn**, and the card's **Turn on** / **Turn off** button, switch
 `autoLearn.enabled` in your user settings. Off stops the extension's background scans; **Scan
@@ -311,28 +313,33 @@ works under a managed policy.
   should now take a line out.
 - It auto-discovers every `~/.claude/projects/*/memory/MEMORY.md`, updates on save and
   on external edits, and can be pinned or tuned via the `permissionWildcarding.memory.*`
-  settings (`enabled`, `dir`, `lineBudget` for one hook's width, `maxLines` for how many lines
+  settings (`enabled`, `dir`, `lineBudget` for the width of any one line, `maxLines` for how many lines
   Claude Code actually loads, `totalBudget`, `recallScript`). Command:
   `Acolyte: Lint memory index`.
 
 The lint is not a hook and needs none. The optional **MEMORY.md guard** is: a Claude Code
-`PreToolUse` hook that refuses an edit leaving the index worse on a measure already past its
-budget (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken comment),
-and lets every shrinking edit through. It uses those fixed budgets; the `memory.*` settings tune
+`PreToolUse` hook that refuses an edit after which the index ends past a budget and is worse on
+it than before (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken
+comment). Deleting whole lines passes unless it breaks an HTML comment or a code fence; for a
+broken comment the fix is to close or remove the whole comment. It uses those fixed budgets; the `memory.*` settings tune
 this gauge, not the hook. Turn it on with **Toggle MEMORY.md guard**, which asks first. Where a
 managed policy sets `allowManagedHooksOnly` or `disableAllHooks`, Claude Code runs no user hook,
-so the guard is installed and inert there, and the card says so. The root README section "The
-MEMORY.md guard" has the rule, the install and the policy caveat.
+so the guard is installed and inert there, and the card says so. Where no local file shows a
+policy, **Check whether Claude Code runs user hooks** asks the installed Claude Code once (it
+asks you first, because where hooks are allowed that is one short real Claude Code turn). The
+guard's refusal inside a real Claude Code session has not been observed end to end: the tests
+drive the hook directly. The root README section "The MEMORY.md guard" has the rule, the install,
+the probe and what has been observed.
 
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:656#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:673#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:922#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:939#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -345,7 +352,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:733#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:750#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -358,13 +365,14 @@ the model asset and the venv, and never runs Python.
 - **⟳ Rebuild recall index** — the one button. It runs `recall.py --rebuild` in the
   DevToolbox venv to force a full CPU re-embed (model + corpus pinned via env so the
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
-- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`
-  or `foreign`, followed every time by whether Claude Code will run it here. The button turns the
-  guard on (after a confirmation naming the hook and the `node` it runs), repairs it, or turns it
-  off.
+- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`,
+  `foreign` or `unreadable`, followed every time by whether Claude Code will run it here. The
+  button turns the guard on (after a confirmation naming the hook and the `node` it runs), repairs
+  it, or turns it off. A hook whose `node` is gone reads `on (needs repair)`, and **Repair**
+  re-points it at the `node` found now (on Windows, `%ProgramFiles%\nodejs` when `PATH` has none).
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1135#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1152#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -383,13 +391,17 @@ memories hold, which is how a change whose compile or install failed is finished
 as the script path below: the first names the corpus whose `scope: global` gate blocks become
 your standing orders in every project, and the other two decide what your global `CLAUDE.md`
 and `AGENTS.md` carry, so all three are read from user settings only.
-The open-threads compiler spawns `recall.py --threads-compile` after a memory edit that can
-change its list (a file that mentions `status:` or a status marker, any edit while a thread is
-listed, and every `MEMORY.md` change, for the INDEX line), a few seconds after activation when
-a memory declares `status:`, a compile already exists or `MEMORY.md` is past a budget, and when
-`openThreads.enabled` is turned on. Only edits in the store that compiles count. While the
-setting is off it compiles nothing. `openThreads.enabled` is machine-scoped for the same reason
-as `gates.enabled`.
+The open-threads compiler, on by default, spawns `recall.py --threads-compile` after a memory
+edit that can change its list (a file that mentions `status:` or a status marker, any edit while
+a thread is listed or while the compile is one the install refuses, and a `MEMORY.md` change when
+the INDEX line could move: the compile carries one, or the index is past a budget), a few seconds
+after activation when a memory declares `status:`, a compile already exists or `MEMORY.md` is
+past a budget, and when `openThreads.enabled` is turned on. Only edits in the store that compiles
+count, asked once per burst. One compile runs at a time, started from a worker thread rather than
+the extension host thread, and a compile asked for meanwhile runs once after it. An identical
+compile leaves `open-threads.generated.md` untouched. While the setting is off it compiles
+nothing, and a compile armed before it went off is dropped. `openThreads.enabled` is
+machine-scoped for the same reason as `gates.enabled`.
 
 `permissionWildcarding.memory.recallScript` overrides the script path and is checked first,
 but you should not normally need it: the VSIX carries its own copy of `recall.py`, and the
@@ -512,7 +524,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 38 commands under AI Acolyte in the
+The manifest registers 39 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -545,9 +557,10 @@ dashboard title-bar buttons.
 | Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
-| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit leaving a `MEMORY.md` index worse on a measure already past its budget; asks before adding it, and says when managed policy will stop Claude Code running it |
+| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit after which a `MEMORY.md` index ends past a budget and is worse than before; asks before adding it, and says when managed policy will stop Claude Code running it |
+| Check whether Claude Code runs user hooks | Ask the installed Claude Code, once, whether managed policy stops it running user hooks (the MEMORY.md guard among them); asks first, because where hooks are allowed it is one short real Claude Code turn, and reads Claude Code's own answer as restricted, not restricted or unknown |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
-| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line while `MEMORY.md` is past a budget |
+| Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line naming the index while `MEMORY.md` is past a budget. While on it always turns it off, after asking; when the install is not current the same prompt offers **Refresh**, which compiles and installs |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |
 | Search Claude memory | Search your Claude memory by meaning and keywords, and open a match at its line |
 | Rebuild recall index | Force a full CPU bge-small re-embed |
@@ -595,7 +608,7 @@ the Acolyte output channel says so once per window. With no user setting, the de
 | `claudeStripModelCheck` | `true` | Once per new Claude Code binary (about 30 s after activation, on a worker thread), compare its known-safe environment variables with the 2.1.296 list the generalizer models, and warn once on a difference. Never edits the list: a change still needs a release. Machine-scoped: a workspace value is ignored |
 | `memory.enabled` | `true` | Claude index lint/gauge and native Codex diagnostics; native gate refresh has a separate installed-marker opt-in |
 | `memory.dir` | `""` | Pin one Claude memory store instead of auto-discovering; Codex uses its selected home. Machine-scoped: a workspace value is ignored |
-| `memory.lineBudget` | `300` | Characters one index hook line may use |
+| `memory.lineBudget` | `300` | Characters any one `MEMORY.md` line may use, counted in characters |
 | `memory.maxLines` | `200` | Lines Claude Code actually loads from `MEMORY.md` |
 | `memory.totalBudget` | `12000` | Byte budget for the whole always-loaded index |
 | `memory.recallScript` | `""` | Override the `recall.py` path; checked before the bundled copy. Machine-scoped: a workspace value is ignored |

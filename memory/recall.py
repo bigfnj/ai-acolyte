@@ -917,8 +917,10 @@ def _strip_code(text):
 
 # Fences as src/memory-index-guard.js spells them: spaces and tabs only, never `\s`, because
 # Python's and JavaScript's `\s` are different sets (memoryLint.js PY_SPACE has the list).
-_FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
-_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
+# THE GUARD'S RULE (any indent, no info-string test). Twin: FENCE_OPEN and FENCE_CLOSE in
+# src/memory-index-guard.js. Not _COMMONMARK_FENCE_OPEN below, which is deliberately different.
+_GUARD_FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_GUARD_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
 
 
 def _comment_defects(text):
@@ -935,11 +937,11 @@ def _comment_defects(text):
     for row, line in enumerate(re.split(r"\r?\n", text), 1):
         if opened is None:
             if fence:
-                m = _FENCE_CLOSE.match(line)
+                m = _GUARD_FENCE_CLOSE.match(line)
                 if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
                     fence = None
                 continue
-            m = _FENCE_OPEN.match(line)
+            m = _GUARD_FENCE_OPEN.match(line)
             if m:
                 fence = m.group(1)
                 continue
@@ -1026,15 +1028,7 @@ def lint():
         # this answers "would the compiler take this file?", and the compiler needs the PAIR.
         meta[stem] = (_fm(text, "type"), _fm(text, "scope"), bool(GATE_BLOCK.search(text)))
 
-    entries = [ln for ln in mem.splitlines() if ln.startswith("- ")]
-    print(f"  {len(entries)} resident index entries" +
-          (f", target < {LINT_ENTRY_WARN}" if LINT_ENTRY_WARN else " (no ceiling set yet)"))
-    over_ceiling = bool(LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN)
-    if over_ceiling:
-        print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
-    print()
-
-    # The lines, their widths and the comments, measured the way the MEMORY.md guard
+    # The entries, lines, widths and comments, measured the way the MEMORY.md guard
     # (src/memory-index-guard.js) and vscode-extension/memoryLint.js measure them (2026-10-19):
     # read with newline="" so a line ends at LF or CRLF only, a trailing newline is not one more
     # line, a CR is not a character, and a width is code points, which is what len() counts.
@@ -1044,6 +1038,19 @@ def lint():
     raw_lines = re.split(r"\r?\n", raw)
     if raw_lines and raw_lines[-1] == "":
         raw_lines.pop()
+
+    # Over raw_lines, not `mem.splitlines()` (2026-10-20): `mem` is a universal-newline read, so
+    # a lone CR already ended a line there, and splitlines() also ends one at \v, \f, \x1c-\x1e,
+    # \x85, U+2028 and U+2029. The guard splits at LF or CRLF only, so "- a", a U+2028, then
+    # "- b" was one entry to the hook that enforces the ceiling and two here.
+    entries = [ln for ln in raw_lines if ln.startswith("- ")]
+    print(f"  {len(entries)} resident index entries" +
+          (f", target < {LINT_ENTRY_WARN}" if LINT_ENTRY_WARN else " (no ceiling set yet)"))
+    over_ceiling = bool(LINT_ENTRY_WARN and len(entries) > LINT_ENTRY_WARN)
+    if over_ceiling:
+        print(f"  ! {len(entries) - LINT_ENTRY_WARN} entries over the attention ceiling")
+    print()
+
     print(f"  {len(raw_lines)} lines, target {LINT_LINES_WARN} (Claude Code loads the first 200)")
     over_lines = len(raw_lines) > LINT_LINES_WARN
     if over_lines:
@@ -1555,7 +1562,7 @@ def compile_gates(allow_empty=False):
     if not names and not allow_empty:
         installed = _installed_gate_bytes()
         if installed:
-            # Kept short on purpose: vscode-extension/extension.js:4292#slice cuts this stderr
+            # Kept short on purpose: vscode-extension/extension.js:4338#slice cuts this stderr
             # to 300 chars before showing it (`#slice` is checked by scripts/check-line-refs.js;
             # this said :3013 until 2026-10-13, when .py comments were first scanned). Re-measured
             # 2026-09-14 after MEMORY_DIR was normpath'd and `installed` became a real byte count:
@@ -1674,9 +1681,11 @@ BACKSLASH = chr(92)
 # same character at least as long with nothing after it but spaces or tabs. Unlike the managed
 # block's reading (src/agent-guidance.js fencedSpans), an opener that never closes runs to the
 # end of the file, as CommonMark has it: a status marker that might be an example is left out.
+# THE COMMONMARK RULE. Twin: COMMONMARK_FENCE_OPEN and COMMONMARK_FENCE_CLOSE in
+# vscode-extension/memoryLint.js. Not _GUARD_FENCE_OPEN above, the guard's any-indent rule.
 _STATUS_MARK = re.compile(r" {0,3}(<!-- /?status -->)[ \t]*")
-_STATUS_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
-_STATUS_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+_COMMONMARK_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_COMMONMARK_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
 
 
 def _status_of(text):
@@ -1713,11 +1722,11 @@ def _status_block(text):
     lines = _memory_body(text).split("\n")
     for i, line in enumerate(lines):
         if fence is not None:
-            m = _STATUS_FENCE_CLOSE.fullmatch(line)
+            m = _COMMONMARK_FENCE_CLOSE.fullmatch(line)
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
                 fence = None
             continue
-        m = _STATUS_FENCE_OPEN.fullmatch(line)
+        m = _COMMONMARK_FENCE_OPEN.fullmatch(line)
         if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
             fence = (m.group(1)[0], len(m.group(1)))
             continue
@@ -1731,11 +1740,23 @@ def _status_block(text):
     return None
 
 
+# Removed from thread text, the stem and the INDEX line's path before anything else (2026-10-20):
+# the C0 and C1 controls and DEL that str.split() does not already treat as whitespace, and the
+# bidirectional controls (ALM, LRM, RLM, the embeddings and overrides U+202A-U+202E, the isolates
+# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Code points, not
+# escapes, so no writer can turn them into the characters themselves. memoryLint.js THREAD_STRIP is
+# the same set, held to it by test/threads-compile.sh.
+_THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
+                               *range(0x86, 0xA0), 0x061C, 0x200E, 0x200F,
+                               *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
+
+
 def _thread_text(raw):
-    """One line of thread text: whitespace collapsed, every `<!--` and `-->` neutralised (Claude
-    Code strips HTML comments, so a stray one would swallow the lines after it), and a leading
-    `#` escaped. Not capped: _cap does that, so --lint can say how long it was."""
-    text = " ".join(raw.split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    """One line of thread text: control and bidi characters removed (_THREAD_STRIP), whitespace
+    collapsed, every `<!--` and `-->` neutralised (Claude Code strips HTML comments, so a stray one
+    would swallow the lines after it), and a leading `#` escaped. Not capped: _cap does that, so
+    --lint can say how long it was."""
+    text = " ".join(raw.translate(_THREAD_STRIP).split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
     return BACKSLASH + text if text.startswith("#") else text
 
 
@@ -1805,7 +1826,7 @@ def _index_health():
     """Each budget MEMORY.md is past, as "<value> <unit> (budget <b>)" phrases, [] when it is
     within all three or there is none. Lines as `wc -l` and memoryLint.js fastLint count them
     (a final newline adds none); bytes on disk; the longest physical line in code points, its
-    line ending excluded. An index that exists and cannot be read is warned about and skipped:
+    CRs excluded. An index that exists and cannot be read is warned about and skipped:
     the threads still compile."""
     index = os.path.join(MEMORY_DIR, "MEMORY.md")
     try:
@@ -1820,7 +1841,10 @@ def _index_health():
     lines = data.decode("utf-8", errors="replace").split("\n")
     if lines[-1] == "":
         lines.pop()
-    longest = max((len(line[:-1] if line.endswith("\r") else line) for line in lines), default=0)
+    # Every CR out, not only a trailing one (2026-10-20): the guard, the lint and memoryLint.js
+    # all measure a line with its CRs removed, and a 300-character line holding one interior CR
+    # read as 301 here, an INDEX line for a width the guard calls within budget.
+    longest = max((len(line.replace("\r", "")) for line in lines), default=0)
     over = []
     if len(lines) > LINT_LINES_WARN:
         over.append(f"{len(lines)} lines (budget {LINT_LINES_WARN})")
@@ -1829,6 +1853,21 @@ def _index_health():
     if longest > LINT_LINE_WARN:
         over.append(f"{longest} characters on its longest line (budget {LINT_LINE_WARN})")
     return over
+
+
+def _home_relative(path):
+    """`path` with forward slashes and the home directory written `~`, as the INDEX line names
+    the index: the same on every OS, and no user name in a file every session loads. A path
+    outside the home (another drive included) is written whole."""
+    full = os.path.normpath(os.path.abspath(path))
+    home = os.path.normpath(os.path.expanduser("~"))
+    try:
+        rel = os.path.relpath(full, home)
+    except ValueError:
+        rel = None
+    if rel is None or rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return full.replace(os.sep, "/")
+    return "~/" + rel.replace(os.sep, "/")
 
 
 def _compile_threads_text(texts=None):
@@ -1840,10 +1879,15 @@ def _compile_threads_text(texts=None):
     could not tell from a torn one."""
     threads, findings, _ = _collect_threads(texts)
     health = _index_health()
-    clean = lambda s: " ".join(s.split()).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    clean = lambda s: (" ".join(s.translate(_THREAD_STRIP).split())
+                       .replace("<!--", "&lt;!--").replace("-->", "--&gt;"))
     lines = []
     if health:
-        lines.append(f"- **INDEX** MEMORY.md is {'; '.join(health)}: compact it before adding "
+        # The index is NAMED (2026-10-20): this line reaches every session's CLAUDE.md and
+        # AGENTS.md, in every project, and "MEMORY.md" alone let an agent elsewhere prune its own
+        # healthy index.
+        index = clean(_home_relative(os.path.join(MEMORY_DIR, "MEMORY.md")))
+        lines.append(f"- **INDEX** {index} is {'; '.join(health)}: compact it before adding "
                      f"anything, and move detail into the memory files.")
     for status, stem, text in threads[:THREAD_LINES_CAP]:
         lines.append(f"- **{status.upper()}** {_cap(text)} ({clean(stem)})")
@@ -1875,7 +1919,16 @@ def compile_threads():
     except OSError as e:
         sys.exit(f"[recall] refusing to compile open threads: cannot list {MEMORY_DIR} "
                  f"({type(e).__name__}); nothing was written.")
-    _replace_file_text(THREADS_OUT, out)
+    # Written only when the bytes differ (2026-10-20). Every open VS Code window watches this file
+    # and reinstalls on each change, and most recompiles change nothing, so an identical compile
+    # leaves the file, its id and its mtime as they were.
+    try:
+        with open(THREADS_OUT, "rb") as f:
+            unchanged = f.read() == out.encode("utf-8")
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        _replace_file_text(THREADS_OUT, out)
     # On stderr, as the gates' are, so `wildcard-perms --open-threads refresh` passes them on.
     for stem, problem in findings["duplicate"]:
         print(f"[recall] open thread left out: {stem}.md: {problem}", file=sys.stderr)
@@ -1884,7 +1937,7 @@ def compile_threads():
     for stem, status in findings["no-block"]:
         print(f"[recall] open thread left out: {stem}.md: status {status} with no "
               f"{STATUS_BEGIN} block", file=sys.stderr)
-    print(f"\n  compiled {len(threads)} open thread(s)\n  -> {THREADS_OUT}")
+    print(f"\n  compiled {len(threads)} open thread(s)\n  -> {THREADS_OUT}{' (unchanged)' if unchanged else ''}")
     if health:
         print(f"  MEMORY.md: {'; '.join(health)}")
     print()
@@ -2553,7 +2606,8 @@ def main():
             pass
     ap = argparse.ArgumentParser(description="Semantic search + hygiene lint over the Claude memory dir.")
     ap.add_argument("query", nargs="*", help="what you're trying to recall")
-    ap.add_argument("-k", type=int, default=6, help="how many results (default 6)")
+    # default=None, so "was -k given?" has an answer the refusals below can ask; a search reads 6.
+    ap.add_argument("-k", type=int, default=None, help="how many results (default 6)")
     ap.add_argument("--rebuild", action="store_true", help="force re-embed every file")
     ap.add_argument("--list", action="store_true", help="show what's indexed and exit")
     ap.add_argument("--lint", action="store_true", help="audit index bloat + links (no model)")
@@ -2582,6 +2636,11 @@ def main():
     args = ap.parse_args()
 
     editing = bool(args.gates_retire or args.gates_restore)
+    # A query's own flags, refused beside every mode that runs alone (2026-10-20). They were left
+    # out of these lists, so `--threads-compile --json` and `--lint --json` ran and dropped the
+    # flag without a word, which is the half-done run the lists below exist to refuse.
+    query_flags = (("--json", args.json), ("-k", args.k is not None),
+                   ("--vector-only", args.vector_only), ("--lexical-only", args.lexical_only))
     if args.gates_list or editing:
         # Each runs alone. `--gates-retire x --gates-compile` reads as "retire, then compile", and
         # quietly doing half of it is the shape of failure this file keeps removing. Exit 2 is
@@ -2591,7 +2650,8 @@ def main():
                                        ("--gates-allow-empty", args.gates_allow_empty),
                                        ("--threads-compile", args.threads_compile),
                                        ("--selftest", args.selftest), ("--rebuild", args.rebuild),
-                                       ("--list", args.list), ("a query", bool(args.query))) if on]
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
         if mixed:
             ap.error(f"--gates-list, --gates-retire and --gates-restore run on their own (retire "
                      f"and restore may share a run), not with {', '.join(mixed)}. Compile in a "
@@ -2607,18 +2667,40 @@ def main():
         mixed = [flag for flag, on in (("--lint", args.lint), ("--gates-compile", args.gates_compile),
                                        ("--gates-allow-empty", args.gates_allow_empty),
                                        ("--selftest", args.selftest), ("--rebuild", args.rebuild),
-                                       ("--list", args.list), ("a query", bool(args.query))) if on]
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
         if mixed:
             ap.error(f"--threads-compile runs on its own, not with {', '.join(mixed)}.")
         compile_threads()
         return
     if args.lint:
+        # Alone too: the lint printed its report and returned, and whatever else was asked for
+        # (a rebuild, a compile, a query and its flags) was dropped in silence.
+        mixed = [flag for flag, on in (("--gates-compile", args.gates_compile),
+                                       ("--gates-allow-empty", args.gates_allow_empty),
+                                       ("--selftest", args.selftest), ("--rebuild", args.rebuild),
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--lint runs on its own, not with {', '.join(mixed)}.")
         texts = lint()
         if texts is not None:
             _lint_retired(texts)
         return
     if args.gates_compile:
+        # Alone as well, beside its own --gates-allow-empty (2026-10-20). Without a list here,
+        # `--gates-compile --rebuild` compiled and dropped the rebuild, and `--json`, `-k` or a
+        # query were dropped without a word, the half-done run the lists above refuse.
+        mixed = [flag for flag, on in (("--selftest", args.selftest), ("--rebuild", args.rebuild),
+                                       ("--list", args.list), ("a query", bool(args.query)))
+                 + query_flags if on]
+        if mixed:
+            ap.error(f"--gates-compile runs on its own (--gates-allow-empty aside), not with "
+                     f"{', '.join(mixed)}.")
         compile_gates(allow_empty=args.gates_allow_empty); return
+    if args.gates_allow_empty:
+        # It qualifies the compile and nothing else, so alone it was dropped in silence too.
+        ap.error("--gates-allow-empty applies only to --gates-compile.")
     if args.selftest:
         selftest(); return
     if args.rebuild:
@@ -2643,7 +2725,7 @@ def main():
     if args.vector_only and args.lexical_only:
         sys.exit("[recall] --vector-only and --lexical-only are mutually exclusive.")
     mode = "vector" if args.vector_only else "lexical" if args.lexical_only else "hybrid"
-    (search_json if args.json else search)(" ".join(args.query), args.k, mode)
+    (search_json if args.json else search)(" ".join(args.query), 6 if args.k is None else args.k, mode)
 
 
 if __name__ == "__main__":

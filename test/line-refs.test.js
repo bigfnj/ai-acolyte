@@ -555,3 +555,36 @@ test('without a commit the tie-break has no HEAD to read, and an ambiguous ancho
   assert.deepEqual(report.fixed.map((f) => f.where), ['notes.md:6']);
   assert.deepEqual(report.left.map((l) => l.kind), ['AMBIGUOUS', 'AMBIGUOUS', 'AMBIGUOUS', 'AMBIGUOUS', 'AMBIGUOUS']);
 });
+
+// THE WEAK-ANCHOR REPORT (2026-10-20). An anchor on many lines of its target lets a citation
+// drift onto another occurrence and still read OK, so every check run counts those (5 or more
+// lines) and lists the worst (10 or more), and never fails on them. Target, LF:
+//   1-10 `many` on ten lines   11-15 `some` on five   16 `once` alone
+// MUTATION: make weakAnchors return [] (or compare `> min`). This fails on the counts below.
+test('the checker reports anchors that occur on many lines of their target, and does not fail on them', (t) => {
+  const target = [
+    ...Array.from({ length: 10 }, (_, i) => `const v${i} = many;`),
+    ...Array.from({ length: 5 }, (_, i) => `const w${i} = some;`),
+    'function once() {}', '',
+  ];
+  const root = fixtureRepo(t, {
+    'src/a.js': target.join('\n'),
+    'notes.md': ['- see `src/a.js:3#many`', '- see `src/a.js:12#some`', '- see `src/a.js:16#once`', ''].join('\n'),
+  });
+  const json = spawnSync(process.execPath, [CHECKER, '--json', '--root', root], { encoding: 'utf8' });
+  assert.equal(json.status, 0, `a weak anchor is reported, never a failure\n${json.stderr}`);
+  const report = JSON.parse(json.stdout);
+  assert.deepEqual(report.results.map((r) => r.verdict), ['OK', 'OK', 'OK'], 'precondition: all three resolve');
+  assert.deepEqual(report.weakAnchors.map((w) => [w.where, w.anchor, w.lines]),
+    [['notes.md:1', 'many', 10], ['notes.md:2', 'some', 5]], 'the 10-line and 5-line anchors, worst first; not the 1-line one');
+  const text = spawnSync(process.execPath, [CHECKER, '--root', root], { encoding: 'utf8' });
+  assert.equal(text.status, 0);
+  assert.match(text.stdout, /weak anchors \(reported, not failed\): 2 OK anchored references name an anchor on 5 or more lines of their target, 1 on 10 or more/);
+  assert.match(text.stdout, /^ {2}\s*10 lines {2}#many in src\/a\.js {2}<- notes\.md:1$/m, 'the worst are listed by default');
+  assert.doesNotMatch(text.stdout, /#some in/, 'a 5-line anchor is counted, and listed only under --detail');
+  const quiet = spawnSync(process.execPath, [CHECKER, '--quiet', '--root', root], { encoding: 'utf8' });
+  assert.match(quiet.stdout, /weak anchors \(reported, not failed\): 2 /, 'the count is printed under --quiet too');
+  assert.doesNotMatch(quiet.stdout, /#many in/);
+  const detail = spawnSync(process.execPath, [CHECKER, '--detail', '--root', root], { encoding: 'utf8' });
+  assert.match(detail.stdout, /5 lines {2}#some in src\/a\.js {2}<- notes\.md:2/);
+});

@@ -698,6 +698,24 @@ printf '%s\n' "$ERR" | grep -qF "run on their own" || fail "the usage error does
 [ -e "$GATES" ] && fail "--gates-retire with --gates-compile still compiled"
 echo "ok: retire mixed with compile is refused as a usage error, and neither runs"
 
+# --gates-compile runs on its own too, --gates-allow-empty aside (2026-10-20): a query flag or a
+# rebuild beside it was dropped in silence. --gates-allow-empty without the compile is refused.
+# Mutations: drop the `mixed` check in the --gates-compile branch -> exit 0 and compiled; drop
+# the --gates-allow-empty refusal -> exit 0 (the help).
+seed
+rm -f "$GATES"
+recall --gates-compile --json
+[ "$RC" = "2" ] || fail "--gates-compile --json exited $RC, wanted the usage error 2"
+printf '%s\n' "$ERR" | grep -qF -- "--gates-compile runs on its own" || fail "the usage error does not say why: $ERR"
+[ -e "$GATES" ] && fail "--gates-compile --json still compiled"
+recall --gates-compile --gates-allow-empty
+[ "$RC" = "0" ] || fail "--gates-compile --gates-allow-empty, the pair the panel sends, exited $RC: $ERR"
+[ -e "$GATES" ] || fail "--gates-compile --gates-allow-empty compiled nothing"
+recall --gates-allow-empty
+[ "$RC" = "2" ] || fail "--gates-allow-empty alone exited $RC, wanted the usage error 2"
+printf '%s\n' "$ERR" | grep -qF -- "applies only to --gates-compile" || fail "the usage error does not say why: $ERR"
+echo "ok: --gates-compile refuses to share a run but for --gates-allow-empty, which needs it"
+
 # ---------------------------------------------------------------- a snapshot that fails refuses first
 # AI_ACOLYTE_GATE_SNAPSHOT_DIR under a regular FILE cannot be created, on either platform.
 # Mutations: rewrite the files before taking the snapshot -> "wrote to the store"; drop the

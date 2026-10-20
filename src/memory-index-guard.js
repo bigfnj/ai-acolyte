@@ -1,7 +1,7 @@
 'use strict';
 
-// The MEMORY.md index guard: a Claude Code PreToolUse hook that refuses an edit leaving the
-// always-loaded memory index WORSE on a measure that is already past its budget.
+// The MEMORY.md index guard: a Claude Code PreToolUse hook that refuses an edit after which the
+// always-loaded memory index ENDS past a budget AND is worse on that measure than before.
 //
 // Claude Code loads the first 200 lines (or 25 KB) of each project's
 // `<config>/projects/<slug>/memory/MEMORY.md` into every session and strips its HTML
@@ -11,12 +11,15 @@
 // fact; this stops the write that causes them.
 //
 // THE RULE. A write is blocked only when some measure ENDS over its budget AND is worse than
-// it was before the write, judged per measure. Deleting lines can only lower a line count, a
-// byte count, the longest line and the entry count, so compaction always gets through, even
-// from an index far past every budget. The one exception is deliberate: deleting HALF of an
-// HTML comment (its `<!--` line or its `-->` line) creates a comment defect, and that edit is
-// refused because it would leak the comment's body into context. The entry budget is what
-// makes "one in, one out" a rule rather than advice.
+// it was before the write, judged per measure. That includes a first crossing (140 lines to
+// 141). Deleting whole lines can only lower a line count, a byte count, the longest line and
+// the entry count, so compaction by deletion gets through even from an index far past every
+// budget, with one deliberate exception: a deletion that breaks an HTML comment (its `<!--`
+// line or its `-->` line alone) or a code fence (an opener that kept a `<!--` from being a
+// comment) creates a comment defect, and is refused because the comment's body would leak
+// into context. An edit that is not a whole-line deletion can shrink the file and still be
+// refused: joining two lines into one past 300 characters makes the longest line worse. The
+// entry budget is what makes "one in, one out" a rule rather than advice.
 //
 // SELF-CONTAINED ON PURPOSE. The installer copies this file to
 // `<home>/.claude/wildcarding/memory-index-guard.js` and the hook runs that copy, outside the
@@ -37,7 +40,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const GUARD_REVISION = 1;
+const GUARD_REVISION = 3;
 
 // Shared with the lint: memory/recall.py LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN and
 // LINT_ENTRY_WARN, and the extension's memory.totalBudget / memory.lineBudget defaults. A test
@@ -235,18 +238,30 @@ const LABELS = {
   bytes: 'bytes',
   lineChars: 'longest line',
   entries: '"- " entries',
-  commentDefects: 'comment defects (nested <!--, orphan -->, unclosed <!--)',
+  commentDefects: 'broken comments',
 };
+const DEFECT_KINDS = { nested: '<!-- inside a comment', orphan: 'orphan -->', unclosed: 'unclosed <!--' };
 
-// Under 600 characters with all five measures failing: Claude Code hands stderr to the model,
-// and the fix has to survive being read in one pass.
-function blockMessage(reasons) {
-  const found = reasons.map((reason) => `${LABELS[reason.metric]} ${reason.after} (budget ${reason.budget}, `
-    + `was ${reason.before})`).join('; ');
-  return 'AI Acolyte MEMORY.md guard blocked this edit: it makes the always-loaded index worse on a '
-    + `measure already past its budget: ${found}. Compact MEMORY.md: move detail into the memory file; `
-    + 'status goes in the memory file; shrinking edits always pass. The user can turn this off with '
-    + '`wildcard-perms --memory-guard off` or the AI Acolyte command "Toggle MEMORY.md guard".\n';
+// Under 600 characters with all five measures failing and a comment located: Claude Code hands
+// stderr to the model, and the fix has to survive being read in one pass. The advice follows
+// the reasons: compaction for a size measure, the whole comment for a comment defect, whose
+// first defect is located when the text the edit would leave is given.
+function blockMessage(reasons, afterText) {
+  const found = reasons.map((reason) => {
+    let where = '';
+    if (reason.metric === 'commentDefects' && typeof afterText === 'string') {
+      const first = commentDefectList(afterText)[0];
+      if (first) where = `; first: ${DEFECT_KINDS[first.kind]}, line ${first.line + 1}`;
+    }
+    return `${LABELS[reason.metric]} ${reason.after} (budget ${reason.budget}, was ${reason.before}${where})`;
+  }).join('; ');
+  const advice = [];
+  if (reasons.some((reason) => reason.metric !== 'commentDefects')) advice.push('Move detail and status to the memory file.');
+  if (reasons.some((reason) => reason.metric === 'commentDefects')) advice.push('Close or remove the whole comment.');
+  return 'AI Acolyte MEMORY.md guard blocked this edit: the index would end past a budget and worse than '
+    + `before: ${found}. ${advice.join(' ')} Deleting whole lines passes unless it breaks a comment or `
+    + 'fence. The user can turn it off: `wildcard-perms --memory-guard off` or the AI Acolyte command '
+    + '"Toggle MEMORY.md guard".\n';
 }
 
 // ── which file is the index ──────────────────────────────────────────────────
@@ -288,16 +303,24 @@ function autoMemoryDirectory(config, env, platform, readFile) {
   return path.isAbsolute(target) ? target : null;
 }
 
-// Basename first, exactly `MEMORY.md`, so every other file in the session exits here with no
-// read at all. Then the parent must be `<config>/projects/<slug>/memory`, or the configured
-// autoMemoryDirectory.
+// A name as the file system reads it. On Windows a name is matched without case, and Win32 drops
+// the trailing dots and spaces of the last component, so `memory.md` and `MEMORY.md.` open the
+// index itself. Other aliases (an 8.3 short name, a `::$DATA` stream, a `\\?\` or UNC spelling,
+// a junction) are not resolved here: they fail open, as docs/engineering-record.md records.
+function nameOf(name, platform) {
+  return platform === 'win32' ? name.replace(/[. ]+$/, '').toLowerCase() : name;
+}
+
+// Basename first, `MEMORY.md` as the file system reads that name, so every other file in the
+// session exits here with no read at all. Then the parent must be
+// `<config>/projects/<slug>/memory`, or the configured autoMemoryDirectory.
 function isIndexPath(filePath, { env = process.env, platform = process.platform, readFile } = {}) {
   if (typeof filePath !== 'string' || !filePath) return false;
-  if (path.basename(filePath) !== INDEX_NAME) return false;
+  if (nameOf(path.basename(filePath), platform) !== nameOf(INDEX_NAME, platform)) return false;
   const parent = path.dirname(path.resolve(filePath));
   const config = configDirectory(env, platform);
   if (config) {
-    const memoryName = platform === 'win32' ? path.basename(parent).toLowerCase() : path.basename(parent);
+    const memoryName = nameOf(path.basename(parent), platform);
     const projects = path.dirname(path.dirname(parent));
     if (memoryName === 'memory' && comparable(projects, platform) === comparable(path.join(config, 'projects'), platform)) {
       return true;
@@ -331,7 +354,7 @@ function decide(input, options = {}) {
     const next = applyEdit(current, event.tool_name, toolInput);
     if (next === null) return ALLOW;
     const result = verdict(current, next);
-    return result.block ? { code: 2, stderr: blockMessage(result.reasons) } : ALLOW;
+    return result.block ? { code: 2, stderr: blockMessage(result.reasons, next) } : ALLOW;
   } catch {
     return ALLOW;
   }

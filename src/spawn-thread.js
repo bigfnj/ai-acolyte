@@ -77,14 +77,28 @@ const GATE = 'ai-acolyte.spawn-gate';
 const GATE_SLOT = Symbol.for('ai-acolyte.spawn-gate');
 const GATE_STALE_MS = 5000;
 const GATE_TICK_MS = 100;
+
+// THE GATE'S CLOCK IS MONOTONIC (2026-10-20). It was Date.now(), the wall clock: set the clock
+// back an hour (a time sync, a manual change) and every hold looked an hour younger, so a dead
+// holder's hold was not stale for an hour and every gated spawn waited on it; set it forward
+// and a live holder's hold could be taken over mid-spawn. process.hrtime is libuv's uv_hrtime
+// (QueryPerformanceCounter on Windows, CLOCK_MONOTONIC elsewhere): one clock for the whole
+// process, so the host thread that writes `base` and every spawn thread that reads it are on
+// one scale, and no wall-clock step moves it. Checked 2026-10-20 on Node 24.16: a worker's
+// reading always fell between the host's readings either side of it. performance.timeOrigin +
+// performance.now() agreed there too, but a worker's timeOrigin has not always been the
+// process's, and hrtime has no such history.
+const monotonicMs = () => Number(process.hrtime.bigint() / 1000000n);
+
 // One gate per process, kept on the global, so a reloaded copy of this module (a
 // same-realm re-activate) shares it with threads its predecessor started. The Int32 at
 // byte 0 is the lock word (0 free, else 1 + the tenths of a second after `base` when it
-// was taken), and the Float64 at byte 8 is `base`, written before any thread can read it.
+// was taken), and the Float64 at byte 8 is `base`, on monotonicMs' scale, written before
+// any thread can read it.
 function spawnGate() {
   if (!(globalThis[GATE_SLOT] instanceof SharedArrayBuffer)) {
     const shared = new SharedArrayBuffer(16);
-    new Float64Array(shared, 8, 1)[0] = Date.now();
+    new Float64Array(shared, 8, 1)[0] = monotonicMs();
     globalThis[GATE_SLOT] = shared;
   }
   return globalThis[GATE_SLOT];
@@ -98,12 +112,12 @@ function gated(start) {
   if (!(shared instanceof SharedArrayBuffer)) return start();
   const lock = new Int32Array(shared, 0, 1);
   const base = new Float64Array(shared, 8, 1)[0];
-  const stamp = () => 1 + Math.max(0, Math.floor((Date.now() - base) / GATE_TICK_MS));
+  const stamp = () => 1 + Math.max(0, Math.floor((monotonicMs() - base) / GATE_TICK_MS));
   let mine = stamp();
   for (;;) {
     const held = Atomics.compareExchange(lock, 0, 0, mine);
     if (held === 0) break;
-    if (Date.now() - (base + (held - 1) * GATE_TICK_MS) > GATE_STALE_MS
+    if (monotonicMs() - (base + (held - 1) * GATE_TICK_MS) > GATE_STALE_MS
       && Atomics.compareExchange(lock, 0, held, mine) === held) break;
     Atomics.wait(lock, 0, held, 50);
     mine = stamp();
@@ -258,7 +272,9 @@ function runTask(task) {
 
 if (!isMainThread && workerData && workerData[TASK]) runTask(workerData[TASK]);
 
-// Two doors, one per caller: src/codex-version.js takes the execFile form for its
-// version probe, src/codex-mcp-config.js the config RPC for the trust ask. Each is
-// chosen by the caller's `offThread: true`, which only the extension passes.
+// Two doors: src/codex-version.js takes the execFile form for its version probe, and
+// src/codex-mcp-config.js the config RPC for the trust ask, each chosen by the caller's
+// `offThread: true`, which only the extension passes. Since 2026-10-20 the extension
+// also calls the execFile form itself, for the open-threads compile (spawnThreadsCompile),
+// which runs unattended after edits.
 module.exports = { execFileOffThread, configRpcOffThread };

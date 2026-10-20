@@ -415,12 +415,12 @@ echo "ok: line widths are code points, and comment markers in code are not comme
 
 # ---------------------------------------------------------------- gates compile is ORDERED
 # Mutation: drop the `sorted()` from `for name in sorted(os.listdir(MEMORY_DIR))` at
-# (memory/recall.py:1458#sorted). The order assertion below fails; the two-compiles assertion does not.
+# (memory/recall.py:1465#sorted). The order assertion below fails; the two-compiles assertion does not.
 #
 # This block used to hold one gate memory and compile it twice. With ONE file there is no
 # order to get wrong, and with any number of files a second os.listdir over an UNCHANGED
 # directory returns the same sequence as the first -- so `$ONE = $TWO` held for a compiler
-# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1450#Sorted promises
+# with no ordering guarantee whatsoever. The docstring at memory/recall.py:1457#Sorted promises
 # "Sorted by filename and hashed so a re-run is byte-identical", and nothing tested the first
 # half of that sentence, which is the half the second one rests on: two machines, or one
 # machine after a restore, agree on the sha only because the walk is sorted.
@@ -1152,6 +1152,30 @@ assert data[\"mode\"] == \"lexical\", data
 " || fail "--json did not name the file and the line of its best excerpt: $OUT"
 "$PY" "$RECALL" --json >/dev/null 2>&1 && fail "--json with no query exited 0"
 echo "ok: --json names each result's file and the line of its best excerpt"
+
+# ----------------------------------------------- a query's flags are refused beside a lone mode
+# --threads-compile, --lint and the gate verbs each run alone, and their refusal lists left out a
+# query's own flags (2026-10-20): `--threads-compile --json` and `--lint --json` ran and dropped
+# the flag without a word. --lint had no list at all, so `--lint --rebuild` linted and never
+# rebuilt. Each combination below is now argparse's usage error, exit 2, saying why.
+# Mutation: disable the --threads-compile refusal ("--threads-compile --json must be a usage
+# error") or the --lint one ("--lint --json ..."). Defaulting -k back to 6 makes every lone mode
+# look like it was given -k, and the earlier --lint sections fail first.
+COMBOS=("--threads-compile --json" "--threads-compile -k 3" "--threads-compile --vector-only"
+        "--lint --json" "--lint -k 3" "--lint -k 6" "--lint --lexical-only" "--lint --rebuild"
+        "--lint some query" "--gates-retire a --json" "--gates-list --lexical-only")
+for combo in "${COMBOS[@]}"; do
+  # shellcheck disable=SC2086  # the combination is split into its words on purpose
+  ERR="$("$PY" "$RECALL" $combo 2>&1 >/dev/null)"
+  RC=$?
+  [ "$RC" = "2" ] || fail "recall.py $combo must be a usage error, exited $RC: $ERR"
+  printf '%s\n' "$ERR" | grep -qE "on (its|their) own" || fail "recall.py $combo: the usage error does not say why: $ERR"
+done
+# And the flags still do their job where they belong: a query takes -k and a ranking mode.
+OUT="$(RECALL_MEMORY_DIR="$MEMJ" RECALL_MEMORY_DIRS= "$PY" "$RECALL" --lexical-only -k 2 kettle 2>/dev/null)" \
+  || fail "a query with -k 2 and --lexical-only failed"
+echo "$OUT" | grep -q "kettle" || fail "a query with -k 2 and --lexical-only found nothing: $OUT"
+echo "ok: --json, -k, --vector-only and --lexical-only are refused beside a mode that runs alone"
 
 # ---------------------------------------------------------------- the heavy imports stay lazy
 # numpy and onnxruntime used to be imported at module scope, and _ensure_runtime imported both

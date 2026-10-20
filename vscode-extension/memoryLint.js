@@ -18,19 +18,21 @@ const os = require('os');
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 // The MEMORY.md guard's own rules, shared rather than restated (2026-10-19): the comment-defect
-// scanner, and the 140-line target the guard blocks growth past. The guard hook uses fixed
-// budgets; this lint's window-scoped memory.* settings tune the gauge only. Found in `./src/` in a
-// packaged extension and `../src/` in the repository, as autoLearnUi.js explains, by a resolve
-// rather than a try/catch, so test/dead-exports.test.js can see which names this file uses.
+// scanner, the 140-line target the guard blocks growth past, and (2026-10-20) its 16-entry
+// ceiling. The guard hook uses fixed budgets; this lint's window-scoped memory.* settings tune the
+// gauge only. Found in `./src/` in a packaged extension and `../src/` in the repository, as
+// autoLearnUi.js explains, by a resolve rather than a try/catch, so test/dead-exports.test.js can
+// see which names this file uses.
 const GUARD_MODULE = require.resolve('./memory-index-guard.js', { paths: [path.join(__dirname, 'src'), path.join(__dirname, '..', 'src')] });
 const { BUDGETS: GUARD_BUDGETS, commentDefectList } = require(GUARD_MODULE);
 const LINES_TARGET = GUARD_BUDGETS.lines;
+const ENTRIES_CEILING = GUARD_BUDGETS.entries;
 
 // recall.py's EXCLUDE (recall.py:233#EXCLUDE): the index is just hooks, so it is never a search
 // target and never a gate source.
 const MEMORY_INDEX = 'MEMORY.md';
 
-// recall.py's gate markers (recall.py:266-268#GATE_BEGIN), and the pattern
+// recall.py's gate markers (recall.py:268-269#GATE_BEGIN), and the pattern
 // _compile_gates_text actually selects on -- recall.py's module-level `GATE_BLOCK`, built as
 // `re.compile(re.escape(GATE_BEGIN) + r"(.*?)" + re.escape(GATE_END), re.DOTALL)` and shared
 // with its --lint. BOTH markers are required, in order. Testing only for the opening one
@@ -194,12 +196,14 @@ function gateAgents(text) {
 const THREAD_STATUSES = ['open', 'awaiting', 'blocked', 'deferred'];
 const THREAD_CLOSED = ['done', 'closed', 'live', 'shelved', 'deleted', 'dropped', 'shipped'];
 const STATUS_BEGIN = '<!-- status -->';
-// recall.py's _STATUS_MARK, _FENCE_OPEN and _FENCE_CLOSE under fullmatch. A line here never holds
-// a newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not (it also stops at
-// a carriage return, U+2028 and U+2029, which a Python line can hold).
+// THE COMMONMARK RULE, for status blocks. Twin: recall.py's _STATUS_MARK, _COMMONMARK_FENCE_OPEN
+// and _COMMONMARK_FENCE_CLOSE under fullmatch. Not the guard's any-indent fences, which
+// commentDefectList (src/memory-index-guard.js) applies to the index. A line here never holds a
+// newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not
+// (it also stops at a carriage return, U+2028 and U+2029, which a Python line can hold).
 const STATUS_MARK = /^ {0,3}(<!-- \/?status -->)[ \t]*$/;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/;
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const COMMONMARK_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/;
+const COMMONMARK_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 // recall.py _status_of: { value, problem }. Both null when the memory declares no `status:`.
 function statusOf(text) {
@@ -234,11 +238,11 @@ function statusBlock(text) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (fence) {
-      const shut = FENCE_CLOSE.exec(line);
+      const shut = COMMONMARK_FENCE_CLOSE.exec(line);
       if (shut && shut[1][0] === fence.char && shut[1].length >= fence.length) fence = null;
       continue;
     }
-    const open = FENCE_OPEN.exec(line);
+    const open = COMMONMARK_FENCE_OPEN.exec(line);
     if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
       fence = { char: open[1][0], length: open[1].length };
       continue;
@@ -251,10 +255,17 @@ function statusBlock(text) {
   return null;
 }
 
-// recall.py _thread_text: Python's str.split() whitespace collapsed, comment markers neutralised,
-// a leading `#` escaped. Uncapped, as Python's is.
+// recall.py _THREAD_STRIP (2026-10-20): the controls Python's split() keeps, and the bidi controls,
+// removed before anything else. Code points, as recall.py writes them.
+const span = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
+const THREAD_STRIP = new Set([...span(0x00, 0x09), ...span(0x0e, 0x1c), ...span(0x7f, 0x85),
+  ...span(0x86, 0xa0), 0x061c, 0x200e, 0x200f, ...span(0x202a, 0x202f), ...span(0x2066, 0x206a)]);
+
+// recall.py _thread_text: THREAD_STRIP removed, Python's str.split() whitespace collapsed, comment
+// markers neutralised, a leading `#` escaped. Uncapped, as Python's is.
 function threadText(raw) {
-  const text = raw.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
+  const kept = Array.from(raw).filter((ch) => !THREAD_STRIP.has(ch.codePointAt(0))).join('');
+  const text = kept.split(new RegExp(`${PY_WS}+`)).filter(Boolean).join(' ')
     .split('<!--').join('&lt;!--').split('-->').join('--&gt;');
   return text.startsWith('#') ? String.fromCharCode(92) + text : text;
 }
@@ -277,7 +288,12 @@ function threadOf(raw) {
 // recall.py _index_health's three budgets (LINT_LINES_WARN, LINT_TOTAL_WARN, LINT_LINE_WARN), and
 // its phrases, over a fastLint result: [] when MEMORY.md is within all three. Not the 16-entry
 // ceiling, which is a soft attention target. `longestLine` is in code points, as Python counts.
-const INDEX_BUDGETS = { lines: 140, bytes: 12000, lineChars: 300 };
+// Taken from the guard's BUDGETS rather than restated (2026-10-20): the numbers were written out
+// here a second time, beside the import they equal, and test/memory-guard-parity.test.js pins
+// recall.py's constants to BUDGETS, so one source holds all three places together.
+const INDEX_BUDGETS = Object.freeze({
+  lines: GUARD_BUDGETS.lines, bytes: GUARD_BUDGETS.bytes, lineChars: GUARD_BUDGETS.lineChars,
+});
 function indexHealth(fast) {
   if (!fast) return [];
   const over = [];
@@ -330,7 +346,7 @@ function cfg() {
 // somebody hid the status-bar gauge, coupling two unrelated features through one key. That
 // exact outcome (zero watchers, gate recompilation silently dead) is already on this repo's
 // record from the pinned-`memory.dir` bug, which is why `memoryStoreDirs`
-// (extension.js:3396-3397#memoryStoreDirs) overrides `dir` before it calls this.
+// (extension.js:3427-3428#memoryStoreDirs) overrides `dir` before it calls this.
 // The lint half honours the key where it belongs: refresh() hides the gauge, clears
 // the diagnostics and drops ITS OWN watchers at its `!conf.enabled` early return, and
 // memoryCardData refuses to render the card. So the feature really is off; what stays alive
@@ -395,17 +411,28 @@ function fastLint(dir, conf, names = null, text = null) {
   // A trailing newline splits into a final empty element that is not a line. Dropping it
   // is what makes this agree with `wc -l`, and with what the loader counts.
   const lineCount = lines.length - (lines[lines.length - 1] === '' ? 1 : 0);
-  // The longest physical line in code points, for the open threads' INDEX budget (indexHealth).
-  // Array.from only for a line longer than the longest so far, so the common case costs nothing.
+  // The longest physical line in code points, every CR out, for the open threads' INDEX budget
+  // (indexHealth). The CRs come out as they do for the per-line check below and in the guard
+  // (2026-10-20): a 300-character line holding one interior CR read as 301 here and nowhere else.
+  // Array.from only for a line longer than the longest so far, so the common case costs nothing:
+  // removing CRs and counting code points can only shorten a line, never lengthen it.
   let longestLine = 0;
   for (const ln of lines) {
-    if (ln.length > longestLine) longestLine = Math.max(longestLine, Array.from(ln).length);
+    if (ln.length > longestLine) longestLine = Math.max(longestLine, Array.from(ln.replace(/\r/g, '')).length);
   }
 
   const over = [];
   const broken = [];
+  // The resident "- " entries, the guard's measure (a line of the LF-or-CRLF split that starts
+  // with "- "), and the line of the first one past its ceiling, which is where the warning goes.
+  let entries = 0;
+  let entryPastCeiling = null;
   const linkRe = /\]\(([^)]+\.md)(#[^)]*)?\)/g;
   lines.forEach((ln, i) => {
+    if (ln.startsWith('- ')) {
+      entries += 1;
+      if (entries === ENTRIES_CEILING + 1) entryPastCeiling = { line: i, end: ln.length };
+    }
     // EVERY line, in code points (2026-10-19), the guard's and recall.py's rule. This read only
     // "- " lines and measured UTF-16 units, so a 300-character heading passed and a line of 160
     // emoji read as 320. `end` is the UTF-16 length, which is what a Range column counts.
@@ -432,6 +459,12 @@ function fastLint(dir, conf, names = null, text = null) {
     // still loads whole, and every addition should now take a line out.
     linesTarget: LINES_TARGET,
     linesOverTarget: lineCount > LINES_TARGET,
+    // The entry ceiling the guard and recall.py --lint hold the index to (2026-10-20). Past it
+    // the index still loads; "one in, one out" is what the guard then enforces.
+    entries,
+    entriesCeiling: ENTRIES_CEILING,
+    entriesOver: entries > ENTRIES_CEILING,
+    entryPastCeiling,
     // A `<!--` inside an open comment, an orphan `-->`, a comment never closed: Claude Code
     // strips comments from the index, so each one leaks text into every session or hides it.
     comments: commentDefectList(text),
@@ -568,7 +601,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1459#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1466#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.
@@ -986,18 +1019,21 @@ class MemoryLint {
     this.status.text = `$(book) mem: ${tok} tok`
       + (r.linesOver ? ` · ${r.lineCount}/${conf.maxLines} lines`
         : r.linesOverTarget ? ` · ${r.lineCount} lines, over the ${r.linesTarget}-line target` : '')
+      + (r.entriesOver ? ` · ${r.entries}/${r.entriesCeiling} entries` : '')
       + (issues ? ` · ${issues} to fix` : '');
     this.status.tooltip =
       `MEMORY.md: ${r.bytes} bytes (~${r.tokens} tokens/session, budget ${conf.totalBudget / 4 | 0})\n` +
       `${r.lineCount} of ${conf.maxLines} lines — Claude Code loads the first ${conf.maxLines} and drops the rest; `
         + `the target is ${r.linesTarget}\n` +
+      `${r.entries} resident "- " entries, ceiling ${r.entriesCeiling}\n` +
       `${r.over.length} over-budget line(s), ${r.broken.length} broken index link(s), `
         + `${r.comments.length} broken HTML comment(s)\n` +
       `${path.dirname(r.memPath).replace(os.homedir(), '~')}\nClick for the full report.`;
     // linesOver joins totalOver here rather than the count: neither has a line to point
     // at, and both are worse than anything that does. Past the target is a warning too: the
-    // index still loads, and the next addition should take a line out.
-    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget)
+    // index still loads, and the next addition should take a line out. Past the entry ceiling
+    // likewise (2026-10-20): a state, so it is named in the text and not counted "to fix".
+    this.status.backgroundColor = (issues || r.totalOver || r.linesOver || r.linesOverTarget || r.entriesOver)
       ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.status.show();
   }
@@ -1011,6 +1047,18 @@ class MemoryLint {
         `the memory file or the project repo and leave a one-line hook.`,
         vscode.DiagnosticSeverity.Warning
       );
+      d.source = 'claude-memory';
+      out.push(d);
+    }
+    // One warning for the entry ceiling, on the first entry past it: the index has no single
+    // line at fault, and one squiggle per surplus entry would read as that many faults.
+    if (r.entryPastCeiling) {
+      const at = r.entryPastCeiling;
+      const d = new vscode.Diagnostic(new vscode.Range(at.line, 0, at.line, at.end),
+        `The index holds ${r.entries} resident "- " entries, past the ${r.entriesCeiling}-entry ceiling `
+        + 'the MEMORY.md guard and recall.py --lint hold it to; this is the first one past it. Take an '
+        + 'entry out for each one you add, and move detail into the memory files.',
+        vscode.DiagnosticSeverity.Warning);
       d.source = 'claude-memory';
       out.push(d);
     }
@@ -1084,6 +1132,10 @@ class MemoryLint {
       ch.appendLine(`  ! ${r.lineCount - r.linesTarget} line(s) past the ${r.linesTarget}-line target:`
         + ' still loaded, but every addition should now take a line out');
     }
+    ch.appendLine(`  ${r.entries} resident index entries, ceiling ${r.entriesCeiling}`);
+    if (r.entriesOver) {
+      ch.appendLine(`  ! ${r.entries - r.entriesCeiling} entries past the ceiling: take one out for each one you add`);
+    }
     ch.appendLine(`  ${r.fileCount} memory files in the dir`);
     ch.appendLine('');
     if (r.over.length) {
@@ -1138,12 +1190,22 @@ function memoryReport() {
   return { conf, dir, report: dir ? fullReport(dir, conf, files) : null };
 }
 
+// The store memoryReport() reports, chosen the same way and without reading it (2026-10-20). The
+// extension's recall.py spawns pin it as RECALL_MEMORY_DIR, and the open threads' corpus watcher
+// compares an event's store with it; each took only `.dir` from memoryReport(), which reads every
+// file in the store (171 files, 24-29 ms warm, on the development box), on paths that run unattended for every *.md event
+// burst and every compile.
+function memoryStoreDir() {
+  return pickPrimary(discoverDirs(cfg())).dir;
+}
+
 // `fullReport` is deliberately NOT exported: its only callers are showReport() and
 // memoryReport(), both in this file, and a dead export entry is a standing invitation to
 // import a function no consumer has ever exercised. The function stays; the entry goes.
-// `fastLint` and `pickPrimaryDir` look similar and are NOT the same case -- they have no
-// production importer either, but test/memory-line-cap.test.js and
-// test/memory-lint-watchers.test.js call them directly, and those calls are the
-// mutation-killing assertions for the line cap and the store-selection rule.
+// `pickPrimaryDir` looks similar and is NOT the same case -- it has no production importer
+// either, but test/memory-lint-watchers.test.js calls it directly, and those calls are the
+// mutation-killing assertions for the store-selection rule. `fastLint` was the same until
+// 2026-10-20, when extension.js began measuring MEMORY.md with it (indexEventMayChange);
+// test/memory-line-cap.test.js still calls it for the line cap.
 module.exports = { MemoryLint, cfg, fastLint, discoverDirs, pickPrimaryDir, memoryReport, otherStoreGates, gateOf, gateEntryOf,
-  threadOf, indexHealth };
+  threadOf, indexHealth, memoryStoreDir };

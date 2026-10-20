@@ -74,11 +74,21 @@ function fixture({
 const versionIn = (dir, ...parts) =>
   JSON.parse(fs.readFileSync(path.join(dir, ...parts), 'utf8')).version;
 
-function runChecker(dir) {
+// A failed run that printed nothing is not a checker verdict, so it says what happened to the
+// process instead of handing the assertions an empty string. Once, on 2026-10-19 under a full
+// masked suite, "a same-version VSIX left over..." saw an empty failure; 50 runs of this file in a
+// row on 2026-10-20 (850 tests) did not reproduce it. The next one names its status and signal.
+function describeEmptyFailure(err) {
+  return `(the checker printed nothing: status ${err.status}, signal ${err.signal}, `
+    + `error ${err.code || err.message})`;
+}
+
+function runChecker(dir, script = checker) {
   try {
-    return { code: 0, out: execFileSync(process.execPath, [checker, dir], { encoding: 'utf8' }) };
+    return { code: 0, out: execFileSync(process.execPath, [script, dir], { encoding: 'utf8', timeout: 60000 }) };
   } catch (err) {
-    return { code: err.status, out: `${err.stdout || ''}${err.stderr || ''}` };
+    const out = `${err.stdout || ''}${err.stderr || ''}`;
+    return { code: err.status, out: out || describeEmptyFailure(err) };
   }
 }
 
@@ -310,7 +320,7 @@ const psStatements = (body) => body
 test('verify-release.ps1 captures STDERR from --gates refresh, or it cannot see it fail', () => {
   // `--gates refresh` reports its one interesting failure -- recall.py's compile step failing,
   // so a stale block is installed on every invocation -- on STDERR
-  // (bin/wildcard-perms:1179#process.stderr.write).
+  // (bin/wildcard-perms:1186#process.stderr.write).
   // The assertion beside it says "refresh is silent when nothing changed". Capture stdout
   // only and that sentence is TRUE in precisely the state it exists to report: the warning
   // goes to the console, the captured text is empty, and the board prints PASS.
@@ -426,4 +436,19 @@ test('verify-release.ps1 judges the --lint RUN before it reads the lint TEXT', (
     `${early.length} assertion(s) read the lint text before the run was judged, so a `
     + 'failed lint is reported as a clean corpus: '
     + early.map((index) => lines[index].trim().slice(0, 70)).join(' | '));
+});
+
+test('a checker run that fails silently reports its status instead of an empty string', () => {
+  // The control for describeEmptyFailure: without it, an empty failure reaches the assertions as
+  // '' and the one unreproduced failure of this file stays undiagnosable.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'release-version-silent-'));
+  try {
+    const silent = path.join(dir, 'silent.js');
+    fs.writeFileSync(silent, 'process.exit(1);\n');
+    const { code, out } = runChecker(dir, silent);
+    assert.equal(code, 1);
+    assert.match(out, /the checker printed nothing: status 1/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

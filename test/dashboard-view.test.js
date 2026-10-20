@@ -98,6 +98,7 @@ function harness(tempHome, opts = {}) {
   // hands back to modal ones. See the window stub below.
   const shown = [];
   const answers = [];
+  const progress = [];
   // Every status-bar message, which used to be thrown away. "already optimal" is
   // only ever said there, so a path that must NOT claim it — an absent or
   // half-written settings.json — was unobservable.
@@ -141,7 +142,13 @@ function harness(tempHome, opts = {}) {
         shown.push({ level: 'warning', message, options, actions: options ? rest.slice(1) : rest });
         return Promise.resolve(answers.length ? answers.shift() : undefined);
       },
+      // Only where a test asks for it (`opts.withProgress`), so every other test keeps the stub
+      // it was written against.
+      ...(opts.withProgress ? {
+        withProgress(options, task) { progress.push(options.title); return task({ report() {} }); },
+      } : {}),
     },
+    ...(opts.withProgress ? { ProgressLocation: { Notification: 15 } } : {}),
     workspace: {
       // `opts.isTrusted` and `opts.workspaceFolders` override the one trusted folder
       // every other test runs in. Both were hard-coded, so the Project-local card was
@@ -264,8 +271,10 @@ function harness(tempHome, opts = {}) {
     if (request === './memoryLint' && parent?.filename === extensionPath) {
       return {
         MemoryLint: class MemoryLint { activate() {} onReconcile() { return { dispose() {} }; } },
-        // COUNTED, not just stubbed. The real memoryReport is 6.99 ms and 25 fs
-        // syscalls against a live corpus, and _push used to call it twice for two
+        // COUNTED, not just stubbed. The real memoryReport was 6.99 ms and 25 fs
+        // syscalls against a live corpus when this was written, and grows with the store
+        // (docs/engineering-record.md, the 2026-10-20 dated note under the refuted rows of
+        // "Optimizations measured and DECLINED"); _push used to call it twice for two
         // cards that need disjoint parts of one result. How many times it is
         // called is the whole property, and nothing else in the suite can see it.
         memoryReport: () => {
@@ -292,7 +301,7 @@ function harness(tempHome, opts = {}) {
   // local-drain-extension.test.js already does this, for the same reason.
   //
   // The whole extension DIRECTORY, not just extension.js: autoLearnUi.js and
-  // autoLearnWorkerRunner.js are real requires from it (extension.js:69#autoLearnUi,
+  // autoLearnWorkerRunner.js are real requires from it (extension.js:75#autoLearnUi,
   // extension.js:10#createAutoLearnWorkerRunner), so leaving them cached leaves a second
   // harness holding the first one's instances.
   const extensionDir = path.dirname(extensionPath) + path.sep;
@@ -322,6 +331,7 @@ function harness(tempHome, opts = {}) {
     passes,
     locks,
     shown,
+    progress,
     statuses,
     // How many lock-contention retries were scheduled. See `timers` above for
     // why 1500 ms identifies them uniquely under this harness.
@@ -485,6 +495,8 @@ test('every dashboard message reaches its command, and nothing else does', async
       ['manageGates', 'permission-wildcarding.manageGates'],
       // The Claude memory card's open-threads toggle (2026-10-19).
       ['toggleOpenThreads', 'permission-wildcarding.toggleOpenThreads'],
+      // Its Refresh button (2026-10-20): the same command, asked to refresh (args checked below).
+      ['refreshOpenThreads', 'permission-wildcarding.toggleOpenThreads'],
       // showWildcards left with its switch arm on 2026-10-14 (no sender since c09daab):
       // the reverse census at the bottom of this test is what would have caught it.
       ['codexHook', 'permission-wildcarding.codexHook'],
@@ -511,6 +523,11 @@ test('every dashboard message reaches its command, and nothing else does', async
     assert.deepEqual(app.executedArgs.at(-1), {
       id: 'permission-wildcarding.viewPermissions', args: [selection],
     }, 'a Codex sidebar row reaches the shared picker with its native rule identity');
+    ui.on.message({ type: 'refreshOpenThreads' });
+    assert.deepEqual(app.executedArgs.at(-1), { id: 'permission-wildcarding.toggleOpenThreads', args: [{ refresh: true }] },
+      'the card\'s Refresh asks the toggle command to refresh, not to toggle');
+    ui.on.message({ type: 'toggleOpenThreads' });
+    assert.deepEqual(app.executedArgs.at(-1), { id: 'permission-wildcarding.toggleOpenThreads', args: [] });
 
     // The old ids remain unadvertised cleanup aliases for installations that
     // carried MAX state across the upgrade. They must not regain a dashboard
@@ -565,12 +582,32 @@ test('every dashboard message reaches its command, and nothing else does', async
     // the script itself on load, and `remove` by the per-row prune button.
     // MUTATION: restore `case 'showWildcards': ...` and its row above. This fails
     // naming showWildcards. Confirmed 2026-10-14.
-    const panelScript = source.slice(source.indexOf('<script nonce='));
-    const senders = new Set((panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [])
-      .map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
+    //
+    // The DASHBOARD's script only (2026-10-20): from its `<script nonce=` to the `</script>` that
+    // closes it. Sliced to the end of the file, as it was, the gates panel's script (a second
+    // webview with a handler of its own) counted as dashboard senders, so a dashboard arm whose
+    // only sender sat in the gates panel passed.
+    const scriptAt = source.indexOf('<script nonce=');
+    const scriptEnd = source.indexOf('</script>', scriptAt);
+    assert.ok(scriptAt > 0 && scriptEnd > scriptAt, 'the dashboard\'s <script> block was not found');
+    const panelScript = source.slice(scriptAt, scriptEnd);
+    assert.ok(!panelScript.includes('<script', 1), 'precondition: the slice holds one script block, not two');
+    const sends = panelScript.match(/postMessage\(\{\s*type:\s*'([^']*)'/g) || [];
+    const senders = new Set(sends.map((hit) => hit.slice(hit.indexOf("'") + 1, hit.lastIndexOf("'"))));
     assert.ok(senders.size > 10, `precondition: the sender scan found only ${senders.size} senders`);
+    // Every post names its type as a literal, or the census cannot read it and must say so.
+    assert.equal(sends.length, (panelScript.match(/postMessage\(/g) || []).length,
+      'a postMessage in the dashboard script does not name its type as a literal, so this census cannot read it');
     const unsent = labels.filter((label) => !senders.has(label));
     assert.deepEqual(unsent, [], `dashboard routes with no sender in the webview: ${unsent.join(', ')}`);
+
+    // AND SENDER -> ARM (2026-10-20). The direction above asks whether every arm has a button;
+    // nothing asked whether every button has an arm, so a new button posting a type the switch
+    // does not handle passed and did nothing when clicked.
+    // MUTATION: add `$('runNow').addEventListener('click', () => vscode.postMessage({ type:
+    // 'notARoute' }));` to the dashboard script. This fails naming notARoute. Confirmed 2026-10-20.
+    const unhandled = [...senders].filter((type) => !labels.includes(type));
+    assert.deepEqual(unhandled, [], `the dashboard posts types its switch does not handle: ${unhandled.join(', ')}`);
 
     // The two that are handled in-process rather than dispatched.
     app.executed.length = 0;
@@ -791,7 +828,7 @@ test('one push per burst, and the push never runs the wildcarding pass', async (
 // THE WRITE PATH. The test above seeds an already-optimal list, so it exercises the
 // branch where runWildcarding finds a fixed point and returns without writing. On a list
 // that is NOT a fixed point the pass runs TWICE, and the source says so unconditionally at
-// vscode-extension/extension.js:3804#twice -- once for the unlocked probe that decides whether
+// vscode-extension/extension.js:3850#twice -- once for the unlocked probe that decides whether
 // there is work, and once for the authoritative in-lock recompute the write is built from.
 // Handing writeAllow the probe snapshot instead lets another writer land between the two
 // and have a stale removal replayed over its state.
@@ -888,6 +925,45 @@ test('the panel template contains no backtick that would end it early', () => {
     if (lines[index].includes('`')) offenders.push(`${index + 1}: ${lines[index].trim()}`);
   }
   assert.deepEqual(offenders, [], 'no backticks between the template delimiters');
+});
+
+// THE CSS CENSUS (2026-10-20). `.listhead` and its two descendant rules outlived their markup by
+// weeks (d6b9e6e removed the last element carrying the class), because nothing compares a style
+// sheet with the page it styles. Every class and id a selector names in each <style> block must
+// occur in the same file outside that block: in the markup, or in the script or code that sets it.
+// A token is a whole word there (`[\w$-]` on neither side), so `listhead` inside `listheader`
+// does not count. Short names (`.h`, `.x`) match almost anywhere; the census cannot clear those
+// and does not pretend to, but a dead rule with a distinctive name, the shape `.listhead` had, fails.
+// MUTATION: add `.zzunusedcensus { color: red; }` to the dashboard's <style>. This fails naming
+// it. Confirmed 2026-10-20.
+test('every class and id the panels\' style sheets name is used outside them', () => {
+  const dir = path.dirname(require.resolve('../vscode-extension/extension'));
+  const files = fs.readdirSync(dir).filter((name) => name.endsWith('.js')).map((name) => path.join(dir, name));
+  let blocks = 0;
+  let selectorsSeen = 0;
+  const unused = [];
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    for (const match of source.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+      blocks += 1;
+      const outside = source.slice(0, match.index) + '\n' + source.slice(match.index + match[0].length);
+      const css = match[1].replace(/\/\*[\s\S]*?\*\//g, ' ');
+      const names = new Set();
+      for (const rule of css.matchAll(/([^{}]+)\{/g)) {
+        const selector = rule[1].trim();
+        if (!selector || selector.startsWith('@')) continue;
+        selectorsSeen += 1;
+        for (const token of selector.matchAll(/([.#])(-?[_a-zA-Z][\w-]*)/g)) names.add(token[2]);
+      }
+      for (const name of names) {
+        const word = new RegExp(`(?<![\\w$-])${name.replace(/[$-]/g, '\\$&')}(?![\\w$-])`);
+        if (!word.test(outside)) unused.push(`${path.basename(file)}: ${name}`);
+      }
+    }
+  }
+  assert.ok(blocks >= 2, `precondition: only ${blocks} <style> block(s) found; the dashboard and the gates panel have one each`);
+  assert.ok(selectorsSeen > 50, `precondition: only ${selectorsSeen} selectors were read; the CSS scan has stopped matching`);
+  assert.deepEqual(unused, [], 'a style sheet names a class or id that nothing outside it uses');
 });
 
 // The Memory card used two different definitions of "issue": the badge counted
@@ -1158,6 +1234,7 @@ test('the Claude memory card says how many open threads are installed where, war
     assert.deepEqual(threads.installed, ['claude'], 'this home has no Codex, so Claude alone');
     assert.equal(threads.current, true);
     assert.equal(threads.index, 'MEMORY.md is 152 lines (budget 140): compact it.');
+    assert.equal(threads.refresh, false, 'a settled install offers no Refresh');
     // MUTATION: drop `threads: threadsCardData(memory)` from the push and this fails.
 
     const panel = runPanelScript(ui.view.webview.html);
@@ -1182,11 +1259,27 @@ test('the Claude memory card says how many open threads are installed where, war
     assert.equal(text('claudeMemoryThreads'), 'Turn on open threads');
     deliver({ ...threads, compile: 'refused', reason: 'it does not match the sha in its own header' });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: the compiled file was refused (it does not match the sha in its own header).');
-    deliver({ ...threads, compile: 'missing', declared: 4, listed: 2, installed: [] });
+    deliver({ ...threads, compile: 'missing', declared: 4, listed: 2, installed: [], refresh: true });
     assert.equal(text('claudeMemoryThreadsStatus'), 'Open threads: 2 open, not compiled yet.');
+    // THE LABEL SAYS WHAT THE CLICK DOES (2026-10-20). While on, the toggle turns the feature off in
+    // every install state (test/extension-open-threads.test.js holds the command to that), so it
+    // reads Turn off even here, where nothing is compiled; Refresh sits beside it, shown exactly
+    // when the payload's `refresh` (the command's threadsNeedRefresh) says the install is not current.
+    assert.equal(text('claudeMemoryThreads'), 'Turn off open threads');
+    assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, false, 'a stale install offers Refresh');
     panel.posted.length = 0;
     panel.dom.byId.get('claudeMemoryThreads').click();
     assert.deepEqual(panel.posted, [{ type: 'toggleOpenThreads' }]);
+    panel.posted.length = 0;
+    panel.dom.byId.get('claudeMemoryThreadsRefresh').click();
+    assert.deepEqual(panel.posted, [{ type: 'refreshOpenThreads' }]);
+    deliver({ ...threads, refresh: false });
+    assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, true, 'a current install offers none');
+    deliver({ ...threads, enabled: false, refresh: true, installed: [] });
+    assert.equal(panel.dom.byId.get('claudeMemoryThreadsRefresh').hidden, true, 'nor does a switched-off one');
+    // MUTATION: show the Refresh button whenever the feature is on (drop `t.refresh`) and the
+    // current-install assertion fails; drop `refresh` from threadsCardData and the builder's
+    // `threads.refresh` assertion above does.
   } finally {
     await app.dispose();
   }
@@ -1609,7 +1702,9 @@ test('the saved-permissions card names over-broad wildcard grants and links to t
 
 // The memory report is the most expensive thing one push does: measured 6.99 ms
 // and 25 fs syscalls (12 readFileSync + 11 existsSync + 2 readdirSync) against a
-// live corpus. _push called it TWICE — once for the Memory card, once for a
+// live corpus at the time; it has grown with the store since (a warm 29.4 ms p50 at
+// 171 files: docs/engineering-record.md, the 2026-10-20 dated note under the refuted
+// rows of "Optimizations measured and DECLINED"). _push called it TWICE — once for the Memory card, once for a
 // one-integer `gateSources` lookup in the Gates card that the first call had
 // already computed. Two calls measured 9.92 ms, so the duplicate cost 2.93 ms of
 // every refresh, and a refresh fires on every settings.json change.
@@ -3647,10 +3742,20 @@ test('turning the MEMORY.md guard on asks first, writes the hook, and the card n
     const asked = app.shown.find((entry) => entry.message === 'Turn on the MEMORY.md guard?');
     assert.ok(asked, `the toggle must ask before it adds a hook: ${JSON.stringify(app.shown.map((s) => s.message))}`);
     assert.equal(asked.options.modal, true);
-    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~\/\.claude\/settings\.json/);
+    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~[\\/]\.claude[\\/]settings\.json\. /);
+    assert.match(asked.options.detail, /a copy of the guard in ~[\\/]\.claude[\\/]wildcarding, /);
     assert.ok(asked.options.detail.includes(path.join(path.dirname(process.execPath), path.basename(process.execPath))),
       'the modal names the node it found on PATH');
     assert.match(asked.options.detail, POLICY_LINE, 'and says whether Claude Code will run it here');
+    // The budgets it names are the guard's own, and the rule is the rule the guard applies.
+    // MUTATION: write a literal 15 for the entry budget in the modal and this fails.
+    const { BUDGETS } = require('../src/memory-index-guard');
+    for (const phrase of [`${BUDGETS.lines} lines`, `${BUDGETS.bytes} bytes`, `${BUDGETS.lineChars} characters on one line`,
+      `${BUDGETS.entries} "- " entries`, `${BUDGETS.commentDefects} broken HTML comments`]) {
+      assert.ok(asked.options.detail.includes(phrase), `the modal names "${phrase}": ${asked.options.detail}`);
+    }
+    assert.match(asked.options.detail, /ends past a budget and is worse on it than before/);
+    assert.doesNotMatch(asked.options.detail, /already past|always pass/);
     const settings = env.read();
     assert.deepEqual(settings.permissions, before.permissions);
     assert.equal(settings.hooks.PreToolUse.length, 1);
@@ -3699,6 +3804,144 @@ test('a cancelled modal, or no node on PATH, leaves settings.json untouched', as
     assert.match(said[0].message, /no node was found on PATH/);
     assert.ok(fs.readFileSync(env.settingsPath).equals(before), 'refused before anything was written');
   } finally { await app.dispose(); }
+});
+
+// The hook's node gone (audit 2026-10-20): the card said "turn it on again" while its button,
+// reading the hook as configured, turned the guard OFF. It now reads as needing repair, and the
+// toggle repairs it, without the first-install modal.
+// MUTATION: drop `repair ||` from toggleMemoryGuard's `next` and the click removes the hook.
+test('a guard whose node is gone is repaired by the toggle, not turned off', async (t) => {
+  const env = setup(t);
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  const ghost = path.join(env.tempHome, 'gone', process.platform === 'win32' ? 'node.exe' : 'node');
+  env.write({ hooks: { PreToolUse: [memoryGuardDefinition({ home: env.tempHome, nodeExecutable: ghost })] } });
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual({ label: data.memoryGuard.label, nodeMissing: data.memoryGuard.nodeMissing }, { label: 'on (needs repair)', nodeMissing: true });
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver({ ...data, memory: { tokens: 10, lines: 3, maxLines: 200, over: 0, broken: 0, unresolved: 0 } });
+    assert.equal(panel.dom.byId.get('memoryGuardBtn').textContent, 'Repair MEMORY.md guard');
+    assert.match(panel.dom.byId.get('memoryGuardStatus').textContent, /the node it runs is gone \(Repair re-points it\)/);
+
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.equal(app.shown.filter((entry) => entry.level === 'warning').length, 0, 'a repair does not ask');
+    const hooks = env.read().hooks.PreToolUse;
+    assert.equal(hooks.length, 1, 'the hook is still there');
+    assert.deepEqual(hooks[0], memoryGuardDefinition({ home: env.tempHome,
+      nodeExecutable: path.join(path.dirname(process.execPath), path.basename(process.execPath)) }), 'and runs the node found now');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard ON/.test(entry.message)));
+  } finally { await app.dispose(); }
+});
+
+// A stub `claude`, first on PATH, for the extension's probe. APPDATA is pointed at an empty
+// directory too: on Windows the launcher falls back to %APPDATA%\npm when PATH has no claude,
+// and that is where the real one lives on a development box.
+function stubClaudeOnPath(t, answer, exitCode) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-dashboard-claude-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const record = path.join(dir, 'ran.json');
+  const script = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)));\n`
+    + `process.stdout.write(${JSON.stringify(answer)} + '\\n'); process.exitCode = ${exitCode};\n`);
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'claude'), 0o755);
+  }
+  const savedAppData = process.env.APPDATA;
+  process.env.APPDATA = dir;
+  t.after(() => { if (savedAppData === undefined) delete process.env.APPDATA; else process.env.APPDATA = savedAppData; });
+  return { dir, ran: () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')) : null) };
+}
+const GOAL_REFUSAL = "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy).";
+
+// The probe the policy line points to, from the palette (audit 2026-10-20): a VSIX ships no bin/,
+// so the CLI verb the card named could not be run by its reader.
+// MUTATION: drop the `choice !== 'Check'` return and the dismissed call runs claude.
+test('"Check whether Claude Code runs user hooks" asks first, runs the probe under progress, and says the answer', async (t) => {
+  const env = setup(t);
+  env.write({});
+  const stub = stubClaudeOnPath(t, GOAL_REFUSAL, 1);
+  withPath(t, [stub.dir, path.dirname(process.execPath)]);
+  const app = harness(env.tempHome, { withProgress: true });
+  try {
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    const asked = app.shown.find((entry) => entry.message === 'Ask Claude Code whether it runs user hooks?');
+    assert.ok(asked && asked.options.modal, 'it asks before it runs Claude Code');
+    assert.match(asked.options.detail, /one short real Claude Code turn/);
+    assert.equal(stub.ran(), null, 'dismissed: claude never ran');
+
+    app.answer('Check');
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    assert.deepEqual(stub.ran(), ['-p', '/goal reply with the word acolyte-probe-ok and stop', '--tools', '',
+      '--no-session-persistence']);
+    assert.deepEqual(app.progress, ['ai-acolyte: asking Claude Code whether it runs user hooks…']);
+    const said = app.shown.at(-1);
+    assert.equal(said.level, 'warning');
+    assert.match(said.message, /^ai-acolyte: user hooks: restricted\. Claude Code refused \/goal because hooks are restricted/);
+    const titles = require('../vscode-extension/package.json').contributes.commands
+      .filter((entry) => entry.command === 'permission-wildcarding.probeUserHooks').map((entry) => entry.title);
+    assert.deepEqual(titles, ['AI Acolyte: Check whether Claude Code runs user hooks']);
+  } finally { await app.dispose(); }
+});
+
+// A census of what the extension shows about the guard: the card's policy line, the modal, the
+// toasts, the refusals and the probe's answers. None may name a `wildcard-perms --` verb, because
+// a VSIX user has no CLI, and the policy line names the palette command by its contributed title.
+// MUTATION: drop `surface: options.surface` from memoryGuardStatus's hookPolicy call and the card
+// and the modal name `wildcard-perms --memory-guard probe`.
+test('nothing the extension shows about the MEMORY.md guard names a CLI verb', async (t) => {
+  const env = setup(t);
+  env.write({ model: 'opus' });
+  const stub = stubClaudeOnPath(t, 'Unknown skill: goal', 0);
+  withPath(t, [stub.dir, path.dirname(process.execPath)]);
+  const app = harness(env.tempHome, { withProgress: true });
+  const seen = [];
+  const collect = () => { for (const entry of app.shown.splice(0)) seen.push(entry.message, entry.options?.detail || ''); };
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const unknownPolicy = ui.posted.at(-1).memoryGuard.policy;
+    assert.match(unknownPolicy, /so run "AI Acolyte: Check whether Claude Code runs user hooks" to check\./);
+    seen.push(unknownPolicy);
+    app.answer('Turn on');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.ok(app.shown.some((entry) => entry.message === 'Turn on the MEMORY.md guard?'), 'precondition: the modal was shown');
+    collect();
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    collect();
+    app.answer('Check');
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    assert.ok(stub.ran(), 'precondition: the probe ran');
+    collect();
+    env.write({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node /x/memory-index-guard.js' }] }] } });
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    collect();
+    fs.writeFileSync(env.settingsPath, '{ "half": ');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    collect();
+    fs.writeFileSync(path.join(env.tempHome, '.claude', 'remote-settings.json'), JSON.stringify({ allowManagedHooksOnly: true }));
+    env.write({});
+    ui.posted.length = 0;
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    seen.push(ui.posted.at(-1).memoryGuard.policy);
+    assert.ok(seen.length >= 10, `WITNESS: the census collected ${seen.length} strings`);
+    const named = seen.filter((text) => /wildcard-perms --/.test(text));
+    assert.deepEqual(named, [], 'a string the extension shows names a CLI verb a VSIX user cannot run');
+  } finally { await app.dispose(); }
+  // The one constant the extension shows from outside the guard modules: its source, outside
+  // comments, names no CLI verb either (the withdrawn Codex workspace scope's note did).
+  const source = fs.readFileSync(path.join(__dirname, '..', 'vscode-extension', 'extension.js'), 'utf8');
+  const lines = source.split(/\r?\n/).filter((line) => !/^\s*\/\//.test(line) && /wildcard-perms --/.test(line));
+  assert.deepEqual(lines, []);
 });
 
 // Activation refreshes the copy after an upgrade, by revision, and never writes settings.json.

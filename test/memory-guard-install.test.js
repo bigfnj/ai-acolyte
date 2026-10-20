@@ -513,20 +513,22 @@ test('a probe whose pipes are held past its deadline still answers, and lets its
   const { spawn } = require('node:child_process');
   const f = fixture(t);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-claude-holder-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const record = path.join(dir, 'holder.json');
   const holder = path.join(dir, 'holder.js');
   const middle = path.join(dir, 'middle.js');
   const script = path.join(dir, 'claude-stub.js');
   fs.writeFileSync(holder, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid }));\n`
     + 'setTimeout(() => {}, 60 * 1000);\n');
-  // The middle and the holder run in this directory, not the probe's: Windows will not remove a
-  // directory a process stands in, and the probe's lies inside the fixture.
+  // The middle and the holder stand in the temp directory itself, which nothing here removes:
+  // Windows will not remove a directory a process stands in, or has only just left (the
+  // probe's directory and this one both failed that way, the second only under full-suite load).
+  const standIn = JSON.stringify(os.tmpdir());
   fs.writeFileSync(middle, `const held = require('child_process').spawn(process.execPath, [${JSON.stringify(holder)}],\n`
-    + `  { detached: true, cwd: ${JSON.stringify(dir)}, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });\n`
+    + `  { detached: true, cwd: ${standIn}, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });\n`
     + 'held.unref();\n');
   fs.writeFileSync(script, `require('child_process').spawn(process.execPath, [${JSON.stringify(middle)}],\n`
-    + `  { cwd: ${JSON.stringify(dir)}, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });\n`
+    + `  { cwd: ${standIn}, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });\n`
     + 'setTimeout(() => {}, 60 * 1000);\n');
   let executable;
   if (process.platform === 'win32') {

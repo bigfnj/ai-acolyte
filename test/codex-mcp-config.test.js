@@ -636,15 +636,25 @@ test('on Windows, an npm-shim codex dies with a host that dies outright', { skip
 // looks for in the cwd first unless NoDefaultCurrentDirectoryInExePath is set
 // (src/exec-resolve.js, taskkillPath). The host here is a real Node process
 // standing in a directory that holds a copy of node named taskkill.exe; a
-// --require preload writes a flag only when it runs as that copy. With a 4 s
-// budget the worker's deadline is 1 s and its grace 1 s, so its own kill is the
-// one that ends the stand-in codex, well inside the host's backstop. The flag is
-// not the only witness: endpoint scanning can hold the first run of a freshly
-// copied executable past the 4 s, and then the copy dies before its preload runs.
-// The answer is the witness that holds either way: only a kill that worked lets
-// the worker report its own deadline instead of the host's backstop.
+// --require preload writes a flag only when it runs as that copy.
+//
+// THE KILL IS REACHED BY AN EVENT, NOT A DEADLINE (2026-10-20). This test used a 4 s budget,
+// so the worker's deadline was 1 s after the call and its own kill came 1 s after that.
+// A worker that started past that 1 s spawns nothing (1cf20d0), and that is how it failed:
+// on CI Windows Node 24 (run 38970150410, "the host answered after 1091 ms") and in 1 of 3
+// loaded full runs here (2,759 ms). Now the stand-in refuses `initialize` and keeps running,
+// so the worker reaches its finally as soon as the stand-in answers, and its grace kill
+// (1 s, read-only) is the kill under test. The budget is 30 s, so the host's backstop is
+// the slow path by a wide margin instead of the next thing to fire.
+//
+// Three witnesses, each its own message:
+//   - the flag: the planted copy never ran. A planted copy that does run is no longer cut
+//     off at 4 s, so endpoint scanning's hold on its first run (about 3 s here) cannot hide it;
+//   - the host itself ran no taskkill: had the worker's kill failed, the stand-in would
+//     have outlived it and only the host's backstop could have ended the worker;
+//   - the stand-in is gone.
 test('the config worker\'s own kill runs System32\'s taskkill, not one planted in its cwd', { skip: process.platform !== 'win32' }, async t => {
-  const { spawn } = require('node:child_process');
+  const { spawn, execFileSync } = require('node:child_process');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-planted-'));
   const pids = [];
   t.after(async () => {
@@ -658,37 +668,69 @@ test('the config worker\'s own kill runs System32\'s taskkill, not one planted i
   const marker = path.join(root, 'planted-marker.js');
   fs.writeFileSync(marker, `if (/taskkill\\.exe$/i.test(process.execPath)) require('fs').writeFileSync(${JSON.stringify(flag)}, process.argv.slice(1).join(' '));\n`);
   fs.copyFileSync(process.execPath, path.join(cwd, 'taskkill.exe'));
-  const codex = hangingCodex(t);
+  // A stand-in that answers `initialize` with a refusal and then stays up until it is killed
+  // (60 s at most, so a failed run cannot leave it behind for long).
+  const pidFile = path.join(root, 'codex.pid');
+  const script = path.join(root, 'refuse.js');
+  fs.writeFileSync(script, [
+    `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+    "require('readline').createInterface({ input: process.stdin }).once('line', (line) => {",
+    "  process.stdout.write(JSON.stringify({ id: JSON.parse(line).id, error: { message: 'the stand-in refuses' } }) + '\\n');",
+    '});',
+    'setInterval(() => {}, 1000);',
+    'setTimeout(() => process.exit(0), 60000);',
+  ].join('\n') + '\n');
+  const shim = path.join(root, 'codex.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
   const env = { ...process.env, NODE_OPTIONS: `--require "${marker.split(path.sep).join('/')}"` };
   // An agent shell often sets this, and with it set the unfixed code passes too.
   delete env.NoDefaultCurrentDirectoryInExePath;
+  // The host records every taskkill it starts itself: only its backstop would.
   const host = spawn(process.execPath, ['-e', `
+    const cp = require('child_process');
+    const kills = [];
+    const execFile = cp.execFile;
+    cp.execFile = function (file, args, ...rest) {
+      if (/taskkill/i.test(String(file))) kills.push(String(file) + ' ' + args.join(' '));
+      return execFile.call(this, file, args, ...rest);
+    };
+    process.on('exit', () => process.stdout.write(JSON.stringify({ hostKills: kills }) + '\\n'));
     require(${JSON.stringify(path.join(__dirname, '..', 'src', 'codex-mcp-config.js'))}).readCodexConfigLayersAsync({
       home: ${JSON.stringify(home)}, codexHome: ${JSON.stringify(codexHome)}, workspaceRoot: ${JSON.stringify(root)},
-      codexExecutable: ${JSON.stringify(codex.executable)}, timeoutMs: 4000,
-    }).then(() => process.stdout.write('answered'), error => process.stdout.write(error.message));`],
+      codexExecutable: ${JSON.stringify(shim)}, timeoutMs: 30000,
+    }).then(() => 'answered', error => error.message).then(answer => process.stdout.write(JSON.stringify({ answer }) + '\\n'));`],
   { cwd, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
   pids.push(host.pid);
   const started = Date.now();
-  let outcome = '';
+  let output = '';
   host.stdout.setEncoding('utf8');
-  host.stdout.on('data', chunk => { outcome += chunk; });
+  host.stdout.on('data', chunk => { output += chunk; });
+  // Bounded, so a run whose kill failed ends here with its evidence instead of holding the
+  // suite: past the host's 30 s backstop, which (with taskkill planted) may not end it either.
+  let bounded = false;
+  const bound = setTimeout(() => {
+    bounded = true;
+    try { execFileSync(path.join(process.env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(host.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch {}
+  }, 45000);
   await new Promise(resolve => host.once('close', resolve));
+  clearTimeout(bound);
+  const said = output.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return { line }; } });
+  const answer = said.find(entry => 'answer' in entry)?.answer;
+  const hostKills = said.find(entry => 'hostKills' in entry)?.hostKills;
   // Said in every message below, so a failure on a loaded runner names its path.
-  outcome = `${outcome} (the host answered after ${Date.now() - started} ms)`;
-  assert.ok(fs.existsSync(codex.pidFile), `precondition: the stand-in codex started; the host said: ${outcome}`);
-  const hung = Number(fs.readFileSync(codex.pidFile, 'utf8'));
+  const evidence = `the host said ${JSON.stringify(said)} and closed after ${Date.now() - started} ms${bounded ? ', ended by this test at 45 s' : ''}`;
+  assert.ok(fs.existsSync(pidFile), `precondition: the stand-in codex started; ${evidence}`);
+  const hung = Number(fs.readFileSync(pidFile, 'utf8'));
   pids.push(hung);
-  // MUTATION: name 'taskkill' bare in the worker's grace kill again (since 2026-10-14
-  // that kill is endProcessTree's, so in src/exec-resolve.js). The copy in
-  // the cwd runs instead (writing the flag once it is past the scan), the stand-in
-  // survives until the host's backstop ends the worker's tree, and the answer is
-  // "unavailable: the worker timed out". Confirmed 2026-10-14: both, on separate runs,
-  // and again through endProcessTree.
+  assert.match(String(answer), /refused: the stand-in refuses/, `precondition: the worker's finally came from the running stand-in's answer; ${evidence}`);
+  // MUTATION: name 'taskkill' bare in endProcessTree (src/exec-resolve.js), which is the
+  // worker's grace kill. The copy in the cwd runs instead and writes the flag, the stand-in
+  // outlives the worker's kill, and the host's backstop is left to end the tree.
+  // Confirmed 2026-10-14 (deadline form), and again 2026-10-20 in this form.
   assert.equal(fs.existsSync(flag), false,
-    `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}; the host said: ${outcome}`);
-  assert.match(outcome, /refused: Codex config operation timed out/, `the worker's deadline, not the host's backstop; the host said: ${outcome}`);
-  assert.equal(await waitFor(() => gone(hung), 3000), true, 'the worker\'s kill ended the stand-in codex');
+    `the taskkill in the worker's cwd ran: ${fs.existsSync(flag) ? fs.readFileSync(flag, 'utf8') : ''}; ${evidence}`);
+  assert.deepEqual(hostKills, [], `the worker's own kill did not end the stand-in, so the host's backstop had to; ${evidence}`);
+  assert.equal(await waitFor(() => gone(hung), 3000), true, `the worker's kill ended the stand-in codex; ${evidence}`);
 });
 
 // THE WORKER'S GRACE KILL IS NEVER AIMED AT A FREED PID (2026-10-14), the guard

@@ -1234,7 +1234,7 @@ function memoryCardData(precomputed = null) {
     //
     // The gate is still correct, for the reason that outlasted it. With the lint off
     // memoryLint clears its diagnostics and disposes its watchers
-    // (memoryLint.js:1010#disposeWatchers) and refresh() never runs again, so nothing maintains what
+    // (memoryLint.js:1008#disposeWatchers) and refresh() never runs again, so nothing maintains what
     // this card draws. Rendering it would show a token count, an issue list and an
     // index status frozen at whatever the last enabled tick left behind — live-looking
     // data from an inert linter, which is worse than no card. Same key, two

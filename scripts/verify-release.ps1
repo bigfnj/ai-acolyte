@@ -366,7 +366,7 @@ if (-not (Test-Path $py)) {
     # carrying one long index line is perfectly releasable and still never prints it, so on
     # this box the one positive check failed on every single run -- which is how a check gets
     # read as noise and then ignored. These two lines are printed UNCONDITIONALLY by _lint
-    # (memory/recall.py:1010#MEMORY.md, memory/recall.py:1050#resident) before any finding is evaluated,
+    # (memory/recall.py:1012#MEMORY.md, memory/recall.py:1052#resident) before any finding is evaluated,
     # so they are what a healthy run looks like, and empty or truncated output cannot satisfy them.
     Check 'lint reported its index census' `
         (($lint -match 'MEMORY\.md: \d+ bytes') -and ($lint -match '\d+ resident index entries')) ''

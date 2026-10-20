@@ -618,7 +618,7 @@ function fullReport(dir, conf, known = null) {
   // would silently skip still lit the button:
   //   1. the gate block needs its CLOSING marker too (that is the one that diverged here),
   //   2. `scope:` is a frontmatter key, not a line anywhere in the file, and
-  //   3. MEMORY.md is excluded, exactly as recall.py:1495#EXCLUDE excludes it.
+  //   3. MEMORY.md is excluded, exactly as recall.py:1497#EXCLUDE excludes it.
   let gateSources = 0;
   // The text of each of those blocks, which the other-store census (otherStoreGates) needs to
   // tell a gate this store already installs from one it does not. Free for the same reason.

@@ -343,10 +343,10 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   // that waited could see its pid file. MUTATION: route readCodexConfigLayersAsync through the
   // synchronous nativeRpc (spawnSync), handing `track` a stand-in object. The call returns after
   // the worker's 25 s default deadline and this fails ("it returned after 31308 ms"). Confirmed
-  // 2026-10-20. Two witnesses that looked natural are not ones: a setImmediate that must run
-  // before the answer survives that mutation on Windows, because libuv runs a completed read in
-  // the next iteration's pending phase, after check; and blocking the thread after spawn()
-  // starts nothing, because the worker's request is written only once the loop runs.
+  // 2026-10-20. Blocking the thread for 7 s after spawn() is NOT a usable mutation: it started
+  // no codex at all, since the worker's request is written only once the loop runs, so the
+  // worker answered past its deadline without spawning, and this witness (and a setImmediate
+  // one, tried first) passed.
   assert.equal(fs.existsSync(codex.pidFile), false,
     `the call returned only after the codex it asks had started, so it waited for it (it returned after ${returnedAfter} ms)`);
   assert.equal(tracked.length, 1, 'the worker is handed to the caller, so a deactivate can end it');

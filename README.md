@@ -379,11 +379,11 @@ or `wildcard-perms --memory-guard on`. `off` removes only its own entry and `sta
 installed. Turning it on copies the guard to `~/.claude/wildcarding/memory-index-guard.js` and
 registers that copy in `~/.claude/settings.json`, run by the absolute `node` found on `PATH`
 (`src/claude-hook-config.js:62#memoryGuardDefinition`); on Windows, when `PATH` has none,
-`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:113#resolveNodeExecutable`). If
+`%ProgramFiles%\nodejs\node.exe` (`src/memory-guard-install.js:114#resolveNodeExecutable`). If
 that node later disappears the status reads `on (needs repair)`, and turning the guard on again
 (the card's **Repair** button) re-points the hook at the node found then. Where `CLAUDE_CONFIG_DIR` is set, every
 `~/.claude` path in this section is that directory instead, as it is for Claude Code
-(`src/memory-guard-install.js:70#configDirFor`). The copy outlives upgrades and is replaced
+(`src/memory-guard-install.js:71#configDirFor`). The copy outlives upgrades and is replaced
 only by a newer guard revision. Your `settings.json` as it was before the first change is kept in
 `~/.claude/backups/settings.json.pre-memory-guard`; when there was no `settings.json` then, a
 `settings.json.pre-memory-guard.absent` marker beside it says so, and no later change takes a
@@ -397,7 +397,7 @@ node "<copy>"`), turning the guard on refuses, and that hook is never touched.
 [watch the cause](#design-principle-watch-the-cause-do-not-hook-the-event)), so the guard is
 installed and inert. The card, the toggle and `--memory-guard status` say so whenever a local file
 shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`, or
-`disableAllHooks` in your own settings (`src/memory-guard-install.js:190#hookPolicy`), and
+`disableAllHooks` in your own settings (`src/memory-guard-install.js:191#hookPolicy`), and
 `--memory-guard status` names the file on a `source:` line. A policy delivered from a server may
 leave no local trace, so where nothing is found they say they cannot tell, and the probe asks
 Claude Code: **AI Acolyte: Check whether Claude Code runs user hooks** in the extension (it asks
@@ -405,11 +405,17 @@ first), or `wildcard-perms --memory-guard probe`. The probe runs
 `claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --no-session-persistence`
 once, in an empty directory of its own, `~/.claude/wildcarding/ai-acolyte-memory-guard-probe`,
 with your own environment. The goal is inert and the run has no built-in tools and no saved
-session; `claude --help` lists no turn limit, so the bound on time is a 60 second deadline that
-ends the whole process tree. It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
+session; `claude --help` lists no turn limit, so the bound on time is a 60 second deadline. On
+Windows the deadline ends the whole process tree (`taskkill /T`, so a `claude` under an npm
+launcher's `cmd.exe` goes too); on Linux and macOS it ends the child alone, which is not started
+as a process group leader (`src/exec-resolve.js:311#endProcessTree`). Two seconds after the
+deadline the probe answers "unknown" even if a process outside that tree still holds its output
+open (`src/memory-guard-install.js:59#PROBE_CLOSE_GRACE_MS`). It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
 flag makes `/goal` run under a policy that blocks user hooks, so the probe would read "not
-restricted" while hooks stay blocked. An existing directory there is used only when it is empty and yours; anything else
-is refused and Claude Code is not run. The answer reads Claude Code's own text: "restricted" is
+restricted" while hooks stay blocked. An existing directory there is used only when it is a
+plain, empty directory, and on Linux and macOS only when you own it; Windows has no owner check
+there (`src/memory-guard-install.js:382#getuid`). Anything else is refused and Claude Code is
+not run. The answer reads Claude Code's own text: "restricted" is
 its refusal message, "not restricted" needs the goal's word in the answer, and anything else,
 a reworded message included, is "unknown". Where hooks are allowed, the probe is one short real
 Claude Code turn. Claude Code still creates one project folder for the directory under

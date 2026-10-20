@@ -48,6 +48,7 @@ const GUARD_SHAS = {
   1: '46d6616be7b3bb8f9d31c406e376bc363ac6aafe4588e3878cf59d3a04fc6012',
   2: 'f337571b7e2ec599f0dfcaea7849bea771b24725b215e51b7b9725233136780a',
   3: 'dc9d953cfb58067db51541d50e9ff83b44ad0a2c4df0af6b1e0708e1bbc3a13b',
+  4: 'f5b307182e501cd09dad0c0e57dd0ce77f4c96ddf48715539c7daa5a5a357d81',
 };
 test('the guard source is pinned to its GUARD_REVISION, so a change without a bump fails', () => {
   const text = fs.readFileSync(GUARD, 'utf8').replace(/\r\n/g, '\n');
@@ -316,16 +317,25 @@ test('only <config>/projects/<slug>/memory/MEMORY.md is the index', (t) => {
   const reads = [];
   const readFile = (file) => { reads.push(file); throw Object.assign(new Error('no'), { code: 'ENOENT' }); };
   assert.equal(isIndexPath(f.index, { env, readFile }), true);
-  // The basename is matched the way the platform's file system opens it (audit 2026-10-20): on
-  // Windows `memory.md` IS the index, and so is `MEMORY.md.` (Win32 drops trailing dots and
-  // spaces); on POSIX they are other files.
+  // The basename is matched without case on Windows (audit 2026-10-20): `memory.md` IS the index
+  // there; on POSIX it is another file.
   // MUTATION: compare the basename exactly again and the win32 cases read false.
-  for (const alias of ['memory.md', 'Memory.MD', 'MEMORY.md.', 'MEMORY.md ', 'memory.md. .']) {
+  for (const alias of ['memory.md', 'Memory.MD']) {
     assert.equal(isIndexPath(path.join(f.memory, alias), { env, readFile, platform: 'win32' }), true, `win32: ${JSON.stringify(alias)}`);
     assert.equal(isIndexPath(path.join(f.memory, alias), { env, readFile, platform: 'linux' }), false, `linux: ${JSON.stringify(alias)}`);
   }
-  assert.equal(isIndexPath(path.join(path.dirname(f.memory), 'MEMORY.', 'memory.md'), { env, readFile, platform: 'win32' }), true,
+  assert.equal(isIndexPath(path.join(path.dirname(f.memory), 'MEMORY', 'memory.md'), { env, readFile, platform: 'win32' }), true,
     'the memory directory\'s own name folds the same way');
+  // Trailing dots and spaces are not folded (GUARD_REVISION 4, audit of 1.9.1): Win32 drops them,
+  // but Node reads the literal name, so judging `MEMORY.md.` would read an empty index. They fail
+  // open like 8.3 names; the next test shows the hook letting one through.
+  // MUTATION: fold trailing dots and spaces in nameOf again and the win32 cases read true.
+  for (const alias of ['MEMORY.md.', 'MEMORY.md ', 'memory.md. .']) {
+    assert.equal(isIndexPath(path.join(f.memory, alias), { env, readFile, platform: 'win32' }), false, `win32: ${JSON.stringify(alias)}`);
+    assert.equal(isIndexPath(path.join(f.memory, alias), { env, readFile, platform: 'linux' }), false, `linux: ${JSON.stringify(alias)}`);
+  }
+  assert.equal(isIndexPath(path.join(path.dirname(f.memory), 'MEMORY.', 'memory.md'), { env, readFile, platform: 'win32' }), false,
+    'nor in the memory directory\'s name');
   assert.equal(isIndexPath(path.join(f.memory, 'MEMORY.md.bak'), { env, readFile, platform: 'win32' }), false);
   assert.equal(isIndexPath(path.join(f.memory, 'MEMORY.mdx'), { env, readFile, platform: 'win32' }), false);
   assert.equal(isIndexPath(path.join(f.memory, process.platform === 'win32' ? 'other.md' : 'memory.md'), { env, readFile }), false,
@@ -343,6 +353,29 @@ test('only <config>/projects/<slug>/memory/MEMORY.md is the index', (t) => {
   const homeIndex = path.join(home, '.claude', 'projects', 'slug', 'memory', 'MEMORY.md');
   assert.equal(isIndexPath(homeIndex, { env: { HOME: home, USERPROFILE: home }, readFile }), true);
   assert.equal(isIndexPath(f.index, { env: { HOME: home, USERPROFILE: home }, readFile }), false);
+});
+
+// A trailing-dot or trailing-space spelling of the index passes through rather than being judged
+// against the empty index Node reads for it. With revision 3's fold, a compacting Write of 145
+// lines to `MEMORY.md.` over a 150-line index exited 2 ("lines 145 (budget 140, was 0)").
+// MUTATION: fold trailing dots and spaces in nameOf again and both decide calls return 2.
+test('a trailing-dot or trailing-space spelling of the index fails open, not judged against an empty read', (t) => {
+  const f = configFixture(t);
+  const env = { CLAUDE_CONFIG_DIR: f.config };
+  const compacting = (file) => JSON.stringify({ tool_name: 'Write', tool_input: { file_path: file, content: 'z\n'.repeat(145) } });
+  const missing = () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); };
+  for (const alias of ['MEMORY.md.', 'MEMORY.md ']) {
+    assert.deepEqual(decide(compacting(path.join(f.memory, alias)), { env, platform: 'win32', readFile: missing }), { code: 0, stderr: '' },
+      `win32: ${JSON.stringify(alias)}`);
+  }
+  assert.equal(decide(compacting(f.index), { env, platform: 'win32', readFile: missing }).code, 2,
+    'WITNESS: the same write to the plain name, read as missing, is judged and refused');
+  if (process.platform === 'win32') {
+    fs.writeFileSync(f.index, 'z\n'.repeat(150));
+    const run = runHook(event('Write', { file_path: `${f.index}.`, content: 'z\n'.repeat(145) }), { CLAUDE_CONFIG_DIR: f.config });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stderr, '');
+  }
 });
 
 test('autoMemoryDirectory from <config>/settings.json is the index directory too', (t) => {

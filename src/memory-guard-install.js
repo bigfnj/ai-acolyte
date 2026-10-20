@@ -56,6 +56,7 @@ const PROBE_ARGS = Object.freeze(['-p', PROBE_PROMPT, '--tools', '', '--no-sessi
 const PROBE_COMMAND = `claude -p "${PROBE_PROMPT}" --tools "" --no-session-persistence`;
 const PROBE_TIMEOUT_MS = 60 * 1000;
 const PROBE_OUTPUT_CAP = 4 * 1024 * 1024;
+const PROBE_CLOSE_GRACE_MS = 2000;
 const RESTRICTED_TEXT = /can['\u2019]t run while hooks are restricted/i;
 
 function resolveHome(options) {
@@ -413,23 +414,42 @@ function memoryGuardProbe(options = {}) {
       const launch = execResolve.npmShimLaunch(name, PROBE_ARGS) || execResolve.resolvedLaunch(name, PROBE_ARGS, 'spawn');
       cwd = probeDirectory(directory);
       const child = spawn(launch.file, launch.args, { ...launch.options, cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      // `options.track` receives the child, so the extension's deactivate can end it (its
+      // trackChild), the way codex-version's and codex-mcp-config's callers hand theirs over.
+      if (typeof options.track === 'function') options.track(child);
       const out = { stdout: '', stderr: '' };
       for (const stream of ['stdout', 'stderr']) {
         child[stream].setEncoding('utf8');
         child[stream].on('data', (chunk) => { if (out[stream].length < PROBE_OUTPUT_CAP) out[stream] += chunk; });
       }
       let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; execResolve.endProcessTree(child); }, options.timeoutMs || PROBE_TIMEOUT_MS);
+      let grace = null;
+      const timedOutRun = () => ({ error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), ...out });
+      // THE DEADLINE SETTLES, WITH OR WITHOUT 'close' (audit of 1.9.1). 'close' waits for every
+      // holder of the child's pipes, and a process the tree kill does not reach can hold them: one
+      // whose parent has exited is outside taskkill's tree, and on POSIX only the child is
+      // signalled. So PROBE_CLOSE_GRACE_MS after the deadline the probe answers as timed out and
+      // destroys its own ends of the pipes, which would otherwise keep a process like the CLI alive.
+      const timer = setTimeout(() => {
+        timedOut = true;
+        execResolve.endProcessTree(child);
+        grace = setTimeout(() => {
+          for (const stream of ['stdout', 'stderr']) try { child[stream].destroy(); } catch { /* already closed */ }
+          settle(timedOutRun());
+        }, PROBE_CLOSE_GRACE_MS);
+      }, options.timeoutMs || PROBE_TIMEOUT_MS);
       // A program that cannot start emits 'error' then 'close'; one already running that fails a
-      // kill emits 'error' and is still running, so only 'close' settles that one.
+      // kill emits 'error' and is still running, so only 'close' (or the grace) settles that one.
       child.on('error', (error) => {
         if (Number.isInteger(child.pid)) return;
         clearTimeout(timer);
+        clearTimeout(grace);
         settle({ error, ...out });
       });
       child.on('close', (status) => {
         clearTimeout(timer);
-        settle(timedOut ? { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), ...out } : { status, ...out });
+        clearTimeout(grace);
+        settle(timedOut ? timedOutRun() : { status, ...out });
       });
       child.stdin.on('error', () => { /* a child that exits before reading stdin */ });
       child.stdin.end();

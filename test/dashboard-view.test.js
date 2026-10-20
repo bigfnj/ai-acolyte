@@ -3856,6 +3856,38 @@ test('a guard whose node is gone is repaired by the toggle, not turned off', asy
   } finally { await app.dispose(); }
 });
 
+// The same gone node beside a foreign guard (audit of 1.9.1): the card offered Repair, the toggle
+// asked for an add, and planMemoryGuard refuses every add while a foreign guard is there, so each
+// click was an error. Off works there, and is what the card and the toggle now do.
+// MUTATION: drop `&& status.status !== 'foreign'` from the toggle's `repair` and the click errors;
+// drop `&& mg.label !== 'foreign'` from the card and its button says Repair.
+test('a gone node beside a foreign guard offers Turn off, and the toggle removes ours', async (t) => {
+  const env = setup(t);
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  const ghost = path.join(env.tempHome, 'gone', process.platform === 'win32' ? 'node.exe' : 'node');
+  const foreign = { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: 'node "D:/elsewhere/memory-index-guard.js"' }] };
+  env.write({ hooks: { PreToolUse: [memoryGuardDefinition({ home: env.tempHome, nodeExecutable: ghost }), foreign] } });
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual({ label: data.memoryGuard.label, on: data.memoryGuard.on, nodeMissing: data.memoryGuard.nodeMissing },
+      { label: 'foreign', on: true, nodeMissing: true }, 'precondition: ours with its node gone, beside a foreign guard');
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver({ ...data, memory: { tokens: 10, lines: 3, maxLines: 200, over: 0, broken: 0, unresolved: 0 } });
+    assert.equal(panel.dom.byId.get('memoryGuardBtn').textContent, 'Turn off MEMORY.md guard');
+    assert.doesNotMatch(panel.dom.byId.get('memoryGuardStatus').textContent, /Repair/);
+
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.deepEqual(app.shown.filter((entry) => entry.level === 'error').map((entry) => entry.message), [], 'the click does not fail');
+    assert.deepEqual(env.read().hooks.PreToolUse, [foreign], 'ours is removed and the foreign guard is left as it was');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard OFF/.test(entry.message)));
+  } finally { await app.dispose(); }
+});
+
 // A stub `claude`, first on PATH, for the extension's probe. APPDATA is pointed at an empty
 // directory too: on Windows the launcher falls back to %APPDATA%\npm when PATH has no claude,
 // and that is where the real one lives on a development box.
@@ -3906,6 +3938,77 @@ test('"Check whether Claude Code runs user hooks" asks first, runs the probe und
     const titles = require('../vscode-extension/package.json').contributes.commands
       .filter((entry) => entry.command === 'permission-wildcarding.probeUserHooks').map((entry) => entry.title);
     assert.deepEqual(titles, ['AI Acolyte: Check whether Claude Code runs user hooks']);
+  } finally { await app.dispose(); }
+});
+
+// A probe still running when the window closes is ended by deactivate, like every other child the
+// extension starts (audit of 1.9.1): memoryGuardProbe hands its child to `options.track`, and the
+// extension passes trackChild. The stand-in claude records its pid and then sleeps for 60 s.
+// MUTATION: drop `track: trackChild` from probeUserHooks (or the options.track call in
+// memoryGuardProbe) and the stand-in outlives deactivate.
+test('deactivate ends a "Check whether Claude Code runs user hooks" probe that is still running', async (t) => {
+  const { setTimeout: wait } = require('node:timers/promises');
+  const env = setup(t);
+  env.write({});
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-dashboard-claude-slow-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const record = path.join(dir, 'pid.json');
+  const script = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid }));\n`
+    + 'setTimeout(() => {}, 60 * 1000);\n');
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'claude'), 0o755);
+  }
+  const savedAppData = process.env.APPDATA;
+  process.env.APPDATA = dir;
+  t.after(() => { if (savedAppData === undefined) delete process.env.APPDATA; else process.env.APPDATA = savedAppData; });
+  withPath(t, [dir, path.dirname(process.execPath)]);
+  const pid = () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')).pid : null);
+  t.after(() => { try { process.kill(pid()); } catch { /* ended, or never started */ } });
+  const alive = (id) => { try { process.kill(id, 0); return true; } catch { return false; } };
+  const app = harness(env.tempHome, { withProgress: true });
+  try {
+    app.answer('Check');
+    const running = app.commands.get('permission-wildcarding.probeUserHooks')();
+    for (let i = 0; i < 200 && !pid(); i += 1) await wait(50);
+    assert.ok(pid(), 'precondition: the stand-in claude started');
+    assert.equal(alive(pid()), true, 'precondition: and is still running');
+    await app.extension.deactivate();
+    let gone = false;
+    for (let i = 0; i < 100 && !gone; i += 1) { gone = !alive(pid()); if (!gone) await wait(50); }
+    assert.equal(gone, true, `the probe's claude (pid ${pid()}) outlived deactivate`);
+    await running;
+  } finally { await app.dispose(); }
+});
+
+// The probe changes no file the card reads and keeps no answer, so it pushes nothing to the
+// dashboard (audit of 1.9.1). The witness is the guard toggle, which does refresh, through the
+// same view and the same wait.
+// MUTATION: put `dashboard?.refresh()` back at the end of probeUserHooks and a push arrives.
+test('the hooks probe pushes nothing to the dashboard', async (t) => {
+  const env = setup(t);
+  env.write({});
+  const stub = stubClaudeOnPath(t, GOAL_REFUSAL, 1);
+  withPath(t, [stub.dir, path.dirname(process.execPath)]);
+  const app = harness(env.tempHome, { withProgress: true });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    assert.ok(ui.posted.length >= 1, 'precondition: the view was pushed once');
+    const before = ui.posted.length;
+    app.answer('Check');
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    assert.ok(stub.ran(), 'precondition: the probe ran');
+    await settle(400);
+    assert.equal(ui.posted.length, before, 'the probe pushed the card again');
+    app.answer('Turn on');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    await settle(400);
+    assert.ok(ui.posted.length > before, 'WITNESS: a guard toggle does push, through the same wait');
   } finally { await app.dispose(); }
 });
 

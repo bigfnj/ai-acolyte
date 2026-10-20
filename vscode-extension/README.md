@@ -371,6 +371,8 @@ the model asset and the venv, and never runs Python.
   button turns the guard on (after a confirmation naming the hook and the `node` it runs), repairs
   it, or turns it off. A hook whose `node` is gone reads `on (needs repair)`, and **Repair**
   re-points it at the `node` found now (on Windows, `%ProgramFiles%\nodejs` when `PATH` has none).
+  Beside another hook that runs a MEMORY.md guard it reads `foreign` instead, and the button turns
+  ours off rather than repairing it, because the guard is never added beside another one.
 
 Python does run unattended in two other places, both gated on your having opted in.
 `autoSyncRecallIfStale` (`extension.js:1154#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not

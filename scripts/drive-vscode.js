@@ -92,7 +92,11 @@ assert.ok(codeCommand, 'VS Code is not installed or its code command cannot be r
 const codeExecutable = path.resolve(path.dirname(codeCommand), '..', 'Code.exe');
 assert.ok(fs.existsSync(codeExecutable), `VS Code application is missing: ${codeExecutable}`);
 pruneDriveDirs();
-const root = fs.mkdtempSync(path.join(os.tmpdir(), DRIVE_PREFIX));
+// Under the temp directory's real path, not its spelling (2026-10-20): where TEMP is an 8.3 short
+// name (C:\Users\JUSTIN~1.LOW\...), every path the drive built kept it while Codex's config/read
+// and the extension name the long form, so the MCP group's path comparisons failed on that box
+// alone. realpathSync.native expands the short name; elsewhere it changes nothing.
+const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), DRIVE_PREFIX));
 const home = path.join(root, 'home');
 const codexHome = codexLayout === 'custom-override' ? path.join(root, 'custom-codex') : path.join(home, '.codex');
 const codexInstructions = path.join(codexHome, codexLayout === 'custom-override' ? 'AGENTS.override.md' : 'AGENTS.md');

@@ -4052,3 +4052,13 @@ corpus stays clean). Mutations, each killed: `entries: 16` back in `BUDGETS` (th
 the budget table and the sha pin fail); `|| r.entries > 16` in the gauge's colour (the watcher
 test); `LINT_ENTRY_WARN = 16` back in recall.py (the parity test); `len(entries) > 16` in the clean
 condition (recall-py.sh: "40 entries inside every size budget is not clean").
+
+**Found while releasing it: the real-editor drive and an 8.3 temp path.** On the box whose agent
+host sets `TEMP` to its 8.3 short name (`C:UsersJUSTIN~1.LOW...`), `drive-vscode.js --mcp-only yes
+--review-runtime yes` failed 1 of 2 at `mcp.js` `assert.ok(user)`: the drive built every path under
+the short spelling, while Codex's `config/read` names the long one, so no user layer compared equal.
+Patching that one comparison moved the failure to the next check (2 pass, 1 fail), so the drive now
+makes its root under `fs.realpathSync.native(os.tmpdir())`. Measured the same day under the short
+`TEMP`: the MCP group 6 of 6 (it was 1 of 2), the default group 4 of 4 and the dashboard group 6 of
+6, unchanged. With a long-form `TEMP` the unfixed drive already passed 6 of 6, so the product was
+never at fault. The other box has no 8.3 name, which is why it never saw this.

@@ -917,8 +917,10 @@ def _strip_code(text):
 
 # Fences as src/memory-index-guard.js spells them: spaces and tabs only, never `\s`, because
 # Python's and JavaScript's `\s` are different sets (memoryLint.js PY_SPACE has the list).
-_FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
-_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
+# THE GUARD'S RULE (any indent, no info-string test). Twin: FENCE_OPEN and FENCE_CLOSE in
+# src/memory-index-guard.js. Not _COMMONMARK_FENCE_OPEN below, which is deliberately different.
+_GUARD_FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_GUARD_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
 
 
 def _comment_defects(text):
@@ -935,11 +937,11 @@ def _comment_defects(text):
     for row, line in enumerate(re.split(r"\r?\n", text), 1):
         if opened is None:
             if fence:
-                m = _FENCE_CLOSE.match(line)
+                m = _GUARD_FENCE_CLOSE.match(line)
                 if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
                     fence = None
                 continue
-            m = _FENCE_OPEN.match(line)
+            m = _GUARD_FENCE_OPEN.match(line)
             if m:
                 fence = m.group(1)
                 continue
@@ -1679,9 +1681,11 @@ BACKSLASH = chr(92)
 # same character at least as long with nothing after it but spaces or tabs. Unlike the managed
 # block's reading (src/agent-guidance.js fencedSpans), an opener that never closes runs to the
 # end of the file, as CommonMark has it: a status marker that might be an example is left out.
+# THE COMMONMARK RULE. Twin: COMMONMARK_FENCE_OPEN and COMMONMARK_FENCE_CLOSE in
+# vscode-extension/memoryLint.js. Not _GUARD_FENCE_OPEN above, the guard's any-indent rule.
 _STATUS_MARK = re.compile(r" {0,3}(<!-- /?status -->)[ \t]*")
-_STATUS_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
-_STATUS_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+_COMMONMARK_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_COMMONMARK_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
 
 
 def _status_of(text):
@@ -1718,11 +1722,11 @@ def _status_block(text):
     lines = _memory_body(text).split("\n")
     for i, line in enumerate(lines):
         if fence is not None:
-            m = _STATUS_FENCE_CLOSE.fullmatch(line)
+            m = _COMMONMARK_FENCE_CLOSE.fullmatch(line)
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
                 fence = None
             continue
-        m = _STATUS_FENCE_OPEN.fullmatch(line)
+        m = _COMMONMARK_FENCE_OPEN.fullmatch(line)
         if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
             fence = (m.group(1)[0], len(m.group(1)))
             continue

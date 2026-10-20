@@ -155,17 +155,24 @@ function linesOf(text) {
   return lines;
 }
 
+// CommonMark's fence, LOOSELY: up to three spaces and three or more backticks or tildes, with no
+// info-string test, and a closer that may end in any JavaScript whitespace (`\s`, not [ \t]).
+// JavaScript only; twin: the same pair in src/codex-memory-gates.js. Not memoryLint.js
+// COMMONMARK_FENCE_OPEN (strict), nor the MEMORY.md guard's any-indent FENCE_OPEN.
+const LOOSE_COMMONMARK_FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const LOOSE_COMMONMARK_FENCE_CLOSE = /^ {0,3}(?:`+|~+)\s*$/;
+
 function headingsFor(lines) {
   const headings = new Map();
   let fence = null;
   let parent = '';
   for (let index = 0; index < lines.length; index += 1) {
     const text = index === 0 ? lines[index].text.replace(/^\uFEFF/, '') : lines[index].text;
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(text);
+    const marker = LOOSE_COMMONMARK_FENCE.exec(text);
     if (marker) {
       if (!fence) fence = marker[1];
       else if (marker[1][0] === fence[0] && marker[1].length >= fence.length &&
-        /^ {0,3}(?:`+|~+)\s*$/.test(text)) fence = null;
+        LOOSE_COMMONMARK_FENCE_CLOSE.test(text)) fence = null;
       continue;
     }
     if (fence) continue;

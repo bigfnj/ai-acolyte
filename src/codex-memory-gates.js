@@ -17,6 +17,10 @@ const AUTOMATIC = Symbol('already-installed-native-gates');
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const canonical = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
 const hashObject = value => sha(JSON.stringify(value));
+// CommonMark's fence, LOOSELY (no info-string test; a closer may end in any JavaScript `\s`).
+// JavaScript only; twin: the same pair in src/codex-memory.js, which reads the headings.
+const LOOSE_COMMONMARK_FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const LOOSE_COMMONMARK_FENCE_CLOSE = /^ {0,3}(?:`+|~+)\s*$/;
 
 function ordinaryParents(file, create = false) {
   const directory = path.dirname(path.resolve(file)), root = path.parse(directory).root;
@@ -161,10 +165,10 @@ function gatesFromFile(file, text, diagnostics) {
   const result = [];
   let fence = null, opening = null, invalid = false;
   for (const row of rows.slice(finish + 1)) {
-    const code = /^ {0,3}(`{3,}|~{3,})/.exec(row.text);
+    const code = LOOSE_COMMONMARK_FENCE.exec(row.text);
     if (code) {
       if (!fence) fence = code[1];
-      else if (code[1][0] === fence[0] && code[1].length >= fence.length && /^ {0,3}(?:`+|~+)\s*$/.test(row.text)) fence = null;
+      else if (code[1][0] === fence[0] && code[1].length >= fence.length && LOOSE_COMMONMARK_FENCE_CLOSE.test(row.text)) fence = null;
       continue;
     }
     if (fence) continue;

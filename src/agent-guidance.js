@@ -170,8 +170,11 @@ function markerLineAt(text, marker, from = 0) {
 // One deliberate departure: CommonMark runs an unclosed fence to the end of the file, and
 // here an opener that never closes is plain text. A stray fence line in the user's notes
 // must not be able to hide the real block below it.
-const FENCE_OPENER = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const FENCE_CLOSER = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+// THE COMMONMARK RULE, in JavaScript only (no Python reads the managed block). Same rule as
+// memoryLint.js COMMONMARK_FENCE_OPEN, whose twin is recall.py _COMMONMARK_FENCE_OPEN; not the
+// MEMORY.md guard's any-indent FENCE_OPEN (src/memory-index-guard.js).
+const COMMONMARK_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const COMMONMARK_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 function fencedSpans(text) {
   const lines = [];
   for (let at = 0; at < text.length;) {
@@ -189,7 +192,7 @@ function fencedSpans(text) {
   // at 487 to 542 ms against 4.5 to 4.9 ms, three fresh interleaved processes each.
   const unclosed = {};
   for (let i = 0; i < lines.length; i += 1) {
-    const open = FENCE_OPENER.exec(lines[i].text);
+    const open = COMMONMARK_FENCE_OPEN.exec(lines[i].text);
     if (!open) continue;
     const [, fence, info] = open;
     const char = fence[0];
@@ -197,7 +200,7 @@ function fencedSpans(text) {
     if (fence.length >= (unclosed[char] ?? Infinity)) continue;
     let close = -1;
     for (let j = i + 1; j < lines.length && close === -1; j += 1) {
-      const shut = FENCE_CLOSER.exec(lines[j].text);
+      const shut = COMMONMARK_FENCE_CLOSE.exec(lines[j].text);
       if (shut && shut[1][0] === char && shut[1].length >= fence.length) close = j;
     }
     if (close === -1) { unclosed[char] = fence.length; continue; }

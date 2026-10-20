@@ -894,7 +894,7 @@ test('a marker pair inside a closed code fence is a documented example, not a bl
 
   // MUTATION: make blockRange ignore the fences (`const example = null`) and the first
   // assertion fails: the example reads as the block, and `on` replaces its body. In
-  // fencedSpans, drop ` {0,3}` from FENCE_OPENER, the length test, the same-character test
+  // fencedSpans, drop ` {0,3}` from COMMONMARK_FENCE_OPEN, the length test, the same-character test
   // or the backtick-info test, and the matching labelled assertion fails.
 });
 

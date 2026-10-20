@@ -196,12 +196,14 @@ function gateAgents(text) {
 const THREAD_STATUSES = ['open', 'awaiting', 'blocked', 'deferred'];
 const THREAD_CLOSED = ['done', 'closed', 'live', 'shelved', 'deleted', 'dropped', 'shipped'];
 const STATUS_BEGIN = '<!-- status -->';
-// recall.py's _STATUS_MARK, _STATUS_FENCE_OPEN and _STATUS_FENCE_CLOSE under fullmatch. A line
-// here never holds a newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not
+// THE COMMONMARK RULE, for status blocks. Twin: recall.py's _STATUS_MARK, _COMMONMARK_FENCE_OPEN
+// and _COMMONMARK_FENCE_CLOSE under fullmatch. Not the guard's any-indent fences, which
+// commentDefectList (src/memory-index-guard.js) applies to the index. A line here never holds a
+// newline, and `[^\n]` stands for Python's `.`, which JavaScript's `.` is not
 // (it also stops at a carriage return, U+2028 and U+2029, which a Python line can hold).
 const STATUS_MARK = /^ {0,3}(<!-- \/?status -->)[ \t]*$/;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/;
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const COMMONMARK_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/;
+const COMMONMARK_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 // recall.py _status_of: { value, problem }. Both null when the memory declares no `status:`.
 function statusOf(text) {
@@ -236,11 +238,11 @@ function statusBlock(text) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (fence) {
-      const shut = FENCE_CLOSE.exec(line);
+      const shut = COMMONMARK_FENCE_CLOSE.exec(line);
       if (shut && shut[1][0] === fence.char && shut[1].length >= fence.length) fence = null;
       continue;
     }
-    const open = FENCE_OPEN.exec(line);
+    const open = COMMONMARK_FENCE_OPEN.exec(line);
     if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
       fence = { char: open[1][0], length: open[1].length };
       continue;

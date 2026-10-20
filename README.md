@@ -11,7 +11,9 @@ and emits policy in each agent's native format.
 **Version 1.9.0 keeps the memory index lean**: an optional MEMORY.md guard hook refuses an edit
 that leaves the index worse past its budget, an Open threads block carries each memory's open status
 into every session in place of index lines, and Toggle Auto Learn switches Auto Learn from the
-dashboard (a workspace may now only turn it off). Two Windows process-spawn races are fixed.
+dashboard (a workspace may now only turn it off). One Windows process-spawn race is fixed (the
+Codex version probe inherited another spawn's pipes, so it read "timed out"), and a tree kill its
+caller started now reads as ended.
 **Version 1.8.1 groups the dashboard rows** under Activity, Memory & instructions and Permissions,
 with Agent sessions first. **Version 1.8.0 gives the two memory rows the same features**: Claude memory gains Search,
 Inspect memory sources, a gates line and the Claude Code version, and Codex memory gains the CPU model
@@ -703,6 +705,10 @@ mutation run there changes the code the next real tool call runs against your re
 ```bash
 git -C ../ai-acolyte-live checkout --detach vX.Y.Z
 ```
+
+The live worktree exists only on the machine whose `settings.json` registers the hook from it, so a
+release cut on another machine records that this step is still to do there (the record's "The 1.9.0
+backlog clearance (2026-10-20)" explains the 1.9.0 case).
 
 `test/recall-py.sh` is listed because nothing else invokes it. It is not in `node --test`
 (it needs the toolbox Python, which CI has no way to provide) and it was not in this

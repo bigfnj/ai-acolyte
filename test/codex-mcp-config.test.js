@@ -336,8 +336,8 @@ test('the asynchronous layers read does not block, is bounded, hands its child o
   const returnedAfter = Date.now() - started;
   // NO CLOCK IN THIS CLAIM (2026-10-20). It was `returnedAfter < 1000`, but on Windows the call
   // holds this thread for the worker's CreateProcess, which is not waiting on Codex and, under
-  // the loaded runs captured that day, took 243-693 ms for this worker and up to 1,080 ms for a
-  // node child. The 1.8.0 full run failed this test once (which line was not recorded). The
+  // the loaded runs captured that day, took 162-569 ms for this file's workers (n=9) and up to
+  // 1,080 ms for a node child (n=81). The 1.8.0 full run failed this test once (which line was not recorded). The
   // witness is an order instead: the call returned before the codex it asks had even started.
   // That codex is two more process starts away (the worker's, then cmd.exe's), so only a call
   // that waited could see its pid file. MUTATION: route readCodexConfigLayersAsync through the

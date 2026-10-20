@@ -3793,7 +3793,7 @@ test('"Check whether Claude Code runs user hooks" asks first, runs the probe und
     app.answer('Check');
     await app.commands.get('permission-wildcarding.probeUserHooks')();
     assert.deepEqual(stub.ran(), ['-p', '/goal reply with the word acolyte-probe-ok and stop', '--tools', '',
-      '--strict-mcp-config', '--no-session-persistence']);
+      '--no-session-persistence']);
     assert.deepEqual(app.progress, ['ai-acolyte: asking Claude Code whether it runs user hooks…']);
     const said = app.shown.at(-1);
     assert.equal(said.level, 'warning');

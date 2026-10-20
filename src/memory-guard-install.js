@@ -33,17 +33,27 @@ const REVISION_RE = /^const GUARD_REVISION = (\d+);/m;
 // THE PROBE IS BOUNDED (2026-10-20). Where hooks are allowed, `/goal <condition>` starts a real
 // agent run that Claude Code keeps going until the condition holds, under the user's own
 // permission mode and allow list; "probe" was a goal that invited exploration. The condition is
-// now inert, and the run gets no built-in tools (`--tools ""`), no MCP servers
-// (`--strict-mcp-config` with no --mcp-config) and no saved session (`--no-session-persistence`),
-// every one of them listed by `claude --help` in Claude Code 2.1.293. That help lists no turn
-// limit, so none is passed: an undocumented flag is one more way for the probe to break, and the
-// 60 s ceiling, which ends the whole process tree, is the bound on time. A Claude Code that does
-// not know one of these flags answers with an error, and that reads as unknown.
+// now inert, and the run gets no built-in tools (`--tools ""`) and no saved session
+// (`--no-session-persistence`), both listed by `claude --help` in Claude Code 2.1.293 and both
+// measured not to change the answer. That help lists no turn limit, so none is passed: an
+// undocumented flag is one more way for the probe to break, and the 60 s ceiling, which ends the
+// whole process tree, is the bound on time. A Claude Code that does not know one of these flags
+// answers with an error, and that reads as unknown.
+//
+// NEVER `--strict-mcp-config` (2026-10-20). It was in the first bounded version, to keep MCP
+// servers out, and it makes /goal's restriction check answer wrongly. Measured on the development
+// box with the real home and environment, launched through src/exec-resolve.js, Claude Code
+// 2.1.293, under a managed policy that sets allowManagedHooksOnly: `claude -p "/goal x"` and the
+// inert goal alone, with `--no-session-persistence`, and with `--tools ""` all answered "/goal can't
+// run while hooks are restricted"; adding `--strict-mcp-config` made /goal RUN, so the probe read
+// "not restricted". A PreToolUse canary passed through --settings did not fire with or without
+// the flag (its Write landed both times): user hooks stay blocked, and only the check misreports.
+// test/memory-guard-install.test.js fails if the flag comes back.
 const PROBE_WORD = 'acolyte-probe-ok';
 const PROBE_GOAL = `reply with the word ${PROBE_WORD} and stop`;
 const PROBE_PROMPT = `/goal ${PROBE_GOAL}`;
-const PROBE_ARGS = Object.freeze(['-p', PROBE_PROMPT, '--tools', '', '--strict-mcp-config', '--no-session-persistence']);
-const PROBE_COMMAND = `claude -p "${PROBE_PROMPT}" --tools "" --strict-mcp-config --no-session-persistence`;
+const PROBE_ARGS = Object.freeze(['-p', PROBE_PROMPT, '--tools', '', '--no-session-persistence']);
+const PROBE_COMMAND = `claude -p "${PROBE_PROMPT}" --tools "" --no-session-persistence`;
 const PROBE_TIMEOUT_MS = 60 * 1000;
 const PROBE_OUTPUT_CAP = 4 * 1024 * 1024;
 const RESTRICTED_TEXT = /can['\u2019]t run while hooks are restricted/i;
@@ -379,6 +389,12 @@ function probeDirectory(dir) {
 // npmShimLaunch's when the shim is cmd-shim's node form (no cmd.exe at all), else resolvedLaunch's,
 // and the deadline calls endProcessTree, which ends cmd.exe and everything under it
 // (src/exec-resolve.js). Resolves, never rejects, with { result, detail, command, directory }.
+//
+// THE REAL ENVIRONMENT (2026-10-20). The answer is only true of the config directory Claude Code
+// reads, with its settings and cached managed settings, so the child gets this process's own
+// environment: spawn is given no `env`, and passes process.env through. A run with HOME,
+// USERPROFILE or CLAUDE_CONFIG_DIR pointed at a throwaway directory answers for that directory,
+// and can read "not restricted" on a box whose policy restricts hooks.
 function memoryGuardProbe(options = {}) {
   const directory = probeDirectoryPath(options);
   return new Promise((resolve) => {

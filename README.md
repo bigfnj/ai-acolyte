@@ -376,11 +376,13 @@ shows it: a `managed-settings.json`, the cached `~/.claude/remote-settings.json`
 leave no local trace, so where nothing is found they say they cannot tell, and the probe asks
 Claude Code: **AI Acolyte: Check whether Claude Code runs user hooks** in the extension (it asks
 first), or `wildcard-perms --memory-guard probe`. The probe runs
-`claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --strict-mcp-config --no-session-persistence`
-once, in an empty directory of its own, `~/.claude/wildcarding/ai-acolyte-memory-guard-probe`.
-The goal is inert and the run has no built-in tools, no MCP servers and no saved session; `claude
---help` lists no turn limit, so the bound on time is a 60 second deadline that ends the whole
-process tree. An existing directory there is used only when it is empty and yours; anything else
+`claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --no-session-persistence`
+once, in an empty directory of its own, `~/.claude/wildcarding/ai-acolyte-memory-guard-probe`,
+with your own environment. The goal is inert and the run has no built-in tools and no saved
+session; `claude --help` lists no turn limit, so the bound on time is a 60 second deadline that
+ends the whole process tree. It never passes `--strict-mcp-config`: on Claude Code 2.1.293 that
+flag makes `/goal` run under a policy that blocks user hooks, so the probe would read "not
+restricted" while hooks stay blocked. An existing directory there is used only when it is empty and yours; anything else
 is refused and Claude Code is not run. The answer reads Claude Code's own text: "restricted" is
 its refusal message, "not restricted" needs the goal's word in the answer, and anything else,
 a reworded message included, is "unknown". Where hooks are allowed, the probe is one short real
@@ -388,13 +390,17 @@ Claude Code turn. Claude Code still creates one project folder for the directory
 `~/.claude/projects` (holding an empty `memory/`, and no transcript), and the fixed name keeps it
 to one. The lint keeps reporting the same measures either way.
 
-**What has been observed, and what has not.** On 2026-10-19, under a managed policy that set
-`allowManagedHooksOnly`, the 1.9.0 probe answered "restricted" in about 5 seconds (Claude Code
-2.1.301). On 2026-10-20 the development box carried no such policy locally, and the bounded
-probe above answered "not restricted" in 4.3 seconds (Claude Code 2.1.293), the first time that
-answer was seen. The guard's refusal itself, a real Claude Code session running the hook, the
-hook exiting 2 and Claude Code handing its message to the model, has not been observed end to
-end: every test drives the hook directly, the way Claude Code is documented to run it.
+**What has been observed, and what has not.** The development box runs under a managed policy
+that sets `allowManagedHooksOnly`. The probe answered "restricted" there on 2026-10-19 (the 1.9.0
+probe, about 5 seconds, Claude Code 2.1.301) and on 2026-10-20 (the probe above, from the CLI with
+the real home, 4.3 seconds, Claude Code 2.1.293). Two hazards give a false "not restricted":
+`--strict-mcp-config` (measured on that box), and a probe run outside your real environment (a
+throwaway `HOME`, `USERPROFILE` or `CLAUDE_CONFIG_DIR`), because the answer is only true of the
+config directory Claude Code reads. A "not restricted" answer from a
+correctly run probe has not been seen. Nor has the guard's refusal itself: a real Claude Code
+session running the hook, the hook exiting 2 and Claude Code handing its message to the model
+has not been observed end to end, and every test drives the hook directly, the way Claude Code
+is documented to run it.
 
 The editor gauge and `recall.py --lint` count lines, line widths and broken comments exactly as
 the guard does, and `recall.py --lint` also holds the entry count to 16;

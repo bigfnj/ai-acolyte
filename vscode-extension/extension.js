@@ -4518,7 +4518,7 @@ async function probeUserHooks() {
     'Ask Claude Code whether it runs user hooks?',
     {
       modal: true,
-      detail: 'Runs claude -p "/goal ..." once, with no tools, no MCP servers and no saved session, in an empty '
+      detail: 'Runs claude -p "/goal ..." once, with no built-in tools and no saved session, in an empty '
         + 'directory of its own, and reads Claude Code\'s own answer. Where hooks are restricted it refuses at once; '
         + 'where they are allowed this is one short real Claude Code turn. Ends after 60 s at most.',
     },

@@ -382,7 +382,7 @@ function stubClaude(t, answer, exitCode, sleepMs = 0) {
   const script = path.join(dir, 'claude-stub.js');
   fs.writeFileSync(script, `const fs = require('fs');
 fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid,
-  entries: fs.readdirSync(process.cwd()) }));
+  entries: fs.readdirSync(process.cwd()), witness: process.env.ACOLYTE_PROBE_WITNESS || null }));
 setTimeout(() => {
   process.stdout.write(${JSON.stringify(answer)} + '\\n');
   process.exitCode = ${exitCode};
@@ -400,11 +400,10 @@ setTimeout(() => {
   return { dir, script, executable, record: () => JSON.parse(fs.readFileSync(record, 'utf8')) };
 }
 
-const PROBE_ARGV = ['-p', '/goal reply with the word acolyte-probe-ok and stop', '--tools', '', '--strict-mcp-config',
-  '--no-session-persistence'];
+const PROBE_ARGV = ['-p', '/goal reply with the word acolyte-probe-ok and stop', '--tools', '', '--no-session-persistence'];
 
-// The bound arrives as arguments (audit 2026-10-20): an inert goal, no built-in tools, no MCP
-// servers, nothing saved. `--tools ""` is an empty argument, and survives the cmd.exe launch.
+// The bound arrives as arguments (audit 2026-10-20): an inert goal, no built-in tools, nothing
+// saved. `--tools ""` is an empty argument, and survives the cmd.exe launch.
 // MUTATION: drop '--tools', '' from PROBE_ARGS and the argv below differs.
 test('the probe runs the bounded /goal command once, in an empty directory of its own', async (t) => {
   const f = fixture(t);
@@ -412,8 +411,7 @@ test('the probe runs the bounded /goal command once, in an empty directory of it
   const options = { home: f.home, env: {}, claudeExecutable: stub.executable };
   const probe = await memoryGuardProbe(options);
   assert.equal(probe.result, 'restricted', probe.detail);
-  assert.equal(probe.command, 'claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --strict-mcp-config '
-    + '--no-session-persistence');
+  assert.equal(probe.command, 'claude -p "/goal reply with the word acolyte-probe-ok and stop" --tools "" --no-session-persistence');
   const seen = stub.record();
   assert.deepEqual(seen.argv, PROBE_ARGV);
   assert.deepEqual(seen.entries, [], 'the probe session has no project to act on');
@@ -435,6 +433,27 @@ test('the probe runs the bounded /goal command once, in an empty directory of it
   assert.equal(unknown.result, 'unknown');
   assert.match(unknown.detail, /neither refused nor accepted \/goal: Unknown skill: goal/);
   assert.equal((await memoryGuardProbe({ ...options, claudeExecutable: path.join(stub.dir, 'missing-claude') })).result, 'unknown');
+});
+
+// --strict-mcp-config makes /goal's restriction check answer wrongly: measured at integration
+// (2026-10-20, Claude Code 2.1.293, the real home, a policy that sets allowManagedHooksOnly), /goal
+// refused with every other probe argument and RAN with it, so the probe read "not restricted"
+// while a PreToolUse canary still did not fire. And the answer is only true of the environment
+// claude runs in, so the child inherits this process's environment.
+// MUTATION: add '--strict-mcp-config' back to PROBE_ARGS and this fails; give the spawn an
+// `env: {}` and the witness is missing.
+test('the probe never passes --strict-mcp-config, and claude inherits the real environment', async (t) => {
+  const f = fixture(t);
+  const stub = stubClaude(t, RESTRICTED, 1);
+  const saved = process.env.ACOLYTE_PROBE_WITNESS;
+  process.env.ACOLYTE_PROBE_WITNESS = 'inherited';
+  t.after(() => { if (saved === undefined) delete process.env.ACOLYTE_PROBE_WITNESS; else process.env.ACOLYTE_PROBE_WITNESS = saved; });
+  const probe = await memoryGuardProbe({ home: f.home, env: {}, claudeExecutable: stub.executable });
+  const seen = stub.record();
+  assert.ok(seen.argv.length > 2, `precondition: the stub saw the probe's arguments: ${JSON.stringify(seen.argv)}`);
+  assert.equal(seen.argv.includes('--strict-mcp-config'), false, `--strict-mcp-config was passed: ${JSON.stringify(seen.argv)}`);
+  assert.doesNotMatch(probe.command, /--strict-mcp-config/);
+  assert.equal(seen.witness, 'inherited', 'claude runs with this process\'s environment');
 });
 
 // An npm shim in cmd-shim's node form is run as the node script it names, with no cmd.exe, and

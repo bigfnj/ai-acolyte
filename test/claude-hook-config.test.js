@@ -70,7 +70,7 @@ test('inspect reads missing, configured, outdated, foreign and unsupported', () 
     command: `node "${spelled(path.resolve('a checkout', 'src', 'memory-index-guard.js'))}"` }] };
   const foreign = inspectMemoryGuard({ hooks: { PreToolUse: [foreignGuard] } }, OPTIONS);
   assert.equal(foreign.status, 'foreign');
-  assert.match(foreign.reason, /a different path/);
+  assert.match(foreign.reason, /a command this tool did not write/);
 
   for (const shape of [[], 'x', { PreToolUse: {} }, { PreToolUse: [{}] }, { PreToolUse: [{ hooks: ['x'] }] }]) {
     assert.equal(inspectMemoryGuard({ hooks: shape }, OPTIONS).status, 'unsupported', JSON.stringify(shape));
@@ -93,6 +93,29 @@ test('ownership is our stable path, as a whole path', () => {
   if (process.platform === 'win32') {
     const backslashed = memoryGuardScriptPath(HOME).toUpperCase().replace('MEMORY-INDEX-GUARD.JS', 'memory-index-guard.js');
     assert.equal(inspectMemoryGuard(handler(`node "${backslashed}"`), OPTIONS).status, 'outdated');
+  }
+});
+
+// The user's own wrapper around our copy is theirs (audit 2026-10-20): ownership by path alone
+// let `on` replace it and `off` delete it. A node and our copy, and nothing else, is ours.
+// MUTATION: go back to "names our path anywhere in the command" and the wrapper reads as ours,
+// so on rewrites it and off removes it.
+test('a command that wraps our copy, or passes it more arguments, is foreign and left alone', () => {
+  const script = spelled(memoryGuardScriptPath(HOME));
+  const handler = (command) => ({ hooks: { PreToolUse: [{ matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command }] }] } });
+  for (const command of [`timeout 5 node "${script}"`, `"${spelled(NODE)}" "${script}" --verbose`, `sh -c 'node "${script}"'`,
+    `bash "${script}"`]) {
+    const settings = handler(command);
+    assert.equal(inspectMemoryGuard(settings, OPTIONS).status, 'foreign', command);
+    assert.throws(() => planMemoryGuard(settings, true, OPTIONS), /refusing to add the MEMORY\.md guard/, command);
+    const off = planMemoryGuard(settings, false, OPTIONS);
+    assert.equal(off.changed, false, `off leaves ${command} alone`);
+    assert.equal(off.settings, settings);
+  }
+  for (const command of [`"${spelled(NODE)}" "${script}"`, `node "${script}"`, ` '${spelled(NODE)}'  '${script}' `]) {
+    assert.notEqual(inspectMemoryGuard(handler(command), OPTIONS).status, 'foreign', `ours: ${command}`);
+    assert.equal(planMemoryGuard(planMemoryGuard(handler(command), true, OPTIONS).settings, false, OPTIONS).settings.hooks, undefined,
+      `on repairs ${command} and off removes it`);
   }
 });
 

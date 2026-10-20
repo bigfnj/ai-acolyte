@@ -98,6 +98,7 @@ function harness(tempHome, opts = {}) {
   // hands back to modal ones. See the window stub below.
   const shown = [];
   const answers = [];
+  const progress = [];
   // Every status-bar message, which used to be thrown away. "already optimal" is
   // only ever said there, so a path that must NOT claim it — an absent or
   // half-written settings.json — was unobservable.
@@ -141,7 +142,13 @@ function harness(tempHome, opts = {}) {
         shown.push({ level: 'warning', message, options, actions: options ? rest.slice(1) : rest });
         return Promise.resolve(answers.length ? answers.shift() : undefined);
       },
+      // Only where a test asks for it (`opts.withProgress`), so every other test keeps the stub
+      // it was written against.
+      ...(opts.withProgress ? {
+        withProgress(options, task) { progress.push(options.title); return task({ report() {} }); },
+      } : {}),
     },
+    ...(opts.withProgress ? { ProgressLocation: { Notification: 15 } } : {}),
     workspace: {
       // `opts.isTrusted` and `opts.workspaceFolders` override the one trusted folder
       // every other test runs in. Both were hard-coded, so the Project-local card was
@@ -324,6 +331,7 @@ function harness(tempHome, opts = {}) {
     passes,
     locks,
     shown,
+    progress,
     statuses,
     // How many lock-contention retries were scheduled. See `timers` above for
     // why 1500 ms identifies them uniquely under this harness.
@@ -3734,10 +3742,20 @@ test('turning the MEMORY.md guard on asks first, writes the hook, and the card n
     const asked = app.shown.find((entry) => entry.message === 'Turn on the MEMORY.md guard?');
     assert.ok(asked, `the toggle must ask before it adds a hook: ${JSON.stringify(app.shown.map((s) => s.message))}`);
     assert.equal(asked.options.modal, true);
-    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~\/\.claude\/settings\.json/);
+    assert.match(asked.options.detail, /Adds a PreToolUse hook to ~[\\/]\.claude[\\/]settings\.json\. /);
+    assert.match(asked.options.detail, /a copy of the guard in ~[\\/]\.claude[\\/]wildcarding, /);
     assert.ok(asked.options.detail.includes(path.join(path.dirname(process.execPath), path.basename(process.execPath))),
       'the modal names the node it found on PATH');
     assert.match(asked.options.detail, POLICY_LINE, 'and says whether Claude Code will run it here');
+    // The budgets it names are the guard's own, and the rule is the rule the guard applies.
+    // MUTATION: write a literal 15 for the entry budget in the modal and this fails.
+    const { BUDGETS } = require('../src/memory-index-guard');
+    for (const phrase of [`${BUDGETS.lines} lines`, `${BUDGETS.bytes} bytes`, `${BUDGETS.lineChars} characters on one line`,
+      `${BUDGETS.entries} "- " entries`, `${BUDGETS.commentDefects} broken HTML comments`]) {
+      assert.ok(asked.options.detail.includes(phrase), `the modal names "${phrase}": ${asked.options.detail}`);
+    }
+    assert.match(asked.options.detail, /ends past a budget and is worse on it than before/);
+    assert.doesNotMatch(asked.options.detail, /already past|always pass/);
     const settings = env.read();
     assert.deepEqual(settings.permissions, before.permissions);
     assert.equal(settings.hooks.PreToolUse.length, 1);
@@ -3786,6 +3804,144 @@ test('a cancelled modal, or no node on PATH, leaves settings.json untouched', as
     assert.match(said[0].message, /no node was found on PATH/);
     assert.ok(fs.readFileSync(env.settingsPath).equals(before), 'refused before anything was written');
   } finally { await app.dispose(); }
+});
+
+// The hook's node gone (audit 2026-10-20): the card said "turn it on again" while its button,
+// reading the hook as configured, turned the guard OFF. It now reads as needing repair, and the
+// toggle repairs it, without the first-install modal.
+// MUTATION: drop `repair ||` from toggleMemoryGuard's `next` and the click removes the hook.
+test('a guard whose node is gone is repaired by the toggle, not turned off', async (t) => {
+  const env = setup(t);
+  const { memoryGuardDefinition } = require('../src/claude-hook-config');
+  const ghost = path.join(env.tempHome, 'gone', process.platform === 'win32' ? 'node.exe' : 'node');
+  env.write({ hooks: { PreToolUse: [memoryGuardDefinition({ home: env.tempHome, nodeExecutable: ghost })] } });
+  withPath(t, [path.dirname(process.execPath)]);
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const data = ui.posted.at(-1);
+    assert.deepEqual({ label: data.memoryGuard.label, nodeMissing: data.memoryGuard.nodeMissing }, { label: 'on (needs repair)', nodeMissing: true });
+    const panel = runPanelScript(ui.view.webview.html);
+    panel.deliver({ ...data, memory: { tokens: 10, lines: 3, maxLines: 200, over: 0, broken: 0, unresolved: 0 } });
+    assert.equal(panel.dom.byId.get('memoryGuardBtn').textContent, 'Repair MEMORY.md guard');
+    assert.match(panel.dom.byId.get('memoryGuardStatus').textContent, /the node it runs is gone \(Repair re-points it\)/);
+
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.equal(app.shown.filter((entry) => entry.level === 'warning').length, 0, 'a repair does not ask');
+    const hooks = env.read().hooks.PreToolUse;
+    assert.equal(hooks.length, 1, 'the hook is still there');
+    assert.deepEqual(hooks[0], memoryGuardDefinition({ home: env.tempHome,
+      nodeExecutable: path.join(path.dirname(process.execPath), path.basename(process.execPath)) }), 'and runs the node found now');
+    assert.ok(app.shown.some((entry) => entry.level === 'info' && /MEMORY\.md guard ON/.test(entry.message)));
+  } finally { await app.dispose(); }
+});
+
+// A stub `claude`, first on PATH, for the extension's probe. APPDATA is pointed at an empty
+// directory too: on Windows the launcher falls back to %APPDATA%\npm when PATH has no claude,
+// and that is where the real one lives on a development box.
+function stubClaudeOnPath(t, answer, exitCode) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-dashboard-claude-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const record = path.join(dir, 'ran.json');
+  const script = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)));\n`
+    + `process.stdout.write(${JSON.stringify(answer)} + '\\n'); process.exitCode = ${exitCode};\n`);
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'claude'), 0o755);
+  }
+  const savedAppData = process.env.APPDATA;
+  process.env.APPDATA = dir;
+  t.after(() => { if (savedAppData === undefined) delete process.env.APPDATA; else process.env.APPDATA = savedAppData; });
+  return { dir, ran: () => (fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')) : null) };
+}
+const GOAL_REFUSAL = "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy).";
+
+// The probe the policy line points to, from the palette (audit 2026-10-20): a VSIX ships no bin/,
+// so the CLI verb the card named could not be run by its reader.
+// MUTATION: drop the `choice !== 'Check'` return and the dismissed call runs claude.
+test('"Check whether Claude Code runs user hooks" asks first, runs the probe under progress, and says the answer', async (t) => {
+  const env = setup(t);
+  env.write({});
+  const stub = stubClaudeOnPath(t, GOAL_REFUSAL, 1);
+  withPath(t, [stub.dir, path.dirname(process.execPath)]);
+  const app = harness(env.tempHome, { withProgress: true });
+  try {
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    const asked = app.shown.find((entry) => entry.message === 'Ask Claude Code whether it runs user hooks?');
+    assert.ok(asked && asked.options.modal, 'it asks before it runs Claude Code');
+    assert.match(asked.options.detail, /one short real Claude Code turn/);
+    assert.equal(stub.ran(), null, 'dismissed: claude never ran');
+
+    app.answer('Check');
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    assert.deepEqual(stub.ran(), ['-p', '/goal reply with the word acolyte-probe-ok and stop', '--tools', '',
+      '--no-session-persistence']);
+    assert.deepEqual(app.progress, ['ai-acolyte: asking Claude Code whether it runs user hooks…']);
+    const said = app.shown.at(-1);
+    assert.equal(said.level, 'warning');
+    assert.match(said.message, /^ai-acolyte: user hooks: restricted\. Claude Code refused \/goal because hooks are restricted/);
+    const titles = require('../vscode-extension/package.json').contributes.commands
+      .filter((entry) => entry.command === 'permission-wildcarding.probeUserHooks').map((entry) => entry.title);
+    assert.deepEqual(titles, ['AI Acolyte: Check whether Claude Code runs user hooks']);
+  } finally { await app.dispose(); }
+});
+
+// A census of what the extension shows about the guard: the card's policy line, the modal, the
+// toasts, the refusals and the probe's answers. None may name a `wildcard-perms --` verb, because
+// a VSIX user has no CLI, and the policy line names the palette command by its contributed title.
+// MUTATION: drop `surface: options.surface` from memoryGuardStatus's hookPolicy call and the card
+// and the modal name `wildcard-perms --memory-guard probe`.
+test('nothing the extension shows about the MEMORY.md guard names a CLI verb', async (t) => {
+  const env = setup(t);
+  env.write({ model: 'opus' });
+  const stub = stubClaudeOnPath(t, 'Unknown skill: goal', 0);
+  withPath(t, [stub.dir, path.dirname(process.execPath)]);
+  const app = harness(env.tempHome, { withProgress: true });
+  const seen = [];
+  const collect = () => { for (const entry of app.shown.splice(0)) seen.push(entry.message, entry.options?.detail || ''); };
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const unknownPolicy = ui.posted.at(-1).memoryGuard.policy;
+    assert.match(unknownPolicy, /so run "AI Acolyte: Check whether Claude Code runs user hooks" to check\./);
+    seen.push(unknownPolicy);
+    app.answer('Turn on');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    assert.ok(app.shown.some((entry) => entry.message === 'Turn on the MEMORY.md guard?'), 'precondition: the modal was shown');
+    collect();
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    collect();
+    app.answer('Check');
+    await app.commands.get('permission-wildcarding.probeUserHooks')();
+    assert.ok(stub.ran(), 'precondition: the probe ran');
+    collect();
+    env.write({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node /x/memory-index-guard.js' }] }] } });
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    collect();
+    fs.writeFileSync(env.settingsPath, '{ "half": ');
+    await app.commands.get('permission-wildcarding.toggleMemoryGuard')();
+    collect();
+    fs.writeFileSync(path.join(env.tempHome, '.claude', 'remote-settings.json'), JSON.stringify({ allowManagedHooksOnly: true }));
+    env.write({});
+    ui.posted.length = 0;
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    seen.push(ui.posted.at(-1).memoryGuard.policy);
+    assert.ok(seen.length >= 10, `WITNESS: the census collected ${seen.length} strings`);
+    const named = seen.filter((text) => /wildcard-perms --/.test(text));
+    assert.deepEqual(named, [], 'a string the extension shows names a CLI verb a VSIX user cannot run');
+  } finally { await app.dispose(); }
+  // The one constant the extension shows from outside the guard modules: its source, outside
+  // comments, names no CLI verb either (the withdrawn Codex workspace scope's note did).
+  const source = fs.readFileSync(path.join(__dirname, '..', 'vscode-extension', 'extension.js'), 'utf8');
+  const lines = source.split(/\r?\n/).filter((line) => !/^\s*\/\//.test(line) && /wildcard-perms --/.test(line));
+  assert.deepEqual(lines, []);
 });
 
 // Activation refreshes the copy after an upgrade, by revision, and never writes settings.json.

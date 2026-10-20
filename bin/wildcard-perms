@@ -1476,7 +1476,7 @@ function codexHook(args) {
 }
 
 // `--memory-guard on|off|status|probe`: the MEMORY.md index guard, a PreToolUse hook that refuses
-// an edit leaving the always-loaded index worse on a measure already past its budget
+// an edit after which the always-loaded index ends past a budget and is worse on it than before
 // (src/memory-index-guard.js). Exit 0 on success, 1 on a usage error or a refusal, like --gates.
 // Every answer carries the policy line, because on a machine whose managed policy restricts
 // hooks the guard is installed and never runs, and a bare "ON" would read as protection.
@@ -1493,15 +1493,25 @@ function memoryGuard(args) {
   const home = path.resolve(os.homedir());
   const tilde = (file) => (String(file).startsWith(home) ? '~' + String(file).slice(home.length) : String(file));
   if (cmd === 'probe') {
-    const probe = install.memoryGuardProbe();
-    process.stdout.write(`wildcard-perms memory-guard probe: ${probe.result}. ${probe.detail}\n`
-      + `  (ran ${probe.command} in an empty temporary directory; the answer reads Claude Code's own message text)\n`);
-    if (probe.result === 'unknown') process.exitCode = 1;
+    const failed = (error) => {
+      process.stderr.write(`wildcard-perms --memory-guard probe: ${error && error.message}\n`);
+      process.exitCode = 1;
+    };
+    try {
+      install.memoryGuardProbe().then((probe) => {
+        process.stdout.write(`wildcard-perms memory-guard probe: ${probe.result}. ${probe.detail}\n`
+          + `  (${probe.command}, in the empty directory ${tilde(probe.directory)}; the answer reads Claude Code's own message text)\n`);
+        if (probe.result === 'unknown') process.exitCode = 1;
+      }, failed);
+    } catch (error) {
+      failed(error);
+    }
     return;
   }
   try {
     const status = cmd === 'status' ? install.memoryGuardStatus() : install.setMemoryGuard(cmd === 'on');
-    const head = status.label === 'off' ? 'OFF' : status.label.toUpperCase();
+    // scripts/smoke.sh matches this head against every label, uppercased (test/cli-memory-guard.test.js).
+    const head = status.label.toUpperCase();
     const changed = cmd === 'status' ? '' : status.changed ? '' : ' (already)';
     process.stdout.write(`wildcard-perms memory-guard: ${head}${changed} - ${tilde(status.settingsPath)}\n`);
     if (status.on) {
@@ -1513,8 +1523,15 @@ function memoryGuard(args) {
     if (status.reason) process.stdout.write(`  note:   ${status.reason}\n`);
     if (cmd === 'on' && status.changed) process.stdout.write('  Applies to Claude Code sessions started from now on.\n');
     if (status.backupPath) process.stdout.write(`  backup: ${tilde(status.backupPath)} (settings.json before the guard's first change)\n`);
+    if (status.backupAbsent) {
+      process.stdout.write(`  backup: none needed, settings.json did not exist before the guard's first change (${tilde(status.backupAbsent)})\n`);
+    }
     process.stdout.write(`  policy: ${status.policy.line}\n`);
-    if (cmd === 'status' && status.status === 'unreadable') process.exitCode = 1;
+    // Which file restricts hooks, so the reader can see the policy rather than take it on trust.
+    if (status.policy.restricted) for (const source of status.policy.sources) process.stdout.write(`  source: ${tilde(source)}\n`);
+    // Both read as UNREADABLE: a settings.json that does not parse, and one whose hooks shape cannot
+    // be read safely. Either way status could not say what is installed.
+    if (cmd === 'status' && (status.status === 'unreadable' || status.status === 'unsupported')) process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`wildcard-perms --memory-guard ${cmd}: ${error.message}\n`);
     process.exitCode = 1;

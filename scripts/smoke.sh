@@ -78,8 +78,9 @@ check "--gates status"    'gates \[claude\]'                          "$(node "$
 check "--guidance status" 'guidance \[claude\]'                       "$(node "$CLI" --guidance status 2>&1)"
 check "--bypass status"   'bypass: (ON|OFF)'                          "$(node "$CLI" --bypass status 2>&1)"
 # The guard's status names a closed set of states and always states the hook policy line,
-# so a crash, a usage error or a verb that fell into hook mode cannot pass.
-check "--memory-guard status" 'memory-guard: (OFF|ON|on \(copy outdated\)|on \(needs repair\)|foreign|unreadable).*policy:' \
+# so a crash, a usage error or a verb that fell into hook mode cannot pass. The CLI prints the
+# label uppercased; test/cli-memory-guard.test.js runs this pattern against every label.
+check "--memory-guard status" 'memory-guard: (OFF|ON|ON \(COPY OUTDATED\)|ON \(NEEDS REPAIR\)|FOREIGN|UNREADABLE) - .*policy:' \
   "$(node "$CLI" --memory-guard status 2>&1 | tr '\n' ' ')"
 # Open threads report each agent with ON or OFF, as --gates does.
 check "--open-threads status" 'open threads \[claude\]: (ON|OFF)' "$(node "$CLI" --open-threads status 2>&1)"

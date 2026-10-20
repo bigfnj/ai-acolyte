@@ -154,6 +154,11 @@
         "icon": "$(shield)"
       },
       {
+        "command": "permission-wildcarding.probeUserHooks",
+        "title": "AI Acolyte: Check whether Claude Code runs user hooks",
+        "icon": "$(question)"
+      },
+      {
         "command": "permission-wildcarding.manageGates",
         "title": "AI Acolyte: Manage memory gates…",
         "icon": "$(checklist)"
@@ -302,7 +307,7 @@
             "Learn from Codex history but do not write Codex rules."
           ],
           "default": "user",
-          "markdownDescription": "Where validated generated Codex rules are written. Codex loads rules at startup, so restart Codex after a rule change.\n\n`workspace` is **withdrawn**: its trust model could not be stated, because VS Code workspace trust, this setting and Codex's own project trust are three different decisions and only the last governs whether Codex loads a workspace rule file. A settings file that still says `workspace` is accepted, but Codex rule export stays OFF and the Auto Learn card says so. To remove rules an older release wrote into a repository: `wildcard-perms --codex-workspace-rules remove`.\n\nA workspace may only make this stricter: it can turn export `off`, never back to `user` when your user setting says `off`."
+          "markdownDescription": "Where validated generated Codex rules are written. Codex loads rules at startup, so restart Codex after a rule change.\n\n`workspace` is **withdrawn**: its trust model could not be stated, because VS Code workspace trust, this setting and Codex's own project trust are three different decisions and only the last governs whether Codex loads a workspace rule file. A settings file that still says `workspace` is accepted, but Codex rule export stays OFF and the Auto Learn card says so. To remove rules an older release wrote into a repository, delete the lines from `# BEGIN permission-wildcarding generated rules` to `# END permission-wildcarding generated rules` in its `.codex/rules/permission-wildcarding.rules`, and the file if nothing else is left in it.\n\nA workspace may only make this stricter: it can turn export `off`, never back to `user` when your user setting says `off`."
         },
         "permissionWildcarding.autoLearn.codexExecutable": {
           "type": "string",

@@ -54,7 +54,10 @@ const { discoverSessions, sessionsSignature } = require('./src/agent-sessions');
 const { drainLocalSettings, localSettingsPath, LOCAL_RELATIVE } = require('./src/local-settings');
 const { guidanceStatusAll, setGuidanceAll } = require('./src/agent-guidance');
 const { gatesStatusAll, setGatesAll, compiledPath } = require('./src/agent-gates');
-const { memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable } = require('./src/memory-guard-install');
+const {
+  memoryGuardStatus, setMemoryGuard, refreshMemoryGuardCopy, resolveNodeExecutable, memoryGuardProbe,
+} = require('./src/memory-guard-install');
+const { BUDGETS: GUARD_BUDGETS } = require('./src/memory-index-guard');
 const {
   openThreadsStatusAll, setOpenThreadsAll, compiledPath: threadsCompiledPath, readCompiled: readCompiledThreads,
 } = require('./src/agent-open-threads');
@@ -106,7 +109,9 @@ const WORKSPACE_SCOPE_WITHDRAWN_NOTE =
   'workspace trust, this setting and Codex\'s own project trust are three different decisions ' +
   'and only the last one governs whether Codex loads a workspace rule file. Codex rule export ' +
   'is OFF while this setting says "workspace". Set it to "user" or "off". To remove rules an ' +
-  'older release wrote into a repository, run: wildcard-perms --codex-workspace-rules remove';
+  'older release wrote into a repository, delete the lines from "# BEGIN permission-wildcarding generated ' +
+  'rules" to "# END permission-wildcarding generated rules" in its .codex/rules/permission-wildcarding.rules, ' +
+  'and the file if nothing else is left in it.';
 // Auto Learn, this wildcarding pass, the legacy cleanup, and the CLI bypass
 // toggle are all writers of one settings.json. They take the same lock
 // (POLICY_LOCK_PATH, defined once in src/policy-lock.js) so none can land
@@ -3305,6 +3310,7 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.toggleGuidance', () => toggleGuidance()),
     vscode.commands.registerCommand('permission-wildcarding.toggleGates', () => toggleGates()),
     vscode.commands.registerCommand('permission-wildcarding.toggleMemoryGuard', () => toggleMemoryGuard()),
+    vscode.commands.registerCommand('permission-wildcarding.probeUserHooks', () => probeUserHooks()),
     // Retire or restore one memory gate at a time, from the card's Manage gates… or the palette.
     vscode.commands.registerCommand('permission-wildcarding.manageGates', () => manageGates()),
     // The open-threads block on or off (openThreads.enabled, user tier), from the Claude memory card;
@@ -4481,18 +4487,24 @@ async function toggleGates() {
 async function toggleMemoryGuard() {
   const home = os.homedir();
   let status;
-  try { status = memoryGuardStatus({ home }); }
+  try { status = memoryGuardStatus({ home, surface: 'extension' }); }
   catch (err) { vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`); return; }
   if (status.status === 'unreadable' || status.status === 'unsupported') {
     vscode.window.showErrorMessage(`ai-acolyte: the MEMORY.md guard cannot be changed: ${status.reason}. Nothing was changed.`);
     return;
   }
+  // CLAUDE_CONFIG_DIR moves the settings.json Claude Code reads, so every path said here is the
+  // status's own, never a literal ~/.claude.
+  const tilde = (file) => String(file).replace(home, '~');
   if (status.status === 'foreign' && !status.on) {
-    vscode.window.showWarningMessage(`ai-acolyte: ${status.reason}. Remove that hook from ~/.claude/settings.json `
+    vscode.window.showWarningMessage(`ai-acolyte: ${status.reason}. Remove that hook from ${tilde(status.settingsPath)} `
       + 'to use this one. Nothing was changed.');
     return;
   }
-  const next = !(status.status === 'configured' || status.status === 'foreign');
+  // A hook of ours whose node is gone is repaired, never turned off: the card's button says
+  // "Repair" for it, and `on` re-points it at the node found now (audit 2026-10-20).
+  const repair = status.on && status.nodeExists === false;
+  const next = repair || !(status.status === 'configured' || status.status === 'foreign');
   let nodeExecutable;
   if (next) {
     nodeExecutable = resolveNodeExecutable();
@@ -4506,11 +4518,13 @@ async function toggleMemoryGuard() {
         'Turn on the MEMORY.md guard?',
         {
           modal: true,
-          detail: 'Adds a PreToolUse hook to ~/.claude/settings.json. Before each Write or Edit, Claude Code runs '
-            + `${nodeExecutable} on a copy of the guard in ~/.claude/wildcarding, and the guard refuses an edit that `
-            + 'leaves a memory index (MEMORY.md) worse on a measure already past its budget: 140 lines, 12000 bytes, '
-            + '300 characters on one line, 16 "- " entries, no broken HTML comment. Edits that shrink the index always '
-            + `pass, and anything it cannot read is let through. settings.json is backed up first. ${status.policy.line}`,
+          detail: `Adds a PreToolUse hook to ${tilde(status.settingsPath)}. Before each Write or Edit, Claude Code runs `
+            + `${nodeExecutable} on a copy of the guard in ${tilde(path.dirname(status.scriptPath))}, and the guard refuses an edit after `
+            + 'which a memory index (MEMORY.md) ends past a budget and is worse on it than before: '
+            + `${GUARD_BUDGETS.lines} lines, ${GUARD_BUDGETS.bytes} bytes, ${GUARD_BUDGETS.lineChars} characters on `
+            + `one line, ${GUARD_BUDGETS.entries} "- " entries, ${GUARD_BUDGETS.commentDefects} broken HTML comments. `
+            + 'Deleting whole lines passes unless it breaks an HTML comment or a code fence, and anything it cannot '
+            + `read is let through. settings.json is backed up first. ${status.policy.line}`,
         },
         'Turn on');
       if (choice !== 'Turn on') return;
@@ -4519,13 +4533,52 @@ async function toggleMemoryGuard() {
   // The modal is an await, and the window may have closed behind it.
   if (deactivated) return;
   try {
-    const result = setMemoryGuard(next, { home, nodeExecutable });
+    const result = setMemoryGuard(next, { home, nodeExecutable, surface: 'extension' });
     vscode.window.showInformationMessage(next
       ? `ai-acolyte: MEMORY.md guard ON, for Claude Code sessions started from now on. ${result.policy.line}`
       : 'ai-acolyte: MEMORY.md guard OFF. Sessions already running keep it until they end.');
   } catch (err) {
     vscode.window.showErrorMessage(`ai-acolyte: ${err.message}`);
   }
+  dashboard?.refresh();
+}
+
+// "Check whether Claude Code runs user hooks" (2026-10-20): the probe the policy line points to
+// when no local file shows a restriction. A VSIX ships no bin/, so the CLI's
+// `--memory-guard probe` was a verb the extension's own card named and could not run. It asks
+// first, because where hooks are allowed the probe is one short real Claude Code turn, and runs
+// async under a progress notification, never on the host thread.
+let probingUserHooks = false;
+async function probeUserHooks() {
+  if (probingUserHooks) {
+    vscode.window.showInformationMessage('ai-acolyte: a check of whether Claude Code runs user hooks is already running.');
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    'Ask Claude Code whether it runs user hooks?',
+    {
+      modal: true,
+      detail: 'Runs claude -p "/goal ..." once, with no built-in tools and no saved session, in an empty '
+        + 'directory of its own, and reads Claude Code\'s own answer. Where hooks are restricted it refuses at once; '
+        + 'where they are allowed this is one short real Claude Code turn. Ends after 60 s at most.',
+    },
+    'Check');
+  if (choice !== 'Check' || deactivated) return;
+  probingUserHooks = true;
+  let probe;
+  try {
+    probe = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'ai-acolyte: asking Claude Code whether it runs user hooks…' },
+      () => memoryGuardProbe({ home: os.homedir() }));
+  } catch (err) {
+    probe = { result: 'unknown', detail: err.message };
+  } finally {
+    probingUserHooks = false;
+  }
+  if (deactivated) return;
+  const message = `ai-acolyte: user hooks: ${probe.result}. ${probe.detail}`;
+  if (probe.result === 'not restricted') vscode.window.showInformationMessage(message);
+  else vscode.window.showWarningMessage(message);
   dashboard?.refresh();
 }
 
@@ -4822,7 +4875,7 @@ function reportThreadsInstall(results, next, compiled = true) {
 // The Claude memory card's guard line: the state, and whether Claude Code will run it here.
 function memoryGuardCardData() {
   try {
-    const status = memoryGuardStatus({ home: os.homedir() });
+    const status = memoryGuardStatus({ home: os.homedir(), surface: 'extension' });
     return { label: status.label, on: status.on, policy: status.policy.line, nodeMissing: status.nodeExists === false };
   } catch (err) {
     return { label: 'unreadable', on: false, policy: err.message, nodeMissing: false };
@@ -5806,7 +5859,7 @@ class WildcardingViewProvider {
         <div class="muted sub" id="claudeMemoryGatesStatus"></div>
         <button class="managed-action" id="claudeMemoryGates">Review memory gates…</button>
         <div class="muted sub" id="memoryGuardStatus"></div>
-        <button class="managed-action" id="memoryGuardBtn" title="A PreToolUse hook that refuses an edit leaving MEMORY.md worse on a measure already past its budget">Turn on MEMORY.md guard</button>
+        <button class="managed-action" id="memoryGuardBtn" title="A PreToolUse hook that refuses an edit after which MEMORY.md ends past a budget and is worse than before">Turn on MEMORY.md guard</button>
         <div class="muted sub" id="claudeMemoryThreadsStatus"></div>
         <div class="sub" id="claudeMemoryThreadsIndex" hidden></div>
         <button class="managed-action" id="claudeMemoryThreads" title="The open-threads block: every memory whose status: is still open, in CLAUDE.md and AGENTS.md">Turn on open threads</button>
@@ -6485,9 +6538,9 @@ class WildcardingViewProvider {
     // here, said every time, because where policy restricts hooks the guard is installed and inert.
     const mg = (d && d.memoryGuard) || { label: 'unreadable', on: false, policy: '', nodeMissing: false };
     $('memoryGuardStatus').textContent = 'MEMORY.md guard: ' + mg.label
-      + (mg.nodeMissing ? ', and the node it runs is gone (turn it on again)' : '') + '. ' + mg.policy;
+      + (mg.nodeMissing ? ', and the node it runs is gone (Repair re-points it)' : '') + '. ' + mg.policy;
     $('memoryGuardBtn').textContent = !mg.on ? 'Turn on MEMORY.md guard'
-      : (mg.label === 'on (needs repair)' ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
+      : (mg.label === 'on (needs repair)' || mg.nodeMissing ? 'Repair MEMORY.md guard' : 'Turn off MEMORY.md guard');
     renderThreads((d && d.threads) || null);
     $('claudeCodeVersion').textContent = d && d.claudeCodeVersion ? 'Claude Code ' + d.claudeCodeVersion + '.' : '';
   }

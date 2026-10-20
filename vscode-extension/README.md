@@ -318,13 +318,18 @@ works under a managed policy.
   `Acolyte: Lint memory index`.
 
 The lint is not a hook and needs none. The optional **MEMORY.md guard** is: a Claude Code
-`PreToolUse` hook that refuses an edit leaving the index worse on a measure already past its
-budget (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken comment),
-and lets every shrinking edit through. It uses those fixed budgets; the `memory.*` settings tune
+`PreToolUse` hook that refuses an edit after which the index ends past a budget and is worse on
+it than before (140 lines, 12,000 bytes, 300 characters on a line, 16 `- ` entries, no broken
+comment). Deleting whole lines passes unless it breaks an HTML comment or a code fence; for a
+broken comment the fix is to close or remove the whole comment. It uses those fixed budgets; the `memory.*` settings tune
 this gauge, not the hook. Turn it on with **Toggle MEMORY.md guard**, which asks first. Where a
 managed policy sets `allowManagedHooksOnly` or `disableAllHooks`, Claude Code runs no user hook,
-so the guard is installed and inert there, and the card says so. The root README section "The
-MEMORY.md guard" has the rule, the install and the policy caveat.
+so the guard is installed and inert there, and the card says so. Where no local file shows a
+policy, **Check whether Claude Code runs user hooks** asks the installed Claude Code once (it
+asks you first, because where hooks are allowed that is one short real Claude Code turn). The
+guard's refusal inside a real Claude Code session has not been observed end to end: the tests
+drive the hook directly. The root README section "The MEMORY.md guard" has the rule, the install,
+the probe and what has been observed.
 
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
@@ -360,10 +365,11 @@ the model asset and the venv, and never runs Python.
 - **⟳ Rebuild recall index** — the one button. It runs `recall.py --rebuild` in the
   DevToolbox venv to force a full CPU re-embed (model + corpus pinned via env so the
   cache matches the card). A full rebuild happens *only* here, because you asked for one.
-- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`
-  or `foreign`, followed every time by whether Claude Code will run it here. The button turns the
-  guard on (after a confirmation naming the hook and the `node` it runs), repairs it, or turns it
-  off.
+- A **MEMORY.md guard** line and button: `off`, `on`, `on (copy outdated)`, `on (needs repair)`,
+  `foreign` or `unreadable`, followed every time by whether Claude Code will run it here. The
+  button turns the guard on (after a confirmation naming the hook and the `node` it runs), repairs
+  it, or turns it off. A hook whose `node` is gone reads `on (needs repair)`, and **Repair**
+  re-points it at the `node` found now (on Windows, `%ProgramFiles%\nodejs` when `PATH` has none).
 
 Python does run unattended in two other places, both gated on your having opted in.
 `autoSyncRecallIfStale` (`extension.js:1147#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
@@ -518,7 +524,7 @@ cycles between one useful mode and two that do nothing there.
 
 ## Every command
 
-The manifest registers 38 commands under AI Acolyte in the
+The manifest registers 39 commands under AI Acolyte in the
 Command Palette. Selected commands also appear as
 dashboard title-bar buttons.
 
@@ -551,7 +557,8 @@ dashboard title-bar buttons.
 | Configure Codex after-turn learning | Configure/remove the Stop hook; activation still requires Codex's own hook review |
 | Toggle shell-style guidance for Claude Code and Codex | Instructions for commands whose approvals are easier to reuse |
 | Toggle memory gates for Claude Code and Codex | Install or remove your compiled standing orders |
-| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit leaving a `MEMORY.md` index worse on a measure already past its budget; asks before adding it, and says when managed policy will stop Claude Code running it |
+| Toggle MEMORY.md guard | Add or remove the optional `PreToolUse` hook that refuses an edit after which a `MEMORY.md` index ends past a budget and is worse than before; asks before adding it, and says when managed policy will stop Claude Code running it |
+| Check whether Claude Code runs user hooks | Ask the installed Claude Code, once, whether managed policy stops it running user hooks (the MEMORY.md guard among them); asks first, because where hooks are allowed it is one short real Claude Code turn, and reads Claude Code's own answer as restricted, not restricted or unknown |
 | Manage memory gates… | Retire or restore one gate memory at a time, in the store that compiles |
 | Toggle open threads | Install or remove the open-threads block: every memory whose `status:` is still open, and an INDEX line naming the index while `MEMORY.md` is past a budget. While on it always turns it off, after asking; when the install is not current the same prompt offers **Refresh**, which compiles and installs |
 | Lint memory index | The `MEMORY.md` bloat + broken-link report |

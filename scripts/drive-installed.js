@@ -348,6 +348,7 @@ Module._load = function load(request, parent, isMain) {
     'permission-wildcarding.toggleGates',
     'permission-wildcarding.toggleAutoLearn',
     'permission-wildcarding.toggleMemoryGuard',
+    'permission-wildcarding.probeUserHooks',
     'permission-wildcarding.toggleOpenThreads',
   ];
   const missing = expected.filter((id) => !commands.has(id));

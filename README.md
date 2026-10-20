@@ -280,9 +280,11 @@ Waiting on the owner's choice between the two layouts.
 
 Each open memory is one line of the block, `- **AWAITING** <text> (<file stem>)`, the stem being
 the memory's file name without `.md`. Lines are sorted by status (open, awaiting, blocked,
-deferred) and then by stem. The text is the status block's, on one line, with control characters
-and bidirectional controls removed, cut at 240 characters. At most ten are listed, and
-one more line counts the rest and points at `recall "status"`. `done`, `closed`, `live`,
+deferred) and then by stem. The text is the status block's, on one line, with control characters,
+bidirectional controls and invisible format characters (the soft hyphen, the zero-width space,
+joiners and invisible operators U+200B-U+200D and U+2060-U+2064, U+FEFF, and the tag block
+U+E0000-U+E007F) removed, cut at 240 characters. At most ten are listed, and one more line
+counts the rest and points at `recall "status"`. `done`, `closed`, `live`,
 `shelved`, `deleted`, `dropped` and `shipped` close a thread: the memory stays, and its line
 leaves the block on the next compile. Any other value, two `status:` lines, or a listed status
 whose block is missing or sits only inside a code fence is left out, and `recall.py --lint`

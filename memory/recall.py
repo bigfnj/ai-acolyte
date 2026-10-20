@@ -1743,12 +1743,17 @@ def _status_block(text):
 # Removed from thread text, the stem and the INDEX line's path before anything else (2026-10-20):
 # the C0 and C1 controls and DEL that str.split() does not already treat as whitespace, and the
 # bidirectional controls (ALM, LRM, RLM, the embeddings and overrides U+202A-U+202E, the isolates
-# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Code points, not
-# escapes, so no writer can turn them into the characters themselves. memoryLint.js THREAD_STRIP is
-# the same set, held to it by test/threads-compile.sh.
+# U+2066-U+2069), which can reorder how a line of CLAUDE.md or AGENTS.md reads. Then the invisible
+# format characters, which a person reading the file cannot see and a model reading it still does:
+# the soft hyphen U+00AD, the zero-width space, non-joiner and joiner U+200B-U+200D, the word joiner
+# and invisible operators U+2060-U+2064, U+FEFF, and the tag block U+E0000-U+E007F, whose
+# characters spell out ASCII text that renders as nothing. Code points, not escapes, so no writer
+# can turn them into the characters themselves. memoryLint.js THREAD_STRIP is the same set, held to
+# it by test/threads-compile.sh.
 _THREAD_STRIP = dict.fromkeys([*range(0x00, 0x09), *range(0x0E, 0x1C), *range(0x7F, 0x85),
-                               *range(0x86, 0xA0), 0x061C, 0x200E, 0x200F,
-                               *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
+                               *range(0x86, 0xA0), 0x00AD, 0x061C, *range(0x200B, 0x2010),
+                               *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A),
+                               0xFEFF, *range(0xE0000, 0xE0080)])
 
 
 def _thread_text(raw):

@@ -3979,7 +3979,13 @@ in that file's 1.9.4 change: its after hooks awaiting `fs.promises.rm` (WP-T's `
 Node 20 holds the process is not known. The file now removes its scratch with `removeDirSync`, the
 same retries done synchronously, after the harness teardown (`f93a547`); the CI run on that commit
 passed 8 of 8 with node 20 / Windows in 2 min 37 s (39478664947). The other 27 call sites keep
-`removeDir`, and all of them completed on node 20 / Windows in both of those runs.
+`removeDir`, and all of them completed on node 20 / Windows in both of those runs. A probe from
+the other development box on `3f04d29` (run 39479120498, node 20 / windows-latest) saw what the
+dumps here could not, since they listed the main thread's handles only: besides the stdio pipes,
+one worker thread (threadId 12) that never exited (added 2026-10-20). That fits the fix: the
+file's extension harness runs work on worker threads, and with the removal synchronous the
+process exits. How an awaited `fs.promises.rm` in the after hook kept that worker from ending is
+not established; the synchronous removal is the measured fix.
 
 **The v1.9.0 release no longer exists.** release.yml keeps the three newest releases, so the 1.9.3
 publish deleted v1.9.0 and the 1.9.4 publish deleted v1.9.1. The record's rows that say a v1.9.0 or

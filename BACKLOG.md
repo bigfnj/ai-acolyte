@@ -10,6 +10,21 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Cleared 2026-10-20 for 1.9.4.** A fourth full audit, of what 1.9.2 and 1.9.3 changed, with a
+stricter bar (a reproduction or a trace), filed 22 rows, none above LOW, and verified the eight
+seeds this file held (rows K1, K2, K5, X1, H2, H4, H5 and H6): 19 FIXED and 3 CLOSED-VERIFIED. The
+leftovers its fix packages noticed are each given a disposition in the same record section, so
+none is queued here. Every row and the evidence are in `docs/engineering-record.md` under "The 1.9.4
+audit clearance: the fourth pass (2026-10-20)".
+
+**Released 2026-10-20 as 1.9.4.** The tag `v1.9.4` is at `572fb36`, the `--no-ff` merge of
+`release/1.9.4`. CI is green on all 8 jobs on `f93a547` (run 39478664947) and on the merge
+(39479318907); two earlier runs on the branch hung on node 20 / Windows until a test cleanup was
+made synchronous (the record has the bisection). The published `ai-acolyte-v194.vsix` (release.yml
+run 39479329502) matches the local build in all 66 entries apart from line endings. Against the
+installed 1.9.4: `drive-installed.js` 17 of 17 and `drive-vscode.js` 4 of 4, 6 of 6 and 6 of 6.
+Suite on the integration: 2073 tests, 2067 pass, 0 fail, 6 skipped (masked view 0 fail).
+
 **Cleared 2026-10-20 for 1.9.3.** A third full audit, of what 1.9.2 changed, filed 23 rows, none
 above LOW, and verified the six seeds this file held: 21 FIXED (15 by mutation-tested commits, 5 corrections to
 published text, and H1 a cleanup whose revert is an equivalent mutant), one DECLINED-MEASURED and one
@@ -150,30 +165,7 @@ Re-verify before acting on anything here, including this paragraph.
 
 ## Open
 
-### Seeds for the fourth audit pass (2026-10-20, noticed while fixing the third)
-
-Each was seen by a 1.9.3 fix package outside its brief and is unverified as a finding until the
-fourth pass reads it.
-
-- **A bare word with no verb reaches hook mode.** `wildcard-perms extra` rewrote settings.json in a
-  throwaway home and exited 0 (on a terminal it waits on stdin). The no-verb guard in
-  `bin/wildcard-perms` fires only on a dashed word. No caller passes arguments to hook mode.
-- **`--learn --mode <m>` with no subcommand writes the mode,** then prints the usage with exit 1.
-- **The older CLI test helpers redirect the home but not `CLAUDE_CONFIG_DIR` or `LOCALAPPDATA`**
-  (cli-gates `runCli`, cli-hook `runArgs` and others).
-- **`test/memory-guard-install.test.js` removes its fixture home with no retries,** and earlier runs
-  left `acolyte-memory-guard-install-*`, `acolyte-claude-holder-*` and `acolyte-probe-hooks-*`
-  directories in `%TEMP%`.
-- **Invisible characters outside the strip set still pass:** the Hangul fillers (U+115F, U+1160,
-  U+3164, U+FFA0), musical format controls U+1D173-U+1D17A, interlinear annotation U+FFF9-U+FFFB,
-  shorthand format controls U+1BCA0-U+1BCA3, the Mongolian free variation selectors and
-  U+206A-U+206F (which the display marks but the compile keeps).
-- **Memory file names print raw** in `recall.py --lint` and the compile. NTFS forbids control
-  characters in names, so only CI's Linux jobs can test it.
-- **`vscode-extension/memoryLint.js` does not strip gate bodies,** so its other-store census can
-  differ from Python's for two bodies that differ only in hidden characters.
-- **The `NOT_SPACE` axis of `test/threads-compile.sh` is now wholly stripped,** so it no longer tests
-  anything in thread text (a degenerate generator axis).
+Nothing open (2026-10-20, after 1.9.4). A new entry carries its evidence and its date.
 
 ---
 

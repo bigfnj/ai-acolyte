@@ -3922,3 +3922,91 @@ controls, Mongolian free variation selectors, U+206A-U+206F); memory file names 
 `--lint` and the compile (untestable on NTFS, testable on CI's Linux); `memoryLint.js` gate bodies
 are not stripped, so its other-store census can differ from Python's; the `NOT_SPACE` axis of
 `test/threads-compile.sh` is now wholly stripped, a degenerate axis.
+
+## The 1.9.4 audit clearance: the fourth pass (2026-10-20)
+
+The fourth pass audited what 1.9.3 changed (`0c73531..72f600a`) with the three read-only lenses
+under a stricter bar: a finding needed a reproduction or a trace (an input that gives a wrong
+result, a crash, a hang, a write that should not happen, a refused legitimate call, or a false
+claim), and style and unproven risks went to a separate list. It also verified the eight seeds
+BACKLOG.md held open. It filed 22 rows, none above LOW. Three fix packages took the code rows to
+dispositions on their own branches, merged `--no-ff` into `release/1.9.4` in this order: WP-K
+`fix/cli-hook-194`, WP-T `fix/test-hygiene-194`, WP-H `fix/hidden-set-194`. The integrator took the
+documentation rows (E1 to E8) and two seeds that needed only evidence (K5, X3).
+
+| id | Finding | Disposition |
+|---|---|---|
+| K1 [LOW] | bare words with no verb reach hook mode, which rewrites settings.json and exits 0: `wildcard-perms gates status` (dashes forgotten) and `wildcard-perms extra` (seed a) | **FIXED** WP-K 9c818a5 (any argv with no verb is exit 2 and runs nothing; mutation FIRED; 316 test runs and 49 real invocations checked, no caller passes a bare word) |
+| K2 [LOW] | learn() saves --mode or --threshold before it checks the subcommand: `--learn sacn --mode auto-safe` switches the mode, exit 1 (seed b, wider) | **FIXED** WP-K fa9bf0d (LEARN_ACTIONS checked before any setMode; mutation FIRED) |
+| K3 [NOTE] | `--codex-workspace-rules status --workspace` (no value) throws an uncaught stack trace | **FIXED** WP-K d37921c (the missing value is named with the usage; mutation FIRED) |
+| K4 [NOTE] | GUIDANCE_USAGE omits `[--workspace <path>]` for derived, accept, decline and reset, which the parser accepts; the usage is now the only map | **FIXED** WP-K 0ad79db (GUIDANCE_USAGE names --workspace; a test holds every usage line to verbOptions both ways; 3 mutations FIRED) |
+| K5 [NOTE] | seed c: the older CLI test helpers redirect HOME and USERPROFILE but not CLAUDE_CONFIG_DIR or LOCALAPPDATA | **CLOSED-VERIFIED**: only --memory-guard reads CLAUDE_CONFIG_DIR in the CLI, the helpers never run it unrefused, and with CLAUDE_CONFIG_DIR at an empty sentinel cli-gates, cli-open-threads, cli-hook and cli-auto-learn passed 90 of 90 and the sentinel stayed empty |
+| H1 [LOW] | one variation selector U+FE00-U+FE0F after every visible character survives the strip and the display unmarked (4 hidden bits a character into CLAUDE.md and AGENTS.md) | **FIXED** WP-H a42eb59 (U+FE00-U+FE0D always removed; U+FE0E/U+FE0F kept once after a digit, #, * or a non-ASCII character; 4 mutations FIRED) |
+| H2 [LOW] | seed a: the strip keeps 3765 of 4174 Default_Ignorable code points (E0080-E00FF spells ASCII like the tag block); U+206A-U+206F marked on display but kept by the compile; the KEPT axis pins the gap | **FIXED** WP-H a42eb59 (Unicode 17.0 Default_Ignorable_Code_Point plus named format and control characters, a named visible list; a test against regex's property both ways that says DEGRADED without regex; every Cf placed; display equal to the strip; 9 mutations FIRED) |
+| H3 [LOW] | recall.py search results and `--list` print a memory's description and matching line raw, ESC included | **FIXED** WP-H c09d459 (_shown_text on every human-readable print of memory text; --json unchanged; mutations C1-C3, C10, C13, C14 FIRED) |
+| H4 [LOW] | seed b: memory file names print raw (an RLO on NTFS, ESC on Linux) in --gates-compile stderr and stdout and --lint | **FIXED** WP-H c09d459 (_shown on every printed name or stem; mutations C4-C9, C11, C12, C15 FIRED; the ESC-name case ran on CI's Linux in run 39478664947, threads-compile.sh ALL PASS with no skip line) |
+| H5 [NOTE] | seed c: memoryLint.js gate bodies are not stripped, so its other-store census reports a gate as missing that Python counts as installed | **FIXED** WP-H 4a945cc (GATE_STRIP twin and a Python-compatible trim; body parity added; 5 mutations FIRED, the trim-after-strip mutant equivalent by construction) |
+| H6 [NOTE] | seed d: the NOT_SPACE axis of test/threads-compile.sh is wholly stripped, a degenerate axis | **FIXED** WP-H a42eb59 (U+2800, U+FFFC, U+1D159 with a witness; mutation FIRED) |
+| X1 [NOTE] | rmSync's maxRetries does not retry EPERM on Node 24, so 26 test cleanups that rely on it leave directories behind in exactly the case they exist for | **FIXED** WP-T e41e38c (28 cleanups through removeDir, fs.promises.rm with retries; mutation FIRED) + integrator f93a547 (removeDirSync in extension-open-threads, where removeDir kept CI's Node 20 / Windows test process alive; bisected on CI; mutation FIRED) |
+| X2 [LOW] | scripts/drive-vscode.js keeps every run's profile and nothing prunes them: 112 directories, 2.86 GB on C: | **FIXED** WP-T 668b9ca (prune beyond the 3 newest, exact prefix, lstat, warnings; 3 mutations FIRED); verified on the real %TEMP% at the 1.9.4 drive: 112 profiles, 3.0 GB, to 4, 119 MB |
+| X3 [NOTE] | seed e: leftover acolyte-* temp directories (sources found; not accumulating since 9fb4256 and 4439f88) | **CLOSED-VERIFIED**: the leftovers' sources were found (the held-pipes test before 9fb4256, the probe-hooks fixture before 4439f88, two mutation runs) and none is still accumulating |
+| E1 [LOW] | README and v1.9.3 notes: memory text reaches the terminal escaped; recall.py's own search and --list did not | **FIXED**: H3 and H4 make the README sentence true; the v1.9.3 notes corrected 2026-10-20 |
+| E2 [LOW] | v1.9.3 notes: exit codes for --codex-hook, --max and --codex-max differ from the stated rule | **FIXED**: the v1.9.3 notes corrected 2026-10-20 |
+| E3 [LOW] | README and v1.9.3 notes: every verb refuses before anything runs (learn wrote first, K2) | **FIXED**: K2 makes the sentence true; the v1.9.3 notes corrected 2026-10-20 |
+| E4 [LOW] | README: the probe answers 2 s after its deadline; since 6ee96f6 up to about 5 s when a leftover process holds its directory | **FIXED** 2c17078 (README: up to about 5 s when a leftover process keeps the probe's directory) |
+| E5 [LOW] | BACKLOG and the record miscount pass 3 (21 FIXED, 1 DECLINED-MEASURED, 1 ACCEPTED-RECORDED; 15 by mutation-tested commits) | **FIXED** 2c17078 (BACKLOG: 21 FIXED, 15 by mutation-tested commits, 1 DECLINED-MEASURED, 1 ACCEPTED-RECORDED) |
+| E6 [NOTE] | record row C2 says 2 mutations; 690618f lists 4 | **FIXED** 2c17078 (row C2: 4 mutations) |
+| E7 [NOTE] | record row P4 omits that classifyProbe's 60 s text was kept on purpose | **FIXED** 2c17078 (row P4 says why classifyProbe kept its 60 s text) |
+| E8 [LOW] | v1.9.0's release was pruned by release.yml's keep-three rule at the 1.9.3 publish; record rows that name its corrected body point at a deleted release, and the v1.9.1 and v1.9.2 bodies and README still said "any exit 0" | **FIXED**: README 2c17078 and the v1.9.1 and v1.9.2 bodies corrected 2026-10-20; the prune is recorded in this section (v1.9.1 went the same way at the 1.9.4 publish) |
+
+**The hidden-character set stops being a list.** Each of the second, third and fourth passes found
+a range the hand-written set missed. Since 1.9.4 it is Unicode 17.0's Default_Ignorable_Code_Point,
+written out as ranges with its source and version named, plus the interlinear annotation and
+Egyptian format controls and the C0 and C1 controls, with a named list of format characters that
+render. A test compares the table with the `regex` module's property in both directions and places
+every `unicodedata` Cf code point; where `regex` is absent it prints DEGRADED on every run instead
+of skipping. A Unicode version that adds a format character fails that test until someone places
+it. The display set equals the strip, tested both ways over every code point.
+
+**Node 20 on Windows hung in CI, and the cause sat in a test's cleanup.** The integration CI's
+node 20 / windows-latest job ran `test/extension-open-threads.test.js` to its last test in about 28
+s and then never let that file's process exit (run 39458585848, then 39461213956, both cancelled at
+14 min; a debug run, 39462957968, was cancelled by the owner at 1 h 24 min). Three debug runs on a
+throwaway branch named nothing that held it: after the last test, only the two stdio pipes remained,
+with no referenced timer, request or handle visible from the main thread (39475465959,
+39476692653). The same file as in v1.9.3 finished in 2 min 28 s (39477929287), which put the cause
+in that file's 1.9.4 change: its after hooks awaiting `fs.promises.rm` (WP-T's `removeDir`). Why
+Node 20 holds the process is not known. The file now removes its scratch with `removeDirSync`, the
+same retries done synchronously, after the harness teardown (`f93a547`); the CI run on that commit
+passed 8 of 8 with node 20 / Windows in 2 min 37 s (39478664947). The other 27 call sites keep
+`removeDir`, and all of them completed on node 20 / Windows in both of those runs.
+
+**The v1.9.0 release no longer exists.** release.yml keeps the three newest releases, so the 1.9.3
+publish deleted v1.9.0 and the 1.9.4 publish deleted v1.9.1. The record's rows that say a v1.9.0 or
+v1.9.1 release body was corrected describe bodies that have since gone with their releases; the
+tags and the code remain.
+
+**Evidence for the release.** The tag `v1.9.4` is at `572fb36`, the `--no-ff` merge of
+`release/1.9.4`. The full battery on the integration (`cef27ce`): 2073 tests, 2067 pass, 0 fail, 0
+cancelled, 6 skipped (the masked view 2049 pass, 0 fail, 24 skipped); smoke 18 of 18; every bash
+harness ALL PASS; 307 of 307 line references anchored. CI 8 of 8 on `f93a547` (run 39478664947),
+whose Python job ran the ESC-in-a-file-name case with no skip line, and on the merge (39479318907).
+The published `ai-acolyte-v194.vsix` (release.yml run 39479329502) matches the local build in all
+66 entries apart from line endings. Against the installed 1.9.4: `drive-installed.js` 17 of 17
+(guard copy at revision 4) and `drive-vscode.js` 4 of 4, 6 of 6 and 6 of 6, the first of which
+pruned the real `%TEMP%` from 112 drive profiles (3.0 GB) to 4 (119 MB). The integrator corrected
+the v1.9.1, v1.9.2 and v1.9.3 release bodies the day the pass found their errors.
+
+**The seeds the fourth pass's fix packages left, each given its disposition here (not queued):**
+
+| Seed | Disposition |
+|---|---|
+| `--learn status --mode` and `--guidance derived --workspace` with no value name the problem without the usage that drain and codex-workspace-rules add | **ACCEPTED-RECORDED** (integrator's decision): the message names the option and the missing value, nothing runs, and the K3 test pins each verb's exact text |
+| An empty-string argument reads "unrecognized argument : no verb given" | **ACCEPTED-RECORDED**: refused correctly with exit 2; the wording is the only gap |
+| `cli-hook.test.js` `runArgs` lacks the `CLAUDE_CONFIG_DIR` and `LOCALAPPDATA` redirects | **CLOSED-VERIFIED** with K5 (the sentinel run) |
+| Six scripts in `scripts/` still pass `maxRetries` to `rmSync`, which does not retry EPERM on Node 24 | **ACCEPTED-RECORDED**: each is a measurement or check run by hand, where the worst case is a leftover scratch directory or an EPERM at the end of a run a person is watching |
+| `%TEMP%` leftovers nothing prunes: `pw-installed-drive-*` (58, about 2.7 MB), runtime harness directories (about 200 MB), `acolyte-claude-holder-*` (12), `acolyte-memory-guard-install-*` (10) | **ACCEPTED-RECORDED**: none is still growing from the suite (X3); the owner's cleanup list names them |
+| `drive-vscode.js`'s prune, run while the suite runs, could remove the short-lived drive directory `test/vscode-acceptance-mcp.test.js` creates | **CLOSED-VERIFIED** by reading: that directory is the newest while the test runs, and the prune keeps the three newest, so it goes only if three drive runs start within that test's seconds |
+| `test/codex-contract.test.js` "every emitted rule refuses its own near misses" failed once in WP-T's masked run (the real `codex execpolicy check` exited non-zero with no output) | **ACCEPTED-RECORDED**: once, then 3 of 3 alone and clean in every later battery and CI run; a real Codex CLI call, not this repository's code |
+| `test/dashboard-project-trust.test.js` "a cold push starts no process on the host thread, and both Codex answers still arrive" failed on CI's node 24 / windows-latest (run 39458585848): the stand-in never wrote its app-server mark | **ACCEPTED-RECORDED**: the class recorded as "The trust ask's 10 s budget ran out on a slow CI runner"; the 1.9.4 diff touched only a comment in that file; it passed on node 24 / Windows in the next three runs |
+| The node 20 / Windows hang's root cause in Node | **ACCEPTED-RECORDED**: worked around in the one file (above); not reproduced on a box with Node 24 only |

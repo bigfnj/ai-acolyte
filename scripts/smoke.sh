@@ -81,6 +81,8 @@ check "--bypass status"   'bypass: (ON|OFF)'                          "$(node "$
 # so a crash, a usage error or a verb that fell into hook mode cannot pass.
 check "--memory-guard status" 'memory-guard: (OFF|ON|on \(copy outdated\)|on \(needs repair\)|foreign|unreadable).*policy:' \
   "$(node "$CLI" --memory-guard status 2>&1 | tr '\n' ' ')"
+# Open threads report each agent with ON or OFF, as --gates does.
+check "--open-threads status" 'open threads \[claude\]: (ON|OFF)' "$(node "$CLI" --open-threads status 2>&1)"
 # --learn status emits the state file as JSON, not prose. Pin the one field whose
 # value set is closed, so a malformed or empty state cannot pass.
 check "--learn status"    '"mode": *"(observe|recommend|auto-safe)"'  "$(node "$CLI" --learn status 2>&1)"

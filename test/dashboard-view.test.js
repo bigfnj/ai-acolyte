@@ -2337,7 +2337,7 @@ test('a completed lock cycle gives the lock-contention budget back', async (t) =
 // `error` on the card is not the same thing: it is the message of an EXCEPTION
 // that escaped. A scan that returns while failing to read half the corpus leaves
 // it null, so the card read perfectly healthy. That is exactly the shape of the
-// defect src/auto-learn-manager.js:2893-2895#errors records — a file that failed every
+// defect src/auto-learn-manager.js:2897-2899#errors records — a file that failed every
 // scan for eight days, invisible because a computed number was not passed on.
 
 // Writes the manager's state file wherever the manager would look for it, which
@@ -2505,7 +2505,7 @@ test('an evidence cap that cannot get under its limit says so', async (t) => {
   // the counts that gate an auto-safe apply. That protected set has had a ceiling of its
   // own since 455ab97, but a family carrying a human decision is never evicted to meet
   // it, so the map can still stay over its limit after the prune has done all it can
-  // (src/auto-learn-manager.js:1063-1066#evictable, which also says that residue is all
+  // (src/auto-learn-manager.js:1067-1070#evictable, which also says that residue is all
   // `retainedObservations` reports now; before 455ab97 the set had no bound at all).
   //
   // It was reported to the state file and to the CLI. The panel, which is the only UI
@@ -2685,7 +2685,7 @@ test('a rebuild held open by a missing Codex root names the folder on the scan-h
   env.write({ permissions: { allow: ['Bash(git status *)'], deny: [] } });
   const pending = `path-sha256:${'a'.repeat(24)}`;
   seedAutoLearnState(env.tempHome, { ...SCAN_SEED }, {
-    version: 3, codexEvidenceRevision: 4, codexEvidenceRebuildPending: true, codexEvidencePendingFiles: [pending],
+    version: 3, codexEvidenceRevision: 5, codexEvidenceRebuildPending: true, codexEvidencePendingFiles: [pending],
   });
   // eslint-disable-next-line global-require
   const { createAutoLearnManager } = require('../src/auto-learn-manager');

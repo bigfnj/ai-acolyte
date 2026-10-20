@@ -28,7 +28,7 @@ its own real-host evidence below.
 | High-water policy backup and restore | FIXED in development for captured literal declarations | Saved declarations survive scans and later grants, scoped to their original Codex home/file. Restore preserves current declarations and claims, excludes intentional removals, and journals interrupted writes. Default/custom-home runtime checks and four actual VS Code recovery flows pass. A no-op Restore fails its native group. See the recovery batch below. |
 | Existing rule inventory and prune | Implemented in development for literal local rules | The separate Show Codex rules command lists local allow/prompt/forbidden declarations and source files. Confirmed allow-rule removal records shared suppression before writing; current builds prevent other workspaces and ordinary Undo from reviving a removed prefix. Unsupported computed files and ambiguous ownership are read-only. Real-app acceptance for this development batch is recorded below. |
 | Post-tool approval hook | FIXED in development for after-turn learning | Codex 0.145.0 flushes completed results before Stop, but after synchronous PostToolUse. The Stop adapter scans completed Codex history with the persisted learning mode. Actual no-editor default/custom-profile checks pass success, failure, deduplication, automatic export and fresh-process reuse. Native Configure/Cancel/Remove passes; a no-op writer fails. Hook configuration still requires Codex's separate exact-definition review. Immediate per-tool timing is not claimed. |
-| Shell history scan and outcome learning | Implemented; separate-wait completion FIXED in development | `parseCodexJsonl` (`src/history-adapters.js:1342#parseCodexJsonl`) parses actual new Codex shell transcripts. The real dashboard Scan button learns individually approved executions and deduplicates repeat scans. Fresh direct exec_command/write_stdin runs now preserve success and failure; ambiguous or interactive outcomes remain unknown. Revision 3 replays old Codex evidence once while preserving Claude counts and grant/undo records. Custom cell continuations and unobserved formats remain outside this proof. |
+| Shell history scan and outcome learning | Implemented; separate-wait completion FIXED in development | `parseCodexJsonl` (`src/history-adapters.js:1446#parseCodexJsonl`) parses actual new Codex shell transcripts. The real dashboard Scan button learns individually approved executions and deduplicates repeat scans. Fresh direct exec_command/write_stdin runs now preserve success and failure; ambiguous or interactive outcomes remain unknown. Revision 3 replays old Codex evidence once while preserving Claude counts and grant/undo records. Custom cell continuations and unobserved formats remain outside this proof. |
 | Non-shell Auto Learn | FIXED in development for exact reviewed MCP approvals | Authoritative MCP records supply exact server/tool identity and success/failure/unknown counts without retaining arguments or response bodies. Review changes one native user-config approval setting; these candidates cannot become Claude permissions or shell rules. Actual VS Code passes six groups with seven fresh runtime calls and three failing controls. Hosted web and other built-in tools do not inherit this proof. |
 | Built-in image and web tools | Measured native boundary; hosted-web outcomes remain unverified | Three fresh `view_image` calls needed no approval. Only the valid image returned structured image content; invalid input also emitted a completion event, so completion alone cannot establish success. Seventy historical web completion records exposed no authoritative outcome status. No speculative approval exporter or successful-run counters were added. See the measured boundary below. |
 | Reviewed and automatic policy export | Implemented, including shared ownership in 1.5.10 | Real VS Code safe-apply produces effective rules. The actual dashboard Review button, checkbox and Grant dialog export a rule learned from real Codex history. A fresh process executes it without approval; a different executable still prompts. Shared ownership retains other workspaces' grants and rechecks effective policy even when only ownership changes. The learned custom-command prefix covers its arguments, so changing only an argument is not a negative control for that grant. |
@@ -310,7 +310,7 @@ Evidence is retained in `acolyte-codex-restore-runtime-q6c0KW` and
 `acolyte-codex-restore-runtime-mWJoIr` under the Windows temporary directory.
 
 Derived advice uses current managed policy and per-source evidence
-(`derivedFor`, `src/auto-learn-manager.js:1862#derivedFor`; `src/derived-guidance.js:236#deriveCodexMitigations`). It offers reuse of
+(`derivedFor`, `src/auto-learn-manager.js:1866#derivedFor`; `src/derived-guidance.js:236#deriveCodexMitigations`). It offers reuse of
 known Git query results while their scope and repository state remain unchanged.
 It does not infer historical approval dialogs, suggest bypassing managed policy,
 or copy Claude-specific tool advice into Codex. Unreadable or absent policy preserves
@@ -1334,7 +1334,7 @@ either way. **sqlite is a projection, so the reader was not changed.**
 `codexHistoryStoreState` compares the two on every scan and reports `codexHistoryStale`
 plus `codexHistoryInspected`. The current implementation distinguishes `exact`,
 `unavailable`, `partial` and `skipped`: an unavailable SQLite API is not proof of
-healthy storage or of stale history (`src/history-adapters.js:2575#unavailable`). VS Code 1.141.1
+healthy storage or of stale history (`src/history-adapters.js:2699#unavailable`). VS Code 1.141.1
 (Node 24.21.0) loads `node:sqlite`; hosts within the `^1.80` engine floor may not, so the
 `unavailable` tier stays (measured 2026-10-13). This storage check does not detect every
 possible rollout-format change.
@@ -1356,7 +1356,7 @@ migrations as notes rather than reasons, and flags a store cursor past the end o
 transcript. Three of the four archived rollouts are forks whose head carries two
 `session_meta` records, the fork's and then its parent's; the append-slice seed now applies
 both, as the full read does, so a fork read again after it is moved is not counted twice
-(`codexHeadSeed`, `src/history-adapters.js:1987#codexHeadSeed`).
+(`codexHeadSeed`, `src/history-adapters.js:2111#codexHeadSeed`).
 
 **Idle rollouts are compressed in place.** Measured 2026-10-16 on the development box, 17
 threads: nine rollouts had become `rollout-<ts>-<uuid>.jsonl.zst`, five in
@@ -1402,8 +1402,8 @@ successful and declined outcomes with the packaged parser. That closes the missi
 claim for this shape. The September 28 direct exec_command/write_stdin proof above closes
 terminal process completion for that shape. Custom cell continuations, other unobserved
 shell/tool formats and parser-format monitoring remain open. `classifyCodexOutput` is
-defined at `src/history-adapters.js:799#classifyCodexOutput`; nested outcomes are handled by
-`applyCodexGroupResult` at `src/history-adapters.js:1178#applyCodexGroupResult`.
+defined at `src/history-adapters.js:870#classifyCodexOutput`; nested outcomes are handled by
+`applyCodexGroupResult` at `src/history-adapters.js:1280#applyCodexGroupResult`.
 
 **Legacy evidence is rebuilt with an audit trail.** State version 2 records a parser
 revision and per-source counts. Old Codex cursors are reread with the corrected parser;

@@ -158,8 +158,8 @@ workspaces. Computed policy remains read-only. This feature is included in the
 Version 1.6.0 also adds **Restore Codex rules**
 (`vscode-extension/extension.js:5147#showCodexRestorePicker`). Restore preserves current rules and deliberate
 removals. The retained catalog lives under the user's `.ai-acolyte/backups` directory
-(`src/auto-learn-manager.js:1427#codexBackupPath`). Codex derived guidance has separate policy and run
-evidence (`src/auto-learn-manager.js:1862#derivedFor`); observed runs are not reported as measured
+(`src/auto-learn-manager.js:1431#codexBackupPath`). Codex derived guidance has separate policy and run
+evidence (`src/auto-learn-manager.js:1866#derivedFor`); observed runs are not reported as measured
 approval prompts. Actual restore and guidance controls now pass in a staged VS Code
 host, with deliberate no-op controls that fail the intended checks. The detailed
 development evidence and supported boundaries remain in the compatibility document.

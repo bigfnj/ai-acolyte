@@ -2409,10 +2409,10 @@ Unrebased whole-object writers still outstanding:
 
 | Site | Nature |
 |---|---|
-| `const updated = {` at `src/auto-learn-manager.js:2374-2377#updated`, written `src/auto-learn-manager.js:2431#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2428-2430#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
-| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2975#next`, written `src/auto-learn-manager.js:3056#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
-| `change.before.content` at `src/auto-learn-manager.js:2111#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2107#change.afterHash`. |
-| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3075#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3071#item.restored.hash` hash guard. |
+| `const updated = {` at `src/auto-learn-manager.js:2378-2381#updated`, written `src/auto-learn-manager.js:2435#change.content` | The apply path. Has an `unchanged()` recheck at `src/auto-learn-manager.js:2432-2434#unchanged`, so it is **check-then-act, not CAS** — a write landing between the check and the `renameSync` inside `atomicWrite` is undetected. When it *is* detected it **throws**, so a routine Claude Code `/model` write turns a legitimate apply into a user-visible error plus rollback churn. |
+| `{ ...permissions, allow: next }` at `src/auto-learn-manager.js:2979#next`, written `src/auto-learn-manager.js:3060#item.content` | **A fourth site, previously unrecorded.** `releaseClaudeGrants`, for `undo()`. Same shape, and **weaker** — no `unchanged()` recheck before the write at all. |
+| `change.before.content` at `src/auto-learn-manager.js:2115#change.before.content` | `rollback()` restores it — a full-file write of stale bytes, guarded only by an `afterHash` check at `src/auto-learn-manager.js:2111#change.afterHash`. |
+| `atomicWrite(item.target.path, item.current.content)` at `src/auto-learn-manager.js:3079#item.current.content` | `undo()`'s inner rollback, same shape, `src/auto-learn-manager.js:3075#item.restored.hash` hash guard. |
 | `{ ...local, permissions }` at `src/local-settings.js:287#local` | Different file (`.claude/settings.local.json`) but the same class — and **the widest read-to-write window in the repo**: `src/local-settings.js:225#readFileSync` read → `src/local-settings.js:287#writeFileAtomicSync` write, spanning two `readUserSettings()` calls AND a full `writeAllow` to user settings. Claude Code writes this file too; it is where project-scoped "always approve" lands. `createSettingsWriter({ settingsPath: <local> })` would work here. |
 
 **Why the migration is blocked, and it is not a small thing.** `applyUnlocked`
@@ -2427,7 +2427,7 @@ Three further blockers for whoever attempts it:
 - Neither writer takes a backup, and `undo()` depends on `beforeHash` and
   `existed`. `change.afterHash` must be recorded from what the writer *actually
   wrote*, not from `change.content`, or `undo()`'s `untouched` test misclassifies.
-- `rollback()` at `src/auto-learn-manager.js:2111#change.before.content` blindly restores `change.before.content`. If the writer
+- `rollback()` at `src/auto-learn-manager.js:2115#change.before.content` blindly restores `change.before.content`. If the writer
   rebased onto fresher bytes, rollback reverts the concurrent change — the exact
   bug, at the failure site.
 - The new vanish guard in `writeTransform` would make `rollback()` **re-create a
@@ -3131,7 +3131,7 @@ refused while off, now name the command where they said "Enable it" in settings.
 `autoLearnConfig` reads it through `vscode-extension/extension.js:1435#tightenOnlySetting`. The
 census above ("The settings census behind S2") called the key safe, because a scan writes only the
 learner's own state. That holds in `recommend`. In `auto-safe` every scan applies grants
-(`src/auto-learn-manager.js:2925#application`), so a repository's `true` could restart unattended
+(`src/auto-learn-manager.js:2929#application`), so a repository's `true` could restart unattended
 applies for a user who turned Auto Learn off and left the mode at auto-safe. That census row is
 superseded by this section. A workspace `false` still turns it off. A looser value is ignored, with
 the same single output line as the other four keys:

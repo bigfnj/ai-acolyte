@@ -50,8 +50,12 @@ const VERSION = 3;
 // nested command (3521c46) withheld, a declined MCP call withheld (3f9a224),
 // and the fork head seed (9abc330). Without it, a transcript already scanned
 // kept the verdicts the older parser gave it. Re-read old cursors once while
-// preserving grants and their Undo transactions.
-const CODEX_EVIDENCE_REVISION = 4;
+// preserving grants and their Undo transactions. Revision 5 (2026-10-20) re-reads
+// once for Codex 0.162/0.163 code mode: a cell of several literal commands is
+// credited from its printed exec_command results (customExecRunsSucceeded), and a
+// guardian rejection, bare or after printed output, is withheld rather than failed.
+// On one day's real sessions that took the credited commands from 567 to 1,378.
+const CODEX_EVIDENCE_REVISION = 5;
 // The oldest on-disk version this code can still make sense of. A state written
 // below it is reset rather than read, which is the reset mechanism that did not
 // exist: `VERSION` was write-only, so bumping it did nothing at all and the one
@@ -999,7 +1003,7 @@ function changeOutcome(item, before, after, source) {
 // deduped by `observationHashes`, so it cannot inflate a count", and for the
 // files it evicts that was false. A cursor-less file takes `mode: 'full'`
 // (`safeContinuation` returns false with no prior), a full read emits every
-// observation in the file wholesale (`src/history-adapters.js:2503#selected`), and each
+// observation in the file wholesale (`src/history-adapters.js:2627#selected`), and each
 // one whose hash is gone is counted again -- into `counts.success`, which is
 // what `isAutoSafeCandidate` gates an automatic allow-list write on. Measured
 // on the live state file 2026-09-22: observationHashes 20,000 of 20,000 with

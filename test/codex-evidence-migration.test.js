@@ -11,7 +11,7 @@ const { scanHistoryFiles } = require('../src/history-adapters');
 // The current Codex evidence revision (src/auto-learn-manager.js,
 // CODEX_EVIDENCE_REVISION). Pinned by value rather than imported, so a change that
 // lowered it, or forgot it, fails here. 4 since 2026-10-13.
-const CURRENT_REVISION = 4;
+const CURRENT_REVISION = 5;
 
 test('MCP parser revision reopens unchanged cursors once and preserves policy while replacing false shell evidence', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acolyte-mcp-evidence-revision-'));

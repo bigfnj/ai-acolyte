@@ -35,6 +35,8 @@ function harness(t, options = {}) {
     RelativePattern: class { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
     Range: class { constructor(startLine, startCharacter, endLine, endCharacter) { Object.assign(this, { startLine, startCharacter, endLine, endCharacter }); } },
     Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
+    Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
+    DiagnosticRelatedInformation: class { constructor(location, message) { Object.assign(this, { location, message }); } },
     DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
     Uri: { file: (fsPath) => ({ scheme: 'file', fsPath }) },
     languages: { createDiagnosticCollection(name) { creates += 1; assert.equal(name, 'codex-memory'); return collection; } },
@@ -146,6 +148,55 @@ test('a missing-reference Problem sits on the line that cites it, not on line 0'
   assert.equal(diagnostic.code, 'missing-reference');
   assert.deepEqual([diagnostic.range.startLine, diagnostic.range.endLine], [2, 2],
     'WITNESS the adapter line reaches the published Range');
+});
+
+// Synthetic names in Codex's `<timestamp>-<id>-<slug>.md` form (src/codex-memory.js has the rule).
+const OLD_SUMMARY = 'rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md';
+const NEW_SUMMARY = 'rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug.md';
+
+test('a renamed-reference Problem links the file Codex renamed the summary to', async (t) => {
+  const h = harness(t);
+  const registry = h.write('MEMORY.md', `# Task Group\n## Task 1\n- ${OLD_SUMMARY}\n`);
+  const current = h.write(NEW_SUMMARY, '# Synthetic rollout\n');
+  h.lint.activate(); await flush();
+  const [diagnostic] = h.entries.get(registry);
+  assert.equal(diagnostic.code, 'renamed-reference');
+  assert.equal(diagnostic.range.startLine, 2);
+  assert.equal(diagnostic.relatedInformation.length, 1);
+  const [related] = diagnostic.relatedInformation;
+  assert.equal(related.location.uri.fsPath, current, 'WITNESS the link opens the current file');
+  assert.deepEqual([related.location.range.startLine, related.location.range.endLine], [0, 0]);
+  assert.equal(related.message, `Current file: ${NEW_SUMMARY}`);
+});
+
+test('a renamedTo outside the root or naming an unselected file publishes no link', async (t) => {
+  // MUTATION: the selected-file check `files.has(target)` -> `true`. The unselected name is
+  // linked and this fails. Confirmed 2026-10-26.
+  const h = harness(t);
+  const report = h.descriptor();
+  const registry = report.files[0].path;
+  report.files.push({ path: path.join(h.memoryRoot, 'rollout_summaries', 'selected.md'), relativePath: 'rollout_summaries/selected.md' });
+  report.diagnostics.push(...[['../x.md', 1], ['rollout_summaries/../../x.md', 2], [NEW_SUMMARY, 3], ['rollout_summaries/selected.md', 4]]
+    .map(([renamedTo, line]) => ({ path: registry, code: 'renamed-reference', severity: 'warning', line, message: `Synthetic ${line}`, renamedTo })));
+  h.lint.readMemory = async () => report;
+  h.lint.activate(); await flush();
+  assert.deepEqual(h.entries.get(registry).map((diagnostic) => [diagnostic.range.startLine,
+    diagnostic.relatedInformation?.map((related) => related.location.uri.fsPath)]), [
+    [1, undefined], [2, undefined], [3, undefined],
+    [4, [report.files[1].path]],
+  ], 'only a selected file under this root is linked');
+});
+
+test('without DiagnosticRelatedInformation or Location the renamed Problem still publishes', async (t) => {
+  const h = harness(t);
+  delete h.vscode.DiagnosticRelatedInformation; delete h.vscode.Location;
+  const registry = h.write('MEMORY.md', `# Task Group\n- ${OLD_SUMMARY}\n`);
+  h.write(NEW_SUMMARY, '# Synthetic rollout\n');
+  h.lint.activate(); await flush();
+  const [diagnostic] = h.entries.get(registry);
+  assert.equal(diagnostic.code, 'renamed-reference');
+  assert.equal(diagnostic.relatedInformation, undefined);
+  assert.equal(h.reports.at(-1).error, undefined);
 });
 
 test('root and directory read failures stay visible in reports without creating fake file Problems', async (t) => {

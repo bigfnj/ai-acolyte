@@ -190,6 +190,10 @@ const TEST_ONLY = {
   'src/codex-mcp-config.js': {
     inspectCodexMcpTool: 'the read-only primitive production wraps in the reviewed proposal API',
   },
+  // 2026-10-26. Production enters through readCodexConsolidation, which runs it per pipeline.
+  'src/codex-consolidation.js': {
+    probeWorkspaceOwnership: 'the git ownership check, driven with an injected run and platform in test/codex-consolidation.test.js',
+  },
   'src/auto-learn.js': {
     AUTO_SAFE_GIT: 'held equal to policy-exporters.js AUTO_SAFE_GIT_SUBCOMMANDS',
     AUTO_SUFFIX_CLOSED_ROOTS: 'held equal to the policy exporters\' copy',

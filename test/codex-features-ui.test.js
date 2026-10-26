@@ -123,6 +123,75 @@ test('memory inspection shows native diagnostics without a Claude line cap or en
   assert.equal(fs.existsSync(path.join(f.codexHome, 'config.toml')), false);
 });
 
+// Codex's consolidation job (src/codex-consolidation.js). The worker reads it beside the
+// native files and merges its one warning; Inspect prints what the worker read.
+let sqlite = null;
+try { sqlite = require('node:sqlite'); } catch { sqlite = null; }
+const SqliteDatabase = sqlite && (typeof sqlite.Database === 'function' ? sqlite.Database : sqlite.DatabaseSync);
+const exactTier = typeof SqliteDatabase === 'function';
+if (!exactTier) {
+  process.stderr.write(`\n[codex-features-ui] SKIPPING the consolidation tier: node:sqlite is unavailable on ${process.version}.\n\n`);
+}
+function failingJob(codexHome) {
+  const db = new SqliteDatabase(path.join(codexHome, 'memories_1.sqlite'));
+  db.exec(`CREATE TABLE jobs (kind TEXT, job_key TEXT, status TEXT, worker_id TEXT, ownership_token TEXT,
+    started_at INTEGER, finished_at INTEGER, lease_until INTEGER, retry_at INTEGER, retry_remaining INTEGER,
+    last_error TEXT, input_watermark INTEGER, last_success_watermark INTEGER)`);
+  db.prepare('INSERT INTO jobs (kind, job_key, status, finished_at, retry_at, retry_remaining, last_error) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('memory_consolidate_global', 'global', 'error', 1792999080, 1793002680, 2, 'failed_workspace_commit');
+  db.close();
+}
+
+// MUTATION: return `memory.diagnostics` alone from the worker's codexMemory operation. The
+// warning never reaches the lint, and this fails.
+test('the native memory worker merges one consolidation warning beside the files\' own', { skip: !exactTier }, (t) => {
+  const f = fixture(t);
+  failingJob(f.codexHome);
+  fs.writeFileSync(path.join(f.root, 'memory_summary.md'), 'v0\nNative summary.\n');
+  f.options.run = () => { throw new Error('the git check spawned with no .git in the fixture'); };
+  const report = run({ operation: 'codexMemory', options: f.options, args: [{}] });
+  const warnings = report.diagnostics.filter((item) => item.code === 'consolidation-failed');
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].line, 0);
+  assert.equal(warnings[0].path, report.files.find((file) => file.relativePath === 'MEMORY.md').path,
+    'on the MEMORY.md the lint publishes, so it is a Problems entry');
+  assert.ok(report.diagnostics.some((item) => item.code === 'summary-version'), 'the files\' own diagnostics are kept');
+  assert.deepEqual(Object.keys(report.consolidation).sort(), ['probes', 'v1', 'v2']);
+  assert.equal(report.consolidation.v1.status, 'error');
+  assert.equal(report.chunks.length, 0, 'no query, no passages');
+});
+
+test('Inspect prints the consolidation job the worker read, and runs nothing', { skip: !exactTier }, async (t) => {
+  const f = fixture(t);
+  failingJob(f.codexHome);
+  let spawned = 0;
+  f.options.run = () => { spawned += 1; return { status: 0, stderr: '' }; };
+  await f.ui.inspectMemory();
+  const report = f.seen.opened[0].content;
+  const lines = report.split('\n');
+  const header = lines.indexOf('Codex memory consolidation (read-only: one row of the jobs table)');
+  const fileLine = lines.findIndex((line) => /^MEMORY\.md: \d+ bytes, \d+ lines$/.test(line));
+  assert.ok(fileLine > 0 && header > fileLine, 'the job follows the file list');
+  assert.equal(lines[header - 1], '');
+  assert.equal(lines[header + 1], 'v1 (memories): memories_1.sqlite, read');
+  assert.match(report, /^ {2}status: error$/m);
+  assert.match(report, /^ {2}last error: failed_workspace_commit$/m);
+  assert.match(report, /^ {2}retries left: 2$/m);
+  assert.match(report, /^ {2}finished: .+ \(2026-10-26T\d\d:\d\d:00\.000Z\)$/m);
+  assert.match(report, /^MEMORY\.md:1: Codex memory consolidation is failing \(failed_workspace_commit\)/m);
+  assert.equal(spawned, 0, 'no .git in the fixture, so the git check never ran');
+  assert.deepEqual(fs.readdirSync(f.codexHome).sort(), ['memories', 'memories_1.sqlite'], 'the read created nothing');
+});
+
+test('Inspect says so when the Codex home has no consolidation database', async (t) => {
+  const f = fixture(t);
+  await f.ui.inspectMemory();
+  const lines = f.seen.opened[0].content.split('\n');
+  const header = lines.indexOf('Codex memory consolidation (read-only: one row of the jobs table)');
+  assert.ok(header > 0);
+  assert.equal(lines[header + 1], 'No memories_<n>.sqlite in this Codex home, so there is no consolidation job to read.');
+});
+
 test('hook UI reviews complete command, honors cancel, and configures only after chosen action', async (t) => {
   const f = fixture(t);
   const file = path.join(f.codexHome, 'hooks.json');

@@ -23,10 +23,26 @@ function run(data) {
   }
   if (operation === 'codexMemory') {
     const { readCodexMemory, queryCodexMemory } = require('./codex-memory');
-    const memory = readCodexMemory(data?.options || {});
-    const query = data?.args?.[0]?.query;
-    return { ...memory, chunks: typeof query === 'string' && query.trim()
-      ? queryCodexMemory(memory, query, { limit: 30 }) : [] };
+    const options = data?.options || {};
+    const request = data?.args?.[0] || {};
+    const memory = readCodexMemory(options);
+    // The consolidation job's status rides on this report, and ONLY here: readCodexMemory
+    // is also what the native gates signature (src/codex-memory-gates.js) and recall read,
+    // and a job status that changes every retry must not move either. A failure costs the
+    // line, never the memory report (src/codex-consolidation.js).
+    let consolidation;
+    try {
+      const { readCodexConsolidation } = require('./codex-consolidation');
+      consolidation = readCodexConsolidation({ ...options, probes: request.probes });
+    } catch (error) {
+      consolidation = { v1: { state: 'unreadable', reason: String(error?.message || error).slice(0, 160) },
+        v2: null, probes: { v1: null, v2: null }, diagnostics: [] };
+    }
+    const query = request.query;
+    return { ...memory,
+      consolidation: { v1: consolidation.v1, v2: consolidation.v2, probes: consolidation.probes },
+      diagnostics: [...memory.diagnostics, ...consolidation.diagnostics],
+      chunks: typeof query === 'string' && query.trim() ? queryCodexMemory(memory, query, { limit: 30 }) : [] };
   }
   const manager = createAutoLearnManager(data?.options || {});
   // `rebuildManagedHits` belongs here even though no UI path calls it yet: it is

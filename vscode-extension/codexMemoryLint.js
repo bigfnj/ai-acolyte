@@ -172,6 +172,15 @@ class CodexMemoryLint {
         hint: this.vscode.DiagnosticSeverity.Hint }[item.severity] ?? this.vscode.DiagnosticSeverity.Warning;
       const diagnostic = new this.vscode.Diagnostic(new this.vscode.Range(line, 0, line, 1), String(item.message), severity);
       diagnostic.source = 'Codex native memory'; diagnostic.code = item.code;
+      // A renamed-reference links the summary's current file, but only a selected file under
+      // this root: the name comes from the worker, and a link is a path the user will open.
+      // Older hosts or stubs without the two classes publish the Problem without the link.
+      const target = typeof item.renamedTo === 'string' && /^rollout_summaries\/[^/\\]+\.md$/.test(item.renamedTo)
+        ? path.resolve(path.join(report.root, ...item.renamedTo.split('/'))) : null;
+      if (target && files.has(target) && this.vscode.DiagnosticRelatedInformation && this.vscode.Location) {
+        diagnostic.relatedInformation = [new this.vscode.DiagnosticRelatedInformation(new this.vscode.Location(
+          this.vscode.Uri.file(target), new this.vscode.Range(0, 0, 0, 0)), `Current file: ${item.renamedTo}`)];
+      }
       if (!grouped.has(item.path)) grouped.set(item.path, []);
       grouped.get(item.path).push(diagnostic);
     }

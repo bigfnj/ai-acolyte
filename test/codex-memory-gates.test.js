@@ -174,9 +174,12 @@ test('malformed scope scalars hold installed instructions while valid non-global
 // vscode-extension/codexFeaturesUi.js Inspect already does for the reader's lines.
 test('merged native-gate diagnostics share one line convention: 0-based, naming the offending line', (t) => {
   const box = fixture(t);
-  const memory = '---\nscope: "global\n---\nSee rollout_summaries/missing.md for context.\n<!-- gate -->\n- x\n<!-- /gate -->\n';
+  const memory = '---\nscope: "global\n---\nSee rollout_summaries/missing.md for context.\n'
+    + 'Earlier session: rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md\n<!-- gate -->\n- x\n<!-- /gate -->\n';
   const files = {
     'MEMORY.md': memory,
+    // The summary Codex renamed the cited one to (synthetic names). No frontmatter: no gate diagnostics.
+    'rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug.md': '# Synthetic rollout\n',
     'rollout_summaries/nested.md': '---\nscope: global\n---\nintro\n<!-- gate -->\na\n<!-- gate -->\nb\n<!-- /gate -->\n',
     'rollout_summaries/unpaired.md': '---\nscope: global\n---\nintro\n<!-- /gate -->\n',
     'rollout_summaries/unclosed.md': '---\nscope: global\nno closing fence\n',
@@ -188,6 +191,7 @@ test('merged native-gate diagnostics share one line convention: 0-based, naming 
   // What each code must point at, as text on the 0-based line it names.
   const marker = {
     'missing-reference': 'rollout_summaries/missing.md', 'invalid-scope': 'scope:',
+    'renamed-reference': 'rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md',
     'nested-gate': '<!-- gate -->', 'unpaired-gate': '<!-- /gate -->', 'unclosed-frontmatter': '---',
   };
   const seen = new Set();
@@ -204,9 +208,25 @@ test('merged native-gate diagnostics share one line convention: 0-based, naming 
   }
   // Both producers really are in the one array, or the check above proves nothing.
   assert.ok(seen.has('missing-reference'), 'the memory reader contributed a line-bearing diagnostic');
+  assert.ok(seen.has('renamed-reference'), 'the memory reader contributed its renamed-reference diagnostic');
   for (const code of ['invalid-scope', 'nested-gate', 'unpaired-gate', 'unclosed-frontmatter']) {
     assert.ok(seen.has(code), `the gate checks contributed ${code}`);
   }
+});
+
+// A renamed-reference is a warning, and only an error holds the compilation, so a store whose
+// MEMORY.md still cites a summary Codex renamed compiles its gates as before (2026-10-26). Its
+// diagnostics are part of sourceSignature, so the fingerprint itself changes once on upgrade.
+test('a renamed rollout-summary reference is a warning that leaves the native gate compilation complete', (t) => {
+  const box = fixture(t);
+  box.write('MEMORY.md', globalGate('- Renamed fixture rule.') + 'Earlier session: rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md\n');
+  box.write('rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug.md', '# Synthetic rollout\n');
+  const status = api.inspectNativeCodexGates(box.options);
+  assert.deepEqual(status.diagnostics.map(item => [item.code, item.severity]), [['renamed-reference', 'warning']]);
+  assert.equal(status.complete, true, 'WITNESS a warning does not block the compilation');
+  assert.equal(status.compilationState, 'ready');
+  assert.equal(status.count, 1);
+  assert.equal(status.canEnable, true);
 });
 
 test('comment-only metadata and separated scope comments preserve an explicit global annotation', (t) => {
@@ -528,4 +548,35 @@ test('failed rollback preserves concurrent instruction edits and reports the rem
     return true;
   });
   assert.match(fs.readFileSync(box.override, 'utf8'), /Concurrent owner note/);
+});
+
+// Codex's consolidation job status rides on the worker's codexMemory report only
+// (src/auto-learn-worker.js), never on readCodexMemory, which this reads. A status that
+// changes on every hourly retry must not move the signature that the gate fingerprint
+// and the automatic refresh are keyed on (2026-10-26, src/codex-consolidation.js).
+// MUTATION (by construction, not run: it would edit src/codex-memory.js): push
+// readCodexConsolidation's diagnostics into readCodexMemory's result. The signature then
+// moves and the warning appears here, and this fails.
+let gatesSqlite = null;
+try { gatesSqlite = require('node:sqlite'); } catch { gatesSqlite = null; }
+const GatesDatabase = gatesSqlite && (typeof gatesSqlite.Database === 'function' ? gatesSqlite.Database : gatesSqlite.DatabaseSync);
+if (typeof GatesDatabase !== 'function') {
+  process.stderr.write(`\n[codex-memory-gates] SKIPPING the consolidation test: node:sqlite is unavailable on ${process.version}.\n\n`);
+}
+test('native gates never see consolidation status', { skip: typeof GatesDatabase !== 'function' }, (t) => {
+  const box = fixture(t); box.write('MEMORY.md', globalGate('- Keep the signature still.'));
+  const before = api.inspectNativeCodexGates(box.options);
+  const db = new GatesDatabase(path.join(box.codexHome, 'memories_1.sqlite'));
+  db.exec('CREATE TABLE jobs (kind TEXT, job_key TEXT, status TEXT, finished_at INTEGER, retry_at INTEGER, retry_remaining INTEGER, last_error TEXT)');
+  db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('memory_consolidate_global', 'global', 'error', 1792999080, 1793002680, 2, 'failed_workspace_commit');
+  db.close();
+  const after = api.inspectNativeCodexGates(box.options);
+  assert.equal(after.sourceSignature, before.sourceSignature);
+  assert.equal(after.fingerprint, before.fingerprint);
+  assert.equal(after.diagnostics.some(item => item.code === 'consolidation-failed'), false);
+  // Witness: the same home through the worker does carry the warning, so the store is real.
+  const { run } = require('../src/auto-learn-worker');
+  const report = run({ operation: 'codexMemory', options: { ...box.options, run: () => { throw new Error('spawned'); } }, args: [{}] });
+  assert.equal(report.diagnostics.filter(item => item.code === 'consolidation-failed').length, 1);
 });

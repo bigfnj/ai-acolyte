@@ -47,6 +47,9 @@ const SITES = [
       + 'the worker reaches it (not detached, so in the worker\'s group on POSIX)', proof: /closed = new Promise\(resolve => child\.once\('close', resolve\)\);/ },
   { file: 'src/codex-mcp-config.js', spawner: 'configRpcOffThread', text: "require('./spawn-thread').configRpcOffThread(requests, options, context)",
     how: 'the config RPC on a thread: configRpcOffThread hands its ThreadChild to options.track (src/spawn-thread.js), which ends its tree through END_TREE' },
+  { file: 'src/codex-consolidation.js', spawner: 'spawnSync', text: ': spawnSync;',
+    how: `${SYNC}; probeWorkspaceOwnership, a one-shot read-only \`git rev-parse --git-dir\` ownership check on the Auto Learn `
+      + 'worker thread (never the host), once per failed consolidation, bounded by PROBE_TIMEOUT_MS', proof: /timeout: PROBE_TIMEOUT_MS,/ },
   { file: 'src/codex-recall.js', spawner: 'spawnSync', text: 'const processResult = spawnSync(runtime.pythonExecutable',
     how: `${SYNC}; the CPU semantic recall bridge, bounded by its timeout`, proof: /input: JSON\.stringify\(input\), encoding: 'utf8', env, timeout,/ },
   { file: 'src/codex-version.js', spawner: 'spawnSync', text: ': spawnSync;',

@@ -44,7 +44,7 @@ while the install is not current and a compile can run (with no DevToolbox venv 
 instead). The whole card is hidden while `memory.enabled` is off; the
 open threads keep running, and the palette command still reaches them.
 
-Version **1.9.6** supports Codex history-based learning, reviewed rule changes, recovery,
+Version **1.10.0** supports Codex history-based learning, reviewed rule changes, recovery,
 MCP approvals, instruction guidance and native memory workflows. Real-editor and fresh
 Codex runtime checks verify the documented outcomes. Coverage remains scoped to the
 tested CLI, platform, policy syntax and tool shapes; the feature-by-feature acceptance
@@ -179,7 +179,7 @@ so catastrophic paths belong in `permissions.deny` — which this extension neve
 
 The Auto Learn card carries **Scan now**, **Review (N)**, **Undo**, **Why prompt?** and
 **Turn on** / **Turn off**, and they post five of the message arms the webview host handles; the switch is at
-`vscode-extension/extension.js:5398#switch`. This sentence has now been wrong three times: twice it
+`vscode-extension/extension.js:5410#switch`. This sentence has now been wrong three times: twice it
 claimed four was the total, once it cited a DESCENDING range, and the correction itself then
 cited the wrong line. The
 second time cited a DESCENDING line range, which is not a range at all.
@@ -242,10 +242,10 @@ automatic workspace export setting.
 
 **Show Codex rules** lists local literal allow, prompt and forbidden rules; confirmed
 removal applies only to supported allow declarations ("Remove this Codex allow rule?",
-`vscode-extension/extension.js:5347#showWarningMessage`).
+`vscode-extension/extension.js:5359#showWarningMessage`).
 Auto Learn remembers removals across workspaces. **Restore Codex rules**
 adds captured missing declarations while preserving current rules and excluding deliberate
-removals (`vscode-extension/extension.js:5147#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
+removals (`vscode-extension/extension.js:5159#showCodexRestorePicker`, [restore exclusions](../src/codex-policy-backup.js#L168)). Computed
 policy stays read-only. Interrupted writes offer an explicit completion step.
 
 **Review Codex MCP approvals** reviews one observed server/tool pair. Approval changes
@@ -335,12 +335,12 @@ the probe and what has been observed.
 The semantic-recall side of memory hygiene is `memory/recall.py`, a separate CPU tool
 (bge-small ONNX cosine fused with BM25). The **script** is bundled into the VSIX:
 packaging copies it into `extMemory` (`scripts/package.mjs:39#extMemory`), and `recallScriptPath`
-(`extension.js:675#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
+(`extension.js:679#recallScriptPath`) probes that bundled copy before any checkout, so a fresh install
 can rebuild the index with no repository on disk. The ~32MB model is **not** bundled; the
 Memory card fetches it on first use into `~/.claude/wildcarding/models/`, writing
 `<name>.<pid>.<random>.tmp` (unique per download, so two windows downloading at once never
 share one, since 2026-10-13) and renaming on success. **Cancel** or any failure unlinks
-that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:941#fs.unlinkSync`) —
+that partial inside `close()`'s callback — `fs.unlinkSync(tmp)` (`extension.js:945#fs.unlinkSync`) —
 and resolves only after it, so a cancelled download leaves nothing behind. Unlinking *beside*
 the close raced the still-open write handle and lost on Windows, which orphaned every
 cancelled transfer. A download whose host is **killed** (a crash, not a normal
@@ -353,7 +353,7 @@ live transfer. See the Memory card section below.
 
 The dashboard also carries a **Memory card** that surfaces what the lint gauge
 doesn't — the state of the CPU recall model and the vector cache. The card's own
-status is a passive filesystem probe: `recallStatus` (`extension.js:752#recallStatus`) tests for
+status is a passive filesystem probe: `recallStatus` (`extension.js:756#recallStatus`) tests for
 the model asset and the venv, and never runs Python.
 
 - **CPU LLM** status: `ready` when both `bge-small.onnx` and the DevToolbox venv
@@ -375,7 +375,7 @@ the model asset and the venv, and never runs Python.
   ours off rather than repairing it, because the guard is never added beside another one.
 
 Python does run unattended in two other places, both gated on your having opted in.
-`autoSyncRecallIfStale` (`extension.js:1154#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
+`autoSyncRecallIfStale` (`extension.js:1158#autoSyncRecallIfStale`) runs `recall.py` **incrementally** — not
 `--rebuild` — on startup and whenever `MEMORY.md` changes, and only when the cache is
 genuinely behind the corpus. Staleness is decided per file, on size and mtime, by
 `entryMatchesFile` (`src/recall-index.js:104#entryMatchesFile`) — plus the embed identity, and never a bare
@@ -425,12 +425,23 @@ only and a repository's `.vscode/settings.json` cannot set either.
 
 The separate **Codex memory** row reads `memory_summary.md`, `MEMORY.md`,
 `rollout_summaries/*.md` and `skills/*/SKILL.md` under the selected Codex home's `memories`
-directory. Raw inputs, sessions and SQLite are excluded ([discoverCodexMemory](../src/codex-memory.js#L101)).
+directory. Raw inputs and sessions are excluded ([discoverCodexMemory](../src/codex-memory.js#L101)).
+Of Codex's SQLite, exactly one row is read: the `memory_consolidate_global` job's status in the
+`jobs` table, six columns, read-only, in the highest `memories_<n>.sqlite` and any
+`memories_v2_<n>.sqlite` ([readCodexConsolidation](../src/codex-consolidation.js)).
 Ambient diagnostics refresh when sources are created, edited or deleted
 ([codexMemoryLint](codexMemoryLint.js#L66)). Codex line counts are informational; Claude's
 index-line budget is not imposed on the native registry. The extension reports absent or
 unreadable sources and does not infer feature enablement, generate memories or rewrite
 native files ([inspectMemory](codexFeaturesUi.js#L106)).
+
+When Codex rewrites a rollout summary it keeps the file's `<timestamp>-<id>` prefix, gives it a new
+slug and deletes the old file, while `MEMORY.md` keeps citing the old name until Codex's own
+consolidation rewrites it. Such a reference reads **renamed-reference**, a warning that names the
+current file, and its Problems entry links to that file
+([renamedSummary](../src/codex-memory.js#L283), [publishDiagnostics](codexMemoryLint.js#L178)).
+It is reported only when the cited file is gone and exactly one readable summary shares the
+prefix; any other unresolved reference stays **missing-reference**. Neither changes a Codex file.
 
 **Search native memory** combines CPU BGE similarity with keyword matching and opens the
 exact current source passage. **Rebuild Codex recall index** re-embeds selected passages
@@ -440,6 +451,23 @@ assets without downloading a model or using the GPU. When semantic retrieval is 
 search reports the reason and offers keyword matches ([searchMemory fallback](codexFeaturesUi.js#L62)).
 Actual editor checks cover semantic passage selection, BOM offsets, rebuild and the visible
 fallback. Rebuild reports failure rather than claiming a keyword-only result rebuilt vectors.
+
+**Consolidation status** (2026-10-26). Codex rewrites `MEMORY.md` in a phase-2 consolidation
+job, and when that job fails the registry goes stale with nothing on the Codex side to say so.
+The card shows one line under its issues line: when the job last consolidated, or that it
+failed, with its error code and the next retry
+(`Consolidation: failed 09:18 (failed_workspace_commit) · retry 10:18`). The line is muted
+unless the job is failing, and never changes the row's state on its own. A failing job also
+raises one `consolidation-failed` warning on line 1 of `MEMORY.md` in Problems, worded without
+clock times so the entry does not change on every retry. **Inspect memory sources** prints the
+job's times (local and UTC), its retries and what the git check found. That check runs on
+Windows only, when the job failed with `failed_workspace_commit` and the memory folder is a git
+repository: the Auto Learn worker runs `git -C <folder> rev-parse --git-dir` once per failed
+attempt, read-only and bounded at 2.5 s, because on a box where Codex runs elevated git refused
+the Administrators-owned folder as "dubious ownership" (measured). The warning then quotes git's
+own suggested `safe.directory` command, kept only when it names that folder. It is git's text,
+and the extension never runs it; nor does it write Codex's database, the memory folder or git's
+configuration ([describeConsolidation](../src/codex-consolidation.js)).
 
 **Review native memory gates** is implemented separately from the shared Memory gates
 switch. It compiles deliberate extension annotations: leading `scope: global` frontmatter

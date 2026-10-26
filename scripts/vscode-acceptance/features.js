@@ -216,6 +216,32 @@ exports.run = async function run() {
       return 'Real filesystem events clear repaired diagnostics, restore the missing-reference diagnostic, and clear deleted-file Problems entries.';
     });
     if (results.some((item) => item.verdict === 'FAIL')) return;
+    await check('a cited rollout summary Codex renamed reaches Problems as renamed-reference with a real link to its current file', async () => {
+      // Codex's `<timestamp>-<id>-<slug>.md` form, synthetic: same prefix, a new slug, the old file absent.
+      const cited = `rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug_${suffix}.md`;
+      const currentName = `rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug_${suffix}.md`;
+      const current = path.join(memory, ...currentName.split('/'));
+      fs.writeFileSync(current, '# Fixture rollout\nThe renamed summary.\n');
+      fs.writeFileSync(summary, `v1\nNative fixture summary.\n${cited}\n`);
+      // diagnostics(file) keeps code, message and severity; the link needs the real objects.
+      const renamed = await waitFor(() => {
+        const items = vscode.languages.getDiagnostics(vscode.Uri.file(summary)).filter((item) => item.source === 'Codex native memory');
+        return items.length === 1 && items[0].code === 'renamed-reference' && items[0].relatedInformation?.length === 1 ? items[0] : null;
+      }, 'WITNESS a renamed summary publishes renamed-reference linking its current file');
+      assert.equal(renamed.range.start.line, 2);
+      assert.equal(renamed.message, `Selected-memory reference was renamed by Codex: ${cited} is now ${currentName}.`);
+      const [related] = renamed.relatedInformation;
+      assert.equal(normalized(related.location.uri.fsPath), normalized(current));
+      assert.equal(related.location.range.start.line, 0);
+      assert.equal(related.message, `Current file: ${currentName}`);
+      features.diagnostics.push({ phase: 'reference-renamed', path: summary, values: diagnostics(summary),
+        related: [{ path: related.location.uri.fsPath, line: related.location.range.start.line, message: related.message }] });
+      fs.unlinkSync(summary);
+      fs.unlinkSync(current);
+      await waitFor(() => diagnostics(summary).length === 0, 'WITNESS deleting the renamed fixture clears its Problem');
+      return 'A real filesystem write of a summary citing a renamed rollout summary publishes renamed-reference with a DiagnosticRelatedInformation link to the current file; deleting the fixture clears it.';
+    });
+    if (results.some((item) => item.verdict === 'FAIL')) return;
     await check('actual native-memory search maps both first and later UTF-8 BOM passages into editor selections', async () => {
       const first = `# Task: Acolyte BOM first ${suffix}\n\nBomfirst${suffix} uses the copper path.\n\n`;
       const later = `# Task: Acolyte BOM later ${suffix}\n\nBomlater${suffix} uses the violet path.\n`;

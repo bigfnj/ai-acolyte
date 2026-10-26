@@ -8,6 +8,12 @@ For Claude Code it watches `~/.claude/settings.json` and generalizes individual
 approvals into command families. Auto Learn reads Claude Code and Codex history
 and emits policy in each agent's native format.
 
+**Version 1.10.0 explains a stale Codex `MEMORY.md`**: a reference to a rollout summary that Codex
+has since renamed reads `renamed-reference` and links the summary's current file, instead of
+"missing or unreadable"; and the Codex memory card shows whether Codex's own memory consolidation is
+succeeding, from one status row of Codex's jobs table, read-only. On Windows, when git refuses a
+memory folder that an elevated Codex created, the card and the Problems entry quote git's own
+`safe.directory` remedy, which the extension never runs.
 **Version 1.9.6 reads the newest Codex builds' sessions**: on Codex 0.162 and 0.163, a code-mode
 cell that runs several commands is credited when every printed result exited 0, so Auto Learn
 learns from approved escalations again; a command the guardian reviewer rejected is no longer
@@ -103,7 +109,7 @@ extension too:
 
 ```bash
 npm run package                                   # builds the .vsix
-code --install-extension ai-acolyte-v196.vsix
+code --install-extension ai-acolyte-v1100.vsix
 ```
 
 Name the version rather than globbing it. Old builds accumulate in the repo root, they

@@ -123,6 +123,44 @@ test('memory inspection shows native diagnostics without a Claude line cap or en
   assert.equal(fs.existsSync(path.join(f.codexHome, 'config.toml')), false);
 });
 
+// Codex's consolidation job (src/codex-consolidation.js). The worker reads it beside the
+// native files and merges its one warning; Inspect prints what the worker read.
+let sqlite = null;
+try { sqlite = require('node:sqlite'); } catch { sqlite = null; }
+const SqliteDatabase = sqlite && (typeof sqlite.Database === 'function' ? sqlite.Database : sqlite.DatabaseSync);
+const exactTier = typeof SqliteDatabase === 'function';
+if (!exactTier) {
+  process.stderr.write(`\n[codex-features-ui] SKIPPING the consolidation tier: node:sqlite is unavailable on ${process.version}.\n\n`);
+}
+function failingJob(codexHome) {
+  const db = new SqliteDatabase(path.join(codexHome, 'memories_1.sqlite'));
+  db.exec(`CREATE TABLE jobs (kind TEXT, job_key TEXT, status TEXT, worker_id TEXT, ownership_token TEXT,
+    started_at INTEGER, finished_at INTEGER, lease_until INTEGER, retry_at INTEGER, retry_remaining INTEGER,
+    last_error TEXT, input_watermark INTEGER, last_success_watermark INTEGER)`);
+  db.prepare('INSERT INTO jobs (kind, job_key, status, finished_at, retry_at, retry_remaining, last_error) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('memory_consolidate_global', 'global', 'error', 1792999080, 1793002680, 2, 'failed_workspace_commit');
+  db.close();
+}
+
+// MUTATION: return `memory.diagnostics` alone from the worker's codexMemory operation. The
+// warning never reaches the lint, and this fails.
+test('the native memory worker merges one consolidation warning beside the files\' own', { skip: !exactTier }, (t) => {
+  const f = fixture(t);
+  failingJob(f.codexHome);
+  fs.writeFileSync(path.join(f.root, 'memory_summary.md'), 'v0\nNative summary.\n');
+  f.options.run = () => { throw new Error('the git check spawned with no .git in the fixture'); };
+  const report = run({ operation: 'codexMemory', options: f.options, args: [{}] });
+  const warnings = report.diagnostics.filter((item) => item.code === 'consolidation-failed');
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].line, 0);
+  assert.equal(warnings[0].path, report.files.find((file) => file.relativePath === 'MEMORY.md').path,
+    'on the MEMORY.md the lint publishes, so it is a Problems entry');
+  assert.ok(report.diagnostics.some((item) => item.code === 'summary-version'), 'the files\' own diagnostics are kept');
+  assert.deepEqual(Object.keys(report.consolidation).sort(), ['probes', 'v1', 'v2']);
+  assert.equal(report.consolidation.v1.status, 'error');
+  assert.equal(report.chunks.length, 0, 'no query, no passages');
+});
+
 test('hook UI reviews complete command, honors cancel, and configures only after chosen action', async (t) => {
   const f = fixture(t);
   const file = path.join(f.codexHome, 'hooks.json');

@@ -4161,3 +4161,62 @@ what ran; a cell with a branch, loop or callback before its last site, or whose 
 match its sites, credits nothing; a process still running when its cell returned credits nothing until
 a terminal result is joined. Each would need Codex to record the executed command and its outcome
 itself, which these builds do not (no `exec_command_end` for a nested call).
+
+## Renamed rollout summaries: a stale reference that names its file (1.10.0, 2026-10-26)
+
+**The report.** The Problems panel showed `missing-reference` warnings ("Selected-memory reference
+is missing or unreadable: rollout_summaries/...") for rollout summaries that were not lost: Codex
+had renamed them. There were 6 on the live store by 2026-10-26 12:00. Why `MEMORY.md` went stale,
+Codex's phase-2 consolidation failing on that box, is covered by a sibling 1.10.0 section. This one
+covers what the lint says until consolidation runs again.
+
+**The naming, measured.** Codex names a summary `<YYYY-MM-DDTHH-MM-SS>-<id>-<slug>.md`. All 21
+summaries on the live store match. The id is four characters mixing digits and both cases, and the
+model chooses the slug. When Codex re-runs stage 1 for a session it writes the summary under a new
+slug and deletes the old file; the timestamp-and-id prefix stays. Only phase-2 consolidation
+rewrites `MEMORY.md`, so until it runs `MEMORY.md` cites the old name.
+
+**The rule, and why it is strict.** A reference that is not a readable selected file reads
+`renamed-reference`, a warning on the same line with a `renamedTo` field, only when three things
+hold: the whole cited path matches `ROLLOUT_SUMMARY_NAME` in src/codex-memory.js (the exact
+timestamp shape, a four-character id, a slug); discovery never saw the cited file; and exactly one
+readable summary shares the prefix. The message names both files, and the Problems entry links the
+current one through `relatedInformation`. The publisher adds that link only for a
+`rollout_summaries/<name>.md` that resolves to a selected file under the report's root, because the
+name comes from the worker and a link is a path the user will open. The rule is strict for the
+reason the 2026-10-13 `Related skill:` rule gives in the same file: a false warning that never
+clears costs more than a missed one. A wrong "is now" sends the reader to the wrong file. A missed
+rename still reads `missing-reference`, which stays true.
+
+**Unreadable files.** A cited file that exists but cannot be read is not renamed, so it stays
+"missing or unreadable". That covers invalid UTF-8, a file over the read limit, a file that changed
+during the read, and one discovery could not even stat: such a file is not in `files`, but its
+storage diagnostic names it, and the set of discovered paths includes those names. A same-prefix
+file that cannot be read is never a candidate, because the prefix index holds readable summaries
+only.
+
+**What stays `missing-reference`.** Zero candidates or two or more, a five-character id, a
+malformed timestamp, a name with no slug, any `skills/` pointer and any other name that is not in
+Codex's form. `unsafe-reference` is unchanged, and the adapter still writes no Codex file.
+
+**The gates fingerprint changes once (ACCEPTED-RECORDED).** `inspectNativeCodexGates` hashes the full
+diagnostics array into `sourceSignature`, and so into the enable `fingerprint`. On a store with a
+renamed citation the code and message change on upgrade, so both change once. A gate review opened
+before the upgrade reads stale and must be reopened, and the next refresh rewrites the extension's
+own `compiled.json` with the new signature. The compiled body and the installed instruction text do
+not change. A warning blocks nothing, because only an error makes the compilation incomplete; a
+store whose `MEMORY.md` cites a renamed summary compiles its gates as before. The signature is left
+as it is: it changes the same way whenever a store's diagnostics change.
+
+**Evidence.** Tests in test/codex-memory.test.js: the unique-candidate case (code, 0-based line,
+`renamedTo`, both names in the message, native bytes unchanged by sha256); a table of six cases that
+stay missing, each with a readable lure a looser rule would name; a cited file with invalid UTF-8,
+and one that cannot be statted, beside a readable sibling; an unreadable sibling as the only
+candidate; and detection in the summary, a rollout summary and a skill. test/codex-memory-lint.test.js:
+the link to the current file, no link for `../x.md`, a traversing name or an unselected file, and a
+publish without the two VS Code classes. test/codex-memory-gates.test.js: `renamed-reference` on its
+own line in the merged diagnostics array, and a renamed citation alone leaves the compilation
+complete. The real-editor features scenario waits for a `renamed-reference` with a real link.
+Mutations (scripts/mutate-check.js), each FIRED: the id `{4}` widened to `+`; `=== 1` widened to
+`> 0`; the discovered guard replaced by `true`; the prefix index built over every discovered path;
+detection limited to the registry; the publisher's selected-file check replaced by `true`.

@@ -174,9 +174,12 @@ test('malformed scope scalars hold installed instructions while valid non-global
 // vscode-extension/codexFeaturesUi.js Inspect already does for the reader's lines.
 test('merged native-gate diagnostics share one line convention: 0-based, naming the offending line', (t) => {
   const box = fixture(t);
-  const memory = '---\nscope: "global\n---\nSee rollout_summaries/missing.md for context.\n<!-- gate -->\n- x\n<!-- /gate -->\n';
+  const memory = '---\nscope: "global\n---\nSee rollout_summaries/missing.md for context.\n'
+    + 'Earlier session: rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md\n<!-- gate -->\n- x\n<!-- /gate -->\n';
   const files = {
     'MEMORY.md': memory,
+    // The summary Codex renamed the cited one to (synthetic names). No frontmatter: no gate diagnostics.
+    'rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug.md': '# Synthetic rollout\n',
     'rollout_summaries/nested.md': '---\nscope: global\n---\nintro\n<!-- gate -->\na\n<!-- gate -->\nb\n<!-- /gate -->\n',
     'rollout_summaries/unpaired.md': '---\nscope: global\n---\nintro\n<!-- /gate -->\n',
     'rollout_summaries/unclosed.md': '---\nscope: global\nno closing fence\n',
@@ -188,6 +191,7 @@ test('merged native-gate diagnostics share one line convention: 0-based, naming 
   // What each code must point at, as text on the 0-based line it names.
   const marker = {
     'missing-reference': 'rollout_summaries/missing.md', 'invalid-scope': 'scope:',
+    'renamed-reference': 'rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md',
     'nested-gate': '<!-- gate -->', 'unpaired-gate': '<!-- /gate -->', 'unclosed-frontmatter': '---',
   };
   const seen = new Set();
@@ -204,9 +208,25 @@ test('merged native-gate diagnostics share one line convention: 0-based, naming 
   }
   // Both producers really are in the one array, or the check above proves nothing.
   assert.ok(seen.has('missing-reference'), 'the memory reader contributed a line-bearing diagnostic');
+  assert.ok(seen.has('renamed-reference'), 'the memory reader contributed its renamed-reference diagnostic');
   for (const code of ['invalid-scope', 'nested-gate', 'unpaired-gate', 'unclosed-frontmatter']) {
     assert.ok(seen.has(code), `the gate checks contributed ${code}`);
   }
+});
+
+// A renamed-reference is a warning, and only an error holds the compilation, so a store whose
+// MEMORY.md still cites a summary Codex renamed compiles its gates as before (2026-10-26). Its
+// diagnostics are part of sourceSignature, so the fingerprint itself changes once on upgrade.
+test('a renamed rollout-summary reference is a warning that leaves the native gate compilation complete', (t) => {
+  const box = fixture(t);
+  box.write('MEMORY.md', globalGate('- Renamed fixture rule.') + 'Earlier session: rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md\n');
+  box.write('rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug.md', '# Synthetic rollout\n');
+  const status = api.inspectNativeCodexGates(box.options);
+  assert.deepEqual(status.diagnostics.map(item => [item.code, item.severity]), [['renamed-reference', 'warning']]);
+  assert.equal(status.complete, true, 'WITNESS a warning does not block the compilation');
+  assert.equal(status.compilationState, 'ready');
+  assert.equal(status.count, 1);
+  assert.equal(status.canEnable, true);
 });
 
 test('comment-only metadata and separated scope comments preserve an explicit global annotation', (t) => {

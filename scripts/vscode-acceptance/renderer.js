@@ -1246,7 +1246,7 @@ async function main() {
         assert.equal(suffix[1], report.memoryFixtureSuffix, 'native memory searches must stay in the same fixture');
         assert.equal(fixture.expectedLabel, `${search.label} ${suffix[1]}`);
         assert.equal(fixture.expectedDescription, `MEMORY.md:${search.line}`);
-        assert.equal(dashboard.searchCodexMemory.text, 'Search native memory…');
+        assert.equal(dashboard.searchCodexMemory.text, 'Search Codex memory…');
         await dashboardClick('searchCodexMemory', 'button');
         const input = await exactPicker('AI Acolyte: Search Codex memory');
         await fillInput(input, fixture.query);
@@ -1322,7 +1322,7 @@ async function main() {
       assert.ok(fixture.expectedPath.replace(/\\/g, '/').endsWith('/memories/' + expected[2]));
       assert.equal(fixture.mode, fixture.caseId === 'search-fallback' ? 'lexical' : 'hybrid');
       assert.ok(typeof fixture.expectedText === 'string' && fixture.expectedText.startsWith('# ' + expected[1] + '\n'));
-      assert.equal(dashboard.searchCodexMemory.text, 'Search native memory…');
+      assert.equal(dashboard.searchCodexMemory.text, 'Search Codex memory…');
       await dashboardClick('searchCodexMemory', 'button');
       const input = await exactPicker('AI Acolyte: Search Codex memory');
       await fillInput(input, fixture.query); await key('Enter', 'Enter', 13);

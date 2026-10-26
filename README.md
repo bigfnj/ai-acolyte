@@ -376,7 +376,9 @@ the same tool over two agents. Each shows the CPU model, four figures and an iss
 has **Search**, **Rebuild** and **Inspect memory sources**, a gates line with **Review**, and its
 agent's version. Codex's per-session figure is its `memory_summary.md`, which a Codex session
 loads when its memory is on. The two keep separate indexes on purpose, so a search of one
-agent's memory never returns the other's.
+agent's memory never returns the other's. The Codex card adds one line for Codex's own
+consolidation job, the one that rewrites `MEMORY.md`: when it last ran, or that it is failing
+and when it retries, read from one row of Codex's SQLite and never written.
 
 ### The MEMORY.md guard (Claude Code, optional)
 

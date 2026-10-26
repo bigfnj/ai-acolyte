@@ -425,7 +425,10 @@ only and a repository's `.vscode/settings.json` cannot set either.
 
 The separate **Codex memory** row reads `memory_summary.md`, `MEMORY.md`,
 `rollout_summaries/*.md` and `skills/*/SKILL.md` under the selected Codex home's `memories`
-directory. Raw inputs, sessions and SQLite are excluded ([discoverCodexMemory](../src/codex-memory.js#L101)).
+directory. Raw inputs and sessions are excluded ([discoverCodexMemory](../src/codex-memory.js#L101)).
+Of Codex's SQLite, exactly one row is read: the `memory_consolidate_global` job's status in the
+`jobs` table, six columns, read-only, in the highest `memories_<n>.sqlite` and any
+`memories_v2_<n>.sqlite` ([readCodexConsolidation](../src/codex-consolidation.js)).
 Ambient diagnostics refresh when sources are created, edited or deleted
 ([codexMemoryLint](codexMemoryLint.js#L66)). Codex line counts are informational; Claude's
 index-line budget is not imposed on the native registry. The extension reports absent or
@@ -440,6 +443,23 @@ assets without downloading a model or using the GPU. When semantic retrieval is 
 search reports the reason and offers keyword matches ([searchMemory fallback](codexFeaturesUi.js#L62)).
 Actual editor checks cover semantic passage selection, BOM offsets, rebuild and the visible
 fallback. Rebuild reports failure rather than claiming a keyword-only result rebuilt vectors.
+
+**Consolidation status** (2026-10-26). Codex rewrites `MEMORY.md` in a phase-2 consolidation
+job, and when that job fails the registry goes stale with nothing on the Codex side to say so.
+The card shows one line under its issues line: when the job last consolidated, or that it
+failed, with its error code and the next retry
+(`Consolidation: failed 09:18 (failed_workspace_commit) · retry 10:18`). The line is muted
+unless the job is failing, and never changes the row's state on its own. A failing job also
+raises one `consolidation-failed` warning on line 1 of `MEMORY.md` in Problems, worded without
+clock times so the entry does not change on every retry. **Inspect memory sources** prints the
+job's times (local and UTC), its retries and what the git check found. That check runs on
+Windows only, when the job failed with `failed_workspace_commit` and the memory folder is a git
+repository: the Auto Learn worker runs `git -C <folder> rev-parse --git-dir` once per failed
+attempt, read-only and bounded at 2.5 s, because on a box where Codex runs elevated git refused
+the Administrators-owned folder as "dubious ownership" (measured). The warning then quotes git's
+own suggested `safe.directory` command, kept only when it names that folder. It is git's text,
+and the extension never runs it; nor does it write Codex's database, the memory folder or git's
+configuration ([describeConsolidation](../src/codex-consolidation.js)).
 
 **Review native memory gates** is implemented separately from the shared Memory gates
 switch. It compiles deliberate extension annotations: leading `scope: global` frontmatter

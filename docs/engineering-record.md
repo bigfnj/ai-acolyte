@@ -4161,3 +4161,97 @@ what ran; a cell with a branch, loop or callback before its last site, or whose 
 match its sites, credits nothing; a process still running when its cell returned credits nothing until
 a terminal result is joined. Each would need Codex to record the executed command and its outcome
 itself, which these builds do not (no `exec_command_end` for a nested call).
+
+## Codex memory consolidation: why MEMORY.md stopped changing (1.10.0, 2026-10-26)
+
+**The report.** On a Windows box where Codex runs elevated, `~/.codex/memories/MEMORY.md` had
+stopped changing, and the lint's `missing-reference` warnings named rollout summaries Codex had
+since renamed. Nothing on the Codex side said why. Diagnosed read-only.
+
+**The cause chain.** Codex rewrites MEMORY.md in a phase-2 consolidation job whose state is one row
+of `~/.codex/memories_<n>.sqlite`, table `jobs`, `kind = 'memory_consolidate_global'`,
+`job_key = 'global'`. It read `status = 'error'`, `last_error = 'failed_workspace_commit'`, two
+retries left, the next an hour after the last. Codex runs elevated, so `~/.codex/**` is owned by
+`BUILTIN\Administrators`. After the consolidation agent, Codex runs `git read-tree --reset HEAD` in
+the memory folder, and the real git, at Medium integrity, refuses a repository owned by another
+principal ("detected dubious ownership"). Codex records only the code; git's stderr, the one place
+the cause is written down, is lost. A non-elevated `git -C <folder> rev-parse --git-dir`
+reproduces the refusal without writing anything (exit 128, git's suggested `safe.directory`
+command tab-indented and unquoted). The opt-in v2 pipeline (`memories_v2`, `memories_v2_<n>.sqlite`)
+held the same failure a minute apart.
+
+**Why the read sits outside readCodexMemory.** `readCodexMemory` (src/codex-memory.js) is also
+what `inspectNativeCodexGates` hashes into `sourceSignature`, and so into the gate fingerprint and
+the automatic refresh, and what recall reads. A job status that changes on every retry would
+invalidate a reviewed gate install for nothing and churn both. So the row is read only in the
+worker's `codexMemory` operation (src/auto-learn-worker.js), which feeds the lint and Inspect, and
+merged there; a failure of that read costs the line and never the memory report. Pinned by "native
+gates never see consolidation status" in test/codex-memory-gates.test.js.
+
+**The privacy boundary.** One row, six columns: `status`, `last_error`, `started_at`,
+`finished_at`, `retry_at`, `retry_remaining`, each selected only where the column exists, with
+`kind` and `job_key` in the WHERE clause. Never another row (the stage-1 rows beside it name
+threads), never `worker_id`, `ownership_token`, `lease_until` or a watermark, and never a write:
+the database is opened through `withReadOnlyDatabase` (src/history-adapters.js), now exported for
+this third reader. `status` and `last_error` are kept only when they are plain codes, and withheld
+otherwise; a time is kept only between 2000 and 2100; a failure reason names the database by its
+basename. The fixtures put `SECRET` in the token, the worker id and the stage-1 rows and assert it
+never reaches the result.
+
+**The git check, its limits and its cache.** Windows only, and only for `status = 'error'` with
+`failed_workspace_commit` and a `.git` in the folder. `git -C <folder> rev-parse --git-dir`, found
+through `resolvedLaunch` (a batch launcher is not run: cmd.exe would re-parse the path), with
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR` and the `GIT_CONFIG_*` injection
+variables removed, `GIT_CEILING_DIRECTORIES` at the folder's parent, `LC_ALL=C`, no prompt, stdout
+ignored and a 2.5 s timeout. Of stderr, only git's `git config --global --add safe.directory <path>`
+line is kept, and only when the path is this folder (case, slashes and a `\\?\` prefix ignored,
+then the real paths compared); the rest names accounts and SIDs and is dropped unlogged. The answer
+is cached on the host, because each worker operation is a fresh thread: the key is the pipeline,
+database, `finished_at`, `last_error`, folder and the mtime and size of the two global git config
+files, so the check runs once per failed attempt and once more after the user edits their git
+config. A timeout is tried once more, then held.
+
+**Where the spawn runs.** On the Auto Learn worker thread, never on the extension host thread, whose
+dashboard push must make no `spawnSync` (test/dashboard-project-trust.test.js). The site is listed in
+test/src-spawn-census.test.js with its proof (`timeout: PROBE_TIMEOUT_MS,`). 2.5 s sits under the
+runner's 5 s terminate deadline (vscode-extension/autoLearnWorkerRunner.js), so a wedged git cannot
+outlive a teardown's terminate.
+
+**How it degrades.**
+
+| Condition | State | Card line | Problems |
+|---|---|---|---|
+| No Codex home, or no `memories_<n>.sqlite` | `absent` | none (when there is no v2 store either) | none |
+| `node:sqlite` missing from the runtime | `unavailable` | `Consolidation status: not available (node:sqlite)`, muted | none |
+| The database will not open or read | `unreadable` | `Consolidation status unreadable: memories_1.sqlite: <reason>`, muted | none |
+| No `jobs` table, or no `kind`, `job_key` or `status` | `unknown-schema` | muted | none |
+| No row for the job | `no-row` | `Consolidation: not run yet`, muted | none |
+| `running` | `read` | `running since HH:MM`, muted | none |
+| `done`, `succeeded`, `succeeded_no_workspace_changes` | `read` | `consolidated HH:MM` (` (no changes)`), muted | none |
+| `error` | `read` | `⚠ Consolidation: failed HH:MM (<code>) · retry HH:MM` (or `retry due`, `no retries left`, and the git answer), foreground | one `consolidation-failed` warning on MEMORY.md, v1 only, with no clock time in it |
+| The read itself threw on the worker | `unreadable` | muted | none; the memory report is untouched |
+
+The line never sets the row's state; a failing job reaches the row's issue count as its one Problems
+entry. v2 never raises one, having no MEMORY.md.
+
+**Measured on the box after it landed.** By then the user's global git config had `safe.directory`
+entries for both folders. The read-only run against the real store read both rows `error` /
+`failed_workspace_commit` with the retry due, the check exited 0 for both, and the line read
+`Consolidation: failed 09:18 (failed_workspace_commit) · retry due · git: accepts the folder now ·
+v2: failed 09:18`. Whether the exception fixes the job is unproven until Codex retries and
+succeeds (docs/codex-compatibility.md, "Still not proven").
+
+**Declined.**
+- **A quick fix.** The extension never writes native memory, Codex's database or git's
+  configuration, and a global `safe.directory` entry is a standing trust decision for a folder
+  another principal owns. The warning quotes git's own command; running it is the user's call.
+- **A database watcher.** The lint's 5-minute reconcile (vscode-extension/codexMemoryLint.js)
+  re-reads the row, Codex's retries are an hour apart, and a watcher on a WAL database that stage-1
+  writes to for every rollout would fire for rows this never reads.
+
+**Tests and mutations.** test/codex-consolidation.test.js (17 tests, 8 needing `node:sqlite`), plus
+three in test/codex-features-ui.test.js, two in test/dashboard-view.test.js (the render, and the
+payload through the real worker thread), one in test/codex-memory-gates.test.js, the census entry
+and the dead-export entry. Four mutants FIRED with scripts/mutate-check.js: the generation sort
+reversed, the warning condition widened from `=== 'error'` to `!== 'done'`, the folder comparison
+replaced by `true`, and `finished_at` dropped from the cache key.

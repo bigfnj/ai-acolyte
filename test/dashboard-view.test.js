@@ -148,6 +148,15 @@ function harness(tempHome, opts = {}) {
         withProgress(options, task) { progress.push(options.title); return task({ report() {} }); },
       } : {}),
     },
+    // Only where a test asks for it (`opts.nativeLint`): what the Codex memory lint needs to
+    // activate (vscode-extension/codexMemoryLint.js). Without it activate() throws inside the
+    // extension's try, and the card carries that error, which every other test here expects.
+    ...(opts.nativeLint ? {
+      languages: { createDiagnosticCollection() { return { clear() {}, set() {}, dispose() {} }; } },
+      Diagnostic: class Diagnostic { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
+      DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
+      Range: class Range { constructor(...bounds) { this.bounds = bounds; } },
+    } : {}),
     ...(opts.withProgress ? { ProgressLocation: { Notification: 15 } } : {}),
     workspace: {
       // `opts.isTrusted` and `opts.workspaceFolders` override the one trusted folder
@@ -157,6 +166,11 @@ function harness(tempHome, opts = {}) {
       isTrusted: opts.isTrusted ?? true,
       workspaceFolders: opts.workspaceFolders ?? [{ uri: { fsPath: path.join(tempHome, 'workspace') } }],
       createFileSystemWatcher(pattern) {
+        // The Codex memory lint disposes what its subscriptions return (opts.nativeLint), as VS
+        // Code's real watcher events give it a Disposable.
+        if (opts.nativeLint) {
+          return { pattern, onDidChange: disposable, onDidCreate: disposable, onDidDelete: disposable, dispose() {} };
+        }
         return { pattern, onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} };
       },
       getConfiguration() {
@@ -1044,6 +1058,93 @@ test('the Codex memory row says 1 issue, 1 file and 1 section, and keeps plurals
     assert.deepEqual(render(6, 2, 2), ['6 files · 2 issues', 'Native memory gates: 2 sections; current.']);
     assert.deepEqual(render(0, 0, 0), ['0 files', 'Native memory gates: 0 sections; current.']);
   } finally { app.dispose(); }
+});
+
+// Codex's consolidation job (src/codex-consolidation.js, 2026-10-26): a line of its own under
+// the issues line, in the foreground with a ⚠ while the job fails, muted otherwise, empty with
+// no store. The row state stays the issue count's: a failing job reaches it as its one Problems
+// entry (the worker test below), never through this line.
+// MUTATION: add `|| (m.consolidation && m.consolidation.tone === 'warn')` to the row's warn
+// condition in renderCodexMemory. The row reads warn with no issues, and this fails.
+test('the Codex memory card draws the consolidation line, and the line alone never colours the row', async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const app = harness(env.tempHome);
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    await settle();
+    const html = ui.view.webview.html;
+    assert.match(html, /<div class="memissues" id="codexMemIssues"><\/div>\s*<div class="muted sub" id="codexConsolidation"><\/div>/,
+      'the line sits right under the issues line');
+    const panel = runPanelScript(html);
+    const { describeConsolidation } = require('../src/codex-consolidation');
+    // Local noon, so neither time below crosses midnight and both read as HH:MM.
+    const now = new Date(2026, 9, 26, 12, 0, 0).getTime();
+    const seconds = Math.floor(now / 1000);
+    const row = { pipeline: 'v1', state: 'read', db: 'memories_1.sqlite', root: 'C:/Users/someone/.codex/memories',
+      status: 'error', lastError: 'failed_workspace_commit', finishedAt: seconds - 600, retryAt: seconds + 3000, retryRemaining: 2 };
+    const failing = describeConsolidation({ v1: row, v2: null, probes: {} }, now);
+    const done = describeConsolidation({ v1: { ...row, status: 'succeeded', lastError: null } }, now);
+    assert.deepEqual([failing.tone, done.tone], ['warn', 'info'], 'precondition: one of each tone');
+    const show = (consolidation, issues = 0) => {
+      panel.deliver({ ...ui.posted[0], codexMemory: { state: 'readable', files: 2, issues, consolidation } });
+      const line = panel.dom.byId.get('codexConsolidation');
+      return { text: line.textContent, className: line.className, title: line.title,
+        row: panel.dom.byId.get('stCodexMemory').className };
+    };
+    const warned = show(failing);
+    assert.equal(warned.text, '⚠ ' + failing.line);
+    assert.match(warned.text, /^⚠ Consolidation: failed \d\d:\d\d \(failed_workspace_commit\) · retry \d\d:\d\d$/);
+    assert.equal(warned.className, 'sub', 'a failing job is in the foreground');
+    assert.equal(warned.title, failing.title);
+    assert.equal(warned.row, 'rowstate', 'the line alone never colours the row');
+    const quiet = show(done);
+    assert.equal(quiet.text, done.line);
+    assert.equal(quiet.className, 'muted sub');
+    assert.equal(quiet.row, 'rowstate');
+    const none = show(null);
+    assert.deepEqual([none.text, none.className, none.title], ['', 'muted sub', '']);
+    assert.equal(show(failing, 1).row, 'rowstate warn', 'the failing job\'s Problems entry is what colours the row');
+  } finally { await app.dispose(); }
+});
+
+// The payload half, through the REAL worker: the lint activates (opts.nativeLint), reads the
+// Codex home on an Auto Learn worker thread, and the card is given the job's line and its one
+// issue. No .git in the fixture, so the git check never runs.
+let dashboardSqlite = null;
+try { dashboardSqlite = require('node:sqlite'); } catch { dashboardSqlite = null; }
+const DashboardDatabase = dashboardSqlite
+  && (typeof dashboardSqlite.Database === 'function' ? dashboardSqlite.Database : dashboardSqlite.DatabaseSync);
+if (typeof DashboardDatabase !== 'function') {
+  process.stderr.write(`\n[dashboard-view] SKIPPING the consolidation payload test: node:sqlite is unavailable on ${process.version}.\n\n`);
+}
+test('a failing consolidation job reaches the Codex card as its line and one issue', { skip: typeof DashboardDatabase !== 'function' }, async (t) => {
+  const env = setup(t);
+  env.write({ permissions: { allow: [], deny: [] } });
+  const codexHome = path.join(env.tempHome, '.codex');
+  fs.mkdirSync(path.join(codexHome, 'memories'), { recursive: true });
+  fs.writeFileSync(path.join(codexHome, 'memories', 'MEMORY.md'), '# Registry\n');
+  const db = new DashboardDatabase(path.join(codexHome, 'memories_1.sqlite'));
+  db.exec('CREATE TABLE jobs (kind TEXT, job_key TEXT, status TEXT, finished_at INTEGER, retry_at INTEGER, retry_remaining INTEGER, last_error TEXT)');
+  const finished = Math.floor(Date.now() / 1000) - 600;
+  db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('memory_consolidate_global', 'global', 'error', finished, finished + 3600, 2, 'failed_workspace_commit');
+  db.close();
+  const app = harness(env.tempHome, { nativeLint: true });
+  try {
+    const ui = fakeView();
+    app.provider.resolveWebviewView(ui.view);
+    const deadline = Date.now() + 20000;
+    while (!ui.posted.at(-1)?.codexMemory?.consolidation && Date.now() < deadline) await settle(50);
+    const codex = ui.posted.at(-1).codexMemory;
+    assert.ok(codex.consolidation, `the worker's report never reached the card: ${codex.error || 'no error either'}`);
+    assert.equal(codex.consolidation.tone, 'warn');
+    // The host describes against the real clock, so ten minutes ago may be yesterday.
+    assert.match(codex.consolidation.line, /^Consolidation: failed (?:\d{4}-\d\d-\d\d )?\d\d:\d\d \(failed_workspace_commit\) · retry /);
+    assert.equal(codex.issues, 1, 'the failing job is the one issue, as its Problems entry');
+    assert.equal(codex.error, null);
+  } finally { await app.dispose(); }
 });
 
 // The Codex CLI version line (2026-10-13) is INFORMATION ONLY: a build outside the tested

@@ -161,6 +161,37 @@ test('the native memory worker merges one consolidation warning beside the files
   assert.equal(report.chunks.length, 0, 'no query, no passages');
 });
 
+test('Inspect prints the consolidation job the worker read, and runs nothing', { skip: !exactTier }, async (t) => {
+  const f = fixture(t);
+  failingJob(f.codexHome);
+  let spawned = 0;
+  f.options.run = () => { spawned += 1; return { status: 0, stderr: '' }; };
+  await f.ui.inspectMemory();
+  const report = f.seen.opened[0].content;
+  const lines = report.split('\n');
+  const header = lines.indexOf('Codex memory consolidation (read-only: one row of the jobs table)');
+  const fileLine = lines.findIndex((line) => /^MEMORY\.md: \d+ bytes, \d+ lines$/.test(line));
+  assert.ok(fileLine > 0 && header > fileLine, 'the job follows the file list');
+  assert.equal(lines[header - 1], '');
+  assert.equal(lines[header + 1], 'v1 (memories): memories_1.sqlite, read');
+  assert.match(report, /^ {2}status: error$/m);
+  assert.match(report, /^ {2}last error: failed_workspace_commit$/m);
+  assert.match(report, /^ {2}retries left: 2$/m);
+  assert.match(report, /^ {2}finished: .+ \(2026-10-26T\d\d:\d\d:00\.000Z\)$/m);
+  assert.match(report, /^MEMORY\.md:1: Codex memory consolidation is failing \(failed_workspace_commit\)/m);
+  assert.equal(spawned, 0, 'no .git in the fixture, so the git check never ran');
+  assert.deepEqual(fs.readdirSync(f.codexHome).sort(), ['memories', 'memories_1.sqlite'], 'the read created nothing');
+});
+
+test('Inspect says so when the Codex home has no consolidation database', async (t) => {
+  const f = fixture(t);
+  await f.ui.inspectMemory();
+  const lines = f.seen.opened[0].content.split('\n');
+  const header = lines.indexOf('Codex memory consolidation (read-only: one row of the jobs table)');
+  assert.ok(header > 0);
+  assert.equal(lines[header + 1], 'No memories_<n>.sqlite in this Codex home, so there is no consolidation job to read.');
+});
+
 test('hook UI reviews complete command, honors cancel, and configures only after chosen action', async (t) => {
   const f = fixture(t);
   const file = path.join(f.codexHome, 'hooks.json');

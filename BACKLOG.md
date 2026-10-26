@@ -10,6 +10,31 @@ refuted claims, retracted figures, measurement hazards and standing decisions.
 
 Anything measured says so and names the date. Anything unverified says that too.
 
+**Released 2026-10-26 as 1.10.0.** The tag `v1.10.0` is at `13e5de4`, the `--no-ff` merge of
+`release/1.10.0` (`fix/renamed-reference` and `feat/codex-consolidation`, built in parallel). It came
+from the owner's Problems panel: `missing-reference` warnings on Codex's MEMORY.md that were true but
+unexplained. A cited rollout summary Codex renamed now reads `renamed-reference` and links its
+current file; the Codex memory card and Inspect show Codex's consolidation job, read from one row of
+its jobs table, with a `consolidation-failed` warning on MEMORY.md and, on Windows, git's own
+`safe.directory` remedy. The record has both under "Renamed rollout summaries" and "Codex memory
+consolidation: why MEMORY.md stopped changing". CI is green on all 8 jobs on the integration (run
+40392965000), the release commit (40393288252) and the merge (40394565108). The published
+`ai-acolyte-v1100.vsix` (release.yml run 40394614979) matches the local build in all 67 entries
+apart from line endings; the keep-three rule pruned v1.9.4. The full suite ran on CI only, as for
+1.9.6; locally the touched and dependent files, 553 tests: 552 pass, 0 fail, 1 skipped (masked view
+526 pass, 0 fail, 27 skipped, the `node:sqlite` tier), plus 12 mutations, all FIRED (each branch's
+four required and two more). Smoke 19 of 19 on main (18 of 18 from the release worktree, which skips
+the state-file check by design); 307 of 307 line references. `drive-installed.js` 17 of 17 staged
+and installed; `drive-vscode.js` 4 of 4, 6 of 6 and 6 of 6, and the features group 7 of 7 after
+`176223d`, including the new renamed-reference check in a real editor. On the live store, the 6
+stale citations read `renamed-reference` with targets that exist, and the card line read the v1 and
+v2 jobs as failing at the git step. The cause was fixed on the box itself (git `safe.directory` for
+the two memory folders; Codex runs elevated, the git it starts does not), and a one-off repointed
+the 6 citations, after which the store reads 0 diagnostics. Found while releasing: the real-editor
+features group had expected the pre-1.8.0 button text since `f5af822` and stopped at its fourth
+check (fixed in `176223d`). Not yet seen: a Codex consolidation succeeding after the fix, which needs
+Codex to start a session. The live worktree is on `v1.10.0` and the hook exits 0.
+
 **Released 2026-10-20 as 1.9.6.** The tag `v1.9.6` is at `cec5058`, the `--no-ff` merge of
 `release/1.9.6`. It reads the sessions of Codex 0.162/0.163 (the owner's report: an active session's
 approvals were not reflected): the Agent sessions card takes a Codex session's activity from its last

@@ -36,7 +36,7 @@ function addDiagnostic(result, code, relativePath, message, severity = 'warning'
     message,
   };
   if (line !== undefined) diagnostic.line = line;
-  result.diagnostics.push(diagnostic);
+  result.diagnostics.push(diagnostic); return diagnostic;
 }
 
 function unavailable(result, code, relativePath, message) {
@@ -264,8 +264,29 @@ const SKILL_POINTER_KINDS = new Set(['registry', 'summary']);
 // another way goes unchecked: a missed dangling pointer costs less than a false
 // warning that never clears.
 const SKILL_POINTER_LINE = /\brelated skills?\b[*_]*\s*:/i;
+// Codex names a rollout summary `<YYYY-MM-DDTHH-MM-SS>-<id>-<slug>.md`: a timestamp, a
+// four-character id mixing digits and both cases, and a slug the model chooses. When it re-runs
+// stage 1 for a session it writes the summary under a NEW slug and deletes the old file; the
+// timestamp-and-id prefix does not change. Only phase-2 consolidation rewrites MEMORY.md, so
+// until that runs it cites the old name (2026-10-26: all 21 summaries on a live store match
+// this pattern, and 6 MEMORY.md citations there named a deleted predecessor). A missing cited
+// summary is reported as renamed only when the whole cited path matches, discovery never saw
+// the cited file, and exactly one READABLE summary shares its prefix. Anything looser names a
+// successor this read cannot vouch for. By the rule above (2026-10-13), a false warning that
+// never clears costs more than a missed one, and a missed rename still reads as
+// missing-reference, which stays true.
+const ROLLOUT_SUMMARY_NAME = /^rollout_summaries\/(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[A-Za-z0-9]{4})-[^/]+\.md$/;
 
-function lintFile(result, file, text, selectedPaths) {
+// The current name of a cited rollout summary Codex renamed, or null. `selection.discovered`
+// holds every selected path discovery saw, readable or not; `selection.prefixes` indexes the
+// readable summaries only, so the one candidate is a different file this read could open.
+function renamedSummary(selection, reference) {
+  const name = ROLLOUT_SUMMARY_NAME.exec(reference);
+  const candidates = name && !selection.discovered.has(reference) ? selection.prefixes.get(name[1]) || [] : [];
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function lintFile(result, file, text, selection) {
   const lines = linesOf(text);
   if (file.kind === 'summary' && lines[0]?.text !== 'v1') {
     addDiagnostic(result, 'summary-version', file.relativePath,
@@ -282,8 +303,14 @@ function lintFile(result, file, text, selectedPaths) {
       seen.add(reference);
       if (reference.split('/').some((part) => part === '.' || part === '..')) {
         addDiagnostic(result, 'unsafe-reference', file.relativePath, `Selected-memory reference contains traversal: ${reference}`, 'warning', line);
-      } else if (!selectedPaths.has(reference)) {
-        addDiagnostic(result, 'missing-reference', file.relativePath, `Selected-memory reference is missing or unreadable: ${reference}`, 'warning', line);
+      } else if (!selection.paths.has(reference)) {
+        const renamedTo = renamedSummary(selection, reference);
+        if (renamedTo) {
+          addDiagnostic(result, 'renamed-reference', file.relativePath,
+            `Selected-memory reference was renamed by Codex: ${reference} is now ${renamedTo}.`, 'warning', line).renamedTo = renamedTo;
+        } else {
+          addDiagnostic(result, 'missing-reference', file.relativePath, `Selected-memory reference is missing or unreadable: ${reference}`, 'warning', line);
+        }
       }
     }
   });
@@ -336,8 +363,17 @@ function readCodexMemory(options = {}) {
     contents.set(file.relativePath, text);
   }
   const selectedPaths = new Set(contents.keys());
+  // Every selected path discovery saw, readable or not. A path it could not stat is not in
+  // result.files, but its storage diagnostic names it: that file exists, so it was not renamed.
+  const discovered = new Set([...result.files, ...result.diagnostics].map((item) => item.relativePath));
+  const prefixes = new Map();
+  for (const relativePath of selectedPaths) {
+    const name = ROLLOUT_SUMMARY_NAME.exec(relativePath);
+    if (name) prefixes.set(name[1], [...(prefixes.get(name[1]) || []), relativePath]);
+  }
+  const selection = { paths: selectedPaths, discovered, prefixes };
   for (const file of result.files) {
-    if (file.readable) lintFile(result, file, contents.get(file.relativePath), selectedPaths);
+    if (file.readable) lintFile(result, file, contents.get(file.relativePath), selection);
   }
   result.lineCount = result.files.reduce((sum, file) => sum + (file.lineCount || 0), 0);
   return finishState(result);

@@ -512,6 +512,111 @@ test('lint diagnostics carry the 0-based line of the first mention while storage
   assert.equal(Object.hasOwn(result.diagnostics[0], 'line'), false, 'a storage failure keeps its prior diagnostic shape');
 });
 
+// Codex renames a rollout summary when it re-runs stage 1 for a session: the same
+// `<timestamp>-<id>` prefix, a new model-chosen slug, and the old file deleted. MEMORY.md keeps
+// the old name until phase-2 consolidation rewrites it (2026-10-26). Every name below is synthetic.
+const OLD_SUMMARY = 'rollout_summaries/2026-10-26T09-18-00-Ab12-old_slug.md';
+const NEW_SUMMARY = 'rollout_summaries/2026-10-26T09-18-00-Ab12-new_slug.md';
+const INVALID_UTF8 = Buffer.from([35, 32, 0xC3, 0x28, 10]);
+
+test('a cited rollout summary Codex renamed is reported as renamed, naming its current file, without writes', (t) => {
+  const box = fixture(t);
+  const registry = box.write('MEMORY.md', `# Task Group\n## Task 1\n### rollout_summary_files\n- ${OLD_SUMMARY}\n`);
+  const current = box.write(NEW_SUMMARY, '# Synthetic rollout\n');
+  const before = [registry, current].map((file) => hash(fs.readFileSync(file)));
+  const result = readCodexMemory({ codexHome: box.codexHome });
+  assert.deepEqual(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath, diagnostic.line,
+    diagnostic.severity, diagnostic.renamedTo]), [['renamed-reference', 'MEMORY.md', 3, 'warning', NEW_SUMMARY]]);
+  assert.equal(result.diagnostics[0].message, `Selected-memory reference was renamed by Codex: ${OLD_SUMMARY} is now ${NEW_SUMMARY}.`);
+  assert.equal(result.diagnostics[0].path, registry, 'the Problem sits in the citing file, not the renamed one');
+  assert.deepEqual([registry, current].map((file) => hash(fs.readFileSync(file))), before, 'the lint never rewrites a native file');
+  assert.deepEqual(fs.readdirSync(path.join(box.memory, 'rollout_summaries')), [path.basename(NEW_SUMMARY)]);
+});
+
+test('a cited summary stays missing unless exactly one readable file shares its whole timestamp-and-id prefix', (t) => {
+  // Each case carries a lure: a readable file that a looser rule would name as the successor.
+  const cases = [
+    { name: 'no file shares the prefix; the same second with another id does not count',
+      cited: OLD_SUMMARY, present: ['rollout_summaries/2026-10-26T09-18-00-Ab13-new_slug.md'] },
+    // MUTATION: `candidates.length === 1` -> `candidates.length > 0`. The first of two candidates
+    // is named as the successor and this fails. Confirmed 2026-10-26.
+    { name: 'two files share the prefix', cited: 'rollout_summaries/2026-10-26T09-18-00-Cd34-old_slug.md',
+      present: ['rollout_summaries/2026-10-26T09-18-00-Cd34-new_a.md', 'rollout_summaries/2026-10-26T09-18-00-Cd34-new_b.md'] },
+    // MUTATION: the id `[A-Za-z0-9]{4})-` -> `[A-Za-z0-9]+)-`. A five-character id becomes a
+    // prefix, its lure is named, and this fails. Confirmed 2026-10-26.
+    { name: 'a five-character id', cited: 'rollout_summaries/2026-10-26T09-18-00-Ef56G-old_slug.md',
+      present: ['rollout_summaries/2026-10-26T09-18-00-Ef56G-new_slug.md'] },
+    { name: 'a malformed timestamp', cited: 'rollout_summaries/2026-10-26T9-18-00-Gh78-old_slug.md',
+      present: ['rollout_summaries/2026-10-26T9-18-00-Gh78-new_slug.md'] },
+    { name: 'no slug', cited: 'rollout_summaries/2026-10-26T09-18-00-Jk90.md',
+      present: ['rollout_summaries/2026-10-26T09-18-00-Jk90-new_slug.md'] },
+    { name: 'a skills/ pointer', cited: 'skills/2026-10-26T09-18-00-Lm12-old_slug/SKILL.md', label: 'Related skill: ',
+      present: ['skills/2026-10-26T09-18-00-Lm12-new_slug/SKILL.md', 'rollout_summaries/2026-10-26T09-18-00-Lm12-new_slug.md'] },
+  ];
+  for (const entry of cases) {
+    const box = fixture(t);
+    box.write('MEMORY.md', `# Task Group\n- ${entry.label || ''}${entry.cited}\n`);
+    for (const relativePath of entry.present) box.write(relativePath, '# Synthetic lure\n');
+    assert.deepEqual(readCodexMemory({ codexHome: box.codexHome }).diagnostics.map((diagnostic) =>
+      [diagnostic.code, diagnostic.message.split(': ')[1], diagnostic.renamedTo]),
+    [['missing-reference', entry.cited, undefined]], `WITNESS ${entry.name} stays missing-reference`);
+  }
+});
+
+test('a cited summary that exists but cannot be read stays missing or unreadable, never renamed', (t) => {
+  // MUTATION: the discovered guard `!selection.discovered.has(reference)` -> `true`. The
+  // unreadable cited file is reported as renamed to its readable sibling and this fails.
+  // Confirmed 2026-10-26.
+  const box = fixture(t);
+  box.write('MEMORY.md', `# Task Group\n- ${OLD_SUMMARY}\n`);
+  box.write(OLD_SUMMARY, INVALID_UTF8);
+  box.write(NEW_SUMMARY, '# Synthetic rollout\n');
+  assert.deepEqual(readCodexMemory({ codexHome: box.codexHome }).diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath]), [
+    ['invalid-utf8', OLD_SUMMARY],
+    ['missing-reference', 'MEMORY.md'],
+  ]);
+  // A cited file discovery could not even stat is not in `files`, but its diagnostic names it.
+  const unstatable = fixture(t);
+  unstatable.write('MEMORY.md', `# Task Group\n- ${OLD_SUMMARY}\n`);
+  const cited = unstatable.write(OLD_SUMMARY, '# Synthetic rollout\n');
+  unstatable.write(NEW_SUMMARY, '# Synthetic rollout\n');
+  mockError(t, 'lstatSync', cited, 'EACCES');
+  assert.deepEqual(readCodexMemory({ codexHome: unstatable.codexHome }).diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath]), [
+    ['path-unreadable', OLD_SUMMARY],
+    ['missing-reference', 'MEMORY.md'],
+  ]);
+});
+
+test('an unreadable file sharing the prefix is never named as the current file', (t) => {
+  // MUTATION: index prefixes over `discovered` instead of the readable `selectedPaths`. The
+  // unreadable sibling is named as the successor and this fails. Confirmed 2026-10-26.
+  const box = fixture(t);
+  box.write('MEMORY.md', `# Task Group\n- ${OLD_SUMMARY}\n`);
+  box.write(NEW_SUMMARY, INVALID_UTF8);
+  const result = readCodexMemory({ codexHome: box.codexHome });
+  assert.deepEqual(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.relativePath]), [
+    ['invalid-utf8', NEW_SUMMARY],
+    ['missing-reference', 'MEMORY.md'],
+  ]);
+  assert.ok(result.diagnostics.every((diagnostic) => diagnostic.renamedTo === undefined));
+});
+
+test('a renamed summary is detected in every file kind that can cite one', (t) => {
+  // MUTATION: look for a rename only when `file.kind === 'registry'`. The summary, rollout and
+  // skill citations fall back to missing-reference and this fails. Confirmed 2026-10-26.
+  const box = fixture(t);
+  box.write('memory_summary.md', `v1\n## General Tips\n- See ${OLD_SUMMARY}\n`);
+  box.write('rollout_summaries/2026-10-26T10-00-00-Zz99-later_slug.md', `# Session narrative\n- Earlier session: ${OLD_SUMMARY}\n`);
+  box.write('skills/synthetic/SKILL.md', `# Synthetic skill\n\nSource: ${OLD_SUMMARY}\n`);
+  box.write(NEW_SUMMARY, '# Synthetic rollout\n');
+  assert.deepEqual(readCodexMemory({ codexHome: box.codexHome }).diagnostics.map((diagnostic) =>
+    [diagnostic.code, diagnostic.relativePath, diagnostic.line, diagnostic.renamedTo]), [
+    ['renamed-reference', 'memory_summary.md', 2, NEW_SUMMARY],
+    ['renamed-reference', 'rollout_summaries/2026-10-26T10-00-00-Zz99-later_slug.md', 1, NEW_SUMMARY],
+    ['renamed-reference', 'skills/synthetic/SKILL.md', 2, NEW_SUMMARY],
+  ]);
+});
+
 test('chunk identity distinguishes same-name sources and changes with edits, ranges, renames and profile', (t) => {
   const box = fixture(t);
   const file = box.write('rollout_summaries/shared.md', '# First\nsame content\n');

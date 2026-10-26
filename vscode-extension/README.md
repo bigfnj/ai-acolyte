@@ -432,6 +432,14 @@ index-line budget is not imposed on the native registry. The extension reports a
 unreadable sources and does not infer feature enablement, generate memories or rewrite
 native files ([inspectMemory](codexFeaturesUi.js#L106)).
 
+When Codex rewrites a rollout summary it keeps the file's `<timestamp>-<id>` prefix, gives it a new
+slug and deletes the old file, while `MEMORY.md` keeps citing the old name until Codex's own
+consolidation rewrites it. Such a reference reads **renamed-reference**, a warning that names the
+current file, and its Problems entry links to that file
+([renamedSummary](../src/codex-memory.js#L283), [publishDiagnostics](codexMemoryLint.js#L178)).
+It is reported only when the cited file is gone and exactly one readable summary shares the
+prefix; any other unresolved reference stays **missing-reference**. Neither changes a Codex file.
+
 **Search native memory** combines CPU BGE similarity with keyword matching and opens the
 exact current source passage. **Rebuild Codex recall index** re-embeds selected passages
 into a private cache scoped to the Codex home ([cacheLocation](../src/codex-recall.js#L64),

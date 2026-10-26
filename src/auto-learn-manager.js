@@ -3122,7 +3122,7 @@ function createAutoLearnManager(options = {}) {
     // off THIS object, so `listCandidates` is absent exactly when `getCandidates`
     // is too, and the fallback could not run. Same for `getStatus` beside `status`.
     // Removed 2026-09-25 with the two dead legs in the extension
-    // (vscode-extension/extension.js:1565-1576#managerStatus, which this note once cited
+    // (vscode-extension/extension.js:1569-1580#managerStatus, which this note once cited
     // as :1032 — a line number that had rotted by 113 lines, which is its own argument
     // against leaving a claim like that unchecked). The rule is pinned by
     // test/auto-learn-manager.test.js: no two keys on this object may be the same

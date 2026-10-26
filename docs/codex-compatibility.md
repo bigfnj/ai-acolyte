@@ -35,9 +35,9 @@ its own real-host evidence below.
 | Auto Learn backup and undo | Implemented, with conservative shared-policy conflicts | The actual dashboard Undo button restores exact policy bytes and learner state in one workspace; a fresh Codex process requests approval again. Version 1.5.10 also checks shared ownership before Undo, including identical rules whose bytes never changed. A conflicting older Undo refuses without writing; undoing the newer transaction first permits the earlier Undo. |
 | Shell-style guidance | Implemented for default/custom home and overrides | Wording now distinguishes Codex shell splitting from Claude generalization (`src/agent-guidance.js:91#GUIDANCE_BODY`). Real VS Code configuration events write/remove the blocks. Actual dashboard Add, Cancel and Remove also have file and persisted-setting checks, including installation into empty Codex and Claude files. Fresh Codex receives the full packaged guidance body; removal is verified. Custom homes, nonempty overrides, empty override fallback and unreadable targets have focused checks. |
 | Memory gates | FIXED in development for explicitly marked native global sections | A separate native compiler reviews the full body and refreshes an installed block without changing native sources. Fresh default/custom Codex sessions load installed/refreshed bodies and confirm absence after Remove. Actual editor checks cover Cancel/Install, edits, zero/refill, override migration, malformed-source retention, Remove and stale review refusal. The old malformed-scope compiler fails the preserved case; install and refresh no-ops fail their intended native groups. |
-| Memory index, lint and recall integration | FIXED in development for native discovery, lint and semantic recall | Reads the native summary, task registry, rollout summaries and memory skills with exact passage provenance. Raw staging inputs, SQLite and sessions are excluded. Actual later-created sources, diagnostic repair/deletion, search, inspection and BOM selections pass in VS Code. CPU semantic retrieval finds zero-keyword paraphrases across registry, rollout and skill sources; actual rebuild replaces poisoned vectors and missing-model searches visibly fall back to keywords. Three disabled-path controls fail their intended native groups. |
+| Memory index, lint and recall integration | FIXED in development for native discovery, lint and semantic recall | Reads the native summary, task registry, rollout summaries and memory skills with exact passage provenance. Raw staging inputs and sessions are excluded. Of Codex's SQLite, exactly one row is read since 2026-10-26: the `memory_consolidate_global` job's status in `jobs`, six columns, read-only, in the highest `memories_<n>.sqlite` and any `memories_v2_<n>.sqlite` (see "Codex memory consolidation on Windows under elevation" below). Actual later-created sources, diagnostic repair/deletion, search, inspection and BOM selections pass in VS Code. CPU semantic retrieval finds zero-keyword paraphrases across registry, rollout and skill sources; actual rebuild replaces poisoned vectors and missing-model searches visibly fall back to keywords. Three disabled-path controls fail their intended native groups. |
 | Derived guidance for recurring friction | FIXED in development for supported repository-query advice | Current cached Codex managed prompt rules are compared with Codex-only successful run counts. A full-body dialog reviews advice before installation into the active Codex instruction file. Actual Accept/Decline and fresh instruction loading/removal pass; a no-op Accept fails the native check. Counts describe observed runs, not historical prompt dialogs. |
-| "Why did this prompt?" | Implemented for visible local policy | `explainAutoLearnPrompt` (`vscode-extension/extension.js:2533#explainAutoLearnPrompt`) inspects visible rules and cached requirements. Three actual diagnostic dialogs agree with adjacent fresh Codex outcomes: reviewed command allowed, unrelated executable declined, original command declined after Undo. They name the selected rules file and disclose that managed/system policy, session approval state and sandbox restrictions remain outside the check. |
+| "Why did this prompt?" | Implemented for visible local policy | `explainAutoLearnPrompt` (`vscode-extension/extension.js:2537#explainAutoLearnPrompt`) inspects visible rules and cached requirements. Three actual diagnostic dialogs agree with adjacent fresh Codex outcomes: reviewed command allowed, unrelated executable declined, original command declined after Undo. They name the selected rules file and disclose that managed/system policy, session approval state and sandbox restrictions remain outside the check. |
 
 ## September 27-28 runtime evidence
 
@@ -672,6 +672,50 @@ names and the citations in its `MEMORY.md`, and the window above is unchanged.
   `ROLLOUT_SUMMARY_NAME`; the rule is beside it). Every other unresolved reference stays
   `missing-reference`. The extension still writes no Codex file: `MEMORY.md` is repaired when
   Codex's own consolidation runs again.
+
+## Codex memory consolidation on Windows under elevation, October 26, 2026
+
+Measured on one Windows box where Codex runs elevated (an endpoint privilege manager raises it).
+Not a version finding: nothing here moves the window above.
+
+- **What stopped.** `~/.codex/memories/MEMORY.md` had stopped changing. Codex rewrites it in a
+  phase-2 consolidation job whose state is one row of `~/.codex/memories_1.sqlite`, table `jobs`,
+  `kind = 'memory_consolidate_global'`, `job_key = 'global'`. The row read `status = 'error'`,
+  `last_error = 'failed_workspace_commit'`, `retry_remaining = 2`, and `retry_at` one hour after
+  `finished_at`. Times are unix seconds. The other statuses Codex uses for the row are `running`
+  while a worker holds its lease and the success outcomes (`done`; Codex's source names
+  `succeeded` and `succeeded_no_workspace_changes`).
+- **The columns.** `kind`, `job_key`, `status`, `worker_id`, `ownership_token`, `last_error` (text);
+  `started_at`, `finished_at`, `lease_until`, `retry_at`, `retry_remaining`, `input_watermark`,
+  `last_success_watermark` (integer). The same table holds the stage-1 rows, one per rollout.
+  Database names follow `memories_<n>.sqlite`, `<n>` a schema generation like `state_<n>.sqlite`'s.
+- **Why it fails.** Codex runs elevated, so everything under `~/.codex` is owned by
+  `BUILTIN\Administrators`. After the consolidation agent, Codex runs `git read-tree --reset HEAD`
+  in the memory folder; git runs at Medium integrity, sees a repository owned by another
+  principal, and refuses it. Codex keeps the code `failed_workspace_commit` and loses git's
+  stderr. A non-elevated `git -C <folder> rev-parse --git-dir` reproduces the refusal read-only:
+  exit 128, `fatal: detected dubious ownership in repository at '<folder>'`, the owner and current
+  user by name and SID, and git's suggested `git config --global --add safe.directory <folder>`,
+  tab-indented with the path unquoted (git single-quotes a path with a space in it).
+- **The store reads fine from outside.** `DatabaseSync(path, { readOnly: true, timeout: 250 })`
+  reads the Administrators-owned WAL database from a non-elevated process.
+- **The v2 pipeline** is opt-in, rooted at `~/.codex/memories_v2`, with `memories_v2_<n>.sqlite` and
+  the same table, and no MEMORY.md. v1 `memories` is Codex's default. The box had both:
+  `memories_v2_1.sqlite` held a row of the same kind and key, failing the same way, a minute apart.
+- **After the exception.** Later the same day, with `safe.directory` entries for both folders in
+  the global git config, the same `rev-parse` exits 0, and both rows still read `error` with the
+  retry due: Codex has to retry before a success can show.
+
+**What AI Acolyte does with it (1.10.0, in development).** The Codex memory card shows one line
+for the job, muted unless it is failing, and a failing v1 job raises one `consolidation-failed`
+warning on `MEMORY.md` with no clock time in it. Of the row, only `status`, `last_error`,
+`started_at`, `finished_at`, `retry_at` and `retry_remaining` are selected; no other row and no
+lease, token or watermark column is read, and nothing is written. On Windows, for
+`failed_workspace_commit` with a `.git` in the folder, the Auto Learn worker runs the
+`rev-parse` check above once per failed attempt (2.5 s limit, `LC_ALL=C`, git's repository
+variables removed, `GIT_CEILING_DIRECTORIES` at the folder's parent). Only git's `safe.directory`
+line is kept, and only when it names this folder; the warning quotes it as git's suggestion and
+the extension never runs it (`src/codex-consolidation.js`).
 
 ## Real history from Codex 0.162 and 0.163 builds, October 20, 2026
 
@@ -1479,6 +1523,14 @@ managed copies are removed without deleting user text. Codex's
 describes those alternatives. The corrected guidance also follows the documented distinction
 between simple shell splitting and complex wrappers in
 [Codex rules](https://learn.chatgpt.com/docs/agent-configuration/rules).
+
+**Codex memory consolidation is read from one box's evidence (2026-10-26).** The v2 row is known
+only by name: its kind, key and columns match v1's on the measured box, but what v2 does when it
+succeeds was never observed, and the opt-in pipeline is read as v1 is, by analogy. git's
+suggested `safe.directory` exception is unproven as a remedy until a consolidation succeeds on
+that box after it is added; the card then reads `consolidated`, or still `failed`. The check
+matches git's English messages with `LC_ALL=C` and an empty `LANGUAGE`; a localized git that
+ignores both is untested, and would read `refused-other` rather than dubious ownership.
 
 ## CI
 

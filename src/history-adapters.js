@@ -2885,9 +2885,10 @@ function mergeRolloutIndex(first, second) {
   };
 }
 
-// The require, the open, the read-only flag and the close, shared by the two
-// readers below so they cannot drift apart. Read-only, best effort, and never
-// allowed to throw into a scan.
+// The require, the open, the read-only flag and the close, shared by the three
+// readers so they cannot drift apart: the two below, and src/codex-consolidation.js
+// readCodexConsolidation, which reads one row of Codex's memory-pipeline `jobs`
+// table. Read-only, best effort, and never allowed to throw into a scan.
 //
 // TWO FAILURE CLASSES, AND THEY ARE NOT THE SAME FINDING. `unavailable: true`
 // means the RUNTIME cannot host this probe at all — the module is absent, or it
@@ -3492,6 +3493,8 @@ module.exports = {
   scanHistoryFiles,
   listTranscriptFiles,
   codexHistoryStoreState,
+  // The shared read-only SQLite door, for src/codex-consolidation.js.
+  withReadOnlyDatabase,
   // Exported for the guard that pins it below the int32 ceiling readSync
   // enforces. Nothing in production reads it from here.
   READ_CHUNK_BYTES,

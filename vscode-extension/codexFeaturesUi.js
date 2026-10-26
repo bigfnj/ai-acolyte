@@ -120,10 +120,18 @@ function createCodexFeaturesUi(vscode, { readMemory, rebuildMemory, runRules, pr
     try {
       const memory = await readMemory();
       if (disposed) return;
+      // The consolidation job's times and the git check, read on the worker with the rest of
+      // this report (src/codex-consolidation.js); nothing here reads or runs anything.
+      const consolidation = memory.consolidation
+        ? ['', 'Codex memory consolidation (read-only: one row of the jobs table)',
+          ...(shared('codex-consolidation').describeConsolidation(memory.consolidation)?.report
+            || ['No memories_<n>.sqlite in this Codex home, so there is no consolidation job to read.'])]
+        : [];
       const lines = ['Codex native memory', memory.root,
         `Storage: ${memory.storageState}; feature enablement: ${memory.featureState}`,
         'Feature enablement is not inferred from files. This report does not enable or generate memories.', '',
-        ...memory.files.map((file) => `${file.relativePath}: ${file.readable === false ? 'unreadable' : `${file.size} bytes, ${file.lineCount ?? '?'} lines`}`), '',
+        ...memory.files.map((file) => `${file.relativePath}: ${file.readable === false ? 'unreadable' : `${file.size} bytes, ${file.lineCount ?? '?'} lines`}`),
+        ...consolidation, '',
         // The adapter's line is 0-based (a Range line); file:line here counts from 1,
         // like the search picker's descriptions. Storage failures carry no line.
         ...memory.diagnostics.map((item) => `${item.relativePath || '(memory root)'}`

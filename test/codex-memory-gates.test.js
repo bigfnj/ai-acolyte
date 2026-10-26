@@ -549,3 +549,34 @@ test('failed rollback preserves concurrent instruction edits and reports the rem
   });
   assert.match(fs.readFileSync(box.override, 'utf8'), /Concurrent owner note/);
 });
+
+// Codex's consolidation job status rides on the worker's codexMemory report only
+// (src/auto-learn-worker.js), never on readCodexMemory, which this reads. A status that
+// changes on every hourly retry must not move the signature that the gate fingerprint
+// and the automatic refresh are keyed on (2026-10-26, src/codex-consolidation.js).
+// MUTATION (by construction, not run: it would edit src/codex-memory.js): push
+// readCodexConsolidation's diagnostics into readCodexMemory's result. The signature then
+// moves and the warning appears here, and this fails.
+let gatesSqlite = null;
+try { gatesSqlite = require('node:sqlite'); } catch { gatesSqlite = null; }
+const GatesDatabase = gatesSqlite && (typeof gatesSqlite.Database === 'function' ? gatesSqlite.Database : gatesSqlite.DatabaseSync);
+if (typeof GatesDatabase !== 'function') {
+  process.stderr.write(`\n[codex-memory-gates] SKIPPING the consolidation test: node:sqlite is unavailable on ${process.version}.\n\n`);
+}
+test('native gates never see consolidation status', { skip: typeof GatesDatabase !== 'function' }, (t) => {
+  const box = fixture(t); box.write('MEMORY.md', globalGate('- Keep the signature still.'));
+  const before = api.inspectNativeCodexGates(box.options);
+  const db = new GatesDatabase(path.join(box.codexHome, 'memories_1.sqlite'));
+  db.exec('CREATE TABLE jobs (kind TEXT, job_key TEXT, status TEXT, finished_at INTEGER, retry_at INTEGER, retry_remaining INTEGER, last_error TEXT)');
+  db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('memory_consolidate_global', 'global', 'error', 1792999080, 1793002680, 2, 'failed_workspace_commit');
+  db.close();
+  const after = api.inspectNativeCodexGates(box.options);
+  assert.equal(after.sourceSignature, before.sourceSignature);
+  assert.equal(after.fingerprint, before.fingerprint);
+  assert.equal(after.diagnostics.some(item => item.code === 'consolidation-failed'), false);
+  // Witness: the same home through the worker does carry the warning, so the store is real.
+  const { run } = require('../src/auto-learn-worker');
+  const report = run({ operation: 'codexMemory', options: { ...box.options, run: () => { throw new Error('spawned'); } }, args: [{}] });
+  assert.equal(report.diagnostics.filter(item => item.code === 'consolidation-failed').length, 1);
+});

@@ -43,6 +43,7 @@ const { recallIndexCount, recallIndexStatus } = require('./src/recall-index');
 const { codexFeatureStatus, createCodexFeaturesUi } = require('./codexFeaturesUi');
 const { createClaudeMemoryUi } = require('./claudeMemoryUi');
 const { codexRecallIndexCount } = require('./src/codex-recall');
+const { describeConsolidation } = require('./src/codex-consolidation');
 const { CodexMemoryLint } = require('./codexMemoryLint');
 const { createCodexMemoryGatesUi } = require('./codexMemoryGatesUi');
 const { createPermissionActions } = require('./permissionActions');
@@ -174,6 +175,9 @@ let dashboardBounce = null;     // debounce for dashboard pushes (see refresh())
 let memoryLint = null;
 let codexMemoryLint = null;
 let codexMemoryReport = null;
+// The git ownership check's answers, as the worker last returned them, handed back on
+// the next read so the check runs once per failed consolidation (src/codex-consolidation.js).
+let codexConsolidationProbes = null;
 let codexMemoryGatesUi = null;
 let codexFeatureUi = null;
 let claudeMemoryUi = null;
@@ -1182,7 +1186,7 @@ function autoSyncRecallIfStale() {
     // Best-effort, but never silent. Three reachable throwers sit inside this try --
     // memoryReport(), recallStatus() and cfg() -- and recording nothing meant the recall
     // index could stop syncing for the life of the window with no trace anywhere.
-    // It also recurs: the startup timer (extension.js:3353#recallSyncTimer) is one-shot, but
+    // It also recurs: the startup timer (extension.js:3365#recallSyncTimer) is one-shot, but
     // memBounce re-enters here on every MEMORY.md write, so a deterministic throw fires again
     // on every trigger and a broken run logged identically to a working one.
     console.error('ai-acolyte: auto recall sync could not run —', err);
@@ -1570,7 +1574,7 @@ function runAutoLearnWorker(operation, ...args) {
 // manager now refuses to carry two names for one function and a test says so.
 //
 // The `?.` and the {} are NOT the same thing and stay: getAutoLearnManager() is nulled
-// for the whole of deactivate() (extension.js:7090#autoLearnManager), so a refresh
+// for the whole of deactivate() (extension.js:7115#autoLearnManager), so a refresh
 // racing a teardown really can arrive here with nothing.
 function managerStatus(manager) {
   return typeof manager?.status === 'function' ? manager.status() : {};
@@ -1827,12 +1831,12 @@ async function runAutoLearnScan(manual = false, userInitiated = false) {
     return null;
   } finally {
     // Only if this scan still owns the latch. deactivate() guards its own clear the
-    // same way (extension.js:7123#autoLearnBusy) and that guard was UNFALSIFIABLE until
+    // same way (extension.js:7148#autoLearnBusy) and that guard was UNFALSIFIABLE until
     // this one existed — deleting it left the suite green, because this line cleared the
     // latch for it on every path. Both halves are needed and the pair is one rule.
     //
     // The hole: two scans really can overlap, because activate() releases the latch
-    // unconditionally so that a wedged predecessor cannot strand it (extension.js:3088#autoLearnBusy).
+    // unconditionally so that a wedged predecessor cannot strand it (extension.js:3092#autoLearnBusy).
     // One boolean cannot track two, so whichever settles FIRST used to clear it, and a
     // predecessor settling after a re-activate opened "already running" for a scan
     // that was still running. A second worker was then dispatched against it.
@@ -3220,7 +3224,7 @@ function activate(context) {
   const codexFeatures = createCodexFeaturesUi(vscode, {
     profileOptions: { home: os.homedir(), codexHome: CODEX_HOME_DIR },
     readMemory: (query) => query ? runAutoLearnWorker('codexMemorySearch', { query, recallOptions: codexRecallOptions() })
-      : runAutoLearnWorker('codexMemory'),
+      : readCodexMemoryReport(),
     rebuildMemory: () => runAutoLearnWorker('rebuildCodexMemory', { recallOptions: codexRecallOptions() }),
     runRules: (operation, request) => runAutoLearnWorker(operation, request),
     refresh: () => dashboard?.refresh(),
@@ -3277,10 +3281,18 @@ function activate(context) {
     vscode.commands.registerCommand('permission-wildcarding.reviewCodexMcp', () => codexFeatures.reviewMcp()),
     vscode.commands.registerCommand('permission-wildcarding.importCodexRules', () => codexFeatures.reviewRules('project-import'))
   );
+  // The native memory report, with the consolidation job's status on it, for the lint and
+  // for Inspect. The worker's git ownership check is cached here, on the host, and handed
+  // back on every read: the worker is a fresh thread each time and keeps nothing.
+  async function readCodexMemoryReport() {
+    const report = await runAutoLearnWorker('codexMemory', { probes: codexConsolidationProbes });
+    if (!deactivated && report?.consolidation?.probes) codexConsolidationProbes = report.consolidation.probes;
+    return report;
+  }
   try {
     const nativeLint = new CodexMemoryLint(vscode, {
       codexHome: CODEX_HOME_DIR,
-      readMemory: () => runAutoLearnWorker('codexMemory'),
+      readMemory: () => readCodexMemoryReport(),
       enabled: () => memoryConf().enabled !== false,
       onRefresh: (report) => {
         if (deactivated || codexMemoryLint !== nativeLint) return;
@@ -5658,6 +5670,9 @@ class WildcardingViewProvider {
         lintEnabled: memoryConf().enabled !== false,
         issues: codexMemoryReport?.diagnostics?.length || 0,
         error: codexMemoryReport?.error || codexMemoryReport?.watchError || null,
+        // Codex's consolidation job, from the same worker report (src/codex-consolidation.js):
+        // one line, a warning only while the job is failing. Pure, so free on every push.
+        consolidation: codexMemoryReport?.consolidation ? describeConsolidation(codexMemoryReport.consolidation) : null,
         gates: codexMemoryGatesUi?.status(),
         // Which codex-cli the configured executable is, against the tested
         // window. INFORMATION ONLY (src/codex-version.js): cached per binary,
@@ -5949,6 +5964,7 @@ class WildcardingViewProvider {
           <div class="stat"><div class="n" id="codexMemLines">–</div><div class="l">summary lines</div></div>
         </div>
         <div class="memissues" id="codexMemIssues"></div>
+        <div class="muted sub" id="codexConsolidation"></div>
         <div class="muted sub" id="codexMemoryStatus"></div>
         <button class="restore" id="searchCodexMemory">Search Codex memory…</button>
         <button class="restore" id="rebuildCodexMemory">Rebuild Codex recall index…</button>
@@ -6686,6 +6702,14 @@ class WildcardingViewProvider {
       issuesLine.className = 'memissues muted';
       issuesLine.textContent = m.state === 'absent' ? '' : '✓ no issues in the native memory files';
     }
+    // Codex's consolidation job (src/codex-consolidation.js, 2026-10-26): its own line, in
+    // the foreground with a ⚠ while the job is failing, muted otherwise. It never reaches
+    // the row state below; a failing job reaches the issue count as its Problems entry.
+    var consolidation = m.consolidation || null;
+    var consolidationLine = $('codexConsolidation');
+    consolidationLine.textContent = consolidation ? (consolidation.tone === 'warn' ? '⚠ ' : '') + consolidation.line : '';
+    consolidationLine.className = consolidation && consolidation.tone === 'warn' ? 'sub' : 'muted sub';
+    consolidationLine.title = consolidation ? consolidation.title || '' : '';
     // Every count on this card read plural: a real store showed "1 issues" (2026-10-13).
     const files = m.files || 0;
     setState('stCodexMemory', m.state === 'absent' ? 'no files yet'
@@ -7013,6 +7037,7 @@ async function deactivate() {
   codexMemoryGatesUi = null;
   codexMemoryLint = null;
   codexMemoryReport = null;
+  codexConsolidationProbes = null;
   clearTimeout(debounceTimer);
   clearTimeout(policyBounce);
   clearTimeout(localDrainBounce);
